@@ -40,7 +40,7 @@ fun main() {
             everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
                 audioChecks() + "; " + loggingChecks() + "; " + securityChecks() + "; " + inBandChecks() + "; " +
                 tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks() + "; " +
-                datagramLimitChecks()
+                datagramLimitChecks() + "; " + mediaMixChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()
@@ -52,6 +52,24 @@ fun main() {
     // otherwise keep the JVM from exiting the way BindingCheck.kt already
     // notes for its own native thread.
     exitProcess(0)
+}
+
+/**
+ * `sipral_media_mix` through the shim idiomatic_media.c gives it: the
+ * generated binding hands its two packets over as bare addresses and had no
+ * way to call it at all. Handles that name nothing reach C and are refused
+ * there, which is what says the shim is there and hands the call through.
+ */
+private fun mediaMixChecks(): String {
+    val packet = Sipral.MEDIA_PACKET_BYTES.toInt()
+    val address = Sipral.ADDRESS_BYTES.toInt()
+    val status = SipralMediaNative.mediaMix(
+        Sipral.HANDLE_NONE, Sipral.HANDLE_NONE, 0, ShortArray(160), ShortArray(160),
+        ByteArray(packet), ByteArray(address), LongArray(3),
+        ByteArray(packet), ByteArray(address), LongArray(3),
+    )
+    assertEquals(SipralStatus.INVALID_HANDLE.value, status, Sipral.lastErrorMessage())
+    return "sipral_media_mix reached through its shim"
 }
 
 private suspend fun everything(): String {

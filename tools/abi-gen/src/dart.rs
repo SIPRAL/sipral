@@ -500,7 +500,7 @@ fn container(out: &mut String, surface: &Surface) -> Result<(), Refused> {
     );
 
     constants(out, surface);
-    sizes(out, surface);
+    sizes(out, surface)?;
     entries(out, surface)?;
     out.push_str("}\n");
     Ok(())
@@ -523,22 +523,27 @@ fn constants(out: &mut String, surface: &Surface) {
 }
 
 /// The layout table, inside [`CONTAINER`].
-fn sizes(out: &mut String, surface: &Surface) {
+fn sizes(out: &mut String, surface: &Surface) -> Result<(), Refused> {
+    out.push('\n');
+    for line in crate::layout::TABLE_DOC {
+        let _ = writeln!(out, "  /// {line}");
+    }
     out.push_str(
-        "\n  /// How many bytes this binding lays each struct and union out in, by\n\
-         \x20 /// the name the header gives it: what `sipral_abi_struct_size` says\n\
-         \x20 /// of the same name, in a library that agrees with this file.\n\
-         \x20 static Map<String, int> recordSizes() => {\n",
+        "  /// Each list is this binding's own length first, then p64, p32a4\n\
+         \x20 /// and p32a8.\n\
+         \x20 static Map<String, List<int>> recordLayouts() => {\n",
     );
-    for record in surface.records {
+    for lengths in crate::layout::table(surface)? {
+        let [p64, p32a4, p32a8] = lengths.sizes;
         let _ = writeln!(
             out,
-            "        '{}': ffi.sizeOf<{}>(),",
-            crate::c::named(record.name),
-            record.name
+            "        '{}': [ffi.sizeOf<{}>(), {p64}, {p32a4}, {p32a8}],",
+            lengths.record.c_name(),
+            lengths.record.name
         );
     }
     out.push_str("      };\n");
+    Ok(())
 }
 
 /// Every entry point, inside [`CONTAINER`], looked up the first time it is
@@ -673,7 +678,7 @@ impl Spelling for Names {
             ("open", "the load and ABI check this back end writes"),
             ("libraryName", "the library's name this back end writes"),
             ("_openLibrary", "the library search this back end writes"),
-            ("recordSizes", "the layout table this back end writes"),
+            ("recordLayouts", "the layout table this back end writes"),
         ]
     }
 

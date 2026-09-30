@@ -148,6 +148,7 @@ fn stir(handle: SipralHandle, anchors: &[u8], unix_seconds: u64) {
 /// zero.
 fn stir_config(anchors: &[u8], unix_seconds: u64) -> SipralStirConfig {
     SipralStirConfig {
+        reserved: 0,
         size: size_of::<SipralStirConfig>(),
         anchors: if anchors.is_empty() {
             ptr::null()
@@ -264,47 +265,22 @@ fn an_account_says_whether_its_encrypted_calls_may_be_recorded_in_the_clear() {
 
 /// A caller built against ABI 0.31 declares the 384 bytes that header gave
 /// `sipral_account_config_t`, whose last four were padding then and may be
-/// left unwritten. Whatever they hold is not read as `recording_in_clear`:
-/// the account is added, and its encrypted calls are recorded encrypted.
+/// left unwritten. `recording_in_clear` starts at 384 today, so nothing of
+/// what it sent is read as the toggle; but the frozen ABI serves no length
+/// from before minor 33, so the struct is refused outright rather than read
+/// with its padding as a member.
 #[test]
-fn padding_a_0_31_caller_left_unwritten_is_not_read_as_recording_in_clear() {
-    const LENGTH_0_31: usize = 384;
+fn a_0_31_account_config_is_refused_rather_than_read() {
+    // 384 bytes on a 64-bit target: everything before the member 0.32 added
+    let length_0_31 = std::mem::offset_of!(SipralAccountConfig, recording_in_clear);
     let credentials = credentials(&[CALLER]);
     let mut heard = Heard::default();
     let stack = stack_hearing(&mut heard, &credentials, false);
     let mut config = crate::account::tests::account_config();
-    config.size = LENGTH_0_31;
-    for garbage in [0xA5_u8, 0x01] {
-        let bytes = ptr::from_mut(&mut config).cast::<u8>();
-        for offset in LENGTH_0_31 - 4..LENGTH_0_31 {
-            // the padding a 0.31 caller never wrote, whatever its stack held
-            let byte = if offset == LENGTH_0_31 - 4 {
-                garbage
-            } else {
-                0
-            };
-            unsafe { bytes.add(offset).write(byte) };
-        }
-        (config.aor, config.aor_len) = text(if garbage == 1 {
-            "sip:one@example.com"
-        } else {
-            "sip:noise@example.com"
-        });
-        let (status, added) = account(stack, &config);
-        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        let in_clear = crate::stack::with_stack(stack, |state| {
-            let id = state.accounts.get(added).expect("the account");
-            Ok(state
-                .engine
-                .account_srtp(id)
-                .is_some_and(|srtp| srtp.recording_in_clear))
-        })
-        .expect("the stack");
-        assert!(
-            !in_clear,
-            "padding holding {garbage:#x} was read as a toggle"
-        );
-    }
+    config.size = length_0_31;
+    let (status, added) = account(stack, &config);
+    assert_eq!(status, SipralStatus::UnsupportedVersion);
+    assert_eq!(added, SIPRAL_HANDLE_NONE);
     assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
 }
 
@@ -445,8 +421,8 @@ fn a_signed_call_is_verified_through_the_c_abi_before_it_rings() {
         sipral_call_identity_text(
             callee,
             incoming.0,
-            SipralIdentityText::VerifiedOrig as u32,
             0,
+            SipralIdentityText::VerifiedOrig as u32,
             buffer.as_mut_ptr(),
             buffer.len(),
             &raw mut needed,
@@ -545,6 +521,7 @@ fn what_an_account_says_about_stir_is_checked_before_it_is_added() {
     ) = text(X5U);
     assert_eq!(account(clockless, &signing).0, SipralStatus::WrongState);
     let stir = SipralStirConfig {
+        reserved: 0,
         size: size_of::<SipralStirConfig>(),
         anchors: ptr::null(),
         anchors_len: 0,

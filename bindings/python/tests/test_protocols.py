@@ -305,7 +305,7 @@ class Protocols(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(alice.conference_uri)
         with self.assertRaises(SipralError) as refused:
             alice.subscribe_conference()
-        self.assertEqual(refused.exception.status, Status.NOT_AFOCUS)
+        self.assertEqual(refused.exception.status, Status.NOT_A_FOCUS)
 
     async def test_l16_is_the_codec_when_it_is_the_only_one_named(self) -> None:
         alice, bob = await self.place_and_answer(

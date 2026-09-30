@@ -480,3 +480,23 @@ if _abi_status != lib.SIPRAL_STATUS_OK:
         "generated against; regenerate the binding or rebuild the library"
     )
 
+
+# Every struct and union the header declares, with how long tools/abi-gen
+# worked it out to be on each of the three layouts the ABI ships for:
+# 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+# to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+# test holds this binding's own layout of each record, and the library's
+# answer from sipral_abi_struct_size, to the number for the layout it runs
+# on; bindings/c/abi-layout.c holds a C compiler to all three.
+RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
+    "sipral_counters_t": (24, 16, 24),
+    "sipral_header_t": (32, 16, 16),
+    "sipral_stack_config_t": (64, 32, 32),
+    "sipral_media_packet_t": (56, 28, 28),
+    "sipral_registration_event_t": (8, 8, 8),
+    "sipral_media_event_t": (32, 16, 16),
+    "sipral_event_payload_t": (32, 16, 16),
+    "sipral_event_t": (72, 40, 48),
+    "sipral_screen_event_t": (24, 12, 12),
+    "sipral_processor_event_t": (40, 20, 20),
+}

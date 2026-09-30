@@ -120,9 +120,6 @@ record! {
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
         /// override already goes out on its account's own transport, and
         /// there is nothing to combine this with.
-        ///
-        /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub transport: u32,
         /// What this call offers and in what order, overriding
         /// `sipral_stack_config_t::codecs` for it: codec names separated by
@@ -142,9 +139,6 @@ record! {
         /// with `sdp` is a session the application wrote, and the order in it
         /// is already the application's own. The names are still checked, so
         /// that a caller who has one wrong learns it here either way.
-        ///
-        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub codecs: *const c_char,
         /// How many bytes of it.
         pub codecs_len: usize,
@@ -157,9 +151,6 @@ record! {
         /// `media_address` set — for the reason `srtp` gives: a call placed
         /// with `sdp` is a session the application wrote, and the candidates
         /// in it are already the application's own to write or not.
-        ///
-        /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub ice: u32,
         /// Where this call's real-time text arrives (RFC 4103): a second
         /// socket the application bound, as an address and a port. Set, the
@@ -172,9 +163,6 @@ record! {
         /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
         /// and no candidates of its own, and typed text sent in the clear
         /// beside encrypted audio is worse than none.
-        ///
-        /// Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
-        /// pinned `MIN_SIZE` is unmoved.
         pub text_address: *const c_char,
         /// How many bytes of it.
         pub text_address_len: usize,
@@ -201,7 +189,7 @@ record! {
 // zero.
 unsafe impl Versioned for SipralCallConfig {
     const NAME: &'static str = "sipral_call_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::CALL_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCallConfig, focus);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -304,7 +292,9 @@ unsafe fn managed_media(config: &SipralCallConfig) -> Result<Option<SocketAddr>,
     else {
         return Ok(None);
     };
-    if config.sdp_len != 0 || !config.sdp.is_null() {
+    // an sdp of no bytes is no sdp, whatever the pointer, as every other
+    // optional piece of text or bytes in this ABI reads
+    if config.sdp_len != 0 {
         return Err(fail(
             SipralStatus::InvalidArgument,
             "media_address and sdp are both set, and a call has one description of its session: \
@@ -4901,8 +4891,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
             crate::identity::sipral_call_identity_text(
                 stack,
                 call,
-                which,
                 index,
+                which,
                 buffer.as_mut_ptr(),
                 buffer.len(),
                 &raw mut needed,
@@ -4980,8 +4970,8 @@ Alert-Info: <urn:alert:source:external>\r\n";
                 crate::identity::sipral_call_identity_text(
                     handle,
                     call,
-                    diversion,
                     2,
+                    diversion,
                     ptr::null_mut(),
                     0,
                     &raw mut needed,
@@ -4990,6 +4980,27 @@ Alert-Info: <urn:alert:source:external>\r\n";
             SipralStatus::InvalidArgument,
             "past the end"
         );
+        // a caller that brought room enough need not ask how much was needed:
+        // `out_needed` may be null here as on every other text-out call
+        let mut buffer = [0 as c_char; 64];
+        assert_eq!(
+            unsafe {
+                crate::identity::sipral_call_identity_text(
+                    handle,
+                    call,
+                    1,
+                    diversion,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    ptr::null_mut(),
+                )
+            },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let written = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+        assert_eq!(written.to_bytes(), b"sip:front@example.com");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
@@ -5356,7 +5367,7 @@ Alert-Info: <urn:alert:source:external>\r\n";
     #[test]
     fn a_call_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle() {
         let mut config = call_config();
-        config.size = crate::versioned::min_size::CALL_CONFIG - 1;
+        config.size = <crate::call::SipralCallConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
         let (placed, _) = place(SIPRAL_HANDLE_NONE, SIPRAL_HANDLE_NONE, &config, 0);
         assert_eq!(
             placed,
@@ -5975,21 +5986,6 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A call configuration at the length the header had before this member
-    /// existed still places a call, and takes the stack's order.
-    #[test]
-    fn a_call_config_at_its_old_min_size_takes_the_stacks_codecs() {
-        let mut observed = Observed::default();
-        let (handle, account) = media_line(&mut observed, |_| {});
-        let mut call_config = managed_config();
-        call_config.size = crate::versioned::min_size::CALL_CONFIG;
-        let (status, _) = place(handle, account, &call_config, 1_000);
-        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        let body = String::from_utf8_lossy(&one(handle)).into_owned();
-        assert!(body.contains("a=rtpmap:0 PCMU/8000"), "{body}");
-        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
-    }
-
     #[test]
     fn an_out_of_range_call_srtp_is_invalid_argument_and_places_nothing() {
         let mut observed = Observed::default();
@@ -6093,52 +6089,38 @@ Alert-Info: <urn:alert:source:external>\r\n";
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// A caller compiled against a header from before this member existed
-    /// declares a `sipral_call_config_t` no longer than
-    /// `crate::versioned::min_size::CALL_CONFIG`, so `srtp` is never among the
-    /// bytes it sent — even when, as here, live bytes happen to sit past the
-    /// declared length. It must read as the zero that means "unspecified" and
-    /// take the stack's own setting, exactly as a header that never grew this
-    /// member would.
+    /// An `sdp` of no bytes beside a `media_address` is no `sdp`, whatever
+    /// its pointer: it was refused as a second description of the session.
     #[test]
-    fn a_call_config_at_its_old_min_size_takes_the_stacks_srtp() {
+    fn a_call_config_with_an_empty_sdp_beside_its_media_address_places_the_call() {
         let mut observed = Observed::default();
-        let (handle, account) = media_line(&mut observed, |config| {
-            config.srtp = SipralSrtp::Required as u32;
-        });
+        let (handle, account) = media_line(&mut observed, |_| {});
         let mut call_config = managed_config();
-        call_config.srtp = SipralSrtp::NotOffered as u32;
-        call_config.size = crate::versioned::min_size::CALL_CONFIG;
+        let nothing = [0_u8; 1];
+        // a binding that hands every buffer over as a pointer and a length
+        // hands an empty one over as a real pointer and zero: that is no sdp
+        call_config.sdp = nothing.as_ptr();
+        call_config.sdp_len = 0;
         let (status, _) = place(handle, account, &call_config, 1_000);
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        let body = String::from_utf8_lossy(&one(handle)).into_owned();
-        assert!(
-            body.contains("RTP/SAVP") && body.contains("a=crypto:"),
-            "a member appended after the old MIN_SIZE must not be read from a struct \
-             declared that short, so this call was supposed to take the stack's REQUIRED: {body}"
-        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
-    /// The same, the other way round: the stack's own `srtp` appended past its
-    /// old MIN_SIZE must not be read from a `sipral_stack_config_t` declared
-    /// that short either, so a call on it gets this build's built-in default
-    /// rather than the value still sitting in memory past the declared size.
+    /// A `sipral_call_config_t` that ends before `srtp`, as it did before
+    /// `srtp` and `transport` were appended to it, comes from an ABI before
+    /// the freeze. `transport` was appended in the tail padding of a length a
+    /// caller of that time declared, so it would be read from whatever that
+    /// caller's stack held there; the struct is refused instead, because the
+    /// oldest version of every struct the frozen ABI serves is minor 33's.
     #[test]
-    fn a_stack_config_at_its_old_min_size_gets_the_default_srtp() {
+    fn a_call_config_from_before_the_freeze_is_refused() {
         let mut observed = Observed::default();
-        let (handle, account) = media_line(&mut observed, |config| {
-            config.srtp = SipralSrtp::Required as u32;
-            config.size = crate::versioned::min_size::STACK_CONFIG;
-        });
-        let (status, _) = place(handle, account, &managed_config(), 1_000);
-        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        let body = String::from_utf8_lossy(&one(handle)).into_owned();
-        assert!(
-            body.contains("RTP/AVP") && !body.contains("a=crypto"),
-            "a member appended after the old MIN_SIZE must not be read from a stack \
-             declared that short, so this call was supposed to get the built-in default: {body}"
-        );
+        let (handle, account) = media_line(&mut observed, |_| {});
+        let mut call_config = managed_config();
+        call_config.size = std::mem::offset_of!(SipralCallConfig, srtp);
+        let (status, _) = place(handle, account, &call_config, 1_000);
+        assert_eq!(status, SipralStatus::UnsupportedVersion);
+        assert!(sent(handle).is_empty(), "nothing was built");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

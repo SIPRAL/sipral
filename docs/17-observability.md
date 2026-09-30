@@ -269,7 +269,7 @@ at most `sipral::LISTED` (32) rows a section with the rest counted, and the
 whole cut at the byte limit given, on a character boundary, with a line
 saying so; and **redacted**, through the same `redact_text` as the log.
 
-`sipral_stack_state(stack, buffer, capacity, &len)` is the C ABI's, and adds
+`sipral_stack_state_text(stack, buffer, capacity, &len)` is the C ABI's, and adds
 what only that layer holds: the transports bound, the last eight calls into
 the stack that were refused (when, with what status, and the sentence), the
 event and farewell queues, the signalling counters of ABI 0.30 (requests and

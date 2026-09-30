@@ -7,7 +7,7 @@
 //! field, and neither the event stream nor the diagnostic record answers.
 //! "What was the stack doing" is a log: [`sipral_stack_log`] installs a
 //! callback that receives the engine's lines at the levels asked for. "What
-//! was the stack holding when it crashed" is a snapshot: [`sipral_stack_state`]
+//! was the stack holding when it crashed" is a snapshot: [`sipral_stack_state_text`]
 //! copies out one bounded text of accounts, calls, transports, media
 //! sessions, the last errors and the counters, from any thread.
 //!
@@ -74,7 +74,7 @@ codes! {
 }
 
 constants! {
-    /// The longest text [`sipral_stack_state`] writes, its NUL included: a
+    /// The longest text [`sipral_stack_state_text`] writes, its NUL included: a
     /// buffer of this many bytes always has room.
     pub const SIPRAL_STATE_TEXT_MAX: usize = 16384;
 }
@@ -86,7 +86,7 @@ const STATE_TEXT_LIMIT: usize = SIPRAL_STATE_TEXT_MAX - 1;
 const LAST_ERRORS: usize = 8;
 
 /// How often, at most, a poll that raised something refreshes the snapshot
-/// kept for [`sipral_stack_state`] to hand out while the stack is busy.
+/// kept for [`sipral_stack_state_text`] to hand out while the stack is busy.
 const SNAPSHOT_EVERY_MS: u64 = 1000;
 
 record! {
@@ -223,7 +223,7 @@ entry! {
     }
 }
 
-/// What a stack remembers beside itself for [`sipral_stack_state`], reachable
+/// What a stack remembers beside itself for [`sipral_stack_state_text`], reachable
 /// without the stack's own lock.
 #[derive(Default)]
 pub(crate) struct Watch {
@@ -354,21 +354,21 @@ entry! {
     /// taken. A call's media session that a thread is in the middle of a
     /// frame on is reported as busy rather than waited for.
     ///
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
-    /// when it does not fit; `out_len` may be null.
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
+    /// when it does not fit; `out_needed` may be null.
     ///
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-    fn sipral_stack_state(
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+    fn sipral_stack_state_text(
         stack: SipralHandle,
         buffer: *mut c_char,
         capacity: usize,
-        out_len: *mut usize,
+        out_needed: *mut usize,
     ) {
         let text = crate::stack::state_text(stack)?;
-        unsafe { copy_out(&text, buffer, capacity, out_len) }
+        unsafe { copy_out(&text, buffer, capacity, out_needed) }
     }
 }
 
@@ -407,7 +407,7 @@ pub(crate) fn log_for(key: &[u8]) -> Log {
 mod tests {
     use super::{
         SIPRAL_STATE_TEXT_MAX, SipralLogLevel, SipralLogRecord, sipral_stack_log,
-        sipral_stack_state,
+        sipral_stack_state_text,
     };
     use crate::call::tests::{account_on, invitation};
     use crate::counters::{SipralCounters, sipral_stack_counters};
@@ -601,7 +601,7 @@ mod tests {
         let mut buffer = vec![0_u8; SIPRAL_STATE_TEXT_MAX];
         let mut len = 0_usize;
         let status = unsafe {
-            sipral_stack_state(
+            sipral_stack_state_text(
                 handle,
                 buffer.as_mut_ptr().cast::<c_char>(),
                 buffer.len(),
@@ -650,12 +650,12 @@ mod tests {
         let mut observed = Observed::default();
         let handle = stack(&mut observed);
         let mut len = 0_usize;
-        let status = unsafe { sipral_stack_state(handle, ptr::null_mut(), 0, &raw mut len) };
+        let status = unsafe { sipral_stack_state_text(handle, ptr::null_mut(), 0, &raw mut len) };
         assert_eq!(status, SipralStatus::BufferTooSmall);
         assert!(len > 1 && len <= SIPRAL_STATE_TEXT_MAX);
     }
 
-    /// What `sipral_stack_state` answered from inside a screening policy,
+    /// What `sipral_stack_state_text` answered from inside a screening policy,
     /// which runs with the stack held.
     static FROM_INSIDE: Mutex<Option<String>> = Mutex::new(None);
 

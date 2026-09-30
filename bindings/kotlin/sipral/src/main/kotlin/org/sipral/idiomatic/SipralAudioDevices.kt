@@ -175,7 +175,8 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
         val device = SipralAudioDevice.of(slots)
         return SipralAudioDeviceInfo(
             id = device.id,
-            name = String(buffer, 0, minOf(needed[0].toInt(), buffer.size), Charsets.UTF_8),
+            // the length counts the trailing NUL, which is not the name
+            name = String(buffer, 0, minOf(needed[0].toInt() - 1, buffer.size).coerceAtLeast(0), Charsets.UTF_8),
             inputChannels = device.inputChannels.toInt(),
             outputChannels = device.outputChannels.toInt(),
             isDefaultInput = device.defaultInput != 0L,

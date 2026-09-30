@@ -14,8 +14,9 @@ Two layers, the way every binding here is two layers:
   `bindings/c/include/sipral.h` does, and the `dlopen` that turns it into
   `lib`. ABI mode needs no C compiler at install time — cffi lays every
   struct out for itself from the `cdef` text, so the `cdef` has to be
-  exact; `tests/test_abi.py` checks it against `bindings/c/abi-sizes.txt`
-  and against the header's own numbers.
+  exact; `tests/test_abi.py` checks it against the layout table the same
+  file carries, against the library's own `sipral_abi_struct_size` and
+  against the header's own numbers.
 - `sipral/stack.py`, `sipral/account.py`, `sipral/call.py`,
   `sipral/media.py`, `sipral/audio.py`, `sipral/events.py`,
   `sipral/enums.py`, `sipral/errors.py` — written by hand against `ffi`/`lib` directly, the way `SipralAbi.swift`

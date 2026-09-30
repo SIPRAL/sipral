@@ -141,11 +141,6 @@ constants! {
     /// This crate's own answer rather than the facade's: the engine sits
     /// beside the facade, not under it, so the facade has nothing to say.
     pub const SIPRAL_FEATURE_AUDIO_DEVICE: u32 = 1 << 11;
-    /// See [`SIPRAL_FEATURE_DTMF`]. A call in progress moves with the
-    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
-    /// call whose media address is gone, and `sipral_call_media_readdress`
-    /// offers it at the socket the application bound on the new network.
-    pub const SIPRAL_FEATURE_CALL_READDRESS: u32 = 1 << 13;
     /// See [`SIPRAL_FEATURE_DTMF`]. Who is calling and how the call asked to
     /// be answered, on every call event: the asserted identity behind the
     /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
@@ -155,6 +150,18 @@ constants! {
     /// `sipral_call_redirect`; and an account's `privacy` and
     /// `session_timer`.
     pub const SIPRAL_FEATURE_CALLER_IDENTITY: u32 = 1 << 12;
+    /// See [`SIPRAL_FEATURE_DTMF`]. A call in progress moves with the
+    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+    /// call whose media address is gone, and `sipral_call_media_readdress`
+    /// offers it at the socket the application bound on the new network.
+    pub const SIPRAL_FEATURE_CALL_READDRESS: u32 = 1 << 13;
+    /// See [`SIPRAL_FEATURE_DTMF`]. The engine's log through a callback,
+    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+    /// snapshot of a stack's state for a crash report
+    /// (`sipral_stack_state_text`). Set in every build of this library, which
+    /// always carries the redaction both depend on; a bit so that a binding
+    /// asks before it shows a "send diagnostics" control.
+    pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
     /// See [`SIPRAL_FEATURE_DTMF`]. The ceilings a stack is created with
     /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
     /// `diagnostic_records` in `sipral_stack_config_t`, read back through
@@ -163,13 +170,6 @@ constants! {
     /// what timed out and what was refused at a limit in
     /// `sipral_counters_t`.
     pub const SIPRAL_FEATURE_LIMITS: u32 = 1 << 15;
-    /// See [`SIPRAL_FEATURE_DTMF`]. The engine's log through a callback,
-    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
-    /// snapshot of a stack's state for a crash report
-    /// (`sipral_stack_state`). Set in every build of this library, which
-    /// always carries the redaction both depend on; a bit so that a binding
-    /// asks before it shows a "send diagnostics" control.
-    pub const SIPRAL_FEATURE_LOGGING: u32 = 1 << 14;
     /// See [`SIPRAL_FEATURE_DTMF`]. STIR/SHAKEN (RFC 8224, RFC 8588): an
     /// account given a key and a certificate URL signs every call it places
     /// (`stir_key`, `stir_certificate_url` in `sipral_account_config_t`), and
@@ -261,7 +261,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralCapabilities {
     const NAME: &'static str = "sipral_capabilities";
-    const MIN_SIZE: usize = crate::versioned::min_size::CAPABILITIES;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCapabilities, features);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

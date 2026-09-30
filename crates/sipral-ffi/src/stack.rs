@@ -157,6 +157,11 @@ pub(crate) const TRANSPORT: TransportId = TransportId(0);
 /// for the calls that do.
 const CLOCK_SLACK_MS: u64 = 50;
 
+/// How soon a poll that found the audio engine held by another thread asks
+/// to be called again, so that the engine's news waits one short beat
+/// rather than until whatever the stack's own next deadline is.
+const AUDIO_BUSY_RETRY: Duration = Duration::from_millis(20);
+
 codes! {
     /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
     ///
@@ -270,9 +275,10 @@ record! {
     /// What a stack is created with.
     ///
     /// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
-    /// filling anything in. Four members have to be filled: the callback, the
-    /// transport, the address this end is reachable at, and the entropy. Nothing
-    /// here can be guessed on the caller's behalf.
+    /// filling anything in. Five members have to be filled: the callback, the
+    /// transport, the address this end is reachable at, the entropy, and the
+    /// media seed, which must differ from the entropy. Nothing here can be
+    /// guessed on the caller's behalf.
     #[derive(Clone, Copy)]
     pub struct SipralStackConfig {
         /// `sizeof` this struct, as the caller's header declares it.
@@ -420,9 +426,6 @@ record! {
         /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
         /// for the reason `docs/06-nat.md` tabulates. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        ///
-        /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub ice: u32,
         /// What this stack does about a NAT in front of it: a `SipralNat`, or
         /// zero for this build's own built-in default, which is
@@ -430,9 +433,6 @@ record! {
         /// socket appears from and writes the answer where a far end reads
         /// it — see [`crate::nat`]. Any other value is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-        ///
-        /// Appended at the tail (task 8.5.5), with the two below; the pinned
-        /// `MIN_SIZE` is unmoved.
         pub nat: u32,
         /// The STUN server `SIPRAL_NAT_STUN` asks, as `host:port`: an
         /// address, not a name, since resolving one is the application's.
@@ -453,9 +453,6 @@ record! {
         /// keeps the stack's setting. Nothing changes for a call that does
         /// not run G.729, so the setting is taken whatever `codecs` names:
         /// a call's own order may name G.729 when the stack's does not.
-        ///
-        /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub g729_annex_b: u32,
         /// A TURN server (RFC 8656) to allocate a relay on for every media
         /// socket `sipral_stack_nat_map` names, as `host:port`: an address,
@@ -472,9 +469,6 @@ record! {
         /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
         /// can use a relay. Copied; the caller's buffer is its own again when
         /// this returns.
-        ///
-        /// Appended at the tail (task 8.5.5), with the five below; the pinned
-        /// `MIN_SIZE` is unmoved.
         pub turn_server: *const c_char,
         /// How many bytes of it.
         pub turn_server_len: usize,
@@ -500,9 +494,6 @@ record! {
         /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
         /// `sipral_call_accept_transfer` or refuses it with
         /// `sipral_call_reject_transfer`, one request at a time.
-        ///
-        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub referrals: u32,
         /// Whether an account behind a NAT keeps its registrar's UDP flow
         /// open, as a `SipralToggle`. **On by default.** An account is
@@ -519,9 +510,6 @@ record! {
         /// while the stack is suspended (`sipral_stack_suspending`), for a
         /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
         /// own address. `sipral_ua`'s `keepalive` module has the reasons.
-        ///
-        /// Appended at the tail (task 8.7.4), with the one below; the pinned
-        /// `MIN_SIZE` is unmoved.
         pub registrar_keepalive: u32,
         /// How often, in milliseconds, or zero for twenty-five seconds (RFC
         /// 5626 §4.4.2's interval for UDP). Each interval is drawn between
@@ -541,9 +529,6 @@ record! {
         /// asks, with the platform's own TLS as it does for SIP. Anything
         /// else, or a value other than zero with no `turn_server`, is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
-        ///
-        /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub turn_transport: u32,
         /// Who pumps this stack's audio: a `SipralAudio`. Zero, and
         /// `SIPRAL_AUDIO_APPLICATION`, is the application, through
@@ -554,9 +539,6 @@ record! {
         /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
         /// platform this build has no backend for, which
         /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
-        ///
-        /// Appended at the tail (task 8.6.18), with the five below; the
-        /// pinned `MIN_SIZE` is unmoved.
         pub audio: u32,
         /// When the devices are opened, in device mode: a
         /// `SipralAudioActivation`, or zero for
@@ -595,9 +577,6 @@ record! {
         /// call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
         /// goes out. A media server built on this library raises it to what
         /// its machine can carry; `docs/19-numbers.md` has what one costs.
-        ///
-        /// Appended at the tail (task 8.10), with the three below; the
-        /// pinned `MIN_SIZE` is unmoved.
         pub max_dialogs: u32,
         /// The most requests from other ends this stack works on at once —
         /// its server transactions, RFC 3261 §17.2 — or zero for 256. Past
@@ -618,6 +597,16 @@ record! {
         /// in the hundreds even on a stack holding thousands of calls: the
         /// calls a support case is about are the ones written most recently.
         pub diagnostic_records: u32,
+        /// When a call listens for keypad digits in the far end's audio, as a
+        /// [`SipralDtmfDetection`](crate::inband::SipralDtmfDetection): zero
+        /// on exactly the calls that negotiated no telephone event, which is
+        /// when such a far end has no other way to send one.
+        /// `sipral_call_dtmf_detection` changes it for one call.
+        ///
+        /// Here rather than after `rtp_port_max`, where it was appended: six
+        /// four-byte members in a row keep the struct free of padding at its
+        /// end on a 64-bit target and on 32-bit ARM alike.
+        pub dtmf_detection: u32,
         /// The STUN servers to turn to, in this order, when `stun_server`
         /// fails: `host:port` addresses separated by commas, not names.
         /// Optional, and only beside a `stun_server`. A server fails when it
@@ -630,9 +619,6 @@ record! {
         /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
         /// when the server in use moves, and when every one has failed.
         /// Copied; the caller's buffer is its own again when this returns.
-        ///
-        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub stun_fallbacks: *const c_char,
         /// How many bytes of it.
         pub stun_fallbacks_len: usize,
@@ -645,21 +631,9 @@ record! {
         /// even `rtp_port_max` is never handed out. A range that holds no
         /// such pair, one given upside down, or one bound given without the
         /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
-        ///
-        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub rtp_port_min: u32,
         /// The highest port of that range, or zero with `rtp_port_min`.
         pub rtp_port_max: u32,
-        /// When a call listens for keypad digits in the far end's audio, as a
-        /// [`SipralDtmfDetection`](crate::inband::SipralDtmfDetection): zero
-        /// on exactly the calls that negotiated no telephone event, which is
-        /// when such a far end has no other way to send one.
-        /// `sipral_call_dtmf_detection` changes it for one call.
-        ///
-        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-        /// unmoved.
-        pub dtmf_detection: u32,
     }
 }
 
@@ -671,7 +645,7 @@ record! {
 // being undefined.
 unsafe impl Versioned for SipralStackConfig {
     const NAME: &'static str = "sipral_stack_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::STACK_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralStackConfig, rtp_port_max);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -714,7 +688,7 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralPollResult {
     const NAME: &'static str = "sipral_poll_result";
-    const MIN_SIZE: usize = crate::versioned::min_size::POLL_RESULT;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPollResult, next_poll_in_ms);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -767,29 +741,17 @@ record! {
         pub media_stall_ms: u64,
         /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
         /// default filled in.
-        ///
-        /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub g729_annex_b: u32,
         /// Whether a REFER outside any dialog reaches the application, as a
         /// `SipralToggle`, with the default — off — filled in.
-        ///
-        /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub referrals: u32,
         /// How often an account behind a NAT sends to its registrar, in
         /// milliseconds, with the default filled in. Zero when
         /// `registrar_keepalive` was turned off, which is the one case where
         /// there is no figure to give.
-        ///
-        /// Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub registrar_keepalive_ms: u64,
         /// The most calls the stack holds at once, with the default filled
         /// in.
-        ///
-        /// Appended at the tail (task 8.10), with the three below; the
-        /// pinned `MIN_SIZE` is unmoved.
         pub max_dialogs: u32,
         /// The most server transactions it works on at once, with the
         /// default filled in.
@@ -801,9 +763,6 @@ record! {
         /// filled in.
         pub diagnostic_records: u32,
         /// The RTP port range, as given; both zero for none.
-        ///
-        /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub rtp_port_min: u32,
         /// See `rtp_port_min`.
         pub rtp_port_max: u32,
@@ -813,7 +772,7 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralStackSettings {
     const NAME: &'static str = "sipral_stack_settings";
-    const MIN_SIZE: usize = crate::versioned::min_size::STACK_SETTINGS;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralStackSettings, rtp_port_max);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -863,7 +822,7 @@ struct StackEntry {
     /// Where the engine's log lines wait for the thread that lets the stack
     /// go (`crate::log`). The same log the state and the engine hold.
     log: sipral::Log,
-    /// What [`crate::log::sipral_stack_state`] reads when the stack is busy,
+    /// What [`crate::log::sipral_stack_state_text`] reads when the stack is busy,
     /// and the last refusals it reports, behind a lock of its own so that
     /// reading them never waits on signalling.
     watch: Mutex<crate::log::Watch>,
@@ -1208,7 +1167,7 @@ impl StackState {
         let floor = self.polled_at_ms.saturating_sub(CLOCK_SLACK_MS);
         if now_ms < floor {
             return Err(fail(
-                SipralStatus::InvalidArgument,
+                SipralStatus::ClockBehind,
                 format!(
                     "now_ms is {now_ms}, more than {CLOCK_SLACK_MS} ms behind this stack's last \
                      reading of {}; two threads reading one clock can disagree by a little, but \
@@ -1319,7 +1278,7 @@ pub(crate) fn with_stack<R>(
     done
 }
 
-/// The text [`crate::log::sipral_stack_state`] copies out: taken now when the
+/// The text [`crate::log::sipral_stack_state_text`] copies out: taken now when the
 /// stack is free, the last one a poll kept when it is not. Never waits.
 pub(crate) fn state_text(stack: SipralHandle) -> Result<String, Fail> {
     let entry = STACKS.get(stack).map_err(handle_failed)?;
@@ -1955,6 +1914,14 @@ entry! {
         if crate::media::inside_media_of(stack) {
             return Err(inside_media());
         }
+        if crate::audio::inside_transmit() {
+            return Err(fail(
+                SipralStatus::Busy,
+                "this thread is the audio engine's, inside the audio transmit callback, and \
+                 destroying a stack from there would wait for this very thread to finish: \
+                 destroy it from another thread",
+            ));
+        }
         // dropping the last share of the entry here is what frees it; a poll
         // running on another thread holds one of its own until it is done
         STACKS.remove(stack).map_err(handle_failed)?;
@@ -1969,8 +1936,7 @@ entry! {
     /// fall more than fifty milliseconds behind the last one this stack saw —
     /// signalling may be called from any thread, and two of them reading the
     /// same clock a moment apart is not a caller mistake — and a jump further
-    /// back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
-    /// delivered.
+    /// back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
     ///
     /// The event callback is called from inside this function, on this
     /// thread, and with nothing held: the stack's work is done and its lock
@@ -2010,7 +1976,7 @@ entry! {
             let mut raised = Vec::new();
             let counted = run(stack, &mut state, now, &mut raised);
             if !raised.is_empty() {
-                // something changed: what `sipral_stack_state` hands out
+                // something changed: what `sipral_stack_state_text` hands out
                 // while another thread holds the stack is brought up to date
                 entry.watch().refresh(stack, &state);
             }
@@ -2091,17 +2057,30 @@ fn run(
         });
     }
     // the audio engine's own news: a device gone, a default moved, a role
-    // reopened. Its lock is taken after the engine's events above have been
-    // translated, and never while a platform call is in flight on it — the
-    // engine makes those from a thread of its own
+    // reopened. Its lock is only tried, after the engine's events above have
+    // been translated: a `sipral_audio_*` call on another thread holds it for
+    // as long as the platform takes to answer about its devices — up to
+    // `audio_probe_ms` — and a poll that waited for it would hold this
+    // stack's lock all that while, turning every signalling call on every
+    // other thread into SIPRAL_STATUS_BUSY. A busy engine is serviced by the
+    // next poll, which is asked for soon.
+    let mut audio_busy = false;
     if let Some(audio) = state.audio.clone() {
-        let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
-        engine.service();
-        while let Some(event) = engine.poll_event() {
-            raised.push(Delivery::bare(crate::event::audio_changed(
-                stack,
-                crate::audio::event_of(event),
-            )));
+        let held = match audio.try_lock() {
+            Ok(engine) => Some(engine),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut engine) = held {
+            engine.service();
+            while let Some(event) = engine.poll_event() {
+                raised.push(Delivery::bare(crate::event::audio_changed(
+                    stack,
+                    crate::audio::event_of(event),
+                )));
+            }
+        } else {
+            audio_busy = true;
         }
     }
     // what the local conferences did since the last poll: members that
@@ -2114,6 +2093,7 @@ fn run(
         state.agent.poll_timeout(),
         state.engine.poll_timeout(),
         crate::nat::Nat::poll_timeout(state),
+        audio_busy.then(|| now + AUDIO_BUSY_RETRY),
     ]
     .into_iter()
     .flatten()
@@ -3131,11 +3111,10 @@ pub(crate) mod tests {
         let mut observed = Observed::default();
         let mut config = config(record, &mut observed);
         // below the pinned minimum rather than `size_of::<SipralStackConfig>() -
-        // 1`: the struct has grown past that minimum since it was first
-        // published, and a size one short of the *current* build is a
-        // perfectly good caller compiled against an older header, not the
-        // wrong size this test means
-        config.size = crate::versioned::min_size::STACK_CONFIG - 1;
+        // 1`: once the struct grows past that minimum, a size one short of
+        // the *current* build is a perfectly good caller compiled against an
+        // older header, not the wrong size this test means
+        config.size = <SipralStackConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
         let (status, handle) = create(&config);
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(handle, SIPRAL_HANDLE_NONE);
@@ -3143,6 +3122,21 @@ pub(crate) mod tests {
         config.size = 0;
         let (status, _) = create(&config);
         assert_eq!(status, SipralStatus::UnsupportedVersion);
+    }
+
+    /// A `sipral_stack_config_t` that ends where the first header's did,
+    /// before `srtp`, comes from an ABI before the freeze. `ice`, `audio` and
+    /// `max_dialogs` were each appended in the tail padding of a length a
+    /// caller of that time declared, so they would be read from whatever that
+    /// caller's stack held there; the struct is refused instead.
+    #[test]
+    fn a_config_from_before_the_freeze_is_refused() {
+        let mut observed = Observed::default();
+        let mut config = config(record, &mut observed);
+        config.size = std::mem::offset_of!(SipralStackConfig, srtp);
+        let (status, handle) = create(&config);
+        assert_eq!(status, SipralStatus::UnsupportedVersion);
+        assert_eq!(handle, SIPRAL_HANDLE_NONE);
     }
 
     #[test]
@@ -3595,7 +3589,7 @@ pub(crate) mod tests {
         // shorter than the first published length: no header ever declared
         // one this short, so it is no version of the struct at all
         let mut out = settings();
-        out.size = crate::versioned::min_size::STACK_SETTINGS - 1;
+        out.size = <crate::stack::SipralStackSettings as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_stack_settings(handle, &raw mut out) },
             SipralStatus::UnsupportedVersion
@@ -3611,7 +3605,7 @@ pub(crate) mod tests {
     fn a_settings_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
         let mut out = settings();
-        out.size = crate::versioned::min_size::STACK_SETTINGS - 1;
+        out.size = <crate::stack::SipralStackSettings as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_stack_settings(SIPRAL_HANDLE_NONE, &raw mut out) },
             SipralStatus::UnsupportedVersion
@@ -3792,7 +3786,7 @@ pub(crate) mod tests {
     fn a_result_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
     {
         let mut result = poll_result();
-        result.size = crate::versioned::min_size::POLL_RESULT - 1;
+        result.size = <crate::stack::SipralPollResult as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_stack_poll(SIPRAL_HANDLE_NONE, 0, &raw mut result) },
             SipralStatus::UnsupportedVersion
@@ -3814,7 +3808,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             unsafe { sipral_stack_poll(handle, 4_949, ptr::null_mut()) },
-            SipralStatus::InvalidArgument,
+            SipralStatus::ClockBehind,
             "fifty-one milliseconds behind is"
         );
         let message = last_error_text();
@@ -4160,7 +4154,7 @@ pub(crate) mod tests {
         assert_eq!(polled, SipralStatus::Ok);
         assert_eq!(
             unsafe { sipral_stack_poll(handle, 900, ptr::null_mut()) },
-            SipralStatus::InvalidArgument,
+            SipralStatus::ClockBehind,
             "the clock is the stack's, not the thread's -- a hundred milliseconds is well past \
              the slack two threads reading it are allowed"
         );

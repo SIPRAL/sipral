@@ -213,6 +213,12 @@ record! {
         /// Nonzero with `destination` null is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
         pub transport: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero; the library reads nothing from
+        /// it.
+        pub reserved: u32,
     }
 }
 
@@ -221,7 +227,7 @@ record! {
 // zero, and a zero `expires_seconds` is the default.
 unsafe impl Versioned for SipralSubscribeConfig {
     const NAME: &'static str = "sipral_subscribe_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::SUBSCRIBE_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralSubscribeConfig, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -565,7 +571,7 @@ record! {
 // members, and the library is the only one that fills it in.
 unsafe impl Versioned for SipralWatchedDialog {
     const NAME: &'static str = "sipral_watched_dialog";
-    const MIN_SIZE: usize = crate::versioned::min_size::WATCHED_DIALOG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralWatchedDialog, duration_ms);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -744,8 +750,9 @@ entry! {
     ///
     /// # Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     fn sipral_subscription_dialog_text(
         stack: SipralHandle,
         subscription: SipralHandle,
@@ -755,9 +762,6 @@ entry! {
         capacity: usize,
         out_needed: *mut usize,
     ) {
-        if out_needed.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_needed is null"));
-        }
         let wanted = match which {
             1 => SipralDialogText::Id,
             2 => SipralDialogText::CallId,
@@ -828,6 +832,7 @@ pub(crate) mod tests {
     /// extension, which is what A1 is for.
     pub(crate) fn watch(target: &str) -> SipralSubscribeConfig {
         let mut config = SipralSubscribeConfig {
+            reserved: 0,
             size: size_of::<SipralSubscribeConfig>(),
             target: ptr::null(),
             target_len: 0,

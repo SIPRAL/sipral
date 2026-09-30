@@ -86,7 +86,7 @@ record! {
 // members, and the library is the only one that fills it in.
 unsafe impl Versioned for SipralPushEcho {
     const NAME: &'static str = "sipral_push_echo";
-    const MIN_SIZE: usize = crate::versioned::min_size::PUSH_ECHO;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPushEcho, refresh_lead_ms);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

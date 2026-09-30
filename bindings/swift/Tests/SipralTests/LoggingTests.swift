@@ -44,6 +44,30 @@ final class LoggingTests: XCTestCase {
         }
     }
 
+    /// A null callback is how C turns the log and a screening policy off,
+    /// and the generated wrappers took neither a null callback nor a null
+    /// pointer beside it, so this did not compile.
+    func testTheGeneratedWrappersTakeANullListener() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        // the stack's own poll thread may hold it for a moment: wait that out
+        func retrying(_ body: () throws -> Void) throws {
+            for _ in 0..<500 {
+                do {
+                    try body()
+                    return
+                } catch let refused as SipralError where refused.status == .busy {
+                    Thread.sleep(forTimeInterval: 0.001)
+                }
+            }
+            try body()
+        }
+        try retrying {
+            try Sipral.stackLog(stack: stack.handle, level: SipralLogLevel.off.rawValue, callback: nil, userData: nil)
+        }
+        try retrying { try Sipral.stackScreen(stack: stack.handle, callback: nil, userData: nil) }
+    }
+
     func testARefusedCallIsLoggedWithNobodyInIt() throws {
         let features = try Sipral.capabilities().features
         XCTAssertNotEqual(features & Sipral.featureLogging, 0)

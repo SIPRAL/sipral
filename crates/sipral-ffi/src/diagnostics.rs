@@ -14,7 +14,7 @@
 //! [`sipral_call_record_json`] and [`sipral_stack_diagnostics_json`] are
 //! `Endpoint::call_record` and `Endpoint::endpoint_record`, serialised. Both
 //! copy into a caller's buffer the way [`crate::error::sipral_last_error_message`]
-//! does: `out_len` always receives the number of bytes the text needs
+//! does: `out_needed` always receives the number of bytes the text needs
 //! including the trailing NUL, and a buffer too small for the whole of it is
 //! `SIPRAL_STATUS_BUFFER_TOO_SMALL` with nothing written to it.
 //!
@@ -72,7 +72,7 @@ use crate::text::text;
 ///
 /// The shape every entry point here that hands text back uses:
 /// [`crate::error::sipral_last_error_message`] set it, and this crate has had
-/// no second one to write text out with until now. `out_len` always receives
+/// no second one to write text out with until now. `out_needed` always receives
 /// the number of bytes `text` needs including a trailing NUL, so a caller
 /// that passes a capacity of zero and a null buffer learns the length and
 /// gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer too
@@ -82,12 +82,12 @@ use crate::text::text;
 /// # Safety
 ///
 /// `buffer` must be writable for `capacity` bytes or be null with a capacity
-/// of zero, and `out_len` must point at one `size_t` or be null.
+/// of zero, and `out_needed` must point at one `size_t` or be null.
 pub(crate) unsafe fn copy_out(
     text: &str,
     buffer: *mut c_char,
     capacity: usize,
-    out_len: *mut usize,
+    out_needed: *mut usize,
 ) -> Result<(), Fail> {
     if buffer.is_null() && capacity != 0 {
         return Err(fail(
@@ -96,8 +96,8 @@ pub(crate) unsafe fn copy_out(
         ));
     }
     let needed = text.len().saturating_add(1);
-    if !out_len.is_null() {
-        unsafe { out_len.write(needed) };
+    if !out_needed.is_null() {
+        unsafe { out_needed.write(needed) };
     }
     if capacity < needed {
         return Err(fail(
@@ -120,26 +120,26 @@ entry! {
     ///
     /// Readable at any point in the call's life, and for as long after it as
     /// the endpoint has not evicted the record to make room for a newer one —
-    /// `sipral_stack_config_t` has no member for the ceiling yet, so today
-    /// that is [`sipral_core::diag::RecordLimits::DEFAULT`]. A call whose
+    /// how many are kept is `sipral_stack_config_t::diagnostic_records`,
+    /// 32 when it is zero. A call whose
     /// record has been evicted, or that has had nothing decided about it yet,
     /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
     /// record, and refusing to read one that happens to be empty would make
     /// a caller unable to tell "nothing yet" from "something went wrong".
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// document, with the length needed in `out_len`.
+    /// document, with the length needed in `out_needed`.
     ///
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     fn sipral_call_record_json(
         stack: SipralHandle,
         call: SipralHandle,
         buffer: *mut c_char,
         capacity: usize,
-        out_len: *mut usize,
+        out_needed: *mut usize,
     ) {
         let json = with_stack(stack, |state| {
             let handle = state.calls.get(call).map_err(handle_failed)?;
@@ -156,7 +156,7 @@ entry! {
                 .call_record(&call_id)
                 .map_or_else(|| "{}".to_owned(), sipral_core::diag::Record::to_json))
         })?;
-        unsafe { copy_out(&json, buffer, capacity, out_len) }
+        unsafe { copy_out(&json, buffer, capacity, out_needed) }
     }
 }
 
@@ -172,20 +172,20 @@ entry! {
     /// [`sipral_call_record_json`] is already the way to ask about one call.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// document, with the length needed in `out_len`.
+    /// document, with the length needed in `out_needed`.
     ///
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     fn sipral_stack_diagnostics_json(
         stack: SipralHandle,
         buffer: *mut c_char,
         capacity: usize,
-        out_len: *mut usize,
+        out_needed: *mut usize,
     ) {
         let json = with_stack(stack, |state| Ok(state.agent.endpoint().diagnostics_json()))?;
-        unsafe { copy_out(&json, buffer, capacity, out_len) }
+        unsafe { copy_out(&json, buffer, capacity, out_needed) }
     }
 }
 
@@ -231,7 +231,7 @@ entry! {
     /// session and say nothing about it.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// text, with the length needed in `out_len` — asking again with a bigger
+    /// text, with the length needed in `out_needed` — asking again with a bigger
     /// buffer answers the same recording rather than stopping a new one,
     /// so a caller that does not yet know how big a buffer to bring may ask
     /// twice: once to be told, once to be handed the text. Once a call here
@@ -242,12 +242,12 @@ entry! {
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     fn sipral_stack_recording_stop(
         stack: SipralHandle,
         buffer: *mut c_char,
         capacity: usize,
-        out_len: *mut usize,
+        out_needed: *mut usize,
     ) {
         with_stack(stack, |state| {
             let text = match state.agent.stop_recording() {
@@ -268,7 +268,7 @@ entry! {
                     ));
                 }
             };
-            let outcome = unsafe { copy_out(&text, buffer, capacity, out_len) };
+            let outcome = unsafe { copy_out(&text, buffer, capacity, out_needed) };
             if outcome.is_ok() {
                 state.agent.clear_stopped_recording();
             }
@@ -326,14 +326,14 @@ mod tests {
     }
 
     fn diagnostics_of(stack: SipralHandle) -> (SipralStatus, String) {
-        read_text(|buffer, capacity, out_len| unsafe {
-            sipral_stack_diagnostics_json(stack, buffer, capacity, out_len)
+        read_text(|buffer, capacity, out_needed| unsafe {
+            sipral_stack_diagnostics_json(stack, buffer, capacity, out_needed)
         })
     }
 
     fn record_of(stack: SipralHandle, call: SipralHandle) -> (SipralStatus, String) {
-        read_text(|buffer, capacity, out_len| unsafe {
-            sipral_call_record_json(stack, call, buffer, capacity, out_len)
+        read_text(|buffer, capacity, out_needed| unsafe {
+            sipral_call_record_json(stack, call, buffer, capacity, out_needed)
         })
     }
 
@@ -343,8 +343,8 @@ mod tests {
     }
 
     fn stop(stack: SipralHandle) -> (SipralStatus, String) {
-        read_text(|buffer, capacity, out_len| unsafe {
-            sipral_stack_recording_stop(stack, buffer, capacity, out_len)
+        read_text(|buffer, capacity, out_needed| unsafe {
+            sipral_stack_recording_stop(stack, buffer, capacity, out_needed)
         })
     }
 

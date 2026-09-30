@@ -204,12 +204,12 @@ internal object IdentityReader {
             var buffer = ByteArray(256)
             val needed = LongArray(1)
             var status = SipralNative.sipral_call_identity_text(
-                client.handle, call, which.value.toLong(), index, buffer, needed,
+                client.handle, call, index, which.value.toLong(), buffer, needed,
             )
             if (status == SipralStatus.BUFFER_TOO_SMALL.value) {
                 buffer = ByteArray(needed[0].toInt())
                 status = SipralNative.sipral_call_identity_text(
-                    client.handle, call, which.value.toLong(), index, buffer, needed,
+                    client.handle, call, index, which.value.toLong(), buffer, needed,
                 )
             }
             if (status != SipralStatus.OK.value) {

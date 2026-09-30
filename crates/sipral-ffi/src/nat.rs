@@ -2012,7 +2012,6 @@ fn no_turn_streams() -> Fail {
 }
 
 entry! {
-    /// Take the next STUN request a media socket has to send.entry! {
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -4021,6 +4020,7 @@ mod tests {
         let mut all = Vec::new();
         loop {
             let mut packet = crate::media::SipralMediaPacket {
+                reserved: 0,
                 size: size_of::<crate::media::SipralMediaPacket>(),
                 data: data.as_mut_ptr(),
                 capacity: data.len(),
@@ -4056,6 +4056,7 @@ mod tests {
         let mut all = Vec::new();
         loop {
             let mut packet = crate::media::SipralMediaPacket {
+                reserved: 0,
                 size: size_of::<crate::media::SipralMediaPacket>(),
                 data: data.as_mut_ptr(),
                 capacity: data.len(),
@@ -4821,6 +4822,7 @@ mod tests {
         let mut all = Vec::new();
         loop {
             let mut packet = crate::media::SipralMediaPacket {
+                reserved: 0,
                 size: size_of::<crate::media::SipralMediaPacket>(),
                 data: data.as_mut_ptr(),
                 capacity: data.len(),
@@ -5346,6 +5348,7 @@ Content-Type: application/sdp\r\n"
         let mut local: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
         let mut remote: [c_char; SIPRAL_ADDRESS_BYTES] = [0; SIPRAL_ADDRESS_BYTES];
         let mut path = crate::media::SipralPathCandidate {
+            reserved: 0,
             size: size_of::<crate::media::SipralPathCandidate>(),
             priority: 0,
             kind: 0,
@@ -5419,6 +5422,7 @@ Content-Type: application/sdp\r\n"
         assert!(last_error_text().contains(&count.to_string()));
         let mut cramped: [c_char; 8] = [0; 8];
         let mut path = crate::media::SipralPathCandidate {
+            reserved: 0,
             size: size_of::<crate::media::SipralPathCandidate>(),
             priority: 0,
             kind: 0,
@@ -5437,7 +5441,8 @@ Content-Type: application/sdp\r\n"
             unsafe { crate::media::sipral_media_path_candidate_at(media, 0, &raw mut path) },
             SipralStatus::BufferTooSmall
         );
-        path.size = crate::versioned::min_size::PATH_CANDIDATE - 1;
+        path.size =
+            <crate::media::SipralPathCandidate as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { crate::media::sipral_media_path_candidate_at(media, 0, &raw mut path) },
             SipralStatus::UnsupportedVersion

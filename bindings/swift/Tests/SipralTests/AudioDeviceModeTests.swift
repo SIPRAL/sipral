@@ -58,6 +58,8 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertFalse(first.isEmpty, "no device listed")
         XCTAssertEqual(first.map(\.id), second.map(\.id))
         XCTAssertTrue(first.allSatisfy { $0.id != 0 && !$0.name.isEmpty })
+        // the library counts the name's trailing NUL, which is not the name's
+        XCTAssertTrue(first.allSatisfy { !$0.name.contains("\0") }, "\(first.map(\.name))")
         XCTAssertEqual(try audio.devices(), second)
         XCTAssertTrue(first.contains { $0.outputChannels > 0 }, "no device can play")
         XCTAssertFalse(try audio.status().isActive, "listing opened the devices")

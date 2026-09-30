@@ -495,7 +495,7 @@ class Call:
                 "sipral_call_conference_uri",
             )
         except SipralError as refused:
-            if refused.status == Status.NOT_AFOCUS:
+            if refused.status == Status.NOT_A_FOCUS:
                 return None
             raise
 
@@ -505,7 +505,7 @@ class Call:
         subscription outlives the call; `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`
         says what it learns and
         :meth:`sipral.subscription.Subscription.conference` reads the
-        picture. `SIPRAL_STATUS_NOT_AFOCUS` when the far end is not one."""
+        picture. `SIPRAL_STATUS_NOT_A_FOCUS` when the far end is not one."""
         out = ffi.new("sipral_handle_t *")
         _call(
             lambda: lib.sipral_call_subscribe_conference(

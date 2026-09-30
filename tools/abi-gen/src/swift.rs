@@ -318,14 +318,16 @@ fn signature(
             // a C function pointer is a type Swift spells, and the pointer
             // after it is the caller's own: both are handed through as they
             // come, which is what every other language does with a listener
-            // installed on a handle the caller already has
+            // installed on a handle the caller already has. Both optional,
+            // because a null callback is how C says "turn it off" and a null
+            // pointer is what a listener with nothing to carry hands over
             Role::Listener {
                 callback,
                 user_data,
                 ..
             } => {
                 for read in [callback, user_data] {
-                    arguments.push(format!("{}: {}", held(read), scalar(&read.ty)));
+                    arguments.push(format!("{}: {}?", held(read), scalar(&read.ty)));
                 }
             }
         }
@@ -871,6 +873,22 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
 
     out.push_str(&plumbing(&check));
 
+    for line in crate::layout::TABLE_DOC {
+        let _ = writeln!(out, "    /// {line}");
+    }
+    out.push_str(
+        "    public static let recordLayouts: [(name: String, imported: Int, p64: Int, p32a4: Int, p32a8: Int)] = [\n",
+    );
+    for lengths in crate::layout::table(surface)? {
+        let [p64, p32a4, p32a8] = lengths.sizes;
+        let c_name = lengths.record.c_name();
+        let _ = writeln!(
+            out,
+            "        (\"{c_name}\", MemoryLayout<{c_name}>.size, {p64}, {p32a4}, {p32a8}),"
+        );
+    }
+    out.push_str("    ]\n\n");
+
     for (function, read) in functions(surface)? {
         if function.name == "sipral_last_error_message" {
             continue;
@@ -972,6 +990,7 @@ impl Spelling for Names {
             ),
             ("ensureAbi", "the ABI check this back end writes"),
             ("check", "the status check this back end writes"),
+            ("recordLayouts", "the layout table this back end writes"),
         ]
     }
 

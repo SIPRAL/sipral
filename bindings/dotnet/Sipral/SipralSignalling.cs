@@ -398,7 +398,7 @@ public sealed partial class SipralStack
         return line;
     }
 
-    /// <summary><c>sipral_stack_transport_failure</c>, from whichever thread
+    /// <summary><c>sipral_stack_transport_failed_with</c>, from whichever thread
     /// found out; never throwing on the way out.</summary>
     private void Report(SignallingRefusedException refused)
     {
@@ -412,8 +412,8 @@ public sealed partial class SipralStack
             failure.Tls = _signalling == SipralTransport.Tls ? (uint)refused.Tls : (uint)SipralTlsFailure.None;
             failure.Detail = detail.Length == 0 ? IntPtr.Zero : pinned.AddrOfPinnedObject();
             failure.DetailLen = (nuint)detail.Length;
-            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failure(Handle, in failure, NowMs),
-                "sipral_stack_transport_failure");
+            SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failed_with(Handle, in failure, NowMs),
+                "sipral_stack_transport_failed_with");
         }
         catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
         {
@@ -530,7 +530,7 @@ public sealed partial class SipralStack
     /// <summary>Closes <paramref name="link"/> if it is still the current
     /// one, tells the stack how it ended — <c>sipral_stack_stream_closed</c>
     /// for an orderly close (<paramref name="refused"/> null),
-    /// <c>sipral_stack_transport_failure</c> otherwise, nothing when
+    /// <c>sipral_stack_transport_failed_with</c> otherwise, nothing when
     /// <paramref name="tell"/> is false — and connects again.</summary>
     private void LoseLink(Link link, SignallingRefusedException? refused, bool tell = true)
     {

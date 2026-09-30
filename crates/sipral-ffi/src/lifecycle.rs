@@ -236,13 +236,7 @@ record! {
 // stack that had nothing standing when it was told to sleep.
 unsafe impl Versioned for SipralSuspending {
     const NAME: &'static str = "sipral_suspending";
-    // Pinned here as a literal, the way every other struct in this crate
-    // pins its oldest published length, rather than in
-    // `crate::versioned::min_size` beside them: three branches land a bullet
-    // of task 8.4.13 in this same crate at once, and that module is not one
-    // any of them may touch without colliding with the other two. The
-    // integrator folds this into the shared table when the branches land.
-    const MIN_SIZE: usize = 32;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralSuspending, calls);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -925,7 +919,9 @@ mod tests {
         let mut observed = Observed::default();
         let (handle, _) = registered(&mut observed, &named_account(), 1_000);
         let mut out = zeroed_report();
-        out.size = 31;
+        // one byte short of the pin on whatever target this runs on: the
+        // struct is 16 bytes on a 32-bit one, where 31 is longer than it
+        out.size = <SipralSuspending as crate::versioned::Versioned>::MIN_SIZE - 1;
         let status = unsafe { sipral_stack_suspending(handle, 1_100, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.unverified, usize::MAX, "nothing was written");

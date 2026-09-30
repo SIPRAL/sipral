@@ -182,8 +182,8 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     }
 
     /// One row, its name read into a buffer that grows to what the library
-    /// says it needs: `sipral_audio_device_at` fills the struct and the
-    /// length needed even when the name does not fit, which the generated
+    /// says it needs: `sipral_audio_device_at` writes the length needed, NUL
+    /// counted, even when the name does not fit, which the generated
     /// wrapper, throwing on anything but success, would not hand back.
     private func device(at index: Int) throws -> AudioDevice {
         var buffer = [CChar](repeating: 0, count: 256)
@@ -200,8 +200,10 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         }
         try Sipral.check(status)
         let read = (device: device, needed: needed)
+        // the trailing NUL is counted in `needed` and is not part of the name
+        let length = max(0, min(read.needed, buffer.count) - 1)
         let name = String(
-            decoding: buffer.prefix(min(read.needed, buffer.count)).map { UInt8(bitPattern: $0) },
+            decoding: buffer.prefix(length).map { UInt8(bitPattern: $0) },
             as: UTF8.self
         )
         return AudioDevice(

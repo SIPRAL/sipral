@@ -36,105 +36,84 @@ use crate::status::SipralStatus;
 ///
 /// The type must be plain data: `#[repr(C)]`, no pointers it owns, no
 /// invariant between its members, and valid when every one of its bytes is
-/// zero. Its first member must be `size: usize`, and [`Versioned::MIN_SIZE`]
-/// must be the length of the oldest published version of it.
+/// zero. Its first member must be `size: usize`, and [`Versioned::PIN`] must
+/// name the last member of the oldest version of it the frozen ABI publishes.
 pub(crate) unsafe trait Versioned: Copy {
     /// What the struct is called in C, for the sentence a caller reads.
     const NAME: &'static str;
 
-    /// The shortest this build will work with.
-    const MIN_SIZE: usize;
+    /// Where the oldest published version of the struct ends, written with
+    /// [`pin!`] as the member it ends with.
+    const PIN: Pin;
+
+    /// The shortest this build will work with: the end of the pinned member,
+    /// on whatever target this was compiled for.
+    ///
+    /// A pinned length longer than the struct would turn away a caller
+    /// compiled against this very header, so that is refused when the crate
+    /// is compiled, on every target, rather than by a test on one.
+    const MIN_SIZE: usize = {
+        assert!(
+            Self::PIN.end <= size_of::<Self>(),
+            "a pinned length is longer than the struct it pins"
+        );
+        Self::PIN.end
+    };
 
     /// Set the size member. The size a caller declared is read from its
     /// pointer instead, since by then there is no value to ask.
     fn set_declared_size(&mut self, bytes: usize);
 }
 
-/// The length each versioned struct had in the **first published header**,
-/// written once as a literal and never recomputed.
+/// The length a versioned struct had in the first version of it the frozen
+/// ABI publishes, held as the member that version ends with.
 ///
-/// This is the whole of what makes appending a member safe, and writing
-/// `size_of::<Self>()` here instead — which is what every one of these used to
-/// be — inverts it. [`declared_size`] refuses anything below `MIN_SIZE`, so a
-/// `MIN_SIZE` that tracks the current build turns away every caller compiled
-/// against yesterday's header, from a change whose entire point was to be
-/// additive. The number has to stand still while the struct grows, and a
-/// literal is the only thing that does.
+/// This is the whole of what makes appending a member safe. [`declared_size`]
+/// refuses anything below [`Versioned::MIN_SIZE`], so a minimum that tracked
+/// the current build — `size_of::<Self>()`, which is what these once were —
+/// would turn away every caller compiled against yesterday's header, from a
+/// change whose entire point was to be additive. The number has to stand
+/// still while the struct grows.
 ///
-/// Changing one of these is therefore a deliberate act with a reviewable diff,
-/// and it is wrong in every case but one: a struct whose **first** published
-/// length was not what is written here. Nothing else is a reason.
-/// `bindings/c/abi-sizes.txt` is printed from this table and the gate diffs
-/// it, so the change shows up twice.
-pub(crate) mod min_size {
-    #![allow(unreachable_pub)]
-    /// `sipral_abi_version_t`
-    pub const ABI_VERSION: usize = 24;
-    /// `sipral_audio_device_t`
-    pub const AUDIO_DEVICE: usize = 32;
-    /// `sipral_audio_info_t`
-    pub const AUDIO_INFO: usize = 48;
-    /// `sipral_account_config_t`
-    pub const ACCOUNT_CONFIG: usize = 144;
-    /// `sipral_call_config_t`
-    pub const CALL_CONFIG: usize = 80;
-    /// `sipral_capabilities_t`
-    pub const CAPABILITIES: usize = 24;
-    /// `sipral_conference_t`
-    pub const CONFERENCE: usize = 32;
-    /// `sipral_conference_user_t`
-    pub const CONFERENCE_USER: usize = 24;
-    /// `sipral_codec_candidate_t`
-    pub const CODEC_CANDIDATE: usize = 24;
-    /// `sipral_codec_info_t`
-    pub const CODEC_INFO: usize = 32;
-    /// `sipral_counters_t`
-    pub const COUNTERS: usize = 152;
-    /// `sipral_local_conference_config_t`
-    pub const LOCAL_CONFERENCE_CONFIG: usize = 24;
-    /// `sipral_local_conference_info_t`
-    pub const LOCAL_CONFERENCE_INFO: usize = 56;
-    /// `sipral_local_conference_member_t`
-    pub const LOCAL_CONFERENCE_MEMBER: usize = 40;
-    /// `sipral_media_info_t`
-    pub const MEDIA_INFO: usize = 88;
-    /// `sipral_media_packet_t`
-    pub const MEDIA_PACKET: usize = 56;
-    /// `sipral_path_candidate_t`
-    pub const PATH_CANDIDATE: usize = 88;
-    /// `sipral_poll_result_t`
-    pub const POLL_RESULT: usize = 48;
-    /// `sipral_progress_config_t`
-    pub const PROGRESS_CONFIG: usize = 72;
-    /// `sipral_consent_tone_t`
-    pub const CONSENT_TONE: usize = 32;
-    /// `sipral_recording_options_t`
-    pub const RECORDING_OPTIONS: usize = 32;
-    /// `sipral_presence_t`
-    pub const PRESENCE: usize = 32;
-    /// `sipral_push_echo_t`
-    pub const PUSH_ECHO: usize = 24;
-    /// `sipral_record_config_t`
-    pub const RECORD_CONFIG: usize = 80;
-    /// `sipral_stack_config_t`
-    pub const STACK_CONFIG: usize = 176;
-    /// `sipral_stack_settings_t`
-    pub const STACK_SETTINGS: usize = 72;
-    /// `sipral_stream_stats_t`
-    pub const STREAM_STATS: usize = 152;
-    /// `sipral_stir_config_t`
-    pub const STIR_CONFIG: usize = 48;
-    /// `sipral_stream_encryption_t`
-    pub const STREAM_ENCRYPTION: usize = 32;
-    /// `sipral_subscribe_config_t`
-    pub const SUBSCRIBE_CONFIG: usize = 88;
-    /// `sipral_transmit_t`
-    pub const TRANSMIT: usize = 88;
-    /// `sipral_transport_failure_t`
-    pub const TRANSPORT_FAILURE: usize = 40;
-    /// `sipral_watched_dialog_t`
-    pub const WATCHED_DIALOG: usize = 32;
+/// A literal stands still too, and was what this used to be: a number read
+/// off a 64-bit build. It is one number on every target, and the length it
+/// describes is not — on 32-bit ARM `sipral_abi_version_t` is 20 bytes where
+/// the literal said 24, so every caller doing exactly what the header says was
+/// refused. A member does not move when the struct grows, and where it ends
+/// is the compiler's answer on each target, so the pin is the member and the
+/// number is derived from it.
+///
+/// The frozen ABI starts at minor 33: every pin names the member each struct
+/// ended with there. Changing one is wrong in every case but a struct whose
+/// first frozen version did not end where it says. `bindings/c/abi-sizes.txt`
+/// prints the member and the length it comes to on each layout, and the gate
+/// diffs it, so the change shows up twice.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Pin {
+    /// The member the oldest published version ends with.
+    pub(crate) member: &'static str,
+    /// Where that member ends, in bytes from the start of the struct.
+    pub(crate) end: usize,
 }
+
+/// The size of what a field accessor returns, so that [`pin!`] can say where
+/// a member ends without its type being written out a second time.
+pub(crate) const fn size_of_member<R, M>(_accessor: fn(&R) -> &M) -> usize {
+    size_of::<M>()
+}
+
+/// `pin!(SipralAbiVersion, reserved)`: the [`Pin`] at the end of `reserved`.
+macro_rules! pin {
+    ($record:ty, $member:ident) => {
+        $crate::versioned::Pin {
+            member: stringify!($member),
+            end: ::std::mem::offset_of!($record, $member)
+                + $crate::versioned::size_of_member(|value: &$record| &value.$member),
+        }
+    };
+}
+
+pub(crate) use pin;
 
 /// More than any struct here will ever be, and small enough that a size
 /// member the caller left uninitialised is refused rather than obeyed. The
@@ -281,7 +260,7 @@ mod tests {
 
     unsafe impl Versioned for Second {
         const NAME: &'static str = "second";
-        const MIN_SIZE: usize = size_of::<First>();
+        const PIN: super::Pin = super::pin!(Second, beta);
 
         fn set_declared_size(&mut self, bytes: usize) {
             self.size = bytes;
@@ -564,7 +543,7 @@ mod tests {
     fn every_versioned_struct_has_a_pinned_length() {
         let mut missing = Vec::new();
         for record in SURFACE.records.iter().filter(|r| r.is_versioned()) {
-            let pinned = MIN_SIZES.iter().any(|(name, _)| *name == record.name);
+            let pinned = MIN_SIZES.iter().any(|(name, _, _)| *name == record.name);
             let ours = FILLED_BY_US.contains(&record.name);
             if !pinned && !ours {
                 missing.push(record.name);
@@ -581,10 +560,15 @@ mod tests {
     /// length for a struct that is no longer declared pins nothing.
     #[test]
     fn nothing_is_pinned_that_does_not_exist() {
-        for (name, _) in MIN_SIZES {
+        for (name, member, _) in MIN_SIZES {
+            let record = SURFACE.records.iter().find(|record| record.name == *name);
             assert!(
-                SURFACE.records.iter().any(|record| record.name == *name),
+                record.is_some(),
                 "{name} has a pinned length and is not in the surface"
+            );
+            assert!(
+                record.is_some_and(|record| record.fields.iter().any(|f| f.name == *member)),
+                "{name} is pinned through {member}, which it does not have"
             );
         }
         for name in FILLED_BY_US {
@@ -596,10 +580,12 @@ mod tests {
     }
 
     /// The invariant the pinning exists for. A pinned length above the
-    /// current one would refuse a caller compiled against this very build.
+    /// current one would refuse a caller compiled against this very build —
+    /// which is what every literal pin did on a 32-bit target, where this
+    /// test failed for 27 structs.
     #[test]
     fn no_pinned_length_is_longer_than_the_struct_is_now() {
-        for (name, pinned) in MIN_SIZES {
+        for (name, _, pinned) in MIN_SIZES {
             let record = SURFACE
                 .records
                 .iter()

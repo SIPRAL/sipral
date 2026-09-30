@@ -581,6 +581,31 @@ object Sipral {
     const val ABI_VERSION_MINOR: Long = 8
 
     /**
+     * Every struct and union the header declares, with how long tools/abi-gen
+     * worked it out to be on each of the three layouts the ABI ships for:
+     * 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+     * to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+     * test holds this binding's own layout of each record, and the library's
+     * answer from sipral_abi_struct_size, to the number for the layout it runs
+     * on; bindings/c/abi-layout.c holds a C compiler to all three.
+     * The three numbers are p64, p32a4 and p32a8, in that order: this
+     * binding lays nothing out itself, so what its size test holds to
+     * them is the library's own answer.
+     */
+    val recordLayouts: Map<String, IntArray> = mapOf(
+        "sipral_counters_t" to intArrayOf(24, 16, 24),
+        "sipral_header_t" to intArrayOf(32, 16, 16),
+        "sipral_stack_config_t" to intArrayOf(64, 32, 32),
+        "sipral_media_packet_t" to intArrayOf(56, 28, 28),
+        "sipral_registration_event_t" to intArrayOf(8, 8, 8),
+        "sipral_media_event_t" to intArrayOf(32, 16, 16),
+        "sipral_event_payload_t" to intArrayOf(32, 16, 16),
+        "sipral_event_t" to intArrayOf(72, 40, 48),
+        "sipral_screen_event_t" to intArrayOf(24, 12, 12),
+        "sipral_processor_event_t" to intArrayOf(40, 20, 20),
+    )
+
+    /**
      * The calling thread's last error, or an empty string when it has
      * none. Read the way C reads it: ask for the length, then for the
      * bytes.

@@ -17,7 +17,7 @@
  *
  * Six entry points -- the four above, and sipral_media_poll_text and
  * sipral_media_poll_recording beside them -- each building one
- * sipral_media_packet_t on the C stack,
+ * sipral_media_packet_t on the C stack (and sipral_media_mix, two),
  * filling it from Java arrays the caller owns, and copying what came back
  * into two more the caller also owns -- nothing here keeps a pointer past
  * its own call, the same rule sipral_jni.c follows throughout. Below them,
@@ -123,6 +123,110 @@ Java_org_sipral_idiomatic_SipralMediaNative_mediaCapture(JNIEnv *env, jclass cls
     status = run_packet_call(env, outData, outDestination, outLen, capture_fetch, &args);
     (*env)->ReleaseShortArrayElements(env, samples, samples_data, JNI_ABORT);
     return status;
+}
+
+/* One sipral_media_packet_t over arrays the caller owns, for the one entry
+ * point that fills two at once and so cannot go through run_packet_call. */
+struct pinned_packet {
+    sipral_media_packet_t packet;
+    jbyteArray data;
+    jbyte *data_buf;
+    jbyteArray destination;
+    jbyte *dest_buf;
+};
+
+/* Pin `outData` (and `outDestination`, when not null) under `pinned`'s
+ * packet. Returns 0, or -1 with nothing left pinned. */
+static int
+pin_packet(JNIEnv *env, struct pinned_packet *pinned, jbyteArray outData,
+    jbyteArray outDestination)
+{
+    memset(pinned, 0, sizeof *pinned);
+    pinned->packet.size = sizeof pinned->packet;
+    pinned->data = outData;
+    pinned->data_buf = (*env)->GetByteArrayElements(env, outData, NULL);
+    if (pinned->data_buf == NULL) {
+        return -1;
+    }
+    pinned->packet.data = (uint8_t *)pinned->data_buf;
+    pinned->packet.capacity = (size_t)(*env)->GetArrayLength(env, outData);
+    if (outDestination != NULL) {
+        pinned->destination = outDestination;
+        pinned->dest_buf = (*env)->GetByteArrayElements(env, outDestination, NULL);
+        if (pinned->dest_buf == NULL) {
+            (*env)->ReleaseByteArrayElements(env, outData, pinned->data_buf, JNI_ABORT);
+            return -1;
+        }
+        pinned->packet.destination = (char *)pinned->dest_buf;
+        pinned->packet.destination_capacity =
+            (size_t)(*env)->GetArrayLength(env, outDestination);
+    }
+    return 0;
+}
+
+/* Copy what the library wrote back into the arrays, and `len`,
+ * `destination_len` and `protocol` into `outLen` as run_packet_call does. */
+static void
+unpin_packet(JNIEnv *env, struct pinned_packet *pinned, jlongArray outLen)
+{
+    jlong lens[3];
+    jsize room;
+
+    (*env)->ReleaseByteArrayElements(env, pinned->data, pinned->data_buf, 0);
+    if (pinned->dest_buf != NULL) {
+        (*env)->ReleaseByteArrayElements(env, pinned->destination, pinned->dest_buf, 0);
+    }
+    lens[0] = (jlong)pinned->packet.len;
+    lens[1] = (jlong)pinned->packet.destination_len;
+    lens[2] = (jlong)pinned->packet.protocol;
+    room = (*env)->GetArrayLength(env, outLen);
+    (*env)->SetLongArrayRegion(env, outLen, 0, room < 3 ? room : 3, lens);
+}
+
+/* sipral_media_mix: a frame of the microphone into each of two joined calls,
+ * and what their far ends sent into `local`. SipralAbi.kt prints its two
+ * sipral_media_packet_t as bare addresses, which is no way to call it. */
+JNIEXPORT jint JNICALL
+Java_org_sipral_idiomatic_SipralMediaNative_mediaMix(JNIEnv *env, jclass cls,
+    jlong mediaA, jlong mediaB, jlong nowMs, jshortArray mic, jshortArray local,
+    jbyteArray outDataA, jbyteArray outDestinationA, jlongArray outLenA,
+    jbyteArray outDataB, jbyteArray outDestinationB, jlongArray outLenB)
+{
+    struct pinned_packet a;
+    struct pinned_packet b;
+    jshort *mic_buf;
+    jshort *local_buf;
+    sipral_status_t status;
+
+    (void)cls;
+    mic_buf = (*env)->GetShortArrayElements(env, mic, NULL);
+    if (mic_buf == NULL) {
+        return (jint)-1;
+    }
+    local_buf = (*env)->GetShortArrayElements(env, local, NULL);
+    if (local_buf == NULL) {
+        (*env)->ReleaseShortArrayElements(env, mic, mic_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    if (pin_packet(env, &a, outDataA, outDestinationA) != 0) {
+        (*env)->ReleaseShortArrayElements(env, local, local_buf, JNI_ABORT);
+        (*env)->ReleaseShortArrayElements(env, mic, mic_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    if (pin_packet(env, &b, outDataB, outDestinationB) != 0) {
+        unpin_packet(env, &a, outLenA);
+        (*env)->ReleaseShortArrayElements(env, local, local_buf, JNI_ABORT);
+        (*env)->ReleaseShortArrayElements(env, mic, mic_buf, JNI_ABORT);
+        return (jint)-1;
+    }
+    status = sipral_media_mix((sipral_handle_t)mediaA, (sipral_handle_t)mediaB,
+        (uint64_t)nowMs, (const int16_t *)mic_buf, (size_t)(*env)->GetArrayLength(env, mic),
+        (int16_t *)local_buf, (size_t)(*env)->GetArrayLength(env, local), &a.packet, &b.packet);
+    unpin_packet(env, &b, outLenB);
+    unpin_packet(env, &a, outLenA);
+    (*env)->ReleaseShortArrayElements(env, local, local_buf, 0);
+    (*env)->ReleaseShortArrayElements(env, mic, mic_buf, JNI_ABORT);
+    return (jint)status;
 }
 
 struct media_now_args {

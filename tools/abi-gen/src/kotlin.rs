@@ -2764,6 +2764,32 @@ fn abi_check(surface: &Surface) -> Result<Option<&'static Function>, Refused> {
     Ok(Some(function))
 }
 
+/// The layout table, inside `Sipral`, for the size test to hold the
+/// library's own answers to.
+fn layouts(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::from("    /**\n");
+    for line in crate::layout::TABLE_DOC {
+        let _ = writeln!(out, "     * {line}");
+    }
+    out.push_str(
+        "     * The three numbers are p64, p32a4 and p32a8, in that order: this\n\
+         \x20    * binding lays nothing out itself, so what its size test holds to\n\
+         \x20    * them is the library's own answer.\n\
+         \x20    */\n\
+         \x20   val recordLayouts: Map<String, IntArray> = mapOf(\n",
+    );
+    for lengths in crate::layout::table(surface)? {
+        let [p64, p32a4, p32a8] = lengths.sizes;
+        let _ = writeln!(
+            out,
+            "        \"{}\" to intArrayOf({p64}, {p32a4}, {p32a8}),",
+            lengths.record.c_name()
+        );
+    }
+    out.push_str("    )\n\n");
+    Ok(out)
+}
+
 /// Print the Kotlin binding.
 pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     audit(surface, &Names)?;
@@ -2844,6 +2870,8 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
             let _ = writeln!(out, "    const val {name}: Long = {}\n", value.value);
         }
     }
+
+    out.push_str(&layouts(surface)?);
 
     out.push_str(
         "    /**\n\
@@ -3943,6 +3971,7 @@ impl Spelling for Names {
         &[
             ("lastErrorMessage", "sipral_last_error_message"),
             ("check", "the status check this back end writes"),
+            ("recordLayouts", "the layout table this back end writes"),
         ]
     }
 

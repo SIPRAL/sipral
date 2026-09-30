@@ -461,7 +461,7 @@ public final class Call: @unchecked Sendable {
             return try ProtocolText.read { buffer in
                 try retryingBusy { try Sipral.callConferenceUri(stack: stack.handle, call: handle, buffer: &buffer) }
             }
-        } catch let error as SipralError where error.status == .notAfocus {
+        } catch let error as SipralError where error.status == .notAFocus {
             return nil
         }
     }
@@ -470,7 +470,7 @@ public final class Call: @unchecked Sendable {
     /// package of this call's focus (RFC 4579 §3.4), from the call's own
     /// account. The subscription outlives the call; each notification is a
     /// `SipralEventKind.conferenceChanged`, and `Subscription.conference()`
-    /// reads the picture. `.notAfocus` for a call whose far end is not one.
+    /// reads the picture. `.notAFocus` for a call whose far end is not one.
     public func subscribeConference() throws -> Subscription {
         let made = try retryingBusy {
             try Sipral.callSubscribeConference(stack: stack.handle, call: handle, nowMs: stack.nowMs())

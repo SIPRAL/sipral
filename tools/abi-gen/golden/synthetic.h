@@ -5,20 +5,99 @@
  * Do not edit: `cargo run -p sipral-abi-gen` writes it again, and
  * `scripts/check.sh` fails when what is committed is not what came out.
  *
- * Every function here returns a sipral_status_t except where its own
- * comment says otherwise, sets the calling thread's last error on
- * failure, and catches any panic rather than letting one reach C. A
- * stack may be used from any thread but only one at a time: a second
- * thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback
- * runs with nothing held, so the library may be called from inside it.
- * A call's media is reached through a handle of its own, from
- * sipral_call_media, and never waits on the stack.
+ * CONVENTIONS. Every declaration below follows these; a comment that
+ * says otherwise is the exception, and says so.
+ *
+ * Status. Every function returns a sipral_status_t, except the three
+ * that return a static name (sipral_status_name, sipral_codec_name,
+ * sipral_event_kind_name: NUL-terminated, the library's, valid while it
+ * is loaded). sipral_status_t is the one signed type: zero is success,
+ * every failure is positive, none is negative, and a newer library may
+ * return one an older header has no name for, which is a failure like
+ * any other. A failure sets the calling thread's last error
+ * (sipral_last_error_message); a success clears it. A panic never
+ * crosses: it is SIPRAL_STATUS_PANIC.
+ *
+ * Enumerations. Each is a typedef of a fixed-width integer and the
+ * names as constants, so no compiler picks a width. Values are only
+ * ever added, never renumbered. In the enumerations that start at 1
+ * zero names nothing: read it as absent.
+ *
+ * Structs that carry `size`. Zero the whole struct, padding included,
+ * then set `size` to its sizeof, on a struct handed in and on one the
+ * library fills alike. A library that knows fewer members reads what
+ * it knows and refuses a nonzero byte past it with
+ * SIPRAL_STATUS_NOT_SUPPORTED; one that fills fewer writes back the
+ * `size` it filled and zeroes the rest. A struct only ever grows by appending members
+ * at its end, and no struct here ends in padding on any target, so an
+ * appended member never lands inside a length a caller declares. The
+ * least a caller may declare is where the oldest version of each
+ * struct ended (bindings/c/abi-sizes.txt). sipral_header_t is the one
+ * struct without a size: it is the element of an array, and never
+ * grows. The event payload union is zeroed whole before the one arm
+ * its kind names is written.
+ *
+ * Text and bytes in. A pointer and a length in bytes, the pointer
+ * read for that length during the call and never kept. Text is UTF-8
+ * with no NUL expected or read, and at most 65536 bytes. For an
+ * optional piece a length of zero is absent, whatever the pointer.
+ *
+ * Text out. `buffer`, `capacity`, `out_needed`: the text is written
+ * with a trailing NUL, and `out_needed`, which may be null, receives
+ * the bytes it needs with that NUL counted. Too small a buffer is
+ * SIPRAL_STATUS_BUFFER_TOO_SMALL and nothing is written; a null
+ * buffer with a capacity of zero asks for the length alone.
+ * Bytes out (sipral_account_freeze, sipral_stack_codec_order,
+ * sipral_media_playback) are counted without a NUL and say so. A
+ * packet struct (sipral_media_packet_t, sipral_transmit_t) brings
+ * buffers at least as large as the constant each member's comment
+ * names, is refused whole with SIPRAL_STATUS_BUFFER_TOO_SMALL when one
+ * is smaller, and comes back with a `len` of zero when nothing was
+ * waiting.
+ *
+ * Handles. 64-bit, zero never valid. A handle that never came from
+ * this library, or from another stack, is
+ * SIPRAL_STATUS_INVALID_HANDLE; one whose object is gone is
+ * SIPRAL_STATUS_STALE_HANDLE. The library hands out no memory for a
+ * caller to free.
+ *
+ * Threads. A stack may be used from any thread, one at a time: a
+ * second thread gets SIPRAL_STATUS_BUSY rather than a wait. A call's
+ * media is reached through a handle of its own (sipral_call_media) and
+ * never waits on the stack; it waits only for a frame another thread
+ * is in the middle of on that same call. The sipral_audio_* calls wait
+ * for the audio engine, which a platform probe holds for up to
+ * sipral_stack_config_t::audio_probe_ms; nothing else waits on them.
+ *
+ * Callbacks. None may unwind into the library. Each gets back its
+ * `user_data` untouched and reads nothing else the caller owns.
+ *   event (sipral_stack_config_t::event_callback): on the thread in
+ *     sipral_stack_poll, with nothing held; may call anything, this
+ *     stack included. user_data lives as long as the stack.
+ *   screen (sipral_stack_screen): on the thread feeding the stack
+ *     bytes, with the stack's lock held; a call into this stack is
+ *     SIPRAL_STATUS_BUSY. user_data lives until the policy is replaced
+ *     or removed and no thread is inside the stack.
+ *   processor (sipral_media_attach_processor): on the thread in
+ *     sipral_media_capture or sipral_media_playback, with that call's
+ *     media held; a call on any media handle, or into that call's
+ *     stack, is SIPRAL_STATUS_BUSY. user_data lives until
+ *     sipral_media_detach_processor returns or the handle is released.
+ *   audio transmit (sipral_stack_config_t::audio_transmit_callback):
+ *     on the audio engine's own thread, with nothing of the library's
+ *     held; sipral_stack_destroy from it is SIPRAL_STATUS_BUSY.
+ *     user_data lives as long as the stack.
+ *   log (sipral_stack_log): on the thread that just finished a call
+ *     into the stack, with nothing held, one line at a time; may call
+ *     anything. user_data lives until the log is replaced or turned off
+ *     and no thread is inside the stack.
+ * Every pointer a callback is handed points into the library's memory
+ * and is valid for that one call.
  */
 
 #ifndef SIPRAL_H
 #define SIPRAL_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 

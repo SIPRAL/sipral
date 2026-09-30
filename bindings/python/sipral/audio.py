@@ -153,7 +153,8 @@ class Audio:
         check(status, "sipral_audio_device_at")
         return AudioDevice(
             id=int(device.id),
-            name=ffi.buffer(name, int(needed[0]))[:].decode("utf-8", "replace"),
+            # the length counts the trailing NUL, which is not the name
+            name=ffi.buffer(name, int(needed[0]) - 1)[:].decode("utf-8", "replace"),
             input_channels=int(device.input_channels),
             output_channels=int(device.output_channels),
             default_input=bool(device.default_input),

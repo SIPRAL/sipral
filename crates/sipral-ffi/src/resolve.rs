@@ -102,10 +102,12 @@ entry! {
     /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
     /// is how it gets another chance.
     ///
-    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
-    /// cases, and neither is an error: the dialog has ended, and none of the
-    /// addresses is one this stack can reach on the protocol asked for. The
-    /// flow stands exactly as it did.
+    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
+    /// of the addresses is one this stack can reach on the protocol asked
+    /// for: the flow stands exactly as it did. A dialog that has ended by the
+    /// time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
+    /// other handle to something that is gone, and changes nothing either;
+    /// an application that resolves in the background treats the two alike.
     ///
     /// There is no `now_ms` here on purpose. Every other call that changes
     /// what this stack will send takes the time because something it does is

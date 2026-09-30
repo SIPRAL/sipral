@@ -348,8 +348,39 @@ private fun everything(): String {
     }
     assertTrue(assertNotNull(twice.message).contains("media_seed"), twice.message)
 
+    // A string the binding hands over empty is a real pointer and a length
+    // of zero, which is how C says the address a datagram arrived on is
+    // left out: it was refused as an address that was empty.
+    Sipral.stackReceiveDatagram(stack, Sipral.TRANSPORT_MAIN, invitation(calls), caller(calls), "", 30)
+
     Sipral.stackDestroy(stack)
+    val layouts = layoutsHold()
     return "a stack built from a class, ${heard.kinds.size} events heard, the first on a thread " +
         "the shim attached and let go of, $calls messages none of which it held past its event, " +
-        "two header fields in a list on a call placed and two on a call refused"
+        "two header fields in a list on a call placed and two on a call refused, " +
+        "$layouts records as long as the layout says"
+}
+
+/**
+ * Every record's length on the layout this JVM runs on, as tools/abi-gen
+ * worked it out, against the library's own answer: this binding lays nothing
+ * out itself, and bindings/c/abi-layout.c holds a C compiler to the same
+ * table on the layouts this machine cannot run.
+ */
+private fun layoutsHold(): Int {
+    val wide = System.getProperty("sun.arch.data.model") != "32"
+    val arch = System.getProperty("os.arch").lowercase()
+    val windows = System.getProperty("os.name").lowercase().startsWith("windows")
+    // 32-bit x86 aligns a 64-bit integer to four inside a struct on every
+    // system but Windows, which aligns it to eight like ARM does
+    val column = when {
+        wide -> 0
+        arch in setOf("x86", "i386", "i686") && !windows -> 1
+        else -> 2
+    }
+    assertTrue(Sipral.recordLayouts.size > 50, "${Sipral.recordLayouts.size} records")
+    for ((name, lengths) in Sipral.recordLayouts) {
+        assertEquals(lengths[column].toLong(), Sipral.abiStructSize(name), name)
+    }
+    return Sipral.recordLayouts.size
 }

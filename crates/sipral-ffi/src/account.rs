@@ -123,10 +123,6 @@ record! {
         /// [`sipral_stack_transport_bind`](crate::transport::sipral_stack_transport_bind)
         /// has bound. A number this stack has never bound is
         /// `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
-        ///
-        /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-        /// unmoved, and what a caller built before this member existed never
-        /// sent reads as the zero that already means "the main transport".
         pub transport: u32,
         /// The push notification service to be woken through, as its
         /// registered name: `apns`, `fcm`, `webpush` (RFC 8599 §4.1.1). Null
@@ -169,17 +165,12 @@ record! {
         pub push_wakes_itself: u32,
         /// Where this account's end-of-call voice quality reports go (RFC
         /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
-        ///
-        /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-        /// unmoved, and what a caller built before this member existed
-        /// never sent reads as the null that already means "send none".
         pub quality_report_uri: *const c_char,
         /// How many bytes of it.
         pub quality_report_uri_len: usize,
         /// A [`SipralSessionTimer`](crate::identity::SipralSessionTimer): how
         /// this account's calls ask for a session timer (RFC 4028). Zero is
-        /// the stack's default, thirty minutes. ABI 0.29, appended at the
-        /// tail like every member after the pinned `MIN_SIZE`.
+        /// the stack's default, thirty minutes.
         pub session_timer: u32,
         /// The interval to ask for under `SIPRAL_SESSION_TIMER_INTERVAL`, in
         /// seconds: at least 90, RFC 4028 §5's floor. Read for nothing else.
@@ -272,7 +263,8 @@ record! {
 // zero, which is how a caller says it has nothing to give.
 unsafe impl Versioned for SipralAccountConfig {
     const NAME: &'static str = "sipral_account_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::ACCOUNT_CONFIG;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralAccountConfig, recording_in_clear);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -1237,7 +1229,8 @@ pub(crate) mod tests {
         // one byte short of the oldest published length: anything between that
         // and this build's own is an older caller, and is taken
         let mut config = account_config();
-        config.size = crate::versioned::min_size::ACCOUNT_CONFIG - 1;
+        config.size =
+            <crate::account::SipralAccountConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(add(handle, &config).0, SipralStatus::UnsupportedVersion);
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
@@ -1249,7 +1242,8 @@ pub(crate) mod tests {
     fn an_account_config_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
         let mut config = account_config();
-        config.size = crate::versioned::min_size::ACCOUNT_CONFIG - 1;
+        config.size =
+            <crate::account::SipralAccountConfig as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             add(SIPRAL_HANDLE_NONE, &config).0,
             SipralStatus::UnsupportedVersion

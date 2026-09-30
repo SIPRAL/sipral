@@ -147,7 +147,7 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertTrue(uri.contains(UDPSocket.parse(bob.bindAddress).host), uri)
         XCTAssertNil(try bobCall.conferenceUri(), "Alice never said she is a focus")
         XCTAssertThrowsError(try bobCall.subscribeConference()) { error in
-            XCTAssertEqual((error as? SipralError)?.status, .notAfocus)
+            XCTAssertEqual((error as? SipralError)?.status, .notAFocus)
         }
         let watched = try aliceCall.subscribeConference()
         XCTAssertEqual(watched.package, "conference")

@@ -128,7 +128,7 @@ record! {
 // of each: it is the defaults.
 unsafe impl Versioned for SipralProgressConfig {
     const NAME: &'static str = "sipral_progress_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::PROGRESS_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralProgressConfig, tone_cycles);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -166,7 +166,7 @@ record! {
 // of each: it is the defaults.
 unsafe impl Versioned for SipralConsentTone {
     const NAME: &'static str = "sipral_consent_tone";
-    const MIN_SIZE: usize = crate::versioned::min_size::CONSENT_TONE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralConsentTone, local);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

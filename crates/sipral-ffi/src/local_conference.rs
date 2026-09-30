@@ -119,6 +119,12 @@ record! {
         /// twenty milliseconds of it. In device mode the audio engine
         /// converts the devices to it.
         pub sample_rate: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero; the library reads nothing from
+        /// it.
+        pub reserved: u32,
     }
 }
 
@@ -126,7 +132,8 @@ record! {
 // of each: it is the ordinary conference.
 unsafe impl Versioned for SipralLocalConferenceConfig {
     const NAME: &'static str = "sipral_local_conference_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::LOCAL_CONFERENCE_CONFIG;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralLocalConferenceConfig, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -166,7 +173,8 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralLocalConferenceInfo {
     const NAME: &'static str = "sipral_local_conference_info";
-    const MIN_SIZE: usize = crate::versioned::min_size::LOCAL_CONFERENCE_INFO;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralLocalConferenceInfo, packets_dropped);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -195,13 +203,20 @@ record! {
         pub gain_input: u32,
         /// The level of what it hears, in the same steps.
         pub gain_output: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
 // Safety: integers and a handle, and zero is a valid value of each.
 unsafe impl Versioned for SipralLocalConferenceMember {
     const NAME: &'static str = "sipral_local_conference_member";
-    const MIN_SIZE: usize = crate::versioned::min_size::LOCAL_CONFERENCE_MEMBER;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralLocalConferenceMember, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -768,6 +783,7 @@ entry! {
             let inner = &held.inner;
             let read = |error: MediaError| conference_failed(&error);
             Ok(SipralLocalConferenceMember {
+                reserved: 0,
                 size: size_of::<SipralLocalConferenceMember>(),
                 member: held.name_of(member),
                 talking: u32::from(inner.is_talking(member).map_err(read)?),
@@ -897,23 +913,23 @@ entry! {
 entry! {
     /// The oldest packet a member's call owes its far end, in application
     /// mode: `out_call` names the call, whose media socket sends it, and
-    /// `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+    /// `packet` is filled as `sipral_media_capture` fills one. A `len`
     /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
     /// waiting. Drain it after every tick.
     ///
     /// # Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
     /// `sipral_media_packet_t` as `sipral_media_capture` describes.
     fn sipral_local_conference_poll_transmit(
         conference: SipralHandle,
         out_call: *mut SipralHandle,
-        out_packet: *mut SipralMediaPacket,
+        packet: *mut SipralMediaPacket,
     ) {
         if out_call.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
         }
-        let mut out = unsafe { read_versioned(out_packet) }?;
+        let mut out = unsafe { read_versioned(packet) }?;
         prepare(&mut out)?;
         let call = with_conference(conference, |held, _| {
             let Some(packet) = held.inner.poll_transmit() else {
@@ -925,7 +941,7 @@ entry! {
             Ok(call)
         })?;
         unsafe { out_call.write(call) };
-        unsafe { write_versioned(out_packet, out) }
+        unsafe { write_versioned(packet, out) }
     }
 }
 
@@ -1086,6 +1102,7 @@ mod tests {
 
     fn config(max_members: u32, sample_rate: u32) -> SipralLocalConferenceConfig {
         SipralLocalConferenceConfig {
+            reserved: 0,
             size: size_of::<SipralLocalConferenceConfig>(),
             max_members,
             local: 0,
@@ -1129,6 +1146,7 @@ mod tests {
 
     fn member_at(conference: SipralHandle, index: usize) -> SipralLocalConferenceMember {
         let mut out = SipralLocalConferenceMember {
+            reserved: 0,
             size: size_of::<SipralLocalConferenceMember>(),
             member: u64::MAX,
             talking: u32::MAX,
@@ -1592,6 +1610,7 @@ mod tests {
         ));
         let text = path.to_string_lossy().into_owned();
         let options = SipralRecordingOptions {
+            reserved: 0,
             size: size_of::<SipralRecordingOptions>(),
             format: 0,
             layout: 0,
@@ -1692,7 +1711,7 @@ mod tests {
         }));
         assert_eq!(
             unsafe {
-                crate::media::sipral_call_attach_processor(
+                crate::media::sipral_media_attach_processor(
                     media_a,
                     Some(call_back_in),
                     ptr::from_ref(reentered).cast_mut().cast::<c_void>(),

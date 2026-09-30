@@ -25,7 +25,9 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `kotlin/sipral/src/main/kotlin/org/sipral/SipralAbi.kt` | The Kotlin binding |
 | `kotlin/sipral/src/main/jni/sipral_jni.c` | The JNI that implements it |
 | `python/sipral/_sipral_cffi.py` | The raw `cffi` ABI-mode surface: `ffi` and `lib` |
-| `c/abi-sizes.txt` | Each sized struct's first published length and its length in this build |
+| `dart/lib/src/sipral_abi.dart` | The raw `dart:ffi` surface |
+| `c/abi-sizes.txt` | Each sized struct's pinned member, and on each of the three layouts the length it pins and the length the struct is now |
+| `c/abi-layout.c` | Every length, offset and pin on the three layouts, as assertions a C compiler checks against the header for six targets |
 
 Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
 `dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs` and the rest of

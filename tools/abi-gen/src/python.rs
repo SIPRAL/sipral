@@ -182,5 +182,24 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
         major = check.major.name,
         minor = check.minor.name,
     );
+    Ok(out + &layouts(surface)?)
+}
+
+/// The layout table, for the size test to hold `ffi.sizeof` to.
+fn layouts(surface: &Surface) -> Result<String, Refused> {
+    let mut out = String::from("\n");
+    for line in crate::layout::TABLE_DOC {
+        let _ = writeln!(out, "# {line}");
+    }
+    out.push_str("RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {\n");
+    for lengths in crate::layout::table(surface)? {
+        let [p64, p32a4, p32a8] = lengths.sizes;
+        let _ = writeln!(
+            out,
+            "    \"{}\": ({p64}, {p32a4}, {p32a8}),",
+            lengths.record.c_name()
+        );
+    }
+    out.push_str("}\n");
     Ok(out)
 }

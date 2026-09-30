@@ -495,10 +495,10 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_call_media_receive(ulong stack, byte[] data, nuint len, out uint arrival);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_stack_screen(ulong stack, SipralScreenCallback callback, IntPtr userData);
+    internal static extern SipralStatus sipral_stack_screen(ulong stack, IntPtr callback, IntPtr userData);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
-    internal static extern SipralStatus sipral_stack_process(ulong stack, SipralProcessCallback callback, IntPtr userData);
+    internal static extern SipralStatus sipral_stack_process(ulong stack, IntPtr callback, IntPtr userData);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_destroy(ulong stack);
@@ -542,7 +542,7 @@ public static class Sipral
     /// <summary>
     /// The longest message that crosses.
     /// </summary>
-    public static readonly nuint MessageBytes = 65535;
+    public const nuint MessageBytes = 65535;
 
     /// <summary>
     /// How long a refused request waits before it is tried again.
@@ -558,6 +558,29 @@ public static class Sipral
     /// Raised by anything the header gains.
     /// </summary>
     public const uint AbiVersionMinor = 8;
+
+    /// <summary>
+    /// Every struct and union the header declares, with how long tools/abi-gen
+    /// worked it out to be on each of the three layouts the ABI ships for:
+    /// 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+    /// to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+    /// test holds this binding's own layout of each record, and the library's
+    /// answer from sipral_abi_struct_size, to the number for the layout it runs
+    /// on; bindings/c/abi-layout.c holds a C compiler to all three.
+    /// </summary>
+    public static (string Name, int Marshalled, int P64, int P32A4, int P32A8)[] RecordLayouts() => new[]
+    {
+        ("sipral_counters_t", Marshal.SizeOf<SipralCounters>(), 24, 16, 24),
+        ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
+        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 64, 32, 32),
+        ("sipral_media_packet_t", Marshal.SizeOf<SipralMediaPacket>(), 56, 28, 28),
+        ("sipral_registration_event_t", Marshal.SizeOf<SipralRegistrationEvent>(), 8, 8, 8),
+        ("sipral_media_event_t", Marshal.SizeOf<SipralMediaEvent>(), 32, 16, 16),
+        ("sipral_event_payload_t", Marshal.SizeOf<SipralEventPayload>(), 32, 16, 16),
+        ("sipral_event_t", Marshal.SizeOf<SipralEvent>(), 72, 40, 48),
+        ("sipral_screen_event_t", Marshal.SizeOf<SipralScreenEvent>(), 24, 12, 12),
+        ("sipral_processor_event_t", Marshal.SizeOf<SipralProcessorEvent>(), 40, 20, 20),
+    };
 
     /// <summary>The calling thread's last error, or an empty string
     /// when it has none. Read the way C reads it: ask for the
@@ -731,7 +754,7 @@ public static class Sipral
     /// pair a struct going in already means by them, and a null callback
     /// removes whatever was installed.
     /// </summary>
-    public static void StackScreen(ulong stack, SipralScreenCallback callback, IntPtr userData)
+    public static void StackScreen(ulong stack, IntPtr callback, IntPtr userData)
     {
         Check(NativeMethods.sipral_stack_screen(stack, callback, userData));
     }
@@ -743,7 +766,7 @@ public static class Sipral
     /// pair a struct going in already means by them, and a null callback
     /// removes whatever was installed.
     /// </summary>
-    public static void StackProcess(ulong stack, SipralProcessCallback callback, IntPtr userData)
+    public static void StackProcess(ulong stack, IntPtr callback, IntPtr userData)
     {
         Check(NativeMethods.sipral_stack_process(stack, callback, userData));
     }

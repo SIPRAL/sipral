@@ -117,6 +117,12 @@ record! {
         /// How often, in milliseconds, what has been written is made to
         /// survive a crash, or zero for every five seconds.
         pub checkpoint_ms: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero; the library reads nothing from
+        /// it.
+        pub reserved: u32,
     }
 }
 
@@ -124,7 +130,7 @@ record! {
 // of each: it is the plain recording.
 unsafe impl Versioned for SipralRecordingOptions {
     const NAME: &'static str = "sipral_recording_options";
-    const MIN_SIZE: usize = crate::versioned::min_size::RECORDING_OPTIONS;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralRecordingOptions, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -528,6 +534,7 @@ mod tests {
 
     fn options() -> super::SipralRecordingOptions {
         super::SipralRecordingOptions {
+            reserved: 0,
             size: size_of::<super::SipralRecordingOptions>(),
             format: 0,
             layout: 0,

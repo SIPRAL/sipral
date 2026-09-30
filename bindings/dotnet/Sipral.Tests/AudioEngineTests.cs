@@ -44,6 +44,10 @@ public sealed class AudioEngineTests
         Assert.Equal(SipralAudio.Application, stack.AudioMode);
         var refused = Assert.Throws<SipralException>(() => stack.Audio.Devices());
         Assert.Equal(SipralStatus.WrongState, refused.Status);
+        // the library counts the trailing NUL in the length it reports; the
+        // message is the text before it, and ends in the library's words
+        Assert.DoesNotContain('\0', refused.Message);
+        Assert.EndsWith("pumps its own frames", refused.Message);
     }
 
     [Fact]
@@ -74,6 +78,8 @@ public sealed class AudioEngineTests
         {
             Assert.NotEqual(0u, device.Id);
             Assert.False(string.IsNullOrEmpty(device.Name));
+            // the library counts the name's trailing NUL, which is not the name's
+            Assert.DoesNotContain('\0', device.Name);
             Assert.True(device.IsMicrophone || device.IsSpeaker, device.Name);
         });
         // keyed by id: two devices may share a name (a dock's input and its

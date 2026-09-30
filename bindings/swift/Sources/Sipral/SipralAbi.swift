@@ -26,6 +26,12 @@ public typealias SipralHandle = sipral_handle_t
 /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
 /// statuses, and it stays reserved, never used and never to be given to a
 /// status. No build returns it and `sipral_status_name` has no name for it.
+///
+/// The one signed number in the ABI, and the only enumeration typed
+/// `int32_t`: zero is success, every failure is positive, and no build
+/// returns a negative one. A binding that treats it as unsigned loses
+/// nothing. A newer library may return a status an older binding has no
+/// name for; read it as a failure, with the last error for the sentence.
 public enum SipralStatus: Int32, Sendable {
     /// The call did what it was asked to.
     case ok = 0
@@ -47,7 +53,15 @@ public enum SipralStatus: Int32, Sendable {
     /// The object is already in use by another call, including one further
     /// down the same call stack. Nothing was done, and nothing blocked.
     case busy = 6
-    /// The library has no room for another object of this kind.
+    /// There is no room for another one: the library's table of objects
+    /// of this kind is full (256 stacks, say), the stack's RTP port range
+    /// is spent, or a queue a call feeds is full — the DTMF digits waiting
+    /// to go out, the dynamic payload types an offer can number, the
+    /// real-time text not yet sent. Nothing was done. Room comes back as
+    /// objects are released, ports given back, or the queue drains; which
+    /// of those the last error says. Not the same as
+    /// `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
+    /// set itself.
     case exhausted = 7
     /// A panic was caught at the boundary. The call did not finish, and the
     /// last error carries whatever the panic said.
@@ -120,7 +134,7 @@ public enum SipralStatus: Int32, Sendable {
     /// The far end of this call is not a conference focus: its Contact
     /// never carried `isfocus` (RFC 4579 §4.1), so there is no
     /// conference to name or subscribe to.
-    case notAfocus = 21
+    case notAFocus = 21
     /// The transport the request would leave on has failed or closed and
     /// has not been bound again. Nothing went out. The failure was
     /// reported as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; reconnect, tell
@@ -131,6 +145,13 @@ public enum SipralStatus: Int32, Sendable {
     /// with `sipral_call_join`, or its codec hears at a rate the
     /// conference does not mix. The last error says which.
     case conferenceRefused = 23
+    /// `now_ms` was more than fifty milliseconds behind the last reading
+    /// of the caller's clock this stack saw (ABI 0.33). Two threads that
+    /// read one clock a moment apart and race for the stack can disagree
+    /// by a little, not by that much. Nothing was done and the stack's
+    /// clock did not move: read the clock again and ask again. A caller
+    /// that keeps getting this has a clock that went backwards.
+    case clockBehind = 24
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -908,7 +929,7 @@ public enum SipralEventKind: UInt32, Sendable {
     /// left this end — not whether a collector accepted it, which this
     /// stack never waits to learn. Raised only when the account named
     /// a collector to publish to at all
-    /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+    /// (`sipral_account_config_t::quality_report_uri`); a call whose
     /// account named none raises nothing here, since nothing was ever
     /// attempted.
     case qualityReportSent = 37
@@ -1120,7 +1141,7 @@ public enum SipralEventKind: UInt32, Sendable {
     case presenceChanged = 52
     /// A transport this stack signals on stopped carrying traffic: the
     /// application said it failed (`sipral_stack_transport_failed`,
-    /// `sipral_stack_transport_failure`) or closed
+    /// `sipral_stack_transport_failed_with`) or closed
     /// (`sipral_stack_stream_closed`), or a stream carried bytes no
     /// message starts with (`sipral_stack_receive_stream`), or a stream
     /// that had answered a keep-alive ping left the next one unanswered
@@ -2735,7 +2756,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 32
+    public static let abiVersionMinor: UInt32 = 33
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -2860,12 +2881,6 @@ public enum Sipral {
     /// beside the facade, not under it, so the facade has nothing to say.
     public static let featureAudioDevice: UInt32 = 2048
 
-    /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
-    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
-    /// call whose media address is gone, and `sipral_call_media_readdress`
-    /// offers it at the socket the application bound on the new network.
-    public static let featureCallReaddress: UInt32 = 8192
-
     /// See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
     /// be answered, on every call event: the asserted identity behind the
     /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
@@ -2876,6 +2891,20 @@ public enum Sipral {
     /// `session_timer`.
     public static let featureCallerIdentity: UInt32 = 4096
 
+    /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
+    /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+    /// call whose media address is gone, and `sipral_call_media_readdress`
+    /// offers it at the socket the application bound on the new network.
+    public static let featureCallReaddress: UInt32 = 8192
+
+    /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+    /// snapshot of a stack's state for a crash report
+    /// (`sipral_stack_state_text`). Set in every build of this library, which
+    /// always carries the redaction both depend on; a bit so that a binding
+    /// asks before it shows a "send diagnostics" control.
+    public static let featureLogging: UInt32 = 16384
+
     /// See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
     /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
     /// `diagnostic_records` in `sipral_stack_config_t`, read back through
@@ -2884,14 +2913,6 @@ public enum Sipral {
     /// what timed out and what was refused at a limit in
     /// `sipral_counters_t`.
     public static let featureLimits: UInt32 = 32768
-
-    /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
-    /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
-    /// snapshot of a stack's state for a crash report
-    /// (`sipral_stack_state`). Set in every build of this library, which
-    /// always carries the redaction both depend on; a bit so that a binding
-    /// asks before it shows a "send diagnostics" control.
-    public static let featureLogging: UInt32 = 16384
 
     /// See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
     /// account given a key and a certificate URL signs every call it places
@@ -3073,7 +3094,7 @@ public enum Sipral {
     /// leaving every bit clear.
     public static let privacyNone: UInt32 = 32
 
-    /// The longest text sipral_stack_state writes, its NUL included: a
+    /// The longest text sipral_stack_state_text writes, its NUL included: a
     /// buffer of this many bytes always has room.
     public static let stateTextMax: Int = 16384
 
@@ -3138,6 +3159,80 @@ public enum Sipral {
             message: rawLastErrorMessage()
         )
     }
+
+    /// Every struct and union the header declares, with how long tools/abi-gen
+    /// worked it out to be on each of the three layouts the ABI ships for:
+    /// 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+    /// to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+    /// test holds this binding's own layout of each record, and the library's
+    /// answer from sipral_abi_struct_size, to the number for the layout it runs
+    /// on; bindings/c/abi-layout.c holds a C compiler to all three.
+    public static let recordLayouts: [(name: String, imported: Int, p64: Int, p32a4: Int, p32a8: Int)] = [
+        ("sipral_abi_version_t", MemoryLayout<sipral_abi_version_t>.size, 24, 20, 20),
+        ("sipral_capabilities_t", MemoryLayout<sipral_capabilities_t>.size, 24, 16, 16),
+        ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 232, 228, 232),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 368, 248, 256),
+        ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
+        ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 112, 104, 112),
+        ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 392, 208, 216),
+        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 152, 84, 84),
+        ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
+        ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
+        ("sipral_path_candidate_t", MemoryLayout<sipral_path_candidate_t>.size, 88, 60, 64),
+        ("sipral_media_info_t", MemoryLayout<sipral_media_info_t>.size, 104, 92, 96),
+        ("sipral_stream_stats_t", MemoryLayout<sipral_stream_stats_t>.size, 328, 312, 328),
+        ("sipral_media_packet_t", MemoryLayout<sipral_media_packet_t>.size, 64, 36, 36),
+        ("sipral_processor_frame_t", MemoryLayout<sipral_processor_frame_t>.size, 64, 32, 32),
+        ("sipral_transmit_t", MemoryLayout<sipral_transmit_t>.size, 88, 48, 48),
+        ("sipral_transport_failure_t", MemoryLayout<sipral_transport_failure_t>.size, 40, 24, 24),
+        ("sipral_registration_event_t", MemoryLayout<sipral_registration_event_t>.size, 40, 36, 40),
+        ("sipral_call_event_t", MemoryLayout<sipral_call_event_t>.size, 328, 208, 216),
+        ("sipral_transfer_event_t", MemoryLayout<sipral_transfer_event_t>.size, 24, 16, 16),
+        ("sipral_media_event_t", MemoryLayout<sipral_media_event_t>.size, 96, 80, 80),
+        ("sipral_recovery_event_t", MemoryLayout<sipral_recovery_event_t>.size, 16, 16, 16),
+        ("sipral_transport_wanted_event_t", MemoryLayout<sipral_transport_wanted_event_t>.size, 40, 20, 20),
+        ("sipral_subscription_event_t", MemoryLayout<sipral_subscription_event_t>.size, 56, 56, 56),
+        ("sipral_announce_event_t", MemoryLayout<sipral_announce_event_t>.size, 16, 16, 16),
+        ("sipral_resolve_event_t", MemoryLayout<sipral_resolve_event_t>.size, 32, 24, 24),
+        ("sipral_message_event_t", MemoryLayout<sipral_message_event_t>.size, 96, 64, 64),
+        ("sipral_nat_event_t", MemoryLayout<sipral_nat_event_t>.size, 64, 40, 40),
+        ("sipral_nat_relay_event_t", MemoryLayout<sipral_nat_relay_event_t>.size, 72, 40, 40),
+        ("sipral_referral_event_t", MemoryLayout<sipral_referral_event_t>.size, 40, 24, 24),
+        ("sipral_turn_stream_event_t", MemoryLayout<sipral_turn_stream_event_t>.size, 40, 24, 24),
+        ("sipral_audio_event_t", MemoryLayout<sipral_audio_event_t>.size, 20, 20, 20),
+        ("sipral_stun_server_event_t", MemoryLayout<sipral_stun_server_event_t>.size, 40, 20, 20),
+        ("sipral_verification_event_t", MemoryLayout<sipral_verification_event_t>.size, 96, 60, 60),
+        ("sipral_progress_event_t", MemoryLayout<sipral_progress_event_t>.size, 80, 80, 80),
+        ("sipral_conference_event_t", MemoryLayout<sipral_conference_event_t>.size, 24, 20, 24),
+        ("sipral_text_event_t", MemoryLayout<sipral_text_event_t>.size, 24, 12, 12),
+        ("sipral_presence_event_t", MemoryLayout<sipral_presence_event_t>.size, 88, 64, 72),
+        ("sipral_transport_failed_event_t", MemoryLayout<sipral_transport_failed_event_t>.size, 32, 24, 24),
+        ("sipral_local_conference_event_t", MemoryLayout<sipral_local_conference_event_t>.size, 40, 40, 40),
+        ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 328, 208, 216),
+        ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
+        ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),
+        ("sipral_screen_request_t", MemoryLayout<sipral_screen_request_t>.size, 48, 28, 32),
+        ("sipral_subscribe_config_t", MemoryLayout<sipral_subscribe_config_t>.size, 88, 48, 48),
+        ("sipral_watched_dialog_t", MemoryLayout<sipral_watched_dialog_t>.size, 32, 28, 32),
+        ("sipral_push_echo_t", MemoryLayout<sipral_push_echo_t>.size, 24, 20, 24),
+        ("sipral_audio_device_t", MemoryLayout<sipral_audio_device_t>.size, 32, 28, 28),
+        ("sipral_audio_info_t", MemoryLayout<sipral_audio_info_t>.size, 48, 44, 48),
+        ("sipral_audio_transmit_t", MemoryLayout<sipral_audio_transmit_t>.size, 56, 36, 40),
+        ("sipral_log_record_t", MemoryLayout<sipral_log_record_t>.size, 64, 40, 48),
+        ("sipral_stir_config_t", MemoryLayout<sipral_stir_config_t>.size, 56, 44, 48),
+        ("sipral_stream_encryption_t", MemoryLayout<sipral_stream_encryption_t>.size, 32, 28, 28),
+        ("sipral_progress_config_t", MemoryLayout<sipral_progress_config_t>.size, 72, 68, 68),
+        ("sipral_consent_tone_t", MemoryLayout<sipral_consent_tone_t>.size, 32, 28, 28),
+        ("sipral_recording_options_t", MemoryLayout<sipral_recording_options_t>.size, 32, 28, 28),
+        ("sipral_conference_t", MemoryLayout<sipral_conference_t>.size, 32, 28, 28),
+        ("sipral_conference_user_t", MemoryLayout<sipral_conference_user_t>.size, 24, 20, 20),
+        ("sipral_presence_t", MemoryLayout<sipral_presence_t>.size, 32, 20, 20),
+        ("sipral_record_config_t", MemoryLayout<sipral_record_config_t>.size, 80, 40, 40),
+        ("sipral_local_conference_config_t", MemoryLayout<sipral_local_conference_config_t>.size, 24, 20, 20),
+        ("sipral_local_conference_info_t", MemoryLayout<sipral_local_conference_info_t>.size, 56, 48, 48),
+        ("sipral_local_conference_member_t", MemoryLayout<sipral_local_conference_member_t>.size, 40, 36, 40),
+    ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
     /// null for a number that is not a status code.
@@ -3336,8 +3431,7 @@ public enum Sipral {
     /// fall more than fifty milliseconds behind the last one this stack saw —
     /// signalling may be called from any thread, and two of them reading the
     /// same clock a moment apart is not a caller mistake — and a jump further
-    /// back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
-    /// delivered.
+    /// back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
     ///
     /// The event callback is called from inside this function, on this
     /// thread, and with nothing held: the stack's work is done and its lock
@@ -3428,7 +3522,7 @@ public enum Sipral {
     /// the same shape: it takes the stack's lock, so it cannot run while a
     /// policy is being asked, and once it returns the callback that was
     /// there is not asked again.
-    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t, userData: UnsafeMutableRawPointer) throws {
+    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t?, userData: UnsafeMutableRawPointer?) throws {
         try ensureAbi()
         let status = sipral_stack_screen(stack, callback, userData)
         try check(status)
@@ -3617,8 +3711,9 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     public static func subscriptionDialogText(stack: SipralHandle, subscription: SipralHandle, index: Int, which: UInt32, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
         var needed = Int()
@@ -4365,16 +4460,20 @@ public enum Sipral {
     /// the field did not write — is one byte, the NUL. An index past the
     /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
+    /// `index` comes before `which`, as it does in every other entry point
+    /// that reads a piece of text about one of several things: the entry
+    /// first, then the piece of it.
+    ///
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or null with a capacity
-    /// of zero, and `out_needed` must point at one `size_t`.
-    public static func callIdentityText(stack: SipralHandle, call: SipralHandle, which: UInt32, index: Int, buffer: inout [CChar]) throws -> Int {
+    /// of zero, and `out_needed` must point at one `size_t` or be null.
+    public static func callIdentityText(stack: SipralHandle, call: SipralHandle, index: Int, which: UInt32, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
         var needed = Int()
         let status =
             buffer.withUnsafeMutableBufferPointer { p4 in
-                sipral_call_identity_text(stack, call, which, index, p4.baseAddress, p4.count, &needed)
+                sipral_call_identity_text(stack, call, index, which, p4.baseAddress, p4.count, &needed)
             }
         try check(status)
         return needed
@@ -5028,68 +5127,69 @@ public enum Sipral {
         try check(status)
     }
 
-    /// Run `process` over every frame captured on this call, against the
-    /// far-end audio this call played MediaSession::render_delay earlier
-    /// — echo cancellation, gain control and noise suppression are all this
-    /// one seam, and `docs/05-media.md` says why.
+    /// Run `callback` over every frame captured on this call, against the
+    /// far-end audio this call played a render delay earlier — echo
+    /// cancellation, gain control and noise suppression are all this one
+    /// seam, and `docs/05-media.md` says why.
     ///
     /// What was attached before is dropped, along with the echo path it had
     /// learned. Attaching mid-call is allowed and costs the first few hundred
     /// milliseconds of a fresh adaptation, the same price a call pays at its
     /// start.
     ///
-    /// **`process` runs with this call's media locked**, the same as
-    /// crate::screening::SipralScreenCallback and unlike
-    /// crate::event::SipralEventCallback: it is called from inside
-    /// sipral_media_playback (to learn what the loudspeaker was just
-    /// given) and inside sipral_media_capture (to run the frame just
+    /// **`callback` runs with this call's media locked**, the same as the
+    /// screening callback and unlike the event callback: it is called from
+    /// inside sipral_media_playback (to learn what the loudspeaker was
+    /// just given) and inside sipral_media_capture (to run the frame just
     /// captured), and — with sipral_processor_frame_t's `reset` set — whenever
     /// this call's media forgets what it has learned, a device change or a
     /// codec change mid-call. All three run on whichever thread called the
-    /// entry point that triggered them. In consequence, **it must not call
-    /// back into the media handle it was attached through**, on this thread
-    /// or on any other — doing so does not deadlock, since every media entry
-    /// point takes its session's lock without waiting and answers
-    /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
-    /// rather than relied on. A *different* call's media, or this stack's
-    /// own entry points, are unaffected. It must not unwind: a panic that
-    /// reached C across this boundary would take the host process with it,
-    /// the same rule every callback in this ABI is held to.
+    /// entry point that triggered them. **From inside `callback`, call
+    /// nothing on any media handle and nothing on this call's stack**: every
+    /// such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
+    /// thread that calls into this call's media meanwhile waits for the
+    /// frame to finish, so a processor that reached into a second call's
+    /// media while that call's processor reached into this one would wait on
+    /// the other for ever; refusing every media handle from inside a frame
+    /// is what rules that out. It must not unwind: a panic that reached C
+    /// across this boundary would take the host process with it, the same
+    /// rule every callback in this ABI is held to.
     ///
-    /// `user_data` is handed back to `process` untouched on every call, read
+    /// `user_data` is handed back to `callback` untouched on every call, read
     /// by nothing here, and has to outlive the last one — which the caller
     /// who installed it is the one to know is over:
-    /// `sipral_call_detach_processor` or the call ending are the two ways.
+    /// `sipral_media_detach_processor` returning, or `sipral_media_release`
+    /// of this handle, are the two ways.
     ///
     /// Safety
     ///
-    /// `process` is called on whichever thread calls
+    /// `callback` is called on whichever thread calls
     /// sipral_media_playback or sipral_media_capture on this call,
     /// for as long as the processor stays attached, and `user_data` has to
     /// outlive the last such call.
-    public static func callAttachProcessor(media: SipralHandle, process: sipral_processor_callback_t, userData: UnsafeMutableRawPointer) throws {
+    public static func mediaAttachProcessor(media: SipralHandle, callback: sipral_processor_callback_t?, userData: UnsafeMutableRawPointer?) throws {
         try ensureAbi()
-        let status = sipral_call_attach_processor(media, process, userData)
+        let status = sipral_media_attach_processor(media, callback, userData)
         try check(status)
     }
 
-    /// Stop running the processor sipral_call_attach_processor attached,
+    /// Stop running the processor sipral_media_attach_processor attached,
     /// if there was one.
     ///
     /// `out_was_attached`, when not null, says whether there was one to stop:
     /// 1 if a processor was attached and is now detached, 0 if there was
     /// none. The frames the application hands over reach the encoder
     /// untouched again from the next one, and the loudspeaker history kept
-    /// for it is released. Once this returns, `process` is not called again
+    /// for it is released. Once this returns, `callback` is not called again
     /// for this attachment — the moment `user_data` may be freed.
     ///
     /// Safety
     ///
     /// `out_was_attached` must point at one `uint32_t` or be null.
-    public static func callDetachProcessor(media: SipralHandle) throws -> UInt32 {
+    public static func mediaDetachProcessor(media: SipralHandle) throws -> UInt32 {
         try ensureAbi()
         var wasAttached = UInt32()
-        let status = sipral_call_detach_processor(media, &wasAttached)
+        let status = sipral_media_detach_processor(media, &wasAttached)
         try check(status)
         return wasAttached
     }
@@ -5100,7 +5200,7 @@ public enum Sipral {
     /// What a device change asks for: the estimate was built for a different
     /// loudspeaker and a different microphone, and carrying it forward makes
     /// the processor fight it for a while instead of adapting cleanly. Calls
-    /// the `process` given to sipral_call_attach_processor with
+    /// the `callback` given to sipral_media_attach_processor with
     /// sipral_processor_frame_t's `reset` set.
     ///
     /// `out_was_attached`, when not null, says whether there was a processor
@@ -5109,10 +5209,10 @@ public enum Sipral {
     /// Safety
     ///
     /// `out_was_attached` must point at one `uint32_t` or be null.
-    public static func callResetProcessor(media: SipralHandle) throws -> UInt32 {
+    public static func mediaResetProcessor(media: SipralHandle) throws -> UInt32 {
         try ensureAbi()
         var wasAttached = UInt32()
-        let status = sipral_call_reset_processor(media, &wasAttached)
+        let status = sipral_media_reset_processor(media, &wasAttached)
         try check(status)
         return wasAttached
     }
@@ -5237,7 +5337,7 @@ public enum Sipral {
     /// One at a time, like every other poll in this crate: call it after
     /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
     /// for a call this stack was running media on, and keep calling until
-    /// `out_packet` comes back with a `len` of zero. A call whose media never
+    /// `packet` comes back with a `len` of zero. A call whose media never
     /// ran leaves nothing here, but for one thing.
     ///
     /// A call given a relay on a TURN server (`turn_server` on the stack's
@@ -5252,12 +5352,12 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
     /// `sipral_media_packet_t` as sipral_media_capture describes.
-    public static func stackPollFarewell(stack: SipralHandle, outPacket: inout sipral_media_packet_t) throws -> SipralHandle {
+    public static func stackPollFarewell(stack: SipralHandle, packet: inout sipral_media_packet_t) throws -> SipralHandle {
         try ensureAbi()
         var call = SipralHandle()
-        let status = sipral_stack_poll_farewell(stack, &call, &outPacket)
+        let status = sipral_stack_poll_farewell(stack, &call, &packet)
         try check(status)
         return call
     }
@@ -5386,8 +5486,9 @@ public enum Sipral {
     ///
     /// `from` is the far end, as `host:port`. `to` is the address the datagram
     /// arrived on, which RFC 3581 §4 makes the address the response has to go
-    /// out from; null with a length of zero means the address this stack was
-    /// created with, which is the answer for a socket bound to one address.
+    /// out from; a length of zero, whatever the pointer, means the address
+    /// this stack was created with, which is the answer for a socket bound to
+    /// one address.
     ///
     /// A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
     /// in each, so it arrives whole the way a datagram does.
@@ -5469,7 +5570,8 @@ public enum Sipral {
     ///
     /// `local` is the address the far end reaches this one at, as `host:port`.
     /// `remote` is the far end of a connection, and is refused on a datagram
-    /// transport, which has many.
+    /// transport, which has many; a length of zero, whatever the pointer,
+    /// leaves it out.
     ///
     /// This is also how a request
     /// SipralEventKind.transportWanted
@@ -5526,7 +5628,7 @@ public enum Sipral {
     ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
     /// of what the failure did to the registrations and calls on it.
-    /// sipral_stack_transport_failure is the same call with the TLS
+    /// sipral_stack_transport_failed_with is the same call with the TLS
     /// library's reason carried along.
     ///
     /// Safety
@@ -5565,10 +5667,10 @@ public enum Sipral {
     /// `failure` must point at a `sipral_transport_failure_t` whose `size`
     /// member says how long it is, and its `detail` must be readable for
     /// `detail_len` bytes.
-    public static func stackTransportFailure(stack: SipralHandle, failure: sipral_transport_failure_t, nowMs: UInt64) throws {
+    public static func stackTransportFailedWith(stack: SipralHandle, failure: sipral_transport_failure_t, nowMs: UInt64) throws {
         try ensureAbi()
         var failure = failure
-        let status = sipral_stack_transport_failure(stack, &failure, nowMs)
+        let status = sipral_stack_transport_failed_with(stack, &failure, nowMs)
         try check(status)
     }
 
@@ -5716,7 +5818,6 @@ public enum Sipral {
         try check(status)
     }
 
-    /// Take the next STUN request a media socket has to send.entry! {
     /// Take the next STUN request a media socket has to send.
     ///
     /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -6367,10 +6468,12 @@ public enum Sipral {
     /// sipral_stack_transport_bind
     /// is how it gets another chance.
     ///
-    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
-    /// cases, and neither is an error: the dialog has ended, and none of the
-    /// addresses is one this stack can reach on the protocol asked for. The
-    /// flow stands exactly as it did.
+    /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
+    /// of the addresses is one this stack can reach on the protocol asked
+    /// for: the flow stands exactly as it did. A dialog that has ended by the
+    /// time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
+    /// other handle to something that is gone, and changes nothing either;
+    /// an application that resolves in the background treats the two alike.
     ///
     /// There is no `now_ms` here on purpose. Every other call that changes
     /// what this stack will send takes the time because something it does is
@@ -6431,29 +6534,29 @@ public enum Sipral {
     ///
     /// Readable at any point in the call's life, and for as long after it as
     /// the endpoint has not evicted the record to make room for a newer one —
-    /// `sipral_stack_config_t` has no member for the ceiling yet, so today
-    /// that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+    /// how many are kept is `sipral_stack_config_t::diagnostic_records`,
+    /// 32 when it is zero. A call whose
     /// record has been evicted, or that has had nothing decided about it yet,
     /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
     /// record, and refusing to read one that happens to be empty would make
     /// a caller unable to tell "nothing yet" from "something went wrong".
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// document, with the length needed in `out_len`.
+    /// document, with the length needed in `out_needed`.
     ///
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     public static func callRecordJson(stack: SipralHandle, call: SipralHandle, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
-        var len = Int()
+        var needed = Int()
         let status =
             buffer.withUnsafeMutableBufferPointer { p2 in
-                sipral_call_record_json(stack, call, p2.baseAddress, p2.count, &len)
+                sipral_call_record_json(stack, call, p2.baseAddress, p2.count, &needed)
             }
         try check(status)
-        return len
+        return needed
     }
 
     /// Copy the whole diagnostic document into `buffer`: what a bug report
@@ -6467,21 +6570,21 @@ public enum Sipral {
     /// sipral_call_record_json is already the way to ask about one call.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// document, with the length needed in `out_len`.
+    /// document, with the length needed in `out_needed`.
     ///
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     public static func stackDiagnosticsJson(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
-        var len = Int()
+        var needed = Int()
         let status =
             buffer.withUnsafeMutableBufferPointer { p1 in
-                sipral_stack_diagnostics_json(stack, p1.baseAddress, p1.count, &len)
+                sipral_stack_diagnostics_json(stack, p1.baseAddress, p1.count, &needed)
             }
         try check(status)
-        return len
+        return needed
     }
 
     /// What a `conference` subscription holds about the conference as a
@@ -6530,8 +6633,9 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     public static func subscriptionConferenceText(stack: SipralHandle, subscription: SipralHandle, index: Int, which: UInt32, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
         var needed = Int()
@@ -6569,8 +6673,9 @@ public enum Sipral {
     ///
     /// Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     public static func callConferenceUri(stack: SipralHandle, call: SipralHandle, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
         var needed = Int()
@@ -6818,7 +6923,7 @@ public enum Sipral {
     /// session and say nothing about it.
     ///
     /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-    /// text, with the length needed in `out_len` — asking again with a bigger
+    /// text, with the length needed in `out_needed` — asking again with a bigger
     /// buffer answers the same recording rather than stopping a new one,
     /// so a caller that does not yet know how big a buffer to bring may ask
     /// twice: once to be told, once to be handed the text. Once a call here
@@ -6829,16 +6934,16 @@ public enum Sipral {
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
     public static func stackRecordingStop(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
-        var len = Int()
+        var needed = Int()
         let status =
             buffer.withUnsafeMutableBufferPointer { p1 in
-                sipral_stack_recording_stop(stack, p1.baseAddress, p1.count, &len)
+                sipral_stack_recording_stop(stack, p1.baseAddress, p1.count, &needed)
             }
         try check(status)
-        return len
+        return needed
     }
 
     /// Ask the platform what devices there are, and say how many the list
@@ -6877,10 +6982,13 @@ public enum Sipral {
 
     /// The device at `index` in the list, and its name into `buffer`.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
-    /// length needed in `out_needed` and the struct filled in all the same;
-    /// the name is UTF-8 and not NUL-terminated.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
+    /// is written the way every other text this ABI hands out is: UTF-8 with
+    /// a trailing NUL, and `out_needed`, when it is not null, receives the
+    /// bytes it needs with that NUL counted. When the name does not fit, the
+    /// answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
+    /// neither to `buffer` nor to `out_device`: ask with a capacity of zero
+    /// to learn the length, then again with room.
     ///
     /// Safety
     ///
@@ -7110,7 +7218,7 @@ public enum Sipral {
     /// (see sipral_log_callback_t). `user_data` is handed back to it untouched
     /// and must stay valid until the log is turned off or replaced and no
     /// thread is inside this stack any more.
-    public static func stackLog(stack: SipralHandle, level: UInt32, callback: sipral_log_callback_t, userData: UnsafeMutableRawPointer) throws {
+    public static func stackLog(stack: SipralHandle, level: UInt32, callback: sipral_log_callback_t?, userData: UnsafeMutableRawPointer?) throws {
         try ensureAbi()
         let status = sipral_stack_log(stack, level, callback, userData)
         try check(status)
@@ -7132,22 +7240,22 @@ public enum Sipral {
     /// taken. A call's media session that a thread is in the middle of a
     /// frame on is reported as busy rather than waited for.
     ///
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
-    /// when it does not fit; `out_len` may be null.
+    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
+    /// when it does not fit; `out_needed` may be null.
     ///
     /// Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or be null with a
-    /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-    public static func stackState(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+    public static func stackStateText(stack: SipralHandle, buffer: inout [CChar]) throws -> Int {
         try ensureAbi()
-        var len = Int()
+        var needed = Int()
         let status =
             buffer.withUnsafeMutableBufferPointer { p1 in
-                sipral_stack_state(stack, p1.baseAddress, p1.count, &len)
+                sipral_stack_state_text(stack, p1.baseAddress, p1.count, &needed)
             }
         try check(status)
-        return len
+        return needed
     }
 
     /// Reserve a free even port from this stack's RTP range, with the odd
@@ -7539,18 +7647,18 @@ public enum Sipral {
 
     /// The oldest packet a member's call owes its far end, in application
     /// mode: `out_call` names the call, whose media socket sends it, and
-    /// `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+    /// `packet` is filled as `sipral_media_capture` fills one. A `len`
     /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
     /// waiting. Drain it after every tick.
     ///
     /// Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
     /// `sipral_media_packet_t` as `sipral_media_capture` describes.
-    public static func localConferencePollTransmit(conference: SipralHandle, outPacket: inout sipral_media_packet_t) throws -> SipralHandle {
+    public static func localConferencePollTransmit(conference: SipralHandle, packet: inout sipral_media_packet_t) throws -> SipralHandle {
         try ensureAbi()
         var call = SipralHandle()
-        let status = sipral_local_conference_poll_transmit(conference, &call, &outPacket)
+        let status = sipral_local_conference_poll_transmit(conference, &call, &packet)
         try check(status)
         return call
     }

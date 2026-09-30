@@ -18,11 +18,21 @@ import re
 import unittest
 from pathlib import Path
 
-from sipral._sipral_cffi import ffi, lib
+from cffi import FFI
+
+from sipral._sipral_cffi import RECORD_LAYOUTS, ffi, lib
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _HEADER = _REPO_ROOT / "bindings" / "c" / "include" / "sipral.h"
 _ABI_SIZES = _REPO_ROOT / "bindings" / "c" / "abi-sizes.txt"
+
+# The structs that carry their own size, as `bindings/c/abi-sizes.txt` lists
+# them: the ones `sipral_abi_struct_size` answers for.
+_VERSIONED = (
+    [line.split()[0] for line in _ABI_SIZES.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")]
+    if _ABI_SIZES.is_file()
+    else []
+)
 
 # `#define NAME ((TYPE)VALUE)`, as `tools/abi-gen/src/c.rs`'s `values`
 # prints every published constant.
@@ -59,36 +69,47 @@ class ConstantsMatchTheHeader(unittest.TestCase):
                 self.assertEqual(int(getattr(lib, name)), int(value))
 
 
-class StructSizesMatchAbiSizes(unittest.TestCase):
-    """`ffi.sizeof` for every record `bindings/c/abi-sizes.txt` names.
+def _layout() -> int:
+    """Which of the three layouts `RECORD_LAYOUTS` lists this process is on:
+    64-bit pointers, or 32-bit ones with a 64-bit integer aligned to four
+    (i386) or to eight (ARM, Windows x86) inside a struct."""
+    if ffi.sizeof("void *") == 8:
+        return 0
+    probe = FFI()
+    probe.cdef("struct probe { char before; uint64_t value; };")
+    return 1 if probe.offsetof("struct probe", "value") == 4 else 2
+
+
+class StructSizesMatchTheLayouts(unittest.TestCase):
+    """`ffi.sizeof` for every record, held to the length tools/abi-gen
+    worked out for the layout this process is on, and to what the library
+    itself says.
 
     cffi's ABI mode lays a struct out for itself from the `cdef` text --
     nothing here links against a compiled definition -- so this is the one
     check that would catch the `cdef` silently drifting from what a real C
-    compiler puts in `bindings/c/abi-sizes.txt`'s own second column, which
-    `scripts/check.sh` already keeps current against this build
-    (`docs/08-ffi.md`, "Versioning").
+    compiler makes of the header, which `bindings/c/abi-layout.c` holds to
+    the same table on six targets (`docs/08-ffi.md`, "Versioning").
     """
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        if not _ABI_SIZES.is_file():
-            raise unittest.SkipTest(f"{_ABI_SIZES} not found; run from a checkout")
-        cls.rows: list[tuple[str, int]] = []
-        for line in _ABI_SIZES.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            name, _first, current = line.split()
-            if current == "-":
-                continue  # filled in by the library alone; no caller declares one
-            cls.rows.append((name, int(current)))
+    def test_every_record_is_as_long_as_the_layout_says(self) -> None:
+        self.assertGreater(len(RECORD_LAYOUTS), 50)
+        layout = _layout()
+        size = ffi.new("size_t *")
+        for name, lengths in RECORD_LAYOUTS.items():
+            with self.subTest(record=name):
+                self.assertEqual(ffi.sizeof(name), lengths[layout])
+                encoded = name.encode()
+                status = lib.sipral_abi_struct_size(encoded, len(encoded), size)
+                self.assertEqual(status, lib.SIPRAL_STATUS_OK)
+                self.assertEqual(size[0], lengths[layout])
 
-    def test_every_versioned_struct_is_the_size_this_build_says(self) -> None:
-        self.assertGreater(len(self.rows), 5)
-        for name, current in self.rows:
-            with self.subTest(struct=name):
-                self.assertEqual(ffi.sizeof(name), current)
+    def test_every_versioned_struct_is_in_the_table(self) -> None:
+        count = ffi.new("size_t *")
+        self.assertEqual(lib.sipral_abi_versioned_count(count), lib.SIPRAL_STATUS_OK)
+        self.assertEqual(len(_VERSIONED), count[0])
+        for name in _VERSIONED:
+            self.assertIn(name, RECORD_LAYOUTS)
 
 
 class SrtpSuitesHaveNames(unittest.TestCase):

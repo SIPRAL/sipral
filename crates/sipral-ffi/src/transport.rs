@@ -97,7 +97,7 @@
 //! the moment the bind succeeds. An application that cannot open the stream
 //! — the far end refused the connection, it timed out, or it opens none at
 //! all — says so with [`sipral_stack_transport_failed`] or
-//! [`sipral_stack_transport_failure`] naming the number it would have bound,
+//! [`sipral_stack_transport_failed_with`] naming the number it would have bound,
 //! and everything waiting stops waiting at once: a call's INVITE is tried
 //! once more over the datagram with one SDES suite per media stream, when
 //! that fits, and what still does not fit ends — a call with
@@ -293,7 +293,7 @@ record! {
 // undefined.
 unsafe impl Versioned for SipralTransmit {
     const NAME: &'static str = "sipral_transmit";
-    const MIN_SIZE: usize = crate::versioned::min_size::TRANSMIT;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralTransmit, source_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -302,7 +302,7 @@ unsafe impl Versioned for SipralTransmit {
 
 record! {
     /// A transport that failed, and why, for
-    /// [`sipral_stack_transport_failure`].
+    /// [`sipral_stack_transport_failed_with`].
     ///
     /// The caller fills in all of it. `detail` is the platform's own sentence
     /// — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
@@ -333,7 +333,7 @@ record! {
 // is the caller's and is read for as long as the call runs and no longer.
 unsafe impl Versioned for SipralTransportFailure {
     const NAME: &'static str = "sipral_transport_failure";
-    const MIN_SIZE: usize = crate::versioned::min_size::TRANSPORT_FAILURE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralTransportFailure, detail_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -583,8 +583,9 @@ entry! {
     ///
     /// `from` is the far end, as `host:port`. `to` is the address the datagram
     /// arrived on, which RFC 3581 §4 makes the address the response has to go
-    /// out from; null with a length of zero means the address this stack was
-    /// created with, which is the answer for a socket bound to one address.
+    /// out from; a length of zero, whatever the pointer, means the address
+    /// this stack was created with, which is the answer for a socket bound to
+    /// one address.
     ///
     /// A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
     /// in each, so it arrives whole the way a datagram does.
@@ -722,7 +723,8 @@ entry! {
     ///
     /// `local` is the address the far end reaches this one at, as `host:port`.
     /// `remote` is the far end of a connection, and is refused on a datagram
-    /// transport, which has many.
+    /// transport, which has many; a length of zero, whatever the pointer,
+    /// leaves it out.
     ///
     /// This is also how a request
     /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
@@ -839,7 +841,7 @@ entry! {
     ///
     /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
     /// of what the failure did to the registrations and calls on it.
-    /// [`sipral_stack_transport_failure`] is the same call with the TLS
+    /// [`sipral_stack_transport_failed_with`] is the same call with the TLS
     /// library's reason carried along.
     ///
     /// # Safety
@@ -893,7 +895,7 @@ entry! {
     /// `failure` must point at a `sipral_transport_failure_t` whose `size`
     /// member says how long it is, and its `detail` must be readable for
     /// `detail_len` bytes.
-    fn sipral_stack_transport_failure(
+    fn sipral_stack_transport_failed_with(
         stack: SipralHandle,
         failure: *const SipralTransportFailure,
         now_ms: u64,
@@ -1041,6 +1043,11 @@ unsafe fn detail_of(detail: *const c_char, len: usize) -> Result<String, Fail> {
 
 /// An address a caller may leave out, as one.
 ///
+/// Left out is a length of zero, with the pointer null or not: what every
+/// other optional piece of text in this ABI means by it, and the only way a
+/// binding that hands every string over as a buffer — an empty one included
+/// — has of saying "none".
+///
 /// # Safety
 ///
 /// `pointer`, when it is not null, must be readable for `len` bytes.
@@ -1049,7 +1056,7 @@ pub(crate) unsafe fn optional_address(
     len: usize,
     name: &'static str,
 ) -> Result<Option<SocketAddr>, Fail> {
-    if pointer.is_null() && len == 0 {
+    if len == 0 {
         return Ok(None);
     }
     Ok(Some(unsafe { address(pointer, len, name) }?))
@@ -1166,7 +1173,7 @@ pub(crate) mod tests {
         SipralTlsFailure, SipralTransmit, SipralTransportError, SipralTransportFailure,
         sipral_stack_poll_transmit, sipral_stack_receive_datagram, sipral_stack_receive_stream,
         sipral_stack_stream_closed, sipral_stack_transport_bind, sipral_stack_transport_failed,
-        sipral_stack_transport_failure,
+        sipral_stack_transport_failed_with,
     };
     use crate::account::{SipralAccountConfig, sipral_account_add, sipral_account_register};
     use crate::error::last_error_text;
@@ -1829,6 +1836,35 @@ pub(crate) mod tests {
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
+    /// `to` left out as an empty buffer rather than a null pointer is left
+    /// out all the same, as every other optional text in this ABI is: a
+    /// binding that hands every string over as a buffer has no null to pass,
+    /// and was refused for passing the one thing it could.
+    #[test]
+    fn an_empty_arrival_address_is_no_address_whatever_its_pointer() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let options = options("options-3");
+        let nothing = [0_u8; 1];
+        let status = unsafe {
+            sipral_stack_receive_datagram(
+                handle,
+                SIPRAL_TRANSPORT_MAIN,
+                options.as_ptr(),
+                options.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                nothing.as_ptr().cast::<c_char>(),
+                0,
+                1_000,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (_, _, from) = take_one(handle);
+        assert_eq!(from, BIND, "the address the stack was created with");
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
     #[test]
     fn bytes_that_are_not_a_message_cost_one_packet_and_nothing_else() {
         let mut observed = Observed::default();
@@ -2216,7 +2252,8 @@ pub(crate) mod tests {
      {
         let mut buffers = Buffers::new();
         let mut transmit = buffers.transmit();
-        transmit.size = crate::versioned::min_size::TRANSMIT - 1;
+        transmit.size =
+            <crate::transport::SipralTransmit as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_stack_poll_transmit(SIPRAL_HANDLE_NONE, &raw mut transmit) },
             SipralStatus::UnsupportedVersion
@@ -2739,7 +2776,7 @@ pub(crate) mod tests {
         let said = "certificate verify failed: certificate has expired";
         let failure = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Expired, said);
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const failure, 1_100) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const failure, 1_100) },
             SipralStatus::Ok,
             "{}",
             last_error_text()
@@ -2782,7 +2819,7 @@ pub(crate) mod tests {
         let account = line(handle);
         let failure = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Untrusted, "");
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const failure, 1_000) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const failure, 1_000) },
             SipralStatus::Ok
         );
         poll(handle, 1_000);
@@ -2859,7 +2896,7 @@ pub(crate) mod tests {
         let expired = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::Expired, "second");
         for (failure, at) in [(&untrusted, 1_000), (&expired, 2_000)] {
             assert_eq!(
-                unsafe { sipral_stack_transport_failure(handle, failure, at) },
+                unsafe { sipral_stack_transport_failed_with(handle, failure, at) },
                 SipralStatus::Ok,
                 "{}",
                 last_error_text()
@@ -2929,7 +2966,7 @@ pub(crate) mod tests {
         let handle = speaking(&mut observed, SipralTransport::Tcp);
         let mismatched = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::NameMismatch, "");
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const mismatched, 1_000) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const mismatched, 1_000) },
             SipralStatus::InvalidArgument
         );
         assert!(last_error_text().contains("TLS"), "{}", last_error_text());
@@ -2937,18 +2974,18 @@ pub(crate) mod tests {
         let long = "x".repeat(SIPRAL_TRANSPORT_DETAIL_BYTES + 1);
         let too_long = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::None, &long);
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const too_long, 1_000) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const too_long, 1_000) },
             SipralStatus::InvalidArgument
         );
         let mut unknown = refused(SIPRAL_TRANSPORT_MAIN, SipralTlsFailure::None, "");
         unknown.tls = 9;
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const unknown, 1_000) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const unknown, 1_000) },
             SipralStatus::InvalidArgument
         );
         let elsewhere = refused(7, SipralTlsFailure::None, "");
         assert_eq!(
-            unsafe { sipral_stack_transport_failure(handle, &raw const elsewhere, 1_000) },
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const elsewhere, 1_000) },
             SipralStatus::InvalidArgument
         );
         poll(handle, 1_000);

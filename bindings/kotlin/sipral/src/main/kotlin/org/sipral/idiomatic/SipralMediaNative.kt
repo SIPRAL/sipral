@@ -39,6 +39,29 @@ internal object SipralMediaNative {
         outLen: LongArray,
     ): Int
 
+    /**
+     * `sipral_media_mix`: one frame of `mic` mixed into each of two joined
+     * calls, with what the far ends sent written into `local`. Each call's
+     * packet is filled the way [mediaCapture] fills one: `outDataA`,
+     * `outDestinationA` and `outLenA` for `mediaA`, the `B` three for
+     * `mediaB`. The generated binding hands the two packets over as bare
+     * addresses and has no way to build either, so this is the only way to
+     * reach the call from Kotlin.
+     */
+    external fun mediaMix(
+        mediaA: Long,
+        mediaB: Long,
+        nowMs: Long,
+        mic: ShortArray,
+        local: ShortArray,
+        outDataA: ByteArray,
+        outDestinationA: ByteArray?,
+        outLenA: LongArray,
+        outDataB: ByteArray,
+        outDestinationB: ByteArray?,
+        outLenB: LongArray,
+    ): Int
+
     /** `sipral_media_poll_rtcp`, filled the same way. */
     external fun mediaPollRtcp(
         media: Long,

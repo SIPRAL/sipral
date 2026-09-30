@@ -42,19 +42,21 @@ internal static class SipralErrors
         NativeLibraryLoader.EnsureRegistered();
         nuint capacity = 256;
         var buffer = new sbyte[capacity];
-        var status = NativeMethods.sipral_last_error_message(buffer, capacity, out var len);
+        var status = NativeMethods.sipral_last_error_message(buffer, capacity, out var needed);
         if (status == SipralStatus.BufferTooSmall)
         {
-            capacity = len;
+            capacity = needed;
             buffer = new sbyte[capacity];
-            status = NativeMethods.sipral_last_error_message(buffer, capacity, out len);
+            status = NativeMethods.sipral_last_error_message(buffer, capacity, out needed);
         }
-        if (status != SipralStatus.Ok)
+        if (status != SipralStatus.Ok || needed == 0)
         {
             return string.Empty;
         }
-        var bytes = new byte[(int)len];
-        Buffer.BlockCopy(buffer, 0, bytes, 0, (int)len);
+        // `needed` counts the trailing NUL, which is not part of the message
+        var length = (int)needed - 1;
+        var bytes = new byte[length];
+        Buffer.BlockCopy(buffer, 0, bytes, 0, length);
         return Encoding.UTF8.GetString(bytes);
     }
 
@@ -80,39 +82,24 @@ internal static class SipralErrors
     /// <summary>Calls an entry point, waiting out an ordinary
     /// <see cref="SipralStatus.Busy"/> for up to half a second before
     /// letting it through to <see cref="Check"/> as whatever it still
-    /// is. A signalling entry point's <c>now_ms</c> more than the ABI's
-    /// clock slack behind this stack's last reading
-    /// (<c>docs/08-ffi.md</c>, "Signalling makes a smaller version of the
-    /// same allowance") gets the same retry: this layer always reads
-    /// <c>now_ms</c> fresh on the calling thread right before the entry
-    /// point runs, so what beat it there is the OS scheduler, not a stale
-    /// value, and a retry reads a later one the stack's high-water mark
-    /// can only have moved forward from, never a value it would refuse
-    /// for the same reason twice in a row.</summary>
+    /// is. <see cref="SipralStatus.ClockBehind"/> — a signalling entry
+    /// point's <c>now_ms</c> more than the ABI's clock slack behind this
+    /// stack's last reading (<c>docs/08-ffi.md</c>, "Signalling makes a
+    /// smaller version of the same allowance") — gets the same retry: this
+    /// layer always reads <c>now_ms</c> fresh on the calling thread right
+    /// before the entry point runs, so what beat it there is the OS
+    /// scheduler, not a stale value, and a retry reads a later one the
+    /// stack's high-water mark can only have moved forward from, never a
+    /// value it would refuse for the same reason twice in a row.</summary>
     internal static void Call(Func<SipralStatus> entryPoint, string where)
     {
         var deadline = Environment.TickCount64 + 500;
         var status = entryPoint();
-        while (Environment.TickCount64 < deadline && (status == SipralStatus.Busy || IsClockStraggler(status)))
+        while (Environment.TickCount64 < deadline && (status == SipralStatus.Busy || status == SipralStatus.ClockBehind))
         {
             Thread.Sleep(1);
             status = entryPoint();
         }
         Check(status, where);
     }
-
-    /// <summary>Whether <paramref name="status"/> is
-    /// <see cref="SipralStatus.InvalidArgument"/> for exactly the reason
-    /// <c>StackState::checked_instant</c> gives it — a <c>now_ms</c> that
-    /// fell behind this stack's high-water mark by more than the slack —
-    /// rather than any other bad argument, which this layer never retries
-    /// since a fresh call would fail it the same way again. Reads the
-    /// thread-local last-error message <see cref="Call"/> was about to
-    /// read anyway on the way to raising it, so peeking here costs
-    /// nothing a failing call was not already going to pay.</summary>
-    private static bool IsClockStraggler(SipralStatus status) =>
-        status == SipralStatus.InvalidArgument &&
-        LastErrorMessage() is { } message &&
-        message.StartsWith("now_ms is ", StringComparison.Ordinal) &&
-        message.Contains("ms behind this stack's last reading", StringComparison.Ordinal);
 }

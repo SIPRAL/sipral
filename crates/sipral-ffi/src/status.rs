@@ -23,6 +23,12 @@ codes! {
     /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
     /// statuses, and it stays reserved, never used and never to be given to a
     /// status. No build returns it and `sipral_status_name` has no name for it.
+    ///
+    /// The one signed number in the ABI, and the only enumeration typed
+    /// `int32_t`: zero is success, every failure is positive, and no build
+    /// returns a negative one. A binding that treats it as unsigned loses
+    /// nothing. A newer library may return a status an older binding has no
+    /// name for; read it as a failure, with the last error for the sentence.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub enum SipralStatus: i32 {
         /// The call did what it was asked to.
@@ -45,7 +51,15 @@ codes! {
         /// The object is already in use by another call, including one further
         /// down the same call stack. Nothing was done, and nothing blocked.
         Busy = 6,
-        /// The library has no room for another object of this kind.
+        /// There is no room for another one: the library's table of objects
+        /// of this kind is full (256 stacks, say), the stack's RTP port range
+        /// is spent, or a queue a call feeds is full — the DTMF digits waiting
+        /// to go out, the dynamic payload types an offer can number, the
+        /// real-time text not yet sent. Nothing was done. Room comes back as
+        /// objects are released, ports given back, or the queue drains; which
+        /// of those the last error says. Not the same as
+        /// `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
+        /// set itself.
         Exhausted = 7,
         /// A panic was caught at the boundary. The call did not finish, and the
         /// last error carries whatever the panic said.
@@ -129,6 +143,13 @@ codes! {
         /// with `sipral_call_join`, or its codec hears at a rate the
         /// conference does not mix. The last error says which.
         ConferenceRefused = 23,
+        /// `now_ms` was more than fifty milliseconds behind the last reading
+        /// of the caller's clock this stack saw (ABI 0.33). Two threads that
+        /// read one clock a moment apart and race for the stack can disagree
+        /// by a little, not by that much. Nothing was done and the stack's
+        /// clock did not move: read the clock again and ask again. A caller
+        /// that keeps getting this has a clock that went backwards.
+        ClockBehind = 24,
     }
 }
 
@@ -168,6 +189,7 @@ entry! {
             21 => c"not a focus".as_ptr(),
             22 => c"transport down".as_ptr(),
             23 => c"conference refused".as_ptr(),
+            24 => c"clock behind".as_ptr(),
             _ => ptr::null(),
         }
     }
@@ -216,6 +238,7 @@ mod tests {
             SipralStatus::NotAFocus,
             SipralStatus::TransportDown,
             SipralStatus::ConferenceRefused,
+            SipralStatus::ClockBehind,
         ];
         for status in all {
             let code = status as i32;
@@ -226,7 +249,7 @@ mod tests {
     #[test]
     fn the_names_are_distinct() {
         let mut seen = Vec::new();
-        for code in (0..=16).chain(18..=23) {
+        for code in (0..=16).chain(18..=24) {
             let Some(text) = name(code) else {
                 panic!("no name for {code}");
             };
@@ -238,7 +261,7 @@ mod tests {
     #[test]
     fn a_number_that_is_not_a_status_has_no_name() {
         assert!(name(17).is_none());
-        assert!(name(24).is_none());
+        assert!(name(25).is_none());
         assert!(name(-1).is_none());
         assert!(name(i32::MAX).is_none());
         assert!(name(i32::MIN).is_none());
@@ -273,5 +296,6 @@ mod tests {
         assert_eq!(SipralStatus::NotAFocus as i32, 21);
         assert_eq!(SipralStatus::TransportDown as i32, 22);
         assert_eq!(SipralStatus::ConferenceRefused as i32, 23);
+        assert_eq!(SipralStatus::ClockBehind as i32, 24);
     }
 }

@@ -247,7 +247,7 @@ class SipralCall internal constructor(
     fun conferenceUri(): String? = try {
         protocolText { buffer -> retryBusy { Sipral.callConferenceUri(client.handle, handle, buffer) } }
     } catch (none: SipralException) {
-        if (none.status != SipralStatus.NOT_AFOCUS) {
+        if (none.status != SipralStatus.NOT_A_FOCUS) {
             throw none
         }
         null
@@ -258,7 +258,7 @@ class SipralCall internal constructor(
      * package of this call's focus (RFC 4579 §3.4), from the call's own
      * account. The subscription outlives the call; each notification is a
      * `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`, and
-     * [SipralSubscription.conference] reads the picture. `NOT_AFOCUS` for a
+     * [SipralSubscription.conference] reads the picture. `NOT_A_FOCUS` for a
      * call whose far end is not one.
      */
     fun subscribeConference(): SipralSubscription {

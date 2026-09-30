@@ -152,7 +152,7 @@ private suspend fun aFocusSaysSoAndTheCallerNamesItsConference(): String = betwe
     assertTrue(uri.contains("127.0.0.1"), uri)
     assertNull(callB.conferenceUri(), "Alice never said she is a focus")
     val refused = assertFailsWith<SipralException> { callB.subscribeConference() }
-    assertEquals(SipralStatus.NOT_AFOCUS, refused.status)
+    assertEquals(SipralStatus.NOT_A_FOCUS, refused.status)
     val watched = callA.subscribeConference()
     assertEquals("conference", watched.`package`)
     assertNotEquals(0L, watched.handle)

@@ -119,8 +119,12 @@ void main() {
   test('a library call that fails throws with the library\'s own words', () {
     expect(
       () => alice.addAccount('not a uri', registrarAddress: 'nowhere'),
-      throwsA(
-          isA<SipralException>().having((e) => e.detail, 'detail', isNotEmpty)),
+      throwsA(isA<SipralException>()
+          .having((e) => e.detail, 'detail', isNotEmpty)
+          // the library counts the trailing NUL in the length it reports;
+          // the message is the text before it
+          .having((e) => e.detail.contains('\u0000'), 'a NUL in the detail',
+              isFalse)),
     );
   });
 }

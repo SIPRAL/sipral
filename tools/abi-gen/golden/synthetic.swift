@@ -270,6 +270,26 @@ public enum Sipral {
         )
     }
 
+    /// Every struct and union the header declares, with how long tools/abi-gen
+    /// worked it out to be on each of the three layouts the ABI ships for:
+    /// 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+    /// to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+    /// test holds this binding's own layout of each record, and the library's
+    /// answer from sipral_abi_struct_size, to the number for the layout it runs
+    /// on; bindings/c/abi-layout.c holds a C compiler to all three.
+    public static let recordLayouts: [(name: String, imported: Int, p64: Int, p32a4: Int, p32a8: Int)] = [
+        ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 24, 16, 24),
+        ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 64, 32, 32),
+        ("sipral_media_packet_t", MemoryLayout<sipral_media_packet_t>.size, 56, 28, 28),
+        ("sipral_registration_event_t", MemoryLayout<sipral_registration_event_t>.size, 8, 8, 8),
+        ("sipral_media_event_t", MemoryLayout<sipral_media_event_t>.size, 32, 16, 16),
+        ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 32, 16, 16),
+        ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 72, 40, 48),
+        ("sipral_screen_event_t", MemoryLayout<sipral_screen_event_t>.size, 24, 12, 12),
+        ("sipral_processor_event_t", MemoryLayout<sipral_processor_event_t>.size, 40, 20, 20),
+    ]
+
     /// Whether this library can serve a binding generated against `major`.`minor`.
     public static func abiCheck(major: UInt32, minor: UInt32) throws {
         try ensureAbi()
@@ -430,7 +450,7 @@ public enum Sipral {
     /// The callback and the pointer after it are one listener, the same
     /// pair a struct going in already means by them, and a null callback
     /// removes whatever was installed.
-    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t, userData: UnsafeMutableRawPointer) throws {
+    public static func stackScreen(stack: SipralHandle, callback: sipral_screen_callback_t?, userData: UnsafeMutableRawPointer?) throws {
         try ensureAbi()
         let status = sipral_stack_screen(stack, callback, userData)
         try check(status)
@@ -441,7 +461,7 @@ public enum Sipral {
     /// The callback and the pointer after it are one listener, the same
     /// pair a struct going in already means by them, and a null callback
     /// removes whatever was installed.
-    public static func stackProcess(stack: SipralHandle, callback: sipral_process_callback_t, userData: UnsafeMutableRawPointer) throws {
+    public static func stackProcess(stack: SipralHandle, callback: sipral_process_callback_t?, userData: UnsafeMutableRawPointer?) throws {
         try ensureAbi()
         let status = sipral_stack_process(stack, callback, userData)
         try check(status)

@@ -731,18 +731,26 @@ pub(crate) fn words(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word = String::new();
     let mut previous_lower = false;
-    for letter in name.chars() {
+    let mut previous_upper = false;
+    let mut letters = name.chars().peekable();
+    while let Some(letter) = letters.next() {
         if letter == '_' {
             if !word.is_empty() {
                 out.push(std::mem::take(&mut word));
             }
             previous_lower = false;
+            previous_upper = false;
             continue;
         }
-        if letter.is_ascii_uppercase() && previous_lower && !word.is_empty() {
+        let next_lower = letters.peek().is_some_and(char::is_ascii_lowercase);
+        if letter.is_ascii_uppercase()
+            && (previous_lower || (previous_upper && next_lower))
+            && !word.is_empty()
+        {
             out.push(std::mem::take(&mut word));
         }
         previous_lower = letter.is_ascii_lowercase() || letter.is_ascii_digit();
+        previous_upper = letter.is_ascii_uppercase();
         word.push(letter);
     }
     if !word.is_empty() {

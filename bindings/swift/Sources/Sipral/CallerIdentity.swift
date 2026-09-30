@@ -168,12 +168,12 @@ enum IdentityReader {
             var buffer = [CChar](repeating: 0, count: 256)
             var needed = 0
             var status = buffer.withUnsafeMutableBufferPointer {
-                sipral_call_identity_text(stack.handle, call, which.rawValue, index, $0.baseAddress, $0.count, &needed)
+                sipral_call_identity_text(stack.handle, call, index, which.rawValue, $0.baseAddress, $0.count, &needed)
             }
             if status == SipralStatus.bufferTooSmall.rawValue {
                 buffer = [CChar](repeating: 0, count: needed)
                 status = buffer.withUnsafeMutableBufferPointer {
-                    sipral_call_identity_text(stack.handle, call, which.rawValue, index, $0.baseAddress, $0.count, &needed)
+                    sipral_call_identity_text(stack.handle, call, index, which.rawValue, $0.baseAddress, $0.count, &needed)
                 }
             }
             try Sipral.check(status)

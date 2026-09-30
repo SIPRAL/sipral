@@ -126,7 +126,8 @@ public sealed class SipralAudioEngine
             status = NativeMethods.sipral_audio_device_at(Handle, index, ref device, name, (nuint)name.Length, out needed);
         }
         SipralErrors.Check(status, "sipral_audio_device_at");
-        var bytes = new byte[(int)needed];
+        // `needed` counts the trailing NUL, which is not part of the name
+        var bytes = new byte[(int)needed - 1];
         Buffer.BlockCopy(name, 0, bytes, 0, bytes.Length);
         return new SipralDeviceInfo(
             device.Id, Encoding.UTF8.GetString(bytes), device.InputChannels, device.OutputChannels,

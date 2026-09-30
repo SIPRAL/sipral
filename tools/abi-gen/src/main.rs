@@ -13,6 +13,7 @@ mod c;
 mod csharp;
 mod dart;
 mod kotlin;
+mod layout;
 mod model;
 mod names;
 mod python;
@@ -37,6 +38,7 @@ fn root() -> PathBuf {
 /// Everything printed from the surface, and where it belongs.
 fn outputs() -> Result<Vec<(PathBuf, String)>, Refused> {
     let here = root();
+    layout::no_tail_padding(&SURFACE)?;
     Ok(vec![
         (
             here.join("bindings/c/include/sipral.h"),
@@ -68,7 +70,11 @@ fn outputs() -> Result<Vec<(PathBuf, String)>, Refused> {
         ),
         (
             here.join("bindings/c/abi-sizes.txt"),
-            sizes::rendered(&SURFACE),
+            sizes::rendered(&SURFACE)?,
+        ),
+        (
+            here.join("bindings/c/abi-layout.c"),
+            sizes::layout_check(&SURFACE)?,
         ),
     ])
 }

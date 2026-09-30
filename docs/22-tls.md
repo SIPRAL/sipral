@@ -992,7 +992,7 @@ when it is left out.
 **When the connection fails.** The first attempt is made before the
 constructor returns and every later one on a thread of the layer's own;
 each one that fails is told to the stack with
-`sipral_stack_transport_failure`, carrying the TLS library's reason and its
+`sipral_stack_transport_failed_with`, carrying the TLS library's reason and its
 own sentence, and arrives as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`. The
 layer tries again one second after a loss, twice as long after each attempt
 that fails, up to thirty seconds. Once connected again it points every

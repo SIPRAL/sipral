@@ -74,7 +74,8 @@ void _check(Sipral sipral, String operation, int status) {
     if (sipral.lastErrorMessage(buffer, 1024, length) != SipralStatus.ok) {
       return '';
     }
-    return _decode(buffer.cast(), min(length.value, 1024));
+    // the length counts the trailing NUL, which is not part of the message
+    return _decode(buffer.cast(), max(0, min(length.value, 1024) - 1));
   });
   throw SipralException(status, operation, detail);
 }

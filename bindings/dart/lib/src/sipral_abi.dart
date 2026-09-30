@@ -89,11 +89,11 @@ typedef SipralScreenCallbackDart = int Function(ffi.Pointer<SipralScreenRequest>
 
 /// Echo cancellation, gain control or noise suppression, run over one
 /// frame, or told to forget what it has learned — SipralProcessorFrame
-/// says which. Installed with sipral_call_attach_processor.
+/// says which. Installed with sipral_media_attach_processor.
 ///
 /// **It runs with this call's media locked**, which is the opposite of
 /// crate::event::SipralEventCallback and the reason
-/// sipral_call_attach_processor's own doc comment says so before it
+/// sipral_media_attach_processor's own doc comment says so before it
 /// says anything else — read it there. In consequence: **this callback
 /// must not call back into the media handle it was attached through**,
 /// on this thread or on any other. It must not unwind, for the same
@@ -137,6 +137,12 @@ typedef SipralLogCallbackDart = void Function(ffi.Pointer<SipralLogRecord> recor
 /// 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
 /// statuses, and it stays reserved, never used and never to be given to a
 /// status. No build returns it and `sipral_status_name` has no name for it.
+///
+/// The one signed number in the ABI, and the only enumeration typed
+/// `int32_t`: zero is success, every failure is positive, and no build
+/// returns a negative one. A binding that treats it as unsigned loses
+/// nothing. A newer library may return a status an older binding has no
+/// name for; read it as a failure, with the last error for the sentence.
 abstract final class SipralStatus {
   /// The call did what it was asked to.
   static const int ok = 0;
@@ -165,7 +171,15 @@ abstract final class SipralStatus {
   /// down the same call stack. Nothing was done, and nothing blocked.
   static const int busy = 6;
 
-  /// The library has no room for another object of this kind.
+  /// There is no room for another one: the library's table of objects
+  /// of this kind is full (256 stacks, say), the stack's RTP port range
+  /// is spent, or a queue a call feeds is full — the DTMF digits waiting
+  /// to go out, the dynamic payload types an offer can number, the
+  /// real-time text not yet sent. Nothing was done. Room comes back as
+  /// objects are released, ports given back, or the queue drains; which
+  /// of those the last error says. Not the same as
+  /// `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
+  /// set itself.
   static const int exhausted = 7;
 
   /// A panic was caught at the boundary. The call did not finish, and the
@@ -251,7 +265,7 @@ abstract final class SipralStatus {
   /// The far end of this call is not a conference focus: its Contact
   /// never carried `isfocus` (RFC 4579 §4.1), so there is no
   /// conference to name or subscribe to.
-  static const int notAfocus = 21;
+  static const int notAFocus = 21;
 
   /// The transport the request would leave on has failed or closed and
   /// has not been bound again. Nothing went out. The failure was
@@ -264,6 +278,14 @@ abstract final class SipralStatus {
   /// with `sipral_call_join`, or its codec hears at a rate the
   /// conference does not mix. The last error says which.
   static const int conferenceRefused = 23;
+
+  /// `now_ms` was more than fifty milliseconds behind the last reading
+  /// of the caller's clock this stack saw (ABI 0.33). Two threads that
+  /// read one clock a moment apart and race for the stack can disagree
+  /// by a little, not by that much. Nothing was done and the stack's
+  /// clock did not move: read the clock again and ask again. A caller
+  /// that keeps getting this has a clock that went backwards.
+  static const int clockBehind = 24;
 }
 
 /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -1167,7 +1189,7 @@ abstract final class SipralEventKind {
   /// left this end — not whether a collector accepted it, which this
   /// stack never waits to learn. Raised only when the account named
   /// a collector to publish to at all
-  /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+  /// (`sipral_account_config_t::quality_report_uri`); a call whose
   /// account named none raises nothing here, since nothing was ever
   /// attempted.
   static const int qualityReportSent = 37;
@@ -1394,9 +1416,13 @@ abstract final class SipralEventKind {
 
   /// A transport this stack signals on stopped carrying traffic: the
   /// application said it failed (`sipral_stack_transport_failed`,
-  /// `sipral_stack_transport_failure`) or closed
+  /// `sipral_stack_transport_failed_with`) or closed
   /// (`sipral_stack_stream_closed`), or a stream carried bytes no
-  /// message starts with (`sipral_stack_receive_stream`).
+  /// message starts with (`sipral_stack_receive_stream`), or a stream
+  /// that had answered a keep-alive ping left the next one unanswered
+  /// for ten seconds (RFC 5626 §4.4.1, `SIPRAL_TRANSPORT_ERROR_TIMED_OUT`:
+  /// the stack has let the connection go, and the socket is the
+  /// application's to close).
   ///
   /// Raised by the next poll, before what the loss did to the
   /// registrations and calls on it. `payload.transport_failed` says
@@ -2750,6 +2776,14 @@ final class SipralAbiVersion extends ffi.Struct {
   /// A fix that changed no declaration.
   @ffi.Uint32()
   external int patch;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// What this build of the library can do: codecs compiled in, transports
@@ -2877,18 +2911,13 @@ final class SipralCounters extends ffi.Struct {
 
   /// Events a poll raised and had nowhere to queue, because the
   /// callback had not kept up and the outbox was already at its ceiling
-  /// (task 8.4.21). Appended here rather than woven in among the
-  /// others: it counts something about delivery itself rather than
-  /// about a call or a registration, and a build from before it existed
-  /// still reads every counter that did.
+  /// (task 8.4.21).
   @ffi.Uint64()
   external int eventsDropped;
 
   /// RTCP goodbyes dropped, oldest first, because the application had
   /// not called `sipral_stack_poll_farewell` and the queue behind it
-  /// was already at its ceiling. Appended at the tail for the same
-  /// reason `events_dropped` was: a build from before this member
-  /// existed still reads every counter that did.
+  /// was already at its ceiling.
   @ffi.Uint64()
   external int farewellsDropped;
 
@@ -2918,8 +2947,6 @@ final class SipralCounters extends ffi.Struct {
   /// they acknowledge arrived again. Only ever over UDP: nothing
   /// retransmits over a stream. A figure that climbs while calls still
   /// connect is a path losing packets before it loses calls.
-  ///
-  /// Appended at the tail (task 8.10), with the three below.
   @ffi.Uint64()
   external int requestsRetransmitted;
 
@@ -2945,9 +2972,10 @@ final class SipralCounters extends ffi.Struct {
 /// What a stack is created with.
 ///
 /// Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
-/// filling anything in. Four members have to be filled: the callback, the
-/// transport, the address this end is reachable at, and the entropy. Nothing
-/// here can be guessed on the caller's behalf.
+/// filling anything in. Five members have to be filled: the callback, the
+/// transport, the address this end is reachable at, the entropy, and the
+/// media seed, which must differ from the entropy. Nothing here can be
+/// guessed on the caller's behalf.
 final class SipralStackConfig extends ffi.Struct {
   /// `sizeof` this struct, as the caller's header declares it.
   @ffi.Size()
@@ -3137,9 +3165,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
   /// for the reason `docs/06-nat.md` tabulates. Any other value is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-  ///
-  /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int ice;
 
@@ -3149,9 +3174,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// socket appears from and writes the answer where a far end reads
   /// it — see crate::nat. Any other value is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-  ///
-  /// Appended at the tail (task 8.5.5), with the two below; the pinned
-  /// `MIN_SIZE` is unmoved.
   @ffi.Uint32()
   external int nat;
 
@@ -3177,9 +3199,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// keeps the stack's setting. Nothing changes for a call that does
   /// not run G.729, so the setting is taken whatever `codecs` names:
   /// a call's own order may name G.729 when the stack's does not.
-  ///
-  /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int g729AnnexB;
 
@@ -3198,9 +3217,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
   /// can use a relay. Copied; the caller's buffer is its own again when
   /// this returns.
-  ///
-  /// Appended at the tail (task 8.5.5), with the five below; the pinned
-  /// `MIN_SIZE` is unmoved.
   external ffi.Pointer<ffi.Char> turnServer;
 
   /// How many bytes of it.
@@ -3235,9 +3251,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
   /// `sipral_call_accept_transfer` or refuses it with
   /// `sipral_call_reject_transfer`, one request at a time.
-  ///
-  /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int referrals;
 
@@ -3256,9 +3269,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// while the stack is suspended (`sipral_stack_suspending`), for a
   /// stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
   /// own address. `sipral_ua`'s `keepalive` module has the reasons.
-  ///
-  /// Appended at the tail (task 8.7.4), with the one below; the pinned
-  /// `MIN_SIZE` is unmoved.
   @ffi.Uint32()
   external int registrarKeepalive;
 
@@ -3282,9 +3292,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// asks, with the platform's own TLS as it does for SIP. Anything
   /// else, or a value other than zero with no `turn_server`, is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
-  ///
-  /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int turnTransport;
 
@@ -3297,9 +3304,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
   /// platform this build has no backend for, which
   /// `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
-  ///
-  /// Appended at the tail (task 8.6.18), with the five below; the
-  /// pinned `MIN_SIZE` is unmoved.
   @ffi.Uint32()
   external int audio;
 
@@ -3348,9 +3352,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
   /// goes out. A media server built on this library raises it to what
   /// its machine can carry; `docs/19-numbers.md` has what one costs.
-  ///
-  /// Appended at the tail (task 8.10), with the three below; the
-  /// pinned `MIN_SIZE` is unmoved.
   @ffi.Uint32()
   external int maxDialogs;
 
@@ -3379,6 +3380,18 @@ final class SipralStackConfig extends ffi.Struct {
   @ffi.Uint32()
   external int diagnosticRecords;
 
+  /// When a call listens for keypad digits in the far end's audio, as a
+  /// SipralDtmfDetection: zero
+  /// on exactly the calls that negotiated no telephone event, which is
+  /// when such a far end has no other way to send one.
+  /// `sipral_call_dtmf_detection` changes it for one call.
+  ///
+  /// Here rather than after `rtp_port_max`, where it was appended: six
+  /// four-byte members in a row keep the struct free of padding at its
+  /// end on a 64-bit target and on 32-bit ARM alike.
+  @ffi.Uint32()
+  external int dtmfDetection;
+
   /// The STUN servers to turn to, in this order, when `stun_server`
   /// fails: `host:port` addresses separated by commas, not names.
   /// Optional, and only beside a `stun_server`. A server fails when it
@@ -3391,9 +3404,6 @@ final class SipralStackConfig extends ffi.Struct {
   /// never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
   /// when the server in use moves, and when every one has failed.
   /// Copied; the caller's buffer is its own again when this returns.
-  ///
-  /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-  /// unmoved.
   external ffi.Pointer<ffi.Char> stunFallbacks;
 
   /// How many bytes of it.
@@ -3409,26 +3419,12 @@ final class SipralStackConfig extends ffi.Struct {
   /// even `rtp_port_max` is never handed out. A range that holds no
   /// such pair, one given upside down, or one bound given without the
   /// other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
-  ///
-  /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int rtpPortMin;
 
   /// The highest port of that range, or zero with `rtp_port_min`.
   @ffi.Uint32()
   external int rtpPortMax;
-
-  /// When a call listens for keypad digits in the far end's audio, as a
-  /// SipralDtmfDetection: zero
-  /// on exactly the calls that negotiated no telephone event, which is
-  /// when such a far end has no other way to send one.
-  /// `sipral_call_dtmf_detection` changes it for one call.
-  ///
-  /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-  /// unmoved.
-  @ffi.Uint32()
-  external int dtmfDetection;
 }
 
 /// What one call to sipral_stack_poll did.
@@ -3540,17 +3536,11 @@ final class SipralStackSettings extends ffi.Struct {
 
   /// Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
   /// default filled in.
-  ///
-  /// Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int g729AnnexB;
 
   /// Whether a REFER outside any dialog reaches the application, as a
   /// `SipralToggle`, with the default — off — filled in.
-  ///
-  /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int referrals;
 
@@ -3558,17 +3548,11 @@ final class SipralStackSettings extends ffi.Struct {
   /// milliseconds, with the default filled in. Zero when
   /// `registrar_keepalive` was turned off, which is the one case where
   /// there is no figure to give.
-  ///
-  /// Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint64()
   external int registrarKeepaliveMs;
 
   /// The most calls the stack holds at once, with the default filled
   /// in.
-  ///
-  /// Appended at the tail (task 8.10), with the three below; the
-  /// pinned `MIN_SIZE` is unmoved.
   @ffi.Uint32()
   external int maxDialogs;
 
@@ -3588,9 +3572,6 @@ final class SipralStackSettings extends ffi.Struct {
   external int diagnosticRecords;
 
   /// The RTP port range, as given; both zero for none.
-  ///
-  /// Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int rtpPortMin;
 
@@ -3733,10 +3714,6 @@ final class SipralAccountConfig extends ffi.Struct {
   /// sipral_stack_transport_bind
   /// has bound. A number this stack has never bound is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
-  ///
-  /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-  /// unmoved, and what a caller built before this member existed never
-  /// sent reads as the zero that already means "the main transport".
   @ffi.Uint32()
   external int transport;
 
@@ -3792,10 +3769,6 @@ final class SipralAccountConfig extends ffi.Struct {
 
   /// Where this account's end-of-call voice quality reports go (RFC
   /// 6035, carried by a PUBLISH, RFC 3903), or null to send none.
-  ///
-  /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-  /// unmoved, and what a caller built before this member existed
-  /// never sent reads as the null that already means "send none".
   external ffi.Pointer<ffi.Char> qualityReportUri;
 
   /// How many bytes of it.
@@ -3804,8 +3777,7 @@ final class SipralAccountConfig extends ffi.Struct {
 
   /// A SipralSessionTimer: how
   /// this account's calls ask for a session timer (RFC 4028). Zero is
-  /// the stack's default, thirty minutes. ABI 0.29, appended at the
-  /// tail like every member after the pinned `MIN_SIZE`.
+  /// the stack's default, thirty minutes.
   @ffi.Uint32()
   external int sessionTimer;
 
@@ -4015,9 +3987,6 @@ final class SipralCallConfig extends ffi.Struct {
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
   /// override already goes out on its account's own transport, and
   /// there is nothing to combine this with.
-  ///
-  /// Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int transport;
 
@@ -4039,9 +4008,6 @@ final class SipralCallConfig extends ffi.Struct {
   /// with `sdp` is a session the application wrote, and the order in it
   /// is already the application's own. The names are still checked, so
   /// that a caller who has one wrong learns it here either way.
-  ///
-  /// Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-  /// unmoved.
   external ffi.Pointer<ffi.Char> codecs;
 
   /// How many bytes of it.
@@ -4057,9 +4023,6 @@ final class SipralCallConfig extends ffi.Struct {
   /// `media_address` set — for the reason `srtp` gives: a call placed
   /// with `sdp` is a session the application wrote, and the candidates
   /// in it are already the application's own to write or not.
-  ///
-  /// Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int ice;
 
@@ -4074,9 +4037,6 @@ final class SipralCallConfig extends ffi.Struct {
   /// by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
   /// and no candidates of its own, and typed text sent in the clear
   /// beside encrypted audio is worse than none.
-  ///
-  /// Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
-  /// pinned `MIN_SIZE` is unmoved.
   external ffi.Pointer<ffi.Char> textAddress;
 
   /// How many bytes of it.
@@ -4133,6 +4093,14 @@ final class SipralCodecInfo extends ffi.Struct {
   /// always travels as a dynamic type.
   @ffi.Uint32()
   external int hasStaticPayloadType;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// One codec this call could have used, and what became of it.
@@ -4163,6 +4131,14 @@ final class SipralCodecCandidate extends ffi.Struct {
   /// nothing beat the one that won.
   @ffi.Uint32()
   external int outrankedBy;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// One path a call's ICE agent tried — a candidate pair it checked, or a
@@ -4208,6 +4184,14 @@ final class SipralPathCandidate extends ffi.Struct {
   /// candidate at all.
   @ffi.Uint32()
   external int remoteKind;
+
+  /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
+  /// both put them without padding at the end of the struct, so that a
+  /// member a later version appends starts past the length a caller built
+  /// against this header declares. The library writes zero here and reads
+  /// nothing from it.
+  @ffi.Uint32()
+  external int reserved;
 
   /// Where to write the local address, `host:port` with a trailing
   /// NUL: for a pair, the candidate its checks left from — the host
@@ -4324,9 +4308,6 @@ final class SipralMediaInfo extends ffi.Struct {
 
   /// Whether the call agreed a real-time text stream (RFC 4103), which
   /// `sipral_media_send_text` writes to.
-  ///
-  /// Appended at the tail (ABI 0.31), like the three below; a caller
-  /// built before them never reads them.
   @ffi.Uint32()
   external int hasText;
 
@@ -4344,6 +4325,14 @@ final class SipralMediaInfo extends ffi.Struct {
   /// `a=rtcp-rsize`).
   @ffi.Uint32()
   external int reducedSize;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// What one call's media has cost, and what it is costing now.
@@ -4458,10 +4447,6 @@ final class SipralStreamStats extends ffi.Struct {
   /// Whether an RFC 3611 VoIP Metrics report is available at all —
   /// zero until this stream has identified a source to report on.
   /// Every `voip_*` member below is meaningless while this is zero.
-  ///
-  /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-  /// unmoved, and what a caller built before these members existed
-  /// never sent reads them all as zero, this one included.
   @ffi.Uint32()
   external int hasVoipMetrics;
 
@@ -4552,16 +4537,11 @@ final class SipralStreamStats extends ffi.Struct {
   /// is `packets_lost`. No packet is lost or discarded by it, so none of
   /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
   /// `loss_rate`, `score` and `suffering` do.
-  ///
-  /// Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
-  /// caller built before it existed never reads it.
   @ffi.Uint64()
   external int framesUnderrun;
 
   /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
   /// zero while it does not.
-  ///
-  /// Appended at the tail (ABI 0.31), like everything below it.
   @ffi.Uint32()
   external int feedback;
 
@@ -4647,11 +4627,16 @@ final class SipralMediaPacket extends ffi.Struct {
   /// says that instead, `destination` is the server, and the bytes are
   /// written, as they are and in order, on the media socket's
   /// connection to it — never sent as a datagram.
-  ///
-  /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-  /// unmoved.
   @ffi.Uint32()
   external int protocol;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. Set it to zero when the struct is handed in;
+  /// the library writes zero here and reads nothing from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// What SipralProcessorCallback is handed for one call: an ordinary
@@ -4785,7 +4770,7 @@ final class SipralTransmit extends ffi.Struct {
 }
 
 /// A transport that failed, and why, for
-/// sipral_stack_transport_failure.
+/// sipral_stack_transport_failed_with.
 ///
 /// The caller fills in all of it. `detail` is the platform's own sentence
 /// — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
@@ -5329,9 +5314,9 @@ final class SipralAnnounceEvent extends ffi.Struct {
 final class SipralResolveEvent extends ffi.Struct {
   /// The dialog this is about, and what
   /// sipral_stack_resolved
-  /// is answered with. Minted by the library, valid while the dialog
-  /// is, and answering for one that has ended changes nothing rather
-  /// than failing.
+  /// is answered with. Minted by the library and valid while the dialog
+  /// is; answering for one that has ended is
+  /// `SIPRAL_STATUS_STALE_HANDLE` and changes nothing.
   @ffi.Uint64()
   external int dialog;
 
@@ -5972,7 +5957,11 @@ final class SipralLocalConferenceEvent extends ffi.Struct {
 
 /// The arm of an event that its kind names.
 ///
-/// Reading any other arm reads bytes the library did not write for it.
+/// The whole union is zeroed before that one arm is written, so every
+/// byte past the arm, and every byte of another arm, reads as zero —
+/// which is what a member appended to an arm later reads as from a
+/// library built before it. Another arm still means nothing for this
+/// kind.
 final class SipralEventPayload extends ffi.Union {
   /// For SipralEventKind.registrationChanged.
   external SipralRegistrationEvent registration;
@@ -6231,6 +6220,14 @@ final class SipralSubscribeConfig extends ffi.Struct {
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`.
   @ffi.Uint32()
   external int transport;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. Set it to zero; the library reads nothing from
+  /// it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// One dialog a `dialog` subscription has been told about, with the text
@@ -6349,7 +6346,7 @@ final class SipralAudioInfo extends ffi.Struct {
   /// own processing behind it where the endpoint has any — a virtual
   /// cable has none, and cancels nothing. An application that wants
   /// the echo gone regardless attaches a processor to each call with
-  /// `sipral_call_attach_processor`; the delay it needs is
+  /// `sipral_media_attach_processor`; the delay it needs is
   /// `render_delay_ms`, and the engine tells each managed call that
   /// number itself, again after every device change.
   @ffi.Uint32()
@@ -6380,6 +6377,14 @@ final class SipralAudioInfo extends ffi.Struct {
   /// through the loudspeaker.
   @ffi.Uint32()
   external int ringer;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// One packet the engine encoded from the microphone, handed to
@@ -6408,6 +6413,14 @@ final class SipralAudioTransmit extends ffi.Struct {
   /// marks them.
   @ffi.Uint32()
   external int protocol;
+
+  /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
+  /// both put them without padding at the end of the struct, so that a
+  /// member a later version appends starts past the length a caller built
+  /// against this header declares. The library writes zero here and reads
+  /// nothing from it.
+  @ffi.Uint32()
+  external int reserved;
 
   /// Where to send it, `host:port`, UTF-8 and not NUL-terminated.
   external ffi.Pointer<ffi.Char> destination;
@@ -6516,6 +6529,14 @@ final class SipralStirConfig extends ffi.Struct {
   /// this on. ABI 0.32.
   @ffi.Uint32()
   external int acceptServiceProviderCodes;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. Set it to zero; the library reads nothing from
+  /// it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// How one stream of a call is protected: one entry of the encryption
@@ -6711,6 +6732,14 @@ final class SipralRecordingOptions extends ffi.Struct {
   /// survive a crash, or zero for every five seconds.
   @ffi.Uint32()
   external int checkpointMs;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. Set it to zero; the library reads nothing from
+  /// it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// A conference as a `conference` subscription holds it, read with
@@ -6769,6 +6798,14 @@ final class SipralConferenceUser extends ffi.Struct {
   /// How many media streams the first of them has.
   @ffi.Uint32()
   external int media;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// This account's presence, as sipral_account_publish_presence takes
@@ -6877,6 +6914,14 @@ final class SipralLocalConferenceConfig extends ffi.Struct {
   /// converts the devices to it.
   @ffi.Uint32()
   external int sampleRate;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. Set it to zero; the library reads nothing from
+  /// it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// A conference as it stands: `sipral_local_conference_info`.
@@ -6958,6 +7003,14 @@ final class SipralLocalConferenceMember extends ffi.Struct {
   /// The level of what it hears, in the same steps.
   @ffi.Uint32()
   external int gainOutput;
+
+  /// Zero. Rounds the struct up to a whole multiple of its alignment on
+  /// every target, so that a member a later version appends starts at or
+  /// past the length a caller built against this header declares, never
+  /// in padding inside it. The library writes zero here and reads nothing
+  /// from it.
+  @ffi.Uint32()
+  external int reserved;
 }
 
 /// Why the library could not be opened, or cannot serve this binding.
@@ -7044,7 +7097,7 @@ final class Sipral {
   /// does not ask about. The
   /// rule for all three numbers is the Versioning section of
   /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-  static const int abiVersionMinor = 32;
+  static const int abiVersionMinor = 33;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -7169,12 +7222,6 @@ final class Sipral {
   /// beside the facade, not under it, so the facade has nothing to say.
   static const int featureAudioDevice = 2048;
 
-  /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
-  /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
-  /// call whose media address is gone, and `sipral_call_media_readdress`
-  /// offers it at the socket the application bound on the new network.
-  static const int featureCallReaddress = 8192;
-
   /// See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
   /// be answered, on every call event: the asserted identity behind the
   /// account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
@@ -7185,6 +7232,20 @@ final class Sipral {
   /// `session_timer`.
   static const int featureCallerIdentity = 4096;
 
+  /// See SIPRAL_FEATURE_DTMF. A call in progress moves with the
+  /// network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+  /// call whose media address is gone, and `sipral_call_media_readdress`
+  /// offers it at the socket the application bound on the new network.
+  static const int featureCallReaddress = 8192;
+
+  /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+  /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
+  /// snapshot of a stack's state for a crash report
+  /// (`sipral_stack_state_text`). Set in every build of this library, which
+  /// always carries the redaction both depend on; a bit so that a binding
+  /// asks before it shows a "send diagnostics" control.
+  static const int featureLogging = 16384;
+
   /// See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
   /// (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
   /// `diagnostic_records` in `sipral_stack_config_t`, read back through
@@ -7193,14 +7254,6 @@ final class Sipral {
   /// what timed out and what was refused at a limit in
   /// `sipral_counters_t`.
   static const int featureLimits = 32768;
-
-  /// See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
-  /// with levels, rate-limited and redacted (`sipral_stack_log`), and a
-  /// snapshot of a stack's state for a crash report
-  /// (`sipral_stack_state`). Set in every build of this library, which
-  /// always carries the redaction both depend on; a bit so that a binding
-  /// asks before it shows a "send diagnostics" control.
-  static const int featureLogging = 16384;
 
   /// See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
   /// account given a key and a certificate URL signs every call it places
@@ -7382,84 +7435,90 @@ final class Sipral {
   /// leaving every bit clear.
   static const int privacyNone = 32;
 
-  /// The longest text sipral_stack_state writes, its NUL included: a
+  /// The longest text sipral_stack_state_text writes, its NUL included: a
   /// buffer of this many bytes always has room.
   static const int stateTextMax = 16384;
 
-  /// How many bytes this binding lays each struct and union out in, by
-  /// the name the header gives it: what `sipral_abi_struct_size` says
-  /// of the same name, in a library that agrees with this file.
-  static Map<String, int> recordSizes() => {
-        'sipral_abi_version_t': ffi.sizeOf<SipralAbiVersion>(),
-        'sipral_capabilities_t': ffi.sizeOf<SipralCapabilities>(),
-        'sipral_counters_t': ffi.sizeOf<SipralCounters>(),
-        'sipral_stack_config_t': ffi.sizeOf<SipralStackConfig>(),
-        'sipral_poll_result_t': ffi.sizeOf<SipralPollResult>(),
-        'sipral_stack_settings_t': ffi.sizeOf<SipralStackSettings>(),
-        'sipral_header_t': ffi.sizeOf<SipralHeader>(),
-        'sipral_account_config_t': ffi.sizeOf<SipralAccountConfig>(),
-        'sipral_call_config_t': ffi.sizeOf<SipralCallConfig>(),
-        'sipral_codec_info_t': ffi.sizeOf<SipralCodecInfo>(),
-        'sipral_codec_candidate_t': ffi.sizeOf<SipralCodecCandidate>(),
-        'sipral_path_candidate_t': ffi.sizeOf<SipralPathCandidate>(),
-        'sipral_media_info_t': ffi.sizeOf<SipralMediaInfo>(),
-        'sipral_stream_stats_t': ffi.sizeOf<SipralStreamStats>(),
-        'sipral_media_packet_t': ffi.sizeOf<SipralMediaPacket>(),
-        'sipral_processor_frame_t': ffi.sizeOf<SipralProcessorFrame>(),
-        'sipral_transmit_t': ffi.sizeOf<SipralTransmit>(),
-        'sipral_transport_failure_t': ffi.sizeOf<SipralTransportFailure>(),
-        'sipral_registration_event_t': ffi.sizeOf<SipralRegistrationEvent>(),
-        'sipral_call_event_t': ffi.sizeOf<SipralCallEvent>(),
-        'sipral_transfer_event_t': ffi.sizeOf<SipralTransferEvent>(),
-        'sipral_media_event_t': ffi.sizeOf<SipralMediaEvent>(),
-        'sipral_recovery_event_t': ffi.sizeOf<SipralRecoveryEvent>(),
-        'sipral_transport_wanted_event_t': ffi.sizeOf<SipralTransportWantedEvent>(),
-        'sipral_subscription_event_t': ffi.sizeOf<SipralSubscriptionEvent>(),
-        'sipral_announce_event_t': ffi.sizeOf<SipralAnnounceEvent>(),
-        'sipral_resolve_event_t': ffi.sizeOf<SipralResolveEvent>(),
-        'sipral_message_event_t': ffi.sizeOf<SipralMessageEvent>(),
-        'sipral_nat_event_t': ffi.sizeOf<SipralNatEvent>(),
-        'sipral_nat_relay_event_t': ffi.sizeOf<SipralNatRelayEvent>(),
-        'sipral_referral_event_t': ffi.sizeOf<SipralReferralEvent>(),
-        'sipral_turn_stream_event_t': ffi.sizeOf<SipralTurnStreamEvent>(),
-        'sipral_audio_event_t': ffi.sizeOf<SipralAudioEvent>(),
-        'sipral_stun_server_event_t': ffi.sizeOf<SipralStunServerEvent>(),
-        'sipral_verification_event_t': ffi.sizeOf<SipralVerificationEvent>(),
-        'sipral_progress_event_t': ffi.sizeOf<SipralProgressEvent>(),
-        'sipral_conference_event_t': ffi.sizeOf<SipralConferenceEvent>(),
-        'sipral_text_event_t': ffi.sizeOf<SipralTextEvent>(),
-        'sipral_presence_event_t': ffi.sizeOf<SipralPresenceEvent>(),
-        'sipral_transport_failed_event_t': ffi.sizeOf<SipralTransportFailedEvent>(),
-        'sipral_local_conference_event_t': ffi.sizeOf<SipralLocalConferenceEvent>(),
-        'sipral_event_payload_t': ffi.sizeOf<SipralEventPayload>(),
-        'sipral_event_t': ffi.sizeOf<SipralEvent>(),
-        'sipral_suspending_t': ffi.sizeOf<SipralSuspending>(),
-        'sipral_screen_request_t': ffi.sizeOf<SipralScreenRequest>(),
-        'sipral_subscribe_config_t': ffi.sizeOf<SipralSubscribeConfig>(),
-        'sipral_watched_dialog_t': ffi.sizeOf<SipralWatchedDialog>(),
-        'sipral_push_echo_t': ffi.sizeOf<SipralPushEcho>(),
-        'sipral_audio_device_t': ffi.sizeOf<SipralAudioDevice>(),
-        'sipral_audio_info_t': ffi.sizeOf<SipralAudioInfo>(),
-        'sipral_audio_transmit_t': ffi.sizeOf<SipralAudioTransmit>(),
-        'sipral_log_record_t': ffi.sizeOf<SipralLogRecord>(),
-        'sipral_stir_config_t': ffi.sizeOf<SipralStirConfig>(),
-        'sipral_stream_encryption_t': ffi.sizeOf<SipralStreamEncryption>(),
-        'sipral_progress_config_t': ffi.sizeOf<SipralProgressConfig>(),
-        'sipral_consent_tone_t': ffi.sizeOf<SipralConsentTone>(),
-        'sipral_recording_options_t': ffi.sizeOf<SipralRecordingOptions>(),
-        'sipral_conference_t': ffi.sizeOf<SipralConference>(),
-        'sipral_conference_user_t': ffi.sizeOf<SipralConferenceUser>(),
-        'sipral_presence_t': ffi.sizeOf<SipralPresence>(),
-        'sipral_record_config_t': ffi.sizeOf<SipralRecordConfig>(),
-        'sipral_local_conference_config_t': ffi.sizeOf<SipralLocalConferenceConfig>(),
-        'sipral_local_conference_info_t': ffi.sizeOf<SipralLocalConferenceInfo>(),
-        'sipral_local_conference_member_t': ffi.sizeOf<SipralLocalConferenceMember>(),
+  /// Every struct and union the header declares, with how long tools/abi-gen
+  /// worked it out to be on each of the three layouts the ABI ships for:
+  /// 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+  /// to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+  /// test holds this binding's own layout of each record, and the library's
+  /// answer from sipral_abi_struct_size, to the number for the layout it runs
+  /// on; bindings/c/abi-layout.c holds a C compiler to all three.
+  /// Each list is this binding's own length first, then p64, p32a4
+  /// and p32a8.
+  static Map<String, List<int>> recordLayouts() => {
+        'sipral_abi_version_t': [ffi.sizeOf<SipralAbiVersion>(), 24, 20, 20],
+        'sipral_capabilities_t': [ffi.sizeOf<SipralCapabilities>(), 24, 16, 16],
+        'sipral_counters_t': [ffi.sizeOf<SipralCounters>(), 232, 228, 232],
+        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 368, 248, 256],
+        'sipral_poll_result_t': [ffi.sizeOf<SipralPollResult>(), 48, 28, 32],
+        'sipral_stack_settings_t': [ffi.sizeOf<SipralStackSettings>(), 112, 104, 112],
+        'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
+        'sipral_account_config_t': [ffi.sizeOf<SipralAccountConfig>(), 392, 208, 216],
+        'sipral_call_config_t': [ffi.sizeOf<SipralCallConfig>(), 152, 84, 84],
+        'sipral_codec_info_t': [ffi.sizeOf<SipralCodecInfo>(), 32, 28, 28],
+        'sipral_codec_candidate_t': [ffi.sizeOf<SipralCodecCandidate>(), 24, 20, 20],
+        'sipral_path_candidate_t': [ffi.sizeOf<SipralPathCandidate>(), 88, 60, 64],
+        'sipral_media_info_t': [ffi.sizeOf<SipralMediaInfo>(), 104, 92, 96],
+        'sipral_stream_stats_t': [ffi.sizeOf<SipralStreamStats>(), 328, 312, 328],
+        'sipral_media_packet_t': [ffi.sizeOf<SipralMediaPacket>(), 64, 36, 36],
+        'sipral_processor_frame_t': [ffi.sizeOf<SipralProcessorFrame>(), 64, 32, 32],
+        'sipral_transmit_t': [ffi.sizeOf<SipralTransmit>(), 88, 48, 48],
+        'sipral_transport_failure_t': [ffi.sizeOf<SipralTransportFailure>(), 40, 24, 24],
+        'sipral_registration_event_t': [ffi.sizeOf<SipralRegistrationEvent>(), 40, 36, 40],
+        'sipral_call_event_t': [ffi.sizeOf<SipralCallEvent>(), 328, 208, 216],
+        'sipral_transfer_event_t': [ffi.sizeOf<SipralTransferEvent>(), 24, 16, 16],
+        'sipral_media_event_t': [ffi.sizeOf<SipralMediaEvent>(), 96, 80, 80],
+        'sipral_recovery_event_t': [ffi.sizeOf<SipralRecoveryEvent>(), 16, 16, 16],
+        'sipral_transport_wanted_event_t': [ffi.sizeOf<SipralTransportWantedEvent>(), 40, 20, 20],
+        'sipral_subscription_event_t': [ffi.sizeOf<SipralSubscriptionEvent>(), 56, 56, 56],
+        'sipral_announce_event_t': [ffi.sizeOf<SipralAnnounceEvent>(), 16, 16, 16],
+        'sipral_resolve_event_t': [ffi.sizeOf<SipralResolveEvent>(), 32, 24, 24],
+        'sipral_message_event_t': [ffi.sizeOf<SipralMessageEvent>(), 96, 64, 64],
+        'sipral_nat_event_t': [ffi.sizeOf<SipralNatEvent>(), 64, 40, 40],
+        'sipral_nat_relay_event_t': [ffi.sizeOf<SipralNatRelayEvent>(), 72, 40, 40],
+        'sipral_referral_event_t': [ffi.sizeOf<SipralReferralEvent>(), 40, 24, 24],
+        'sipral_turn_stream_event_t': [ffi.sizeOf<SipralTurnStreamEvent>(), 40, 24, 24],
+        'sipral_audio_event_t': [ffi.sizeOf<SipralAudioEvent>(), 20, 20, 20],
+        'sipral_stun_server_event_t': [ffi.sizeOf<SipralStunServerEvent>(), 40, 20, 20],
+        'sipral_verification_event_t': [ffi.sizeOf<SipralVerificationEvent>(), 96, 60, 60],
+        'sipral_progress_event_t': [ffi.sizeOf<SipralProgressEvent>(), 80, 80, 80],
+        'sipral_conference_event_t': [ffi.sizeOf<SipralConferenceEvent>(), 24, 20, 24],
+        'sipral_text_event_t': [ffi.sizeOf<SipralTextEvent>(), 24, 12, 12],
+        'sipral_presence_event_t': [ffi.sizeOf<SipralPresenceEvent>(), 88, 64, 72],
+        'sipral_transport_failed_event_t': [ffi.sizeOf<SipralTransportFailedEvent>(), 32, 24, 24],
+        'sipral_local_conference_event_t': [ffi.sizeOf<SipralLocalConferenceEvent>(), 40, 40, 40],
+        'sipral_event_payload_t': [ffi.sizeOf<SipralEventPayload>(), 328, 208, 216],
+        'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 384, 248, 264],
+        'sipral_suspending_t': [ffi.sizeOf<SipralSuspending>(), 32, 16, 16],
+        'sipral_screen_request_t': [ffi.sizeOf<SipralScreenRequest>(), 48, 28, 32],
+        'sipral_subscribe_config_t': [ffi.sizeOf<SipralSubscribeConfig>(), 88, 48, 48],
+        'sipral_watched_dialog_t': [ffi.sizeOf<SipralWatchedDialog>(), 32, 28, 32],
+        'sipral_push_echo_t': [ffi.sizeOf<SipralPushEcho>(), 24, 20, 24],
+        'sipral_audio_device_t': [ffi.sizeOf<SipralAudioDevice>(), 32, 28, 28],
+        'sipral_audio_info_t': [ffi.sizeOf<SipralAudioInfo>(), 48, 44, 48],
+        'sipral_audio_transmit_t': [ffi.sizeOf<SipralAudioTransmit>(), 56, 36, 40],
+        'sipral_log_record_t': [ffi.sizeOf<SipralLogRecord>(), 64, 40, 48],
+        'sipral_stir_config_t': [ffi.sizeOf<SipralStirConfig>(), 56, 44, 48],
+        'sipral_stream_encryption_t': [ffi.sizeOf<SipralStreamEncryption>(), 32, 28, 28],
+        'sipral_progress_config_t': [ffi.sizeOf<SipralProgressConfig>(), 72, 68, 68],
+        'sipral_consent_tone_t': [ffi.sizeOf<SipralConsentTone>(), 32, 28, 28],
+        'sipral_recording_options_t': [ffi.sizeOf<SipralRecordingOptions>(), 32, 28, 28],
+        'sipral_conference_t': [ffi.sizeOf<SipralConference>(), 32, 28, 28],
+        'sipral_conference_user_t': [ffi.sizeOf<SipralConferenceUser>(), 24, 20, 20],
+        'sipral_presence_t': [ffi.sizeOf<SipralPresence>(), 32, 20, 20],
+        'sipral_record_config_t': [ffi.sizeOf<SipralRecordConfig>(), 80, 40, 40],
+        'sipral_local_conference_config_t': [ffi.sizeOf<SipralLocalConferenceConfig>(), 24, 20, 20],
+        'sipral_local_conference_info_t': [ffi.sizeOf<SipralLocalConferenceInfo>(), 56, 48, 48],
+        'sipral_local_conference_member_t': [ffi.sizeOf<SipralLocalConferenceMember>(), 40, 36, 40],
       };
 
   /// Copy the calling thread's last error message into `buffer`.
   ///
   /// The message is UTF-8 and is written with a trailing NUL, which is not
-  /// counted in the length. `out_len`, when it is not null, always receives
+  /// counted in the length. `out_needed`, when it is not null, always receives
   /// the number of bytes the message needs including that NUL, so a caller
   /// that passes a capacity of zero and a null buffer gets the length back
   /// and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
@@ -7475,10 +7534,10 @@ final class Sipral {
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or null with a capacity
-  /// of zero, and `out_len` must point to one `size_t` or be null.
-  late final int Function(ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen) lastErrorMessage = library.lookupFunction<
-      ffi.Int32 Function(ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen),
-      int Function(ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen)>('sipral_last_error_message');
+  /// of zero, and `out_needed` must point to one `size_t` or be null.
+  late final int Function(ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) lastErrorMessage = library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_last_error_message');
 
   /// The short name of a status code, as a static NUL-terminated string, or
   /// null for a number that is not a status code.
@@ -7641,8 +7700,7 @@ final class Sipral {
   /// fall more than fifty milliseconds behind the last one this stack saw —
   /// signalling may be called from any thread, and two of them reading the
   /// same clock a moment apart is not a caller mistake — and a jump further
-  /// back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
-  /// delivered.
+  /// back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
   ///
   /// The event callback is called from inside this function, on this
   /// thread, and with nothing held: the stack's work is done and its lock
@@ -7887,8 +7945,9 @@ final class Sipral {
   ///
   /// Safety
   ///
-  /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-  /// point at one `size_t`.
+  /// `buffer` must be writable for `capacity` bytes or be null with a
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be
+  /// null.
   late final int Function(int stack, int subscription, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) subscriptionDialogText = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Size index, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, int subscription, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_subscription_dialog_text');
@@ -8477,13 +8536,17 @@ final class Sipral {
   /// the field did not write — is one byte, the NUL. An index past the
   /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
   ///
+  /// `index` comes before `which`, as it does in every other entry point
+  /// that reads a piece of text about one of several things: the entry
+  /// first, then the piece of it.
+  ///
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or null with a capacity
-  /// of zero, and `out_needed` must point at one `size_t`.
-  late final int Function(int stack, int call, int which, int index, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) callIdentityText = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Uint32 which, ffi.Size index, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
-      int Function(int stack, int call, int which, int index, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_identity_text');
+  /// of zero, and `out_needed` must point at one `size_t` or be null.
+  late final int Function(int stack, int call, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) callIdentityText = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Size index, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, int call, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_identity_text');
 
   /// Join two active calls into a local conference of three: from here on,
   /// each call's far end hears the other's far end and this end's own
@@ -9006,65 +9069,66 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle media, ffi.Uint64 nowMs, ffi.Pointer<ffi.Int16> samples, ffi.Size sampleCount, ffi.Pointer<SipralMediaPacket> packet),
       int Function(int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount, ffi.Pointer<SipralMediaPacket> packet)>('sipral_media_capture');
 
-  /// Run `process` over every frame captured on this call, against the
-  /// far-end audio this call played MediaSession::render_delay earlier
-  /// — echo cancellation, gain control and noise suppression are all this
-  /// one seam, and `docs/05-media.md` says why.
+  /// Run `callback` over every frame captured on this call, against the
+  /// far-end audio this call played a render delay earlier — echo
+  /// cancellation, gain control and noise suppression are all this one
+  /// seam, and `docs/05-media.md` says why.
   ///
   /// What was attached before is dropped, along with the echo path it had
   /// learned. Attaching mid-call is allowed and costs the first few hundred
   /// milliseconds of a fresh adaptation, the same price a call pays at its
   /// start.
   ///
-  /// **`process` runs with this call's media locked**, the same as
-  /// crate::screening::SipralScreenCallback and unlike
-  /// crate::event::SipralEventCallback: it is called from inside
-  /// sipral_media_playback (to learn what the loudspeaker was just
-  /// given) and inside sipral_media_capture (to run the frame just
+  /// **`callback` runs with this call's media locked**, the same as the
+  /// screening callback and unlike the event callback: it is called from
+  /// inside sipral_media_playback (to learn what the loudspeaker was
+  /// just given) and inside sipral_media_capture (to run the frame just
   /// captured), and — with SipralProcessorFrame's `reset` set — whenever
   /// this call's media forgets what it has learned, a device change or a
   /// codec change mid-call. All three run on whichever thread called the
-  /// entry point that triggered them. In consequence, **it must not call
-  /// back into the media handle it was attached through**, on this thread
-  /// or on any other — doing so does not deadlock, since every media entry
-  /// point takes its session's lock without waiting and answers
-  /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
-  /// rather than relied on. A *different* call's media, or this stack's
-  /// own entry points, are unaffected. It must not unwind: a panic that
-  /// reached C across this boundary would take the host process with it,
-  /// the same rule every callback in this ABI is held to.
+  /// entry point that triggered them. **From inside `callback`, call
+  /// nothing on any media handle and nothing on this call's stack**: every
+  /// such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
+  /// thread that calls into this call's media meanwhile waits for the
+  /// frame to finish, so a processor that reached into a second call's
+  /// media while that call's processor reached into this one would wait on
+  /// the other for ever; refusing every media handle from inside a frame
+  /// is what rules that out. It must not unwind: a panic that reached C
+  /// across this boundary would take the host process with it, the same
+  /// rule every callback in this ABI is held to.
   ///
-  /// `user_data` is handed back to `process` untouched on every call, read
+  /// `user_data` is handed back to `callback` untouched on every call, read
   /// by nothing here, and has to outlive the last one — which the caller
   /// who installed it is the one to know is over:
-  /// `sipral_call_detach_processor` or the call ending are the two ways.
+  /// `sipral_media_detach_processor` returning, or `sipral_media_release`
+  /// of this handle, are the two ways.
   ///
   /// Safety
   ///
-  /// `process` is called on whichever thread calls
+  /// `callback` is called on whichever thread calls
   /// sipral_media_playback or sipral_media_capture on this call,
   /// for as long as the processor stays attached, and `user_data` has to
   /// outlive the last such call.
-  late final int Function(int media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> process, ffi.Pointer<ffi.Void> userData) callAttachProcessor = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> process, ffi.Pointer<ffi.Void> userData),
-      int Function(int media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> process, ffi.Pointer<ffi.Void> userData)>('sipral_call_attach_processor');
+  late final int Function(int media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> callback, ffi.Pointer<ffi.Void> userData) mediaAttachProcessor = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> callback, ffi.Pointer<ffi.Void> userData),
+      int Function(int media, ffi.Pointer<ffi.NativeFunction<SipralProcessorCallback>> callback, ffi.Pointer<ffi.Void> userData)>('sipral_media_attach_processor');
 
-  /// Stop running the processor sipral_call_attach_processor attached,
+  /// Stop running the processor sipral_media_attach_processor attached,
   /// if there was one.
   ///
   /// `out_was_attached`, when not null, says whether there was one to stop:
   /// 1 if a processor was attached and is now detached, 0 if there was
   /// none. The frames the application hands over reach the encoder
   /// untouched again from the next one, and the loudspeaker history kept
-  /// for it is released. Once this returns, `process` is not called again
+  /// for it is released. Once this returns, `callback` is not called again
   /// for this attachment — the moment `user_data` may be freed.
   ///
   /// Safety
   ///
   /// `out_was_attached` must point at one `uint32_t` or be null.
-  late final int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached) callDetachProcessor = library.lookupFunction<
+  late final int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached) mediaDetachProcessor = library.lookupFunction<
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Uint32> outWasAttached),
-      int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached)>('sipral_call_detach_processor');
+      int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached)>('sipral_media_detach_processor');
 
   /// Forget the echo path, the noise floor and the gain the attached
   /// processor has learned, keeping the processor itself attached.
@@ -9072,7 +9136,7 @@ final class Sipral {
   /// What a device change asks for: the estimate was built for a different
   /// loudspeaker and a different microphone, and carrying it forward makes
   /// the processor fight it for a while instead of adapting cleanly. Calls
-  /// the `process` given to sipral_call_attach_processor with
+  /// the `callback` given to sipral_media_attach_processor with
   /// SipralProcessorFrame's `reset` set.
   ///
   /// `out_was_attached`, when not null, says whether there was a processor
@@ -9081,9 +9145,9 @@ final class Sipral {
   /// Safety
   ///
   /// `out_was_attached` must point at one `uint32_t` or be null.
-  late final int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached) callResetProcessor = library.lookupFunction<
+  late final int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached) mediaResetProcessor = library.lookupFunction<
       ffi.Int32 Function(SipralHandle media, ffi.Pointer<ffi.Uint32> outWasAttached),
-      int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached)>('sipral_call_reset_processor');
+      int Function(int media, ffi.Pointer<ffi.Uint32> outWasAttached)>('sipral_media_reset_processor');
 
   /// One frame of a local conference of two calls: decode what `media_a`'s
   /// and `media_b`'s far ends each sent, mix what each of the three
@@ -9194,7 +9258,7 @@ final class Sipral {
   /// One at a time, like every other poll in this crate: call it after
   /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
   /// for a call this stack was running media on, and keep calling until
-  /// `out_packet` comes back with a `len` of zero. A call whose media never
+  /// `packet` comes back with a `len` of zero. A call whose media never
   /// ran leaves nothing here, but for one thing.
   ///
   /// A call given a relay on a TURN server (`turn_server` on the stack's
@@ -9209,11 +9273,11 @@ final class Sipral {
   ///
   /// Safety
   ///
-  /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+  /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
   /// `sipral_media_packet_t` as sipral_media_capture describes.
-  late final int Function(int stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket) stackPollFarewell = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket),
-      int Function(int stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket)>('sipral_stack_poll_farewell');
+  late final int Function(int stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet) stackPollFarewell = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet),
+      int Function(int stack, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet)>('sipral_stack_poll_farewell');
 
   /// Whether a digit is going out or waiting to, and how many have not
   /// started yet.
@@ -9316,8 +9380,9 @@ final class Sipral {
   ///
   /// `from` is the far end, as `host:port`. `to` is the address the datagram
   /// arrived on, which RFC 3581 §4 makes the address the response has to go
-  /// out from; null with a length of zero means the address this stack was
-  /// created with, which is the answer for a socket bound to one address.
+  /// out from; a length of zero, whatever the pointer, means the address
+  /// this stack was created with, which is the answer for a socket bound to
+  /// one address.
   ///
   /// A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
   /// in each, so it arrives whole the way a datagram does.
@@ -9381,7 +9446,8 @@ final class Sipral {
   ///
   /// `local` is the address the far end reaches this one at, as `host:port`.
   /// `remote` is the far end of a connection, and is refused on a datagram
-  /// transport, which has many.
+  /// transport, which has many; a length of zero, whatever the pointer,
+  /// leaves it out.
   ///
   /// This is also how a request
   /// SipralEventKind.transportWanted
@@ -9414,9 +9480,18 @@ final class Sipral {
   /// socket over it would drop the calls that were fine. This is for the
   /// socket that is over.
   ///
+  /// It is also the answer to a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` the
+  /// application could not honour: a failure told of a transport that is
+  /// not up — the number it would have bound the stream at, never bound or
+  /// retired — while the stack waits for that stream is a connection that
+  /// could not be opened, and every request waiting for it stops waiting
+  /// now (RFC 3261 §18.1.1: trimmed into a datagram when it then fits,
+  /// ended with a 513 naming the limit otherwise). A number never bound is
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` while nothing is waiting.
+  ///
   /// The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
   /// of what the failure did to the registrations and calls on it.
-  /// sipral_stack_transport_failure is the same call with the TLS
+  /// sipral_stack_transport_failed_with is the same call with the TLS
   /// library's reason carried along.
   ///
   /// Safety
@@ -9440,6 +9515,9 @@ final class Sipral {
   /// nothing, and the bind that follows the reconnect undoes it. A
   /// transport already down is not retired twice, and the failure is still
   /// raised: that is how each attempt to connect again that fails is told.
+  /// A stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for and that
+  /// could not be opened is told here as well, as
+  /// sipral_stack_transport_failed says.
   ///
   /// A TLS reason on a transport that does not speak TLS or WSS is
   /// `SIPRAL_STATUS_INVALID_ARGUMENT`, and so is a detail longer than
@@ -9450,9 +9528,9 @@ final class Sipral {
   /// `failure` must point at a `sipral_transport_failure_t` whose `size`
   /// member says how long it is, and its `detail` must be readable for
   /// `detail_len` bytes.
-  late final int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs) stackTransportFailure = library.lookupFunction<
+  late final int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs) stackTransportFailedWith = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralTransportFailure> failure, ffi.Uint64 nowMs),
-      int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs)>('sipral_stack_transport_failure');
+      int Function(int stack, ffi.Pointer<SipralTransportFailure> failure, int nowMs)>('sipral_stack_transport_failed_with');
 
   /// Say that a connection closed: the far end went away, or a read returned
   /// zero.
@@ -9575,7 +9653,6 @@ final class Sipral {
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> local, ffi.Size localLen, ffi.Uint64 nowMs),
       int Function(int stack, ffi.Pointer<ffi.Char> local, int localLen, int nowMs)>('sipral_stack_nat_unmap');
 
-  /// Take the next STUN request a media socket has to send.entry! {
   /// Take the next STUN request a media socket has to send.
   ///
   /// The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -10079,10 +10156,12 @@ final class Sipral {
   /// sipral_stack_transport_bind
   /// is how it gets another chance.
   ///
-  /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
-  /// cases, and neither is an error: the dialog has ended, and none of the
-  /// addresses is one this stack can reach on the protocol asked for. The
-  /// flow stands exactly as it did.
+  /// `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
+  /// of the addresses is one this stack can reach on the protocol asked
+  /// for: the flow stands exactly as it did. A dialog that has ended by the
+  /// time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
+  /// other handle to something that is gone, and changes nothing either;
+  /// an application that resolves in the background treats the two alike.
   ///
   /// There is no `now_ms` here on purpose. Every other call that changes
   /// what this stack will send takes the time because something it does is
@@ -10129,23 +10208,23 @@ final class Sipral {
   ///
   /// Readable at any point in the call's life, and for as long after it as
   /// the endpoint has not evicted the record to make room for a newer one —
-  /// `sipral_stack_config_t` has no member for the ceiling yet, so today
-  /// that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+  /// how many are kept is `sipral_stack_config_t::diagnostic_records`,
+  /// 32 when it is zero. A call whose
   /// record has been evicted, or that has had nothing decided about it yet,
   /// answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
   /// record, and refusing to read one that happens to be empty would make
   /// a caller unable to tell "nothing yet" from "something went wrong".
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-  /// document, with the length needed in `out_len`.
+  /// document, with the length needed in `out_needed`.
   ///
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or be null with a
-  /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-  late final int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen) callRecordJson = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen),
-      int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen)>('sipral_call_record_json');
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+  late final int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) callRecordJson = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_record_json');
 
   /// Copy the whole diagnostic document into `buffer`: what a bug report
   /// carries, as the JSON `docs/14-diagnostics.md` describes.
@@ -10158,15 +10237,15 @@ final class Sipral {
   /// sipral_call_record_json is already the way to ask about one call.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-  /// document, with the length needed in `out_len`.
+  /// document, with the length needed in `out_needed`.
   ///
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or be null with a
-  /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen) stackDiagnosticsJson = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen),
-      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen)>('sipral_stack_diagnostics_json');
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) stackDiagnosticsJson = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_stack_diagnostics_json');
 
   /// What a `conference` subscription holds about the conference as a
   /// whole (RFC 4575 §5.5).
@@ -10206,8 +10285,9 @@ final class Sipral {
   ///
   /// Safety
   ///
-  /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-  /// point at one `size_t`.
+  /// `buffer` must be writable for `capacity` bytes or be null with a
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be
+  /// null.
   late final int Function(int stack, int subscription, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) subscriptionConferenceText = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle subscription, ffi.Size index, ffi.Uint32 which, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, int subscription, int index, int which, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_subscription_conference_text');
@@ -10236,8 +10316,9 @@ final class Sipral {
   ///
   /// Safety
   ///
-  /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-  /// point at one `size_t`.
+  /// `buffer` must be writable for `capacity` bytes or be null with a
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be
+  /// null.
   late final int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) callConferenceUri = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle call, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
       int Function(int stack, int call, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_call_conference_uri');
@@ -10431,7 +10512,7 @@ final class Sipral {
   /// session and say nothing about it.
   ///
   /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
-  /// text, with the length needed in `out_len` — asking again with a bigger
+  /// text, with the length needed in `out_needed` — asking again with a bigger
   /// buffer answers the same recording rather than stopping a new one,
   /// so a caller that does not yet know how big a buffer to bring may ask
   /// twice: once to be told, once to be handed the text. Once a call here
@@ -10442,10 +10523,10 @@ final class Sipral {
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or be null with a
-  /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen) stackRecordingStop = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen),
-      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen)>('sipral_stack_recording_stop');
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) stackRecordingStop = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_stack_recording_stop');
 
   /// Ask the platform what devices there are, and say how many the list
   /// holds now.
@@ -10475,10 +10556,13 @@ final class Sipral {
 
   /// The device at `index` in the list, and its name into `buffer`.
   ///
-  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
-  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
-  /// length needed in `out_needed` and the struct filled in all the same;
-  /// the name is UTF-8 and not NUL-terminated.
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
+  /// is written the way every other text this ABI hands out is: UTF-8 with
+  /// a trailing NUL, and `out_needed`, when it is not null, receives the
+  /// bytes it needs with that NUL counted. When the name does not fit, the
+  /// answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
+  /// neither to `buffer` nor to `out_device`: ask with a capacity of zero
+  /// to learn the length, then again with room.
   ///
   /// Safety
   ///
@@ -10682,16 +10766,16 @@ final class Sipral {
   /// taken. A call's media session that a thread is in the middle of a
   /// frame on is reported as busy rather than waited for.
   ///
-  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
-  /// when it does not fit; `out_len` may be null.
+  /// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
+  /// when it does not fit; `out_needed` may be null.
   ///
   /// Safety
   ///
   /// `buffer` must be writable for `capacity` bytes or be null with a
-  /// capacity of zero, and `out_len` must point at one `size_t` or be null.
-  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen) stackState = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outLen),
-      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outLen)>('sipral_stack_state');
+  /// capacity of zero, and `out_needed` must point at one `size_t` or be null.
+  late final int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded) stackStateText = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<ffi.Char> buffer, ffi.Size capacity, ffi.Pointer<ffi.Size> outNeeded),
+      int Function(int stack, ffi.Pointer<ffi.Char> buffer, int capacity, ffi.Pointer<ffi.Size> outNeeded)>('sipral_stack_state_text');
 
   /// Reserve a free even port from this stack's RTP range, with the odd
   /// port above it kept for RTCP, and write it to `out_port`.
@@ -11008,17 +11092,17 @@ final class Sipral {
 
   /// The oldest packet a member's call owes its far end, in application
   /// mode: `out_call` names the call, whose media socket sends it, and
-  /// `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+  /// `packet` is filled as `sipral_media_capture` fills one. A `len`
   /// of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
   /// waiting. Drain it after every tick.
   ///
   /// Safety
   ///
-  /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+  /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
   /// `sipral_media_packet_t` as `sipral_media_capture` describes.
-  late final int Function(int conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket) localConferencePollTransmit = library.lookupFunction<
-      ffi.Int32 Function(SipralHandle conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket),
-      int Function(int conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> outPacket)>('sipral_local_conference_poll_transmit');
+  late final int Function(int conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet) localConferencePollTransmit = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet),
+      int Function(int conference, ffi.Pointer<SipralHandle> outCall, ffi.Pointer<SipralMediaPacket> packet)>('sipral_local_conference_poll_transmit');
 
   /// Record the whole conference to `path`: everybody it hears, each at
   /// its own level, in one channel, written as `options` say — WAV or Ogg

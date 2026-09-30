@@ -5,20 +5,99 @@
  * Do not edit: `cargo run -p sipral-abi-gen` writes it again, and
  * `scripts/check.sh` fails when what is committed is not what came out.
  *
- * Every function here returns a sipral_status_t except where its own
- * comment says otherwise, sets the calling thread's last error on
- * failure, and catches any panic rather than letting one reach C. A
- * stack may be used from any thread but only one at a time: a second
- * thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback
- * runs with nothing held, so the library may be called from inside it.
- * A call's media is reached through a handle of its own, from
- * sipral_call_media, and never waits on the stack.
+ * CONVENTIONS. Every declaration below follows these; a comment that
+ * says otherwise is the exception, and says so.
+ *
+ * Status. Every function returns a sipral_status_t, except the three
+ * that return a static name (sipral_status_name, sipral_codec_name,
+ * sipral_event_kind_name: NUL-terminated, the library's, valid while it
+ * is loaded). sipral_status_t is the one signed type: zero is success,
+ * every failure is positive, none is negative, and a newer library may
+ * return one an older header has no name for, which is a failure like
+ * any other. A failure sets the calling thread's last error
+ * (sipral_last_error_message); a success clears it. A panic never
+ * crosses: it is SIPRAL_STATUS_PANIC.
+ *
+ * Enumerations. Each is a typedef of a fixed-width integer and the
+ * names as constants, so no compiler picks a width. Values are only
+ * ever added, never renumbered. In the enumerations that start at 1
+ * zero names nothing: read it as absent.
+ *
+ * Structs that carry `size`. Zero the whole struct, padding included,
+ * then set `size` to its sizeof, on a struct handed in and on one the
+ * library fills alike. A library that knows fewer members reads what
+ * it knows and refuses a nonzero byte past it with
+ * SIPRAL_STATUS_NOT_SUPPORTED; one that fills fewer writes back the
+ * `size` it filled and zeroes the rest. A struct only ever grows by appending members
+ * at its end, and no struct here ends in padding on any target, so an
+ * appended member never lands inside a length a caller declares. The
+ * least a caller may declare is where the oldest version of each
+ * struct ended (bindings/c/abi-sizes.txt). sipral_header_t is the one
+ * struct without a size: it is the element of an array, and never
+ * grows. The event payload union is zeroed whole before the one arm
+ * its kind names is written.
+ *
+ * Text and bytes in. A pointer and a length in bytes, the pointer
+ * read for that length during the call and never kept. Text is UTF-8
+ * with no NUL expected or read, and at most 65536 bytes. For an
+ * optional piece a length of zero is absent, whatever the pointer.
+ *
+ * Text out. `buffer`, `capacity`, `out_needed`: the text is written
+ * with a trailing NUL, and `out_needed`, which may be null, receives
+ * the bytes it needs with that NUL counted. Too small a buffer is
+ * SIPRAL_STATUS_BUFFER_TOO_SMALL and nothing is written; a null
+ * buffer with a capacity of zero asks for the length alone.
+ * Bytes out (sipral_account_freeze, sipral_stack_codec_order,
+ * sipral_media_playback) are counted without a NUL and say so. A
+ * packet struct (sipral_media_packet_t, sipral_transmit_t) brings
+ * buffers at least as large as the constant each member's comment
+ * names, is refused whole with SIPRAL_STATUS_BUFFER_TOO_SMALL when one
+ * is smaller, and comes back with a `len` of zero when nothing was
+ * waiting.
+ *
+ * Handles. 64-bit, zero never valid. A handle that never came from
+ * this library, or from another stack, is
+ * SIPRAL_STATUS_INVALID_HANDLE; one whose object is gone is
+ * SIPRAL_STATUS_STALE_HANDLE. The library hands out no memory for a
+ * caller to free.
+ *
+ * Threads. A stack may be used from any thread, one at a time: a
+ * second thread gets SIPRAL_STATUS_BUSY rather than a wait. A call's
+ * media is reached through a handle of its own (sipral_call_media) and
+ * never waits on the stack; it waits only for a frame another thread
+ * is in the middle of on that same call. The sipral_audio_* calls wait
+ * for the audio engine, which a platform probe holds for up to
+ * sipral_stack_config_t::audio_probe_ms; nothing else waits on them.
+ *
+ * Callbacks. None may unwind into the library. Each gets back its
+ * `user_data` untouched and reads nothing else the caller owns.
+ *   event (sipral_stack_config_t::event_callback): on the thread in
+ *     sipral_stack_poll, with nothing held; may call anything, this
+ *     stack included. user_data lives as long as the stack.
+ *   screen (sipral_stack_screen): on the thread feeding the stack
+ *     bytes, with the stack's lock held; a call into this stack is
+ *     SIPRAL_STATUS_BUSY. user_data lives until the policy is replaced
+ *     or removed and no thread is inside the stack.
+ *   processor (sipral_media_attach_processor): on the thread in
+ *     sipral_media_capture or sipral_media_playback, with that call's
+ *     media held; a call on any media handle, or into that call's
+ *     stack, is SIPRAL_STATUS_BUSY. user_data lives until
+ *     sipral_media_detach_processor returns or the handle is released.
+ *   audio transmit (sipral_stack_config_t::audio_transmit_callback):
+ *     on the audio engine's own thread, with nothing of the library's
+ *     held; sipral_stack_destroy from it is SIPRAL_STATUS_BUSY.
+ *     user_data lives as long as the stack.
+ *   log (sipral_stack_log): on the thread that just finished a call
+ *     into the stack, with nothing held, one line at a time; may call
+ *     anything. user_data lives until the log is replaced or turned off
+ *     and no thread is inside the stack.
+ * Every pointer a callback is handed points into the library's memory
+ * and is valid for that one call.
  */
 
 #ifndef SIPRAL_H
 #define SIPRAL_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -58,7 +137,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)32)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)33)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -220,14 +299,6 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_AUDIO_DEVICE ((uint32_t)2048)
 
 /**
- * See SIPRAL_FEATURE_DTMF. A call in progress moves with the
- * network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
- * call whose media address is gone, and `sipral_call_media_readdress`
- * offers it at the socket the application bound on the new network.
- */
-#define SIPRAL_FEATURE_CALL_READDRESS ((uint32_t)8192)
-
-/**
  * See SIPRAL_FEATURE_DTMF. Who is calling and how the call asked to
  * be answered, on every call event: the asserted identity behind the
  * account's `trusted_peers` (RFC 3325), `verstat`, `Privacy`,
@@ -240,6 +311,24 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_FEATURE_CALLER_IDENTITY ((uint32_t)4096)
 
 /**
+ * See SIPRAL_FEATURE_DTMF. A call in progress moves with the
+ * network under it: `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` names each
+ * call whose media address is gone, and `sipral_call_media_readdress`
+ * offers it at the socket the application bound on the new network.
+ */
+#define SIPRAL_FEATURE_CALL_READDRESS ((uint32_t)8192)
+
+/**
+ * See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
+ * with levels, rate-limited and redacted (`sipral_stack_log`), and a
+ * snapshot of a stack's state for a crash report
+ * (`sipral_stack_state_text`). Set in every build of this library, which
+ * always carries the redaction both depend on; a bit so that a binding
+ * asks before it shows a "send diagnostics" control.
+ */
+#define SIPRAL_FEATURE_LOGGING ((uint32_t)16384)
+
+/**
  * See SIPRAL_FEATURE_DTMF. The ceilings a stack is created with
  * (`max_dialogs`, `max_server_transactions`, `diagnostic_decisions`,
  * `diagnostic_records` in `sipral_stack_config_t`, read back through
@@ -249,16 +338,6 @@ typedef uint64_t sipral_handle_t;
  * `sipral_counters_t`.
  */
 #define SIPRAL_FEATURE_LIMITS ((uint32_t)32768)
-
-/**
- * See SIPRAL_FEATURE_DTMF. The engine's log through a callback,
- * with levels, rate-limited and redacted (`sipral_stack_log`), and a
- * snapshot of a stack's state for a crash report
- * (`sipral_stack_state`). Set in every build of this library, which
- * always carries the redaction both depend on; a bit so that a binding
- * asks before it shows a "send diagnostics" control.
- */
-#define SIPRAL_FEATURE_LOGGING ((uint32_t)16384)
 
 /**
  * See SIPRAL_FEATURE_DTMF. STIR/SHAKEN (RFC 8224, RFC 8588): an
@@ -493,7 +572,7 @@ typedef uint64_t sipral_handle_t;
 #define SIPRAL_PRIVACY_NONE ((uint32_t)32)
 
 /**
- * The longest text sipral_stack_state writes, its NUL included: a
+ * The longest text sipral_stack_state_text writes, its NUL included: a
  * buffer of this many bytes always has room.
  */
 #define SIPRAL_STATE_TEXT_MAX ((size_t)16384)
@@ -574,6 +653,12 @@ typedef struct sipral_local_conference_member sipral_local_conference_member_t;
  * 17 is a permanent hole: it was passed over when ABI 0.31 numbered its
  * statuses, and it stays reserved, never used and never to be given to a
  * status. No build returns it and `sipral_status_name` has no name for it.
+ *
+ * The one signed number in the ABI, and the only enumeration typed
+ * `int32_t`: zero is success, every failure is positive, and no build
+ * returns a negative one. A binding that treats it as unsigned loses
+ * nothing. A newer library may return a status an older binding has no
+ * name for; read it as a failure, with the last error for the sentence.
  */
 typedef int32_t sipral_status_t;
 enum {
@@ -612,7 +697,15 @@ enum {
      */
     SIPRAL_STATUS_BUSY = 6,
     /**
-     * The library has no room for another object of this kind.
+     * There is no room for another one: the library's table of objects
+     * of this kind is full (256 stacks, say), the stack's RTP port range
+     * is spent, or a queue a call feeds is full — the DTMF digits waiting
+     * to go out, the dynamic payload types an offer can number, the
+     * real-time text not yet sent. Nothing was done. Room comes back as
+     * objects are released, ports given back, or the queue drains; which
+     * of those the last error says. Not the same as
+     * `SIPRAL_STATUS_LIMIT_REACHED`, which is a ceiling the application
+     * set itself.
      */
     SIPRAL_STATUS_EXHAUSTED = 7,
     /**
@@ -712,7 +805,7 @@ enum {
      * never carried `isfocus` (RFC 4579 §4.1), so there is no
      * conference to name or subscribe to.
      */
-    SIPRAL_STATUS_NOT_AFOCUS = 21,
+    SIPRAL_STATUS_NOT_A_FOCUS = 21,
     /**
      * The transport the request would leave on has failed or closed and
      * has not been bound again. Nothing went out. The failure was
@@ -727,6 +820,15 @@ enum {
      * conference does not mix. The last error says which.
      */
     SIPRAL_STATUS_CONFERENCE_REFUSED = 23,
+    /**
+     * `now_ms` was more than fifty milliseconds behind the last reading
+     * of the caller's clock this stack saw (ABI 0.33). Two threads that
+     * read one clock a moment apart and race for the stack can disagree
+     * by a little, not by that much. Nothing was done and the stack's
+     * clock did not move: read the clock again and ask again. A caller
+     * that keeps getting this has a clock that went backwards.
+     */
+    SIPRAL_STATUS_CLOCK_BEHIND = 24,
 };
 
 /**
@@ -1850,7 +1952,7 @@ enum {
      * left this end — not whether a collector accepted it, which this
      * stack never waits to learn. Raised only when the account named
      * a collector to publish to at all
-     * (`sipral_account_settings_t::quality_report_uri`); a call whose
+     * (`sipral_account_config_t::quality_report_uri`); a call whose
      * account named none raises nothing here, since nothing was ever
      * attempted.
      */
@@ -2092,7 +2194,7 @@ enum {
     /**
      * A transport this stack signals on stopped carrying traffic: the
      * application said it failed (`sipral_stack_transport_failed`,
-     * `sipral_stack_transport_failure`) or closed
+     * `sipral_stack_transport_failed_with`) or closed
      * (`sipral_stack_stream_closed`), or a stream carried bytes no
      * message starts with (`sipral_stack_receive_stream`), or a stream
      * that had answered a keep-alive ping left the next one unanswered
@@ -4016,11 +4118,11 @@ typedef uint32_t (*sipral_screen_callback_t)(const sipral_screen_request_t *requ
 /**
  * Echo cancellation, gain control or noise suppression, run over one
  * frame, or told to forget what it has learned — sipral_processor_frame_t
- * says which. Installed with sipral_call_attach_processor.
+ * says which. Installed with sipral_media_attach_processor.
  *
  * **It runs with this call's media locked**, which is the opposite of
  * crate::event::SipralEventCallback and the reason
- * sipral_call_attach_processor's own doc comment says so before it
+ * sipral_media_attach_processor's own doc comment says so before it
  * says anything else — read it there. In consequence: **this callback
  * must not call back into the media handle it was attached through**,
  * on this thread or on any other. It must not unwind, for the same
@@ -4074,6 +4176,14 @@ struct sipral_abi_version {
      * A fix that changed no declaration.
      */
     uint32_t patch;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -4207,18 +4317,13 @@ struct sipral_counters {
     /**
      * Events a poll raised and had nowhere to queue, because the
      * callback had not kept up and the outbox was already at its ceiling
-     * (task 8.4.21). Appended here rather than woven in among the
-     * others: it counts something about delivery itself rather than
-     * about a call or a registration, and a build from before it existed
-     * still reads every counter that did.
+     * (task 8.4.21).
      */
     uint64_t events_dropped;
     /**
      * RTCP goodbyes dropped, oldest first, because the application had
      * not called `sipral_stack_poll_farewell` and the queue behind it
-     * was already at its ceiling. Appended at the tail for the same
-     * reason `events_dropped` was: a build from before this member
-     * existed still reads every counter that did.
+     * was already at its ceiling.
      */
     uint64_t farewells_dropped;
     /**
@@ -4248,8 +4353,6 @@ struct sipral_counters {
      * they acknowledge arrived again. Only ever over UDP: nothing
      * retransmits over a stream. A figure that climbs while calls still
      * connect is a path losing packets before it loses calls.
-     *
-     * Appended at the tail (task 8.10), with the three below.
      */
     uint64_t requests_retransmitted;
     /**
@@ -4276,9 +4379,10 @@ struct sipral_counters {
  * What a stack is created with.
  *
  * Set `size` to `sizeof(sipral_stack_config_t)` and zero the rest before
- * filling anything in. Four members have to be filled: the callback, the
- * transport, the address this end is reachable at, and the entropy. Nothing
- * here can be guessed on the caller's behalf.
+ * filling anything in. Five members have to be filled: the callback, the
+ * transport, the address this end is reachable at, the entropy, and the
+ * media seed, which must differ from the entropy. Nothing here can be
+ * guessed on the caller's behalf.
  */
 struct sipral_stack_config {
     /**
@@ -4477,9 +4581,6 @@ struct sipral_stack_config {
      * `SIPRAL_ICE_OFF` — nothing here offers ICE until it is asked to,
      * for the reason `docs/06-nat.md` tabulates. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-     *
-     * Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t ice;
     /**
@@ -4489,9 +4590,6 @@ struct sipral_stack_config {
      * socket appears from and writes the answer where a far end reads
      * it — see crate::nat. Any other value is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, and nothing is built.
-     *
-     * Appended at the tail (task 8.5.5), with the two below; the pinned
-     * `MIN_SIZE` is unmoved.
      */
     uint32_t nat;
     /**
@@ -4518,9 +4616,6 @@ struct sipral_stack_config {
      * keeps the stack's setting. Nothing changes for a call that does
      * not run G.729, so the setting is taken whatever `codecs` names:
      * a call's own order may name G.729 when the stack's does not.
-     *
-     * Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t g729_annex_b;
     /**
@@ -4539,9 +4634,6 @@ struct sipral_stack_config {
      * a build without `SIPRAL_FEATURE_ICE`, which is the only thing that
      * can use a relay. Copied; the caller's buffer is its own again when
      * this returns.
-     *
-     * Appended at the tail (task 8.5.5), with the five below; the pinned
-     * `MIN_SIZE` is unmoved.
      */
     const char *turn_server;
     /**
@@ -4579,9 +4671,6 @@ struct sipral_stack_config {
      * `SIPRAL_EVENT_KIND_REFERRAL`, and the application takes it with
      * `sipral_call_accept_transfer` or refuses it with
      * `sipral_call_reject_transfer`, one request at a time.
-     *
-     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t referrals;
     /**
@@ -4600,9 +4689,6 @@ struct sipral_stack_config {
      * while the stack is suspended (`sipral_stack_suspending`), for a
      * stack with `SIPRAL_NAT_OFF`, or for an account STUN found on its
      * own address. `sipral_ua`'s `keepalive` module has the reasons.
-     *
-     * Appended at the tail (task 8.7.4), with the one below; the pinned
-     * `MIN_SIZE` is unmoved.
      */
     uint32_t registrar_keepalive;
     /**
@@ -4626,9 +4712,6 @@ struct sipral_stack_config {
      * asks, with the platform's own TLS as it does for SIP. Anything
      * else, or a value other than zero with no `turn_server`, is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`.
-     *
-     * Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t turn_transport;
     /**
@@ -4641,9 +4724,6 @@ struct sipral_stack_config {
      * `audio_transmit_callback`. `SIPRAL_STATUS_NOT_SUPPORTED` on a
      * platform this build has no backend for, which
      * `SIPRAL_FEATURE_AUDIO_DEVICE` says first.
-     *
-     * Appended at the tail (task 8.6.18), with the five below; the
-     * pinned `MIN_SIZE` is unmoved.
      */
     uint32_t audio;
     /**
@@ -4694,9 +4774,6 @@ struct sipral_stack_config {
      * call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
      * goes out. A media server built on this library raises it to what
      * its machine can carry; `docs/19-numbers.md` has what one costs.
-     *
-     * Appended at the tail (task 8.10), with the three below; the
-     * pinned `MIN_SIZE` is unmoved.
      */
     uint32_t max_dialogs;
     /**
@@ -4725,6 +4802,18 @@ struct sipral_stack_config {
      */
     uint32_t diagnostic_records;
     /**
+     * When a call listens for keypad digits in the far end's audio, as a
+     * sipral_dtmf_detection_t: zero
+     * on exactly the calls that negotiated no telephone event, which is
+     * when such a far end has no other way to send one.
+     * `sipral_call_dtmf_detection` changes it for one call.
+     *
+     * Here rather than after `rtp_port_max`, where it was appended: six
+     * four-byte members in a row keep the struct free of padding at its
+     * end on a 64-bit target and on 32-bit ARM alike.
+     */
+    uint32_t dtmf_detection;
+    /**
      * The STUN servers to turn to, in this order, when `stun_server`
      * fails: `host:port` addresses separated by commas, not names.
      * Optional, and only beside a `stun_server`. A server fails when it
@@ -4737,9 +4826,6 @@ struct sipral_stack_config {
      * never spent on finding out. `SIPRAL_EVENT_KIND_STUN_SERVER` says
      * when the server in use moves, and when every one has failed.
      * Copied; the caller's buffer is its own again when this returns.
-     *
-     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     const char *stun_fallbacks;
     /**
@@ -4756,26 +4842,12 @@ struct sipral_stack_config {
      * even `rtp_port_max` is never handed out. A range that holds no
      * such pair, one given upside down, or one bound given without the
      * other is `SIPRAL_STATUS_INVALID_ARGUMENT`.
-     *
-     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t rtp_port_min;
     /**
      * The highest port of that range, or zero with `rtp_port_min`.
      */
     uint32_t rtp_port_max;
-    /**
-     * When a call listens for keypad digits in the far end's audio, as a
-     * sipral_dtmf_detection_t: zero
-     * on exactly the calls that negotiated no telephone event, which is
-     * when such a far end has no other way to send one.
-     * `sipral_call_dtmf_detection` changes it for one call.
-     *
-     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-     * unmoved.
-     */
-    uint32_t dtmf_detection;
 };
 
 /**
@@ -4893,17 +4965,11 @@ struct sipral_stack_settings {
     /**
      * Whether G.729's Annex B is allowed, as a `SipralToggle`, with the
      * default filled in.
-     *
-     * Appended at the tail (task 8.6.15); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t g729_annex_b;
     /**
      * Whether a REFER outside any dialog reaches the application, as a
      * `SipralToggle`, with the default — off — filled in.
-     *
-     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t referrals;
     /**
@@ -4911,17 +4977,11 @@ struct sipral_stack_settings {
      * milliseconds, with the default filled in. Zero when
      * `registrar_keepalive` was turned off, which is the one case where
      * there is no figure to give.
-     *
-     * Appended at the tail (task 8.7.4); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint64_t registrar_keepalive_ms;
     /**
      * The most calls the stack holds at once, with the default filled
      * in.
-     *
-     * Appended at the tail (task 8.10), with the three below; the
-     * pinned `MIN_SIZE` is unmoved.
      */
     uint32_t max_dialogs;
     /**
@@ -4941,9 +5001,6 @@ struct sipral_stack_settings {
     uint32_t diagnostic_records;
     /**
      * The RTP port range, as given; both zero for none.
-     *
-     * Appended at the tail (task 8.10); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t rtp_port_min;
     /**
@@ -5103,10 +5160,6 @@ struct sipral_account_config {
      * sipral_stack_transport_bind
      * has bound. A number this stack has never bound is
      * `SIPRAL_STATUS_INVALID_ARGUMENT`, naming it.
-     *
-     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-     * unmoved, and what a caller built before this member existed never
-     * sent reads as the zero that already means "the main transport".
      */
     uint32_t transport;
     /**
@@ -5165,10 +5218,6 @@ struct sipral_account_config {
     /**
      * Where this account's end-of-call voice quality reports go (RFC
      * 6035, carried by a PUBLISH, RFC 3903), or null to send none.
-     *
-     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-     * unmoved, and what a caller built before this member existed
-     * never sent reads as the null that already means "send none".
      */
     const char *quality_report_uri;
     /**
@@ -5178,8 +5227,7 @@ struct sipral_account_config {
     /**
      * A sipral_session_timer_t: how
      * this account's calls ask for a session timer (RFC 4028). Zero is
-     * the stack's default, thirty minutes. ABI 0.29, appended at the
-     * tail like every member after the pinned `MIN_SIZE`.
+     * the stack's default, thirty minutes.
      */
     uint32_t session_timer;
     /**
@@ -5403,9 +5451,6 @@ struct sipral_call_config {
      * `SIPRAL_STATUS_INVALID_ARGUMENT`: a call with no destination
      * override already goes out on its account's own transport, and
      * there is nothing to combine this with.
-     *
-     * Appended at the tail (task 8.4.10); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t transport;
     /**
@@ -5427,9 +5472,6 @@ struct sipral_call_config {
      * with `sdp` is a session the application wrote, and the order in it
      * is already the application's own. The names are still checked, so
      * that a caller who has one wrong learns it here either way.
-     *
-     * Appended at the tail (task 8.4.13); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     const char *codecs;
     /**
@@ -5446,9 +5488,6 @@ struct sipral_call_config {
      * `media_address` set — for the reason `srtp` gives: a call placed
      * with `sdp` is a session the application wrote, and the candidates
      * in it are already the application's own to write or not.
-     *
-     * Appended at the tail (task 8.6.16); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t ice;
     /**
@@ -5463,9 +5502,6 @@ struct sipral_call_config {
      * by SRTP or DTLS-SRTP or gathering ICE: the text stream has no key
      * and no candidates of its own, and typed text sent in the clear
      * beside encrypted audio is worse than none.
-     *
-     * Appended at the tail (ABI 0.31), like `feedback` and `focus`; the
-     * pinned `MIN_SIZE` is unmoved.
      */
     const char *text_address;
     /**
@@ -5526,6 +5562,14 @@ struct sipral_codec_info {
      * always travels as a dynamic type.
      */
     uint32_t has_static_payload_type;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -5559,6 +5603,14 @@ struct sipral_codec_candidate {
      * nothing beat the one that won.
      */
     uint32_t outranked_by;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -5607,6 +5659,14 @@ struct sipral_path_candidate {
      * candidate at all.
      */
     uint32_t remote_kind;
+    /**
+     * Zero. Keeps the members after it where a 32-bit and a 64-bit target
+     * both put them without padding at the end of the struct, so that a
+     * member a later version appends starts past the length a caller built
+     * against this header declares. The library writes zero here and reads
+     * nothing from it.
+     */
+    uint32_t reserved;
     /**
      * Where to write the local address, `host:port` with a trailing
      * NUL: for a pair, the candidate its checks left from — the host
@@ -5728,9 +5788,6 @@ struct sipral_media_info {
     /**
      * Whether the call agreed a real-time text stream (RFC 4103), which
      * `sipral_media_send_text` writes to.
-     *
-     * Appended at the tail (ABI 0.31), like the three below; a caller
-     * built before them never reads them.
      */
     uint32_t has_text;
     /**
@@ -5748,6 +5805,14 @@ struct sipral_media_info {
      * `a=rtcp-rsize`).
      */
     uint32_t reduced_size;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -5865,10 +5930,6 @@ struct sipral_stream_stats {
      * Whether an RFC 3611 VoIP Metrics report is available at all —
      * zero until this stream has identified a source to report on.
      * Every `voip_*` member below is meaningless while this is zero.
-     *
-     * Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-     * unmoved, and what a caller built before these members existed
-     * never sent reads them all as zero, this one included.
      */
     uint32_t has_voip_metrics;
     /**
@@ -5959,16 +6020,11 @@ struct sipral_stream_stats {
      * is `packets_lost`. No packet is lost or discarded by it, so none of
      * the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
      * `loss_rate`, `score` and `suffering` do.
-     *
-     * Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
-     * caller built before it existed never reads it.
      */
     uint64_t frames_underrun;
     /**
      * Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
      * zero while it does not.
-     *
-     * Appended at the tail (ABI 0.31), like everything below it.
      */
     uint32_t feedback;
     /**
@@ -6059,11 +6115,16 @@ struct sipral_media_packet {
      * says that instead, `destination` is the server, and the bytes are
      * written, as they are and in order, on the media socket's
      * connection to it — never sent as a datagram.
-     *
-     * Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-     * unmoved.
      */
     uint32_t protocol;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. Set it to zero when the struct is handed in;
+     * the library writes zero here and reads nothing from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -6210,7 +6271,7 @@ struct sipral_transmit {
 
 /**
  * A transport that failed, and why, for
- * sipral_stack_transport_failure.
+ * sipral_stack_transport_failed_with.
  *
  * The caller fills in all of it. `detail` is the platform's own sentence
  * — OpenSSL's, `SslStream`'s, `SSLSocket`'s, Network.framework's — and
@@ -6800,9 +6861,9 @@ struct sipral_resolve_event {
     /**
      * The dialog this is about, and what
      * sipral_stack_resolved
-     * is answered with. Minted by the library, valid while the dialog
-     * is, and answering for one that has ended changes nothing rather
-     * than failing.
+     * is answered with. Minted by the library and valid while the dialog
+     * is; answering for one that has ended is
+     * `SIPRAL_STATUS_STALE_HANDLE` and changes nothing.
      */
     sipral_handle_t dialog;
     /**
@@ -7511,7 +7572,11 @@ struct sipral_local_conference_event {
 /**
  * The arm of an event that its kind names.
  *
- * Reading any other arm reads bytes the library did not write for it.
+ * The whole union is zeroed before that one arm is written, so every
+ * byte past the arm, and every byte of another arm, reads as zero —
+ * which is what a member appended to an arm later reads as from a
+ * library built before it. Another arm still means nothing for this
+ * kind.
  */
 union sipral_event_payload {
     /**
@@ -7815,6 +7880,14 @@ struct sipral_subscribe_config {
      * `SIPRAL_STATUS_INVALID_ARGUMENT`.
      */
     uint32_t transport;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. Set it to zero; the library reads nothing from
+     * it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -7945,7 +8018,7 @@ struct sipral_audio_info {
      * own processing behind it where the endpoint has any — a virtual
      * cable has none, and cancels nothing. An application that wants
      * the echo gone regardless attaches a processor to each call with
-     * `sipral_call_attach_processor`; the delay it needs is
+     * `sipral_media_attach_processor`; the delay it needs is
      * `render_delay_ms`, and the engine tells each managed call that
      * number itself, again after every device change.
      */
@@ -7976,6 +8049,14 @@ struct sipral_audio_info {
      * through the loudspeaker.
      */
     uint32_t ringer;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -8007,6 +8088,14 @@ struct sipral_audio_transmit {
      * marks them.
      */
     uint32_t protocol;
+    /**
+     * Zero. Keeps the members after it where a 32-bit and a 64-bit target
+     * both put them without padding at the end of the struct, so that a
+     * member a later version appends starts past the length a caller built
+     * against this header declares. The library writes zero here and reads
+     * nothing from it.
+     */
+    uint32_t reserved;
     /**
      * Where to send it, `host:port`, UTF-8 and not NUL-terminated.
      */
@@ -8126,6 +8215,14 @@ struct sipral_stir_config {
      * this on. ABI 0.32.
      */
     uint32_t accept_service_provider_codes;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. Set it to zero; the library reads nothing from
+     * it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -8333,6 +8430,14 @@ struct sipral_recording_options {
      * survive a crash, or zero for every five seconds.
      */
     uint32_t checkpoint_ms;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. Set it to zero; the library reads nothing from
+     * it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -8397,6 +8502,14 @@ struct sipral_conference_user {
      * How many media streams the first of them has.
      */
     uint32_t media;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -8519,6 +8632,14 @@ struct sipral_local_conference_config {
      * converts the devices to it.
      */
     uint32_t sample_rate;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. Set it to zero; the library reads nothing from
+     * it.
+     */
+    uint32_t reserved;
 };
 
 /**
@@ -8606,13 +8727,21 @@ struct sipral_local_conference_member {
      * The level of what it hears, in the same steps.
      */
     uint32_t gain_output;
+    /**
+     * Zero. Rounds the struct up to a whole multiple of its alignment on
+     * every target, so that a member a later version appends starts at or
+     * past the length a caller built against this header declares, never
+     * in padding inside it. The library writes zero here and reads nothing
+     * from it.
+     */
+    uint32_t reserved;
 };
 
 /**
  * Copy the calling thread's last error message into `buffer`.
  *
  * The message is UTF-8 and is written with a trailing NUL, which is not
- * counted in the length. `out_len`, when it is not null, always receives
+ * counted in the length. `out_needed`, when it is not null, always receives
  * the number of bytes the message needs including that NUL, so a caller
  * that passes a capacity of zero and a null buffer gets the length back
  * and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
@@ -8628,9 +8757,9 @@ struct sipral_local_conference_member {
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or null with a capacity
- * of zero, and `out_len` must point to one `size_t` or be null.
+ * of zero, and `out_needed` must point to one `size_t` or be null.
  */
-sipral_status_t sipral_last_error_message(char *buffer, size_t capacity, size_t *out_len);
+sipral_status_t sipral_last_error_message(char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * The short name of a status code, as a static NUL-terminated string, or
@@ -8794,8 +8923,7 @@ sipral_status_t sipral_stack_destroy(sipral_handle_t stack);
  * fall more than fifty milliseconds behind the last one this stack saw —
  * signalling may be called from any thread, and two of them reading the
  * same clock a moment apart is not a caller mistake — and a jump further
- * back than that is `SIPRAL_STATUS_INVALID_ARGUMENT` with nothing
- * delivered.
+ * back than that is `SIPRAL_STATUS_CLOCK_BEHIND` with nothing delivered.
  *
  * The event callback is called from inside this function, on this
  * thread, and with nothing held: the stack's work is done and its lock
@@ -9040,8 +9168,9 @@ sipral_status_t sipral_subscription_dialog_at(sipral_handle_t stack, sipral_hand
  *
  * Safety
  *
- * `buffer` must be writable for `capacity` bytes, and `out_needed` must
- * point at one `size_t`.
+ * `buffer` must be writable for `capacity` bytes or be null with a
+ * capacity of zero, and `out_needed` must point at one `size_t` or be
+ * null.
  */
 sipral_status_t sipral_subscription_dialog_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
 
@@ -9630,12 +9759,16 @@ sipral_status_t sipral_call_identity_count(sipral_handle_t stack, sipral_handle_
  * the field did not write — is one byte, the NUL. An index past the
  * end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
  *
+ * `index` comes before `which`, as it does in every other entry point
+ * that reads a piece of text about one of several things: the entry
+ * first, then the piece of it.
+ *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or null with a capacity
- * of zero, and `out_needed` must point at one `size_t`.
+ * of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_call_identity_text(sipral_handle_t stack, sipral_handle_t call, uint32_t which, size_t index, char *buffer, size_t capacity, size_t *out_needed);
+sipral_status_t sipral_call_identity_text(sipral_handle_t stack, sipral_handle_t call, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Join two active calls into a local conference of three: from here on,
@@ -10159,64 +10292,65 @@ sipral_status_t sipral_media_playback(sipral_handle_t media, int16_t *samples, s
 sipral_status_t sipral_media_capture(sipral_handle_t media, uint64_t now_ms, const int16_t *samples, size_t sample_count, sipral_media_packet_t *packet);
 
 /**
- * Run `process` over every frame captured on this call, against the
- * far-end audio this call played MediaSession::render_delay earlier
- * — echo cancellation, gain control and noise suppression are all this
- * one seam, and `docs/05-media.md` says why.
+ * Run `callback` over every frame captured on this call, against the
+ * far-end audio this call played a render delay earlier — echo
+ * cancellation, gain control and noise suppression are all this one
+ * seam, and `docs/05-media.md` says why.
  *
  * What was attached before is dropped, along with the echo path it had
  * learned. Attaching mid-call is allowed and costs the first few hundred
  * milliseconds of a fresh adaptation, the same price a call pays at its
  * start.
  *
- * **`process` runs with this call's media locked**, the same as
- * crate::screening::SipralScreenCallback and unlike
- * crate::event::SipralEventCallback: it is called from inside
- * sipral_media_playback (to learn what the loudspeaker was just
- * given) and inside sipral_media_capture (to run the frame just
+ * **`callback` runs with this call's media locked**, the same as the
+ * screening callback and unlike the event callback: it is called from
+ * inside sipral_media_playback (to learn what the loudspeaker was
+ * just given) and inside sipral_media_capture (to run the frame just
  * captured), and — with sipral_processor_frame_t's `reset` set — whenever
  * this call's media forgets what it has learned, a device change or a
  * codec change mid-call. All three run on whichever thread called the
- * entry point that triggered them. In consequence, **it must not call
- * back into the media handle it was attached through**, on this thread
- * or on any other — doing so does not deadlock, since every media entry
- * point takes its session's lock without waiting and answers
- * `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
- * rather than relied on. A *different* call's media, or this stack's
- * own entry points, are unaffected. It must not unwind: a panic that
- * reached C across this boundary would take the host process with it,
- * the same rule every callback in this ABI is held to.
+ * entry point that triggered them. **From inside `callback`, call
+ * nothing on any media handle and nothing on this call's stack**: every
+ * such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
+ * thread that calls into this call's media meanwhile waits for the
+ * frame to finish, so a processor that reached into a second call's
+ * media while that call's processor reached into this one would wait on
+ * the other for ever; refusing every media handle from inside a frame
+ * is what rules that out. It must not unwind: a panic that reached C
+ * across this boundary would take the host process with it, the same
+ * rule every callback in this ABI is held to.
  *
- * `user_data` is handed back to `process` untouched on every call, read
+ * `user_data` is handed back to `callback` untouched on every call, read
  * by nothing here, and has to outlive the last one — which the caller
  * who installed it is the one to know is over:
- * `sipral_call_detach_processor` or the call ending are the two ways.
+ * `sipral_media_detach_processor` returning, or `sipral_media_release`
+ * of this handle, are the two ways.
  *
  * Safety
  *
- * `process` is called on whichever thread calls
+ * `callback` is called on whichever thread calls
  * sipral_media_playback or sipral_media_capture on this call,
  * for as long as the processor stays attached, and `user_data` has to
  * outlive the last such call.
  */
-sipral_status_t sipral_call_attach_processor(sipral_handle_t media, sipral_processor_callback_t process, void *user_data);
+sipral_status_t sipral_media_attach_processor(sipral_handle_t media, sipral_processor_callback_t callback, void *user_data);
 
 /**
- * Stop running the processor sipral_call_attach_processor attached,
+ * Stop running the processor sipral_media_attach_processor attached,
  * if there was one.
  *
  * `out_was_attached`, when not null, says whether there was one to stop:
  * 1 if a processor was attached and is now detached, 0 if there was
  * none. The frames the application hands over reach the encoder
  * untouched again from the next one, and the loudspeaker history kept
- * for it is released. Once this returns, `process` is not called again
+ * for it is released. Once this returns, `callback` is not called again
  * for this attachment — the moment `user_data` may be freed.
  *
  * Safety
  *
  * `out_was_attached` must point at one `uint32_t` or be null.
  */
-sipral_status_t sipral_call_detach_processor(sipral_handle_t media, uint32_t *out_was_attached);
+sipral_status_t sipral_media_detach_processor(sipral_handle_t media, uint32_t *out_was_attached);
 
 /**
  * Forget the echo path, the noise floor and the gain the attached
@@ -10225,7 +10359,7 @@ sipral_status_t sipral_call_detach_processor(sipral_handle_t media, uint32_t *ou
  * What a device change asks for: the estimate was built for a different
  * loudspeaker and a different microphone, and carrying it forward makes
  * the processor fight it for a while instead of adapting cleanly. Calls
- * the `process` given to sipral_call_attach_processor with
+ * the `callback` given to sipral_media_attach_processor with
  * sipral_processor_frame_t's `reset` set.
  *
  * `out_was_attached`, when not null, says whether there was a processor
@@ -10235,7 +10369,7 @@ sipral_status_t sipral_call_detach_processor(sipral_handle_t media, uint32_t *ou
  *
  * `out_was_attached` must point at one `uint32_t` or be null.
  */
-sipral_status_t sipral_call_reset_processor(sipral_handle_t media, uint32_t *out_was_attached);
+sipral_status_t sipral_media_reset_processor(sipral_handle_t media, uint32_t *out_was_attached);
 
 /**
  * One frame of a local conference of two calls: decode what `media_a`'s
@@ -10347,7 +10481,7 @@ sipral_status_t sipral_media_poll_transmit(sipral_handle_t media, uint64_t now_m
  * One at a time, like every other poll in this crate: call it after
  * every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
  * for a call this stack was running media on, and keep calling until
- * `out_packet` comes back with a `len` of zero. A call whose media never
+ * `packet` comes back with a `len` of zero. A call whose media never
  * ran leaves nothing here, but for one thing.
  *
  * A call given a relay on a TURN server (`turn_server` on the stack's
@@ -10362,10 +10496,10 @@ sipral_status_t sipral_media_poll_transmit(sipral_handle_t media, uint64_t now_m
  *
  * Safety
  *
- * `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+ * `out_call` must point at one `sipral_handle_t`, and `packet` at a
  * `sipral_media_packet_t` as sipral_media_capture describes.
  */
-sipral_status_t sipral_stack_poll_farewell(sipral_handle_t stack, sipral_handle_t *out_call, sipral_media_packet_t *out_packet);
+sipral_status_t sipral_stack_poll_farewell(sipral_handle_t stack, sipral_handle_t *out_call, sipral_media_packet_t *packet);
 
 /**
  * Whether a digit is going out or waiting to, and how many have not
@@ -10469,8 +10603,9 @@ sipral_status_t sipral_stack_poll_transmit(sipral_handle_t stack, sipral_transmi
  *
  * `from` is the far end, as `host:port`. `to` is the address the datagram
  * arrived on, which RFC 3581 §4 makes the address the response has to go
- * out from; null with a length of zero means the address this stack was
- * created with, which is the answer for a socket bound to one address.
+ * out from; a length of zero, whatever the pointer, means the address
+ * this stack was created with, which is the answer for a socket bound to
+ * one address.
  *
  * A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
  * in each, so it arrives whole the way a datagram does.
@@ -10534,7 +10669,8 @@ sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t tran
  *
  * `local` is the address the far end reaches this one at, as `host:port`.
  * `remote` is the far end of a connection, and is refused on a datagram
- * transport, which has many.
+ * transport, which has many; a length of zero, whatever the pointer,
+ * leaves it out.
  *
  * This is also how a request
  * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
@@ -10578,7 +10714,7 @@ sipral_status_t sipral_stack_transport_bind(sipral_handle_t stack, uint32_t tran
  *
  * The next poll raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` for it, ahead
  * of what the failure did to the registrations and calls on it.
- * sipral_stack_transport_failure is the same call with the TLS
+ * sipral_stack_transport_failed_with is the same call with the TLS
  * library's reason carried along.
  *
  * Safety
@@ -10616,7 +10752,7 @@ sipral_status_t sipral_stack_transport_failed(sipral_handle_t stack, uint32_t tr
  * member says how long it is, and its `detail` must be readable for
  * `detail_len` bytes.
  */
-sipral_status_t sipral_stack_transport_failure(sipral_handle_t stack, const sipral_transport_failure_t *failure, uint64_t now_ms);
+sipral_status_t sipral_stack_transport_failed_with(sipral_handle_t stack, const sipral_transport_failure_t *failure, uint64_t now_ms);
 
 /**
  * Say that a connection closed: the far end went away, or a read returned
@@ -10740,7 +10876,6 @@ sipral_status_t sipral_stack_nat_map(sipral_handle_t stack, const char *local, s
 sipral_status_t sipral_stack_nat_unmap(sipral_handle_t stack, const char *local, size_t local_len, uint64_t now_ms);
 
 /**
- * Take the next STUN request a media socket has to send.entry! {
  * Take the next STUN request a media socket has to send.
  *
  * The same record and the same rules as `sipral_stack_poll_transmit`,
@@ -11244,10 +11379,12 @@ sipral_status_t sipral_account_time_to_ready(sipral_handle_t stack, sipral_handl
  * sipral_stack_transport_bind
  * is how it gets another chance.
  *
- * `SIPRAL_STATUS_OK` with nothing changed is the honest answer in two
- * cases, and neither is an error: the dialog has ended, and none of the
- * addresses is one this stack can reach on the protocol asked for. The
- * flow stands exactly as it did.
+ * `SIPRAL_STATUS_OK` with nothing changed is the honest answer when none
+ * of the addresses is one this stack can reach on the protocol asked
+ * for: the flow stands exactly as it did. A dialog that has ended by the
+ * time the answer comes is `SIPRAL_STATUS_STALE_HANDLE`, like every
+ * other handle to something that is gone, and changes nothing either;
+ * an application that resolves in the background treats the two alike.
  *
  * There is no `now_ms` here on purpose. Every other call that changes
  * what this stack will send takes the time because something it does is
@@ -11294,22 +11431,22 @@ sipral_status_t sipral_account_retarget(sipral_handle_t stack, sipral_handle_t a
  *
  * Readable at any point in the call's life, and for as long after it as
  * the endpoint has not evicted the record to make room for a newer one —
- * `sipral_stack_config_t` has no member for the ceiling yet, so today
- * that is sipral_core::diag::RecordLimits::DEFAULT. A call whose
+ * how many are kept is `sipral_stack_config_t::diagnostic_records`,
+ * 32 when it is zero. A call whose
  * record has been evicted, or that has had nothing decided about it yet,
  * answers `SIPRAL_STATUS_OK` with `{}`: an empty record is still a
  * record, and refusing to read one that happens to be empty would make
  * a caller unable to tell "nothing yet" from "something went wrong".
  *
  * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
- * document, with the length needed in `out_len`.
+ * document, with the length needed in `out_needed`.
  *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or be null with a
- * capacity of zero, and `out_len` must point at one `size_t` or be null.
+ * capacity of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_call_record_json(sipral_handle_t stack, sipral_handle_t call, char *buffer, size_t capacity, size_t *out_len);
+sipral_status_t sipral_call_record_json(sipral_handle_t stack, sipral_handle_t call, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Copy the whole diagnostic document into `buffer`: what a bug report
@@ -11323,14 +11460,14 @@ sipral_status_t sipral_call_record_json(sipral_handle_t stack, sipral_handle_t c
  * sipral_call_record_json is already the way to ask about one call.
  *
  * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
- * document, with the length needed in `out_len`.
+ * document, with the length needed in `out_needed`.
  *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or be null with a
- * capacity of zero, and `out_len` must point at one `size_t` or be null.
+ * capacity of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_stack_diagnostics_json(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+sipral_status_t sipral_stack_diagnostics_json(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * What a `conference` subscription holds about the conference as a
@@ -11371,8 +11508,9 @@ sipral_status_t sipral_subscription_conference_user_at(sipral_handle_t stack, si
  *
  * Safety
  *
- * `buffer` must be writable for `capacity` bytes, and `out_needed` must
- * point at one `size_t`.
+ * `buffer` must be writable for `capacity` bytes or be null with a
+ * capacity of zero, and `out_needed` must point at one `size_t` or be
+ * null.
  */
 sipral_status_t sipral_subscription_conference_text(sipral_handle_t stack, sipral_handle_t subscription, size_t index, uint32_t which, char *buffer, size_t capacity, size_t *out_needed);
 
@@ -11401,8 +11539,9 @@ sipral_status_t sipral_call_set_focus(sipral_handle_t stack, sipral_handle_t cal
  *
  * Safety
  *
- * `buffer` must be writable for `capacity` bytes, and `out_needed` must
- * point at one `size_t`.
+ * `buffer` must be writable for `capacity` bytes or be null with a
+ * capacity of zero, and `out_needed` must point at one `size_t` or be
+ * null.
  */
 sipral_status_t sipral_call_conference_uri(sipral_handle_t stack, sipral_handle_t call, char *buffer, size_t capacity, size_t *out_needed);
 
@@ -11596,7 +11735,7 @@ sipral_status_t sipral_stack_recording_start(sipral_handle_t stack, const char *
  * session and say nothing about it.
  *
  * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when `buffer` cannot hold the whole
- * text, with the length needed in `out_len` — asking again with a bigger
+ * text, with the length needed in `out_needed` — asking again with a bigger
  * buffer answers the same recording rather than stopping a new one,
  * so a caller that does not yet know how big a buffer to bring may ask
  * twice: once to be told, once to be handed the text. Once a call here
@@ -11607,9 +11746,9 @@ sipral_status_t sipral_stack_recording_start(sipral_handle_t stack, const char *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or be null with a
- * capacity of zero, and `out_len` must point at one `size_t` or be null.
+ * capacity of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_stack_recording_stop(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+sipral_status_t sipral_stack_recording_stop(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Ask the platform what devices there are, and say how many the list
@@ -11640,10 +11779,13 @@ sipral_status_t sipral_audio_device_count(sipral_handle_t stack, size_t *out_cou
 /**
  * The device at `index` in the list, and its name into `buffer`.
  *
- * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
- * `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
- * length needed in `out_needed` and the struct filled in all the same;
- * the name is UTF-8 and not NUL-terminated.
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
+ * is written the way every other text this ABI hands out is: UTF-8 with
+ * a trailing NUL, and `out_needed`, when it is not null, receives the
+ * bytes it needs with that NUL counted. When the name does not fit, the
+ * answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
+ * neither to `buffer` nor to `out_device`: ask with a capacity of zero
+ * to learn the length, then again with room.
  *
  * Safety
  *
@@ -11847,15 +11989,15 @@ sipral_status_t sipral_stack_log(sipral_handle_t stack, uint32_t level, sipral_l
  * taken. A call's media session that a thread is in the middle of a
  * frame on is reported as busy rather than waited for.
  *
- * `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_len`,
- * when it does not fit; `out_len` may be null.
+ * `SIPRAL_STATUS_BUFFER_TOO_SMALL`, with the length needed in `out_needed`,
+ * when it does not fit; `out_needed` may be null.
  *
  * Safety
  *
  * `buffer` must be writable for `capacity` bytes or be null with a
- * capacity of zero, and `out_len` must point at one `size_t` or be null.
+ * capacity of zero, and `out_needed` must point at one `size_t` or be null.
  */
-sipral_status_t sipral_stack_state(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_len);
+sipral_status_t sipral_stack_state_text(sipral_handle_t stack, char *buffer, size_t capacity, size_t *out_needed);
 
 /**
  * Reserve a free even port from this stack's RTP range, with the odd
@@ -12173,16 +12315,16 @@ sipral_status_t sipral_local_conference_tick(sipral_handle_t conference, uint64_
 /**
  * The oldest packet a member's call owes its far end, in application
  * mode: `out_call` names the call, whose media socket sends it, and
- * `out_packet` is filled as `sipral_media_capture` fills one. A `len`
+ * `packet` is filled as `sipral_media_capture` fills one. A `len`
  * of zero, with `SIPRAL_HANDLE_NONE` in `out_call`, means nothing is
  * waiting. Drain it after every tick.
  *
  * Safety
  *
- * `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+ * `out_call` must point at one `sipral_handle_t`, and `packet` at a
  * `sipral_media_packet_t` as `sipral_media_capture` describes.
  */
-sipral_status_t sipral_local_conference_poll_transmit(sipral_handle_t conference, sipral_handle_t *out_call, sipral_media_packet_t *out_packet);
+sipral_status_t sipral_local_conference_poll_transmit(sipral_handle_t conference, sipral_handle_t *out_call, sipral_media_packet_t *packet);
 
 /**
  * Record the whole conference to `path`: everybody it hears, each at

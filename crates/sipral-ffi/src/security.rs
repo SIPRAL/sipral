@@ -236,6 +236,12 @@ record! {
         /// whose certificates carry codes and no numbers, makes by turning
         /// this on. ABI 0.32.
         pub accept_service_provider_codes: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero; the library reads nothing from
+        /// it.
+        pub reserved: u32,
     }
 }
 
@@ -243,7 +249,7 @@ record! {
 // no anchors, the defaults, and the stack's own clock.
 unsafe impl Versioned for SipralStirConfig {
     const NAME: &'static str = "sipral_stir_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::STIR_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralStirConfig, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -284,7 +290,8 @@ record! {
 // Safety: integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralStreamEncryption {
     const NAME: &'static str = "sipral_stream_encryption";
-    const MIN_SIZE: usize = crate::versioned::min_size::STREAM_ENCRYPTION;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralStreamEncryption, awaiting_keys);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

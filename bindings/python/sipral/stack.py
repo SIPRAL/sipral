@@ -226,7 +226,7 @@ class Stack:
 
         The first connection is made here, before this returns. When it
         fails, or later breaks, the stack is told why
-        (`sipral_stack_transport_failure`) and says so as
+        (`sipral_stack_transport_failed_with`) and says so as
         `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` on :attr:`events` -- untrusted,
         a name that does not match, expired, a handshake refused, a server
         that refused the connection -- and this class connects again, one
@@ -1033,14 +1033,14 @@ class Stack:
 
     def state(self) -> str:
         """Everything this stack is holding, as the redacted text
-        `sipral_stack_state` writes for a crash report: accounts, calls,
+        `sipral_stack_state_text` writes for a crash report: accounts, calls,
         transports, media sessions, the last refused calls, the queues, the
         RTP range and the counters. Safe from any thread, and never waits."""
         buffer = ffi.new(f"char[{lib.SIPRAL_STATE_TEXT_MAX}]")
         length = ffi.new("size_t *")
         check(
-            lib.sipral_stack_state(self.handle, buffer, lib.SIPRAL_STATE_TEXT_MAX, length),
-            "sipral_stack_state",
+            lib.sipral_stack_state_text(self.handle, buffer, lib.SIPRAL_STATE_TEXT_MAX, length),
+            "sipral_stack_state_text",
         )
         return ffi.string(buffer, int(length[0]) - 1).decode("utf-8")
 
@@ -1231,7 +1231,7 @@ class Stack:
             while True:
                 buffer = ffi.new(f"char[{capacity}]")
                 status = lib.sipral_call_identity_text(
-                    self.handle, handle, which, index, buffer, capacity, needed
+                    self.handle, handle, index, which, buffer, capacity, needed
                 )
                 if status == lib.SIPRAL_STATUS_BUFFER_TOO_SMALL:
                     capacity = int(needed[0])
@@ -2080,7 +2080,7 @@ class Stack:
         self._selector.register(sock, selectors.EVENT_READ, data="signalling")
 
     def _report_failure(self, error: int, tls: int, detail: str) -> None:
-        """`sipral_stack_transport_failure`, from whichever thread found out;
+        """`sipral_stack_transport_failed_with`, from whichever thread found out;
         never raising on the way out."""
         failure = ffi.new("sipral_transport_failure_t *")
         failure.size = ffi.sizeof("sipral_transport_failure_t")
@@ -2093,8 +2093,8 @@ class Stack:
         failure.detail_len = len(text)
         try:
             _retry(
-                lambda: lib.sipral_stack_transport_failure(self.handle, failure, self.now_ms()),
-                "sipral_stack_transport_failure",
+                lambda: lib.sipral_stack_transport_failed_with(self.handle, failure, self.now_ms()),
+                "sipral_stack_transport_failed_with",
             )
         except Exception:  # noqa: BLE001 -- the stack is going away
             pass
@@ -2102,7 +2102,7 @@ class Stack:
     def _lose_link(self, error: int, tls: int, detail: str, *, closed: bool = False, tell: bool = True) -> None:
         """Close the signalling connection, tell the stack how it ended --
         `sipral_stack_stream_closed` for an orderly close,
-        `sipral_stack_transport_failure` otherwise, nothing for one the
+        `sipral_stack_transport_failed_with` otherwise, nothing for one the
         stack itself found broken -- and connect again."""
         with self._link_lock:
             sock, self._link = self._link, None

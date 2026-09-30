@@ -3504,9 +3504,16 @@ fn the_words_a_name_is_made_of_join_back_into_snake() {
         "Ok",
         "sipral_call_send_dtmf",
         "timer_t1_ms",
+        "NotAFocus",
     ] {
         held(name);
     }
+    // a one-letter word between two capitals: the status every sentence in
+    // the documentation calls SIPRAL_STATUS_NOT_A_FOCUS, which a rule that
+    // only looked backwards printed as NOT_AFOCUS
+    assert_eq!(words("NotAFocus"), ["Not", "A", "Focus"]);
+    assert_eq!(screaming("NotAFocus"), "NOT_A_FOCUS");
+    assert_eq!(upper_camel("NotAFocus"), "NotAFocus");
     // and every name the ABI really holds, which is the half that keeps
     // holding as the surface grows
     for name in every_spelling(&sipral_ffi::abi::SURFACE) {
@@ -3679,6 +3686,53 @@ fn a_record_dart_cannot_lay_out_is_refused_by_name() {
 /// surface: an alias in a signature and its integer in a field, an
 /// enumeration as its width, a union by value, a callback as a pointer to a
 /// native function, and a callback that answers with a number.
+/// A struct holding a callback that is not the event callback, which is
+/// what `sipral_stack_config_t` holds in `audio_transmit_callback`.
+const SCREEN_HOLDER: Record = Record {
+    name: "SipralScreenHolder",
+    doc: &[],
+    shape: Shape::Struct,
+    fields: &[
+        member("size", "usize"),
+        member("screen", "SipralScreenCallback"),
+        member("user_data", "*mut c_void"),
+    ],
+    size: 24,
+};
+
+/// C# decided whether a callback crossed as a function pointer by the one
+/// name `SipralEventCallback`, so every other callback held in a struct was a
+/// delegate-typed field: a struct that stops being blittable, and a field the
+/// delegate's own documentation says to fill with a function pointer it
+/// cannot hold. Every callback is a function pointer now, whatever it is
+/// called, in a struct and as a parameter alike.
+#[test]
+fn every_callback_crosses_into_csharp_as_a_function_pointer_whatever_it_is_called() {
+    const HELD: Surface = Surface {
+        records: &[
+            COUNTERS,
+            HEADER,
+            CONFIG,
+            PACKET,
+            REGISTRATION,
+            MEDIA_EVENT,
+            PAYLOAD,
+            EVENT,
+            SCREEN_EVENT,
+            PROCESSOR_EVENT,
+            SCREEN_HOLDER,
+        ],
+        ..SYNTHETIC
+    };
+    let printed = csharp::binding(&HELD).unwrap();
+    assert!(printed.contains("    public IntPtr Screen;"), "{printed}");
+    assert!(!printed.contains("public SipralScreenCallback Screen"));
+    assert!(
+        printed.contains("sipral_stack_screen(ulong stack, IntPtr callback, IntPtr userData)"),
+        "{printed}"
+    );
+}
+
 #[test]
 fn every_shape_crosses_into_dart_as_dart_ffi_spells_it() {
     let printed = dart::binding(&SYNTHETIC).unwrap();
@@ -3695,7 +3749,7 @@ fn every_shape_crosses_into_dart_as_dart_ffi_spells_it() {
          ffi.Pointer<ffi.Void> userData);",
         "typedef SipralScreenCallbackDart = int Function(ffi.Pointer<SipralScreenEvent> event, \
          ffi.Pointer<ffi.Void> userData);",
-        "        'sipral_event_t': ffi.sizeOf<SipralEvent>(),",
+        "        'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 72, 40, 48],",
     ] {
         assert!(printed.contains(shape), "missing: {shape}\n{printed}");
     }

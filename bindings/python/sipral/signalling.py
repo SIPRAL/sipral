@@ -9,7 +9,7 @@ Sipral links no TLS library (`docs/22-tls.md`), so the connection is
 Python's own `ssl`, checked by OpenSSL against the name the server is
 expected to have. Nothing here turns that check off: a certificate that
 fails is a connection that is not made, and the stack hears why
-(`sipral_stack_transport_failure`), which it passes on to the application
+(`sipral_stack_transport_failed_with`), which it passes on to the application
 as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
 """
 

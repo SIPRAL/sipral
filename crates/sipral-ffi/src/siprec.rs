@@ -76,7 +76,7 @@ record! {
 // zero, and the required ones are refused by name.
 unsafe impl Versioned for SipralRecordConfig {
     const NAME: &'static str = "sipral_record_config";
-    const MIN_SIZE: usize = crate::versioned::min_size::RECORD_CONFIG;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralRecordConfig, far_end_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

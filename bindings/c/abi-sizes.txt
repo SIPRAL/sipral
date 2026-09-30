@@ -1,49 +1,51 @@
 # Printed by tools/abi-gen. Do not edit.
 #
-# <struct> <first published length> <length in this build>
+# <struct> <pinned member> then, for each layout, <pin> <length>:
+#   p64    64-bit pointers (x86-64, ARM64, on every system)
+#   p32a4  32-bit pointers, 64-bit integers 4-aligned (i386 System V)
+#   p32a8  32-bit pointers, 64-bit integers 8-aligned (ARM EABI, Windows x86)
 #
-# The first number is pinned in crates/sipral-ffi and must not move:
-# it is what a caller built against the oldest header declares, and
-# a library that stopped accepting it would break that caller from a
-# change meant to be additive. The second grows by one appended
-# member at a time. A dash means the library fills that struct in
-# itself and no caller ever declares one.
-sipral_abi_version_t 24 24
-sipral_account_config_t 144 392
-sipral_audio_device_t 32 32
-sipral_audio_info_t 48 48
-sipral_audio_transmit_t - 56
-sipral_call_config_t 80 152
-sipral_capabilities_t 24 24
-sipral_codec_candidate_t 24 24
-sipral_codec_info_t 32 32
-sipral_conference_t 32 32
-sipral_conference_user_t 24 24
-sipral_consent_tone_t 32 32
-sipral_counters_t 152 232
-sipral_event_t - 384
-sipral_local_conference_config_t 24 24
-sipral_local_conference_info_t 56 56
-sipral_local_conference_member_t 40 40
-sipral_log_record_t - 64
-sipral_media_info_t 88 104
-sipral_media_packet_t 56 64
-sipral_path_candidate_t 88 88
-sipral_poll_result_t 48 48
-sipral_presence_t 32 32
-sipral_processor_frame_t - 64
-sipral_progress_config_t 72 72
-sipral_push_echo_t 24 24
-sipral_record_config_t 80 80
-sipral_recording_options_t 32 32
-sipral_screen_request_t - 48
-sipral_stack_config_t 176 376
-sipral_stack_settings_t 72 112
-sipral_stir_config_t 48 56
-sipral_stream_encryption_t 32 32
-sipral_stream_stats_t 152 328
-sipral_subscribe_config_t 88 88
-sipral_suspending_t 32 32
-sipral_transmit_t 88 88
-sipral_transport_failure_t 40 40
-sipral_watched_dialog_t 32 32
+# The pin is where the named member ends: the length of the oldest
+# version of the struct the frozen ABI publishes, and the least a
+# caller may declare. It must not move. The length grows by one
+# appended member at a time. A dash means the library fills that
+# struct in itself and no caller ever declares one.
+sipral_abi_version_t reserved 24 24 20 20 20 20
+sipral_account_config_t recording_in_clear 392 392 208 208 216 216
+sipral_audio_device_t present 32 32 28 28 28 28
+sipral_audio_info_t reserved 48 48 44 44 48 48
+sipral_audio_transmit_t - - 56 - 36 - 40
+sipral_call_config_t focus 152 152 84 84 84 84
+sipral_capabilities_t features 24 24 16 16 16 16
+sipral_codec_candidate_t reserved 24 24 20 20 20 20
+sipral_codec_info_t reserved 32 32 28 28 28 28
+sipral_conference_t locked 32 32 28 28 28 28
+sipral_conference_user_t reserved 24 24 20 20 20 20
+sipral_consent_tone_t local 32 32 28 28 28 28
+sipral_counters_t requests_refused_at_limit 232 232 228 228 232 232
+sipral_event_t - - 384 - 248 - 264
+sipral_local_conference_config_t reserved 24 24 20 20 20 20
+sipral_local_conference_info_t packets_dropped 56 56 48 48 48 48
+sipral_local_conference_member_t reserved 40 40 36 36 40 40
+sipral_log_record_t - - 64 - 40 - 48
+sipral_media_info_t reserved 104 104 92 92 96 96
+sipral_media_packet_t reserved 64 64 36 36 36 36
+sipral_path_candidate_t remote_len 88 88 60 60 64 64
+sipral_poll_result_t next_poll_in_ms 48 48 28 28 32 32
+sipral_presence_t note_len 32 32 20 20 20 20
+sipral_processor_frame_t - - 64 - 32 - 32
+sipral_progress_config_t tone_cycles 72 72 68 68 68 68
+sipral_push_echo_t refresh_lead_ms 24 24 20 20 24 24
+sipral_record_config_t far_end_len 80 80 40 40 40 40
+sipral_recording_options_t reserved 32 32 28 28 28 28
+sipral_screen_request_t - - 48 - 28 - 32
+sipral_stack_config_t rtp_port_max 368 368 248 248 256 256
+sipral_stack_settings_t rtp_port_max 112 112 104 104 112 112
+sipral_stir_config_t reserved 56 56 44 44 48 48
+sipral_stream_encryption_t awaiting_keys 32 32 28 28 28 28
+sipral_stream_stats_t feedback_suppressed 328 328 312 312 328 328
+sipral_subscribe_config_t reserved 88 88 48 48 48 48
+sipral_suspending_t calls 32 32 16 16 16 16
+sipral_transmit_t source_len 88 88 48 48 48 48
+sipral_transport_failure_t detail_len 40 40 24 24 24 24
+sipral_watched_dialog_t duration_ms 32 32 28 28 32 32

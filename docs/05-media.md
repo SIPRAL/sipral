@@ -2076,15 +2076,15 @@ owes on the first two.
 
 ### Attaching one from C
 
-`sipral_call_attach_processor(media, process, user_data)` is the seam at the
+`sipral_media_attach_processor(media, process, user_data)` is the seam at the
 C ABI: `process` is called from inside `sipral_media_playback` (to learn what
 the loudspeaker was just given) and inside `sipral_media_capture` (to run the
 frame just captured), on whichever thread called the one that triggered it,
-with `sipral_processor_frame_t::reset` clear. `sipral_call_reset_processor`
+with `sipral_processor_frame_t::reset` clear. `sipral_media_reset_processor`
 calls it once more with `reset` set instead, and every buffer and every
 length null and zero, the moment a device change or a codec change mid-call
 asks the attached processor to forget what it has learned.
-`sipral_call_detach_processor` stops it being called at all and releases the
+`sipral_media_detach_processor` stops it being called at all and releases the
 loudspeaker history kept for it. `docs/08-ffi.md`'s "Media across the
 boundary" has the threading contract in full — in particular, the one rule
 that is not obvious from C: the callback runs with this call's media locked

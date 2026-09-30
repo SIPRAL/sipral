@@ -444,7 +444,7 @@ event_kinds! {
         /// left this end — not whether a collector accepted it, which this
         /// stack never waits to learn. Raised only when the account named
         /// a collector to publish to at all
-        /// (`sipral_account_settings_t::quality_report_uri`); a call whose
+        /// (`sipral_account_config_t::quality_report_uri`); a call whose
         /// account named none raises nothing here, since nothing was ever
         /// attempted.
         37 = QualityReportSent, c"quality report sent";
@@ -658,7 +658,7 @@ event_kinds! {
         52 = PresenceChanged, c"presence changed";
         /// A transport this stack signals on stopped carrying traffic: the
         /// application said it failed (`sipral_stack_transport_failed`,
-        /// `sipral_stack_transport_failure`) or closed
+        /// `sipral_stack_transport_failed_with`) or closed
         /// (`sipral_stack_stream_closed`), or a stream carried bytes no
         /// message starts with (`sipral_stack_receive_stream`), or a stream
         /// that had answered a keep-alive ping left the next one unanswered
@@ -1493,9 +1493,9 @@ record! {
     pub struct SipralResolveEvent {
         /// The dialog this is about, and what
         /// [`sipral_stack_resolved`](crate::resolve::sipral_stack_resolved)
-        /// is answered with. Minted by the library, valid while the dialog
-        /// is, and answering for one that has ended changes nothing rather
-        /// than failing.
+        /// is answered with. Minted by the library and valid while the dialog
+        /// is; answering for one that has ended is
+        /// `SIPRAL_STATUS_STALE_HANDLE` and changes nothing.
         pub dialog: SipralHandle,
         /// The host to resolve, as the URI spells it — a name, or a literal
         /// address, which is still reported because the flow the dialog is on
@@ -1627,7 +1627,11 @@ record! {
 record! {
     /// The arm of an event that its kind names.
     ///
-    /// Reading any other arm reads bytes the library did not write for it.
+    /// The whole union is zeroed before that one arm is written, so every
+    /// byte past the arm, and every byte of another arm, reads as zero —
+    /// which is what a member appended to an arm later reads as from a
+    /// library built before it. Another arm still means nothing for this
+    /// kind.
     #[derive(Clone, Copy)]
     pub union SipralEventPayload {
         /// For [`SipralEventKind::RegistrationChanged`].

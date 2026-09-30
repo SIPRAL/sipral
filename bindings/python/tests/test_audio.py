@@ -50,6 +50,10 @@ class AStackPicksWhoPumpsItsAudio(unittest.TestCase):
             with self.assertRaises(SipralError) as raised:
                 stack.audio.devices()
             self.assertEqual(raised.exception.status, Status.WRONG_STATE)
+            # the library counts the trailing NUL in the length it reports;
+            # the message is the text before it
+            self.assertNotIn("\0", str(raised.exception))
+            self.assertTrue(str(raised.exception).endswith("pumps its own frames"), str(raised.exception))
 
     @unittest.skipIf(_HAS_DEVICES, "this build has an audio backend")
     def test_device_mode_on_a_build_without_a_backend_is_refused(self) -> None:
@@ -72,6 +76,8 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
             self.assertIsInstance(device, AudioDevice)
             self.assertGreater(device.id, 0)
             self.assertTrue(device.name)
+            # the library counts the name's trailing NUL, which is not the name's
+            self.assertNotIn("\0", device.name)
             self.assertTrue(device.is_microphone or device.is_speaker, device)
         again = self.audio.refresh()
         self.assertEqual(

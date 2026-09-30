@@ -586,6 +586,12 @@ record! {
         /// Whether it has one. Opus does not: it is newer than the table and
         /// always travels as a dynamic type.
         pub has_static_payload_type: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
@@ -593,7 +599,7 @@ record! {
 // each — a zeroed one reads as the codec that is not a codec.
 unsafe impl Versioned for SipralCodecInfo {
     const NAME: &'static str = "sipral_codec_info";
-    const MIN_SIZE: usize = crate::versioned::min_size::CODEC_INFO;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCodecInfo, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -623,6 +629,12 @@ record! {
         /// otherwise, because nothing beat a codec that was never named and
         /// nothing beat the one that won.
         pub outranked_by: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
@@ -631,7 +643,7 @@ record! {
 // that is not an outcome.
 unsafe impl Versioned for SipralCodecCandidate {
     const NAME: &'static str = "sipral_codec_candidate";
-    const MIN_SIZE: usize = crate::versioned::min_size::CODEC_CANDIDATE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralCodecCandidate, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -670,6 +682,12 @@ record! {
         /// A [`SipralCandidateKind`]: what `remote` is, when it is a
         /// candidate at all.
         pub remote_kind: u32,
+        /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
+        /// both put them without padding at the end of the struct, so that a
+        /// member a later version appends starts past the length a caller built
+        /// against this header declares. The library writes zero here and reads
+        /// nothing from it.
+        pub reserved: u32,
         /// Where to write the local address, `host:port` with a trailing
         /// NUL: for a pair, the candidate its checks left from — the host
         /// candidate, or the relayed one; for a relay, the relayed address.
@@ -697,7 +715,7 @@ record! {
 // all-zero is a caller that wants neither address.
 unsafe impl Versioned for SipralPathCandidate {
     const NAME: &'static str = "sipral_path_candidate";
-    const MIN_SIZE: usize = crate::versioned::min_size::PATH_CANDIDATE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPathCandidate, remote_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -757,9 +775,6 @@ record! {
         pub stalled: u32,
         /// Whether the call agreed a real-time text stream (RFC 4103), which
         /// `sipral_media_send_text` writes to.
-        ///
-        /// Appended at the tail (ABI 0.31), like the three below; a caller
-        /// built before them never reads them.
         pub has_text: u32,
         /// Whether the audio stream runs RTP/AVPF (RFC 4585): both ends named
         /// a feedback profile.
@@ -770,6 +785,12 @@ record! {
         /// Whether both ends agreed reduced-size RTCP (RFC 5506,
         /// `a=rtcp-rsize`).
         pub reduced_size: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
@@ -777,7 +798,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralMediaInfo {
     const NAME: &'static str = "sipral_media_info";
-    const MIN_SIZE: usize = crate::versioned::min_size::MEDIA_INFO;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralMediaInfo, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -856,10 +877,6 @@ record! {
         /// Whether an RFC 3611 VoIP Metrics report is available at all —
         /// zero until this stream has identified a source to report on.
         /// Every `voip_*` member below is meaningless while this is zero.
-        ///
-        /// Appended at the tail (task 8.6.9); the pinned `MIN_SIZE` is
-        /// unmoved, and what a caller built before these members existed
-        /// never sent reads them all as zero, this one included.
         pub has_voip_metrics: u32,
         /// RFC 3611 SS4.7.1's loss rate, as its own 256ths (multiply by
         /// 100 and divide by 256 for a percentage).
@@ -914,14 +931,9 @@ record! {
         /// is `packets_lost`. No packet is lost or discarded by it, so none of
         /// the `voip_*` rates above sees it (RFC 3611 SS4.7.1 counts packets);
         /// `loss_rate`, `score` and `suffering` do.
-        ///
-        /// Appended at the tail; the pinned `MIN_SIZE` is unmoved, and a
-        /// caller built before it existed never reads it.
         pub frames_underrun: u64,
         /// Whether the stream runs RTP/AVPF (RFC 4585). Every count below is
         /// zero while it does not.
-        ///
-        /// Appended at the tail (ABI 0.31), like everything below it.
         pub feedback: u32,
         /// The `trr-int` both ends agreed: the least time between two
         /// regular reports, in milliseconds. Zero for none.
@@ -949,7 +961,8 @@ record! {
 // valid value of each.
 unsafe impl Versioned for SipralStreamStats {
     const NAME: &'static str = "sipral_stream_stats";
-    const MIN_SIZE: usize = crate::versioned::min_size::STREAM_STATS;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralStreamStats, feedback_suppressed);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -992,10 +1005,13 @@ record! {
         /// says that instead, `destination` is the server, and the bytes are
         /// written, as they are and in order, on the media socket's
         /// connection to it — never sent as a datagram.
-        ///
-        /// Appended at the tail (task 8.5.5); the pinned `MIN_SIZE` is
-        /// unmoved.
         pub protocol: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero when the struct is handed in;
+        /// the library writes zero here and reads nothing from it.
+        pub reserved: u32,
     }
 }
 
@@ -1005,7 +1021,7 @@ record! {
 // being undefined.
 unsafe impl Versioned for SipralMediaPacket {
     const NAME: &'static str = "sipral_media_packet";
-    const MIN_SIZE: usize = crate::versioned::min_size::MEDIA_PACKET;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralMediaPacket, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -1453,6 +1469,7 @@ pub(crate) fn with_media<R>(
     act: impl FnOnce(&mut MediaSession, &MediaEntry) -> Result<R, Fail>,
 ) -> Result<R, Fail> {
     let entry = MEDIA.get(media).map_err(handle_failed)?;
+    refuse_from_inside_a_frame()?;
     let _inside = Inside::enter(entry.stack);
     match entry.share.with(|session| act(session, &entry)) {
         Ok(done) => done,
@@ -1488,6 +1505,7 @@ fn with_media_pair<R>(
 ) -> Result<R, Fail> {
     let entry_a = MEDIA.get(media_a).map_err(handle_failed)?;
     let entry_b = MEDIA.get(media_b).map_err(handle_failed)?;
+    refuse_from_inside_a_frame()?;
     let _inside_a = Inside::enter(entry_a.stack);
     let _inside_b = Inside::enter(entry_b.stack);
     if media_a <= media_b {
@@ -1529,6 +1547,26 @@ fn media_unavailable(error: SessionUnavailable) -> Fail {
              that is left to do with the handle is release it",
         ),
     }
+}
+
+/// Refuse a media entry point called from inside a frame of any call's
+/// media on this thread: from a processor, or from a local conference's tick.
+///
+/// The session lock waits for a frame another thread is in the middle of, so
+/// two processors on two threads, each reaching into the other's call, would
+/// each wait for the other's frame to end. Refusing every media handle from
+/// inside a frame, rather than only the one the frame is on, is what makes
+/// that impossible rather than merely documented.
+fn refuse_from_inside_a_frame() -> Result<(), Fail> {
+    if INSIDE.with_borrow(Vec::is_empty) {
+        return Ok(());
+    }
+    Err(fail(
+        SipralStatus::Busy,
+        "this thread is inside a frame of a call's media (a processor, or a local conference's \
+         tick), and a media entry point called from there could wait on a frame that is waiting \
+         on this one; call it once the frame has returned",
+    ))
 }
 
 thread_local! {
@@ -1715,6 +1753,7 @@ entry! {
             ));
         };
         let info = SipralCodecInfo {
+            reserved: 0,
             size: size_of::<SipralCodecInfo>(),
             codec: named_codec(codec) as u32,
             clock_rate: codec.clock_rate(),
@@ -1766,8 +1805,11 @@ entry! {
                 format!("this stack offers {} codecs and there is room for {capacity}", order.len()),
             ));
         }
-        // the capacity reaches the length, so a non-empty order has a buffer
-        unsafe { std::ptr::copy_nonoverlapping(order.as_ptr(), out_codecs, order.len()) };
+        // the capacity reaches the length, so a non-empty order has a
+        // buffer; an empty one is nothing to copy, and the buffer may be null
+        if !order.is_empty() {
+            unsafe { std::ptr::copy_nonoverlapping(order.as_ptr(), out_codecs, order.len()) };
+        }
         Ok(())
     }
 }
@@ -1972,6 +2014,7 @@ fn paths_of(
                 _ => (SipralPathOutcome::Unknown, 0),
             };
             let numbers = SipralPathCandidate {
+                reserved: 0,
                 size: size_of::<SipralPathCandidate>(),
                 priority: path.priority,
                 kind: match path.kind {
@@ -2017,6 +2060,7 @@ fn candidate_of(candidate: &CodecCandidate) -> SipralCodecCandidate {
         _ => (SipralCodecOutcome::Unknown, SipralCodec::Unknown),
     };
     SipralCodecCandidate {
+        reserved: 0,
         size: size_of::<SipralCodecCandidate>(),
         codec: named_codec(candidate.codec) as u32,
         outcome: outcome as u32,
@@ -2028,6 +2072,7 @@ fn media_info(session: &MediaSession) -> SipralMediaInfo {
     let plan = session.plan();
     let feedback = session.feedback();
     SipralMediaInfo {
+        reserved: 0,
         size: size_of::<SipralMediaInfo>(),
         codec: named_codec(session.codec()) as u32,
         payload_type: u32::from(plan.codec.payload()),
@@ -2345,11 +2390,11 @@ record! {
 alias! {
     /// Echo cancellation, gain control or noise suppression, run over one
     /// frame, or told to forget what it has learned — [`SipralProcessorFrame`]
-    /// says which. Installed with [`sipral_call_attach_processor`].
+    /// says which. Installed with [`sipral_media_attach_processor`].
     ///
     /// **It runs with this call's media locked**, which is the opposite of
     /// [`crate::event::SipralEventCallback`] and the reason
-    /// [`sipral_call_attach_processor`]'s own doc comment says so before it
+    /// [`sipral_media_attach_processor`]'s own doc comment says so before it
     /// says anything else — read it there. In consequence: **this callback
     /// must not call back into the media handle it was attached through**,
     /// on this thread or on any other. It must not unwind, for the same
@@ -2429,54 +2474,55 @@ impl Processor for CProcessor {
 }
 
 entry! {
-    /// Run `process` over every frame captured on this call, against the
-    /// far-end audio this call played [`MediaSession::render_delay`] earlier
-    /// — echo cancellation, gain control and noise suppression are all this
-    /// one seam, and `docs/05-media.md` says why.
+    /// Run `callback` over every frame captured on this call, against the
+    /// far-end audio this call played a render delay earlier — echo
+    /// cancellation, gain control and noise suppression are all this one
+    /// seam, and `docs/05-media.md` says why.
     ///
     /// What was attached before is dropped, along with the echo path it had
     /// learned. Attaching mid-call is allowed and costs the first few hundred
     /// milliseconds of a fresh adaptation, the same price a call pays at its
     /// start.
     ///
-    /// **`process` runs with this call's media locked**, the same as
-    /// [`crate::screening::SipralScreenCallback`] and unlike
-    /// [`crate::event::SipralEventCallback`]: it is called from inside
-    /// [`sipral_media_playback`] (to learn what the loudspeaker was just
-    /// given) and inside [`sipral_media_capture`] (to run the frame just
+    /// **`callback` runs with this call's media locked**, the same as the
+    /// screening callback and unlike the event callback: it is called from
+    /// inside [`sipral_media_playback`] (to learn what the loudspeaker was
+    /// just given) and inside [`sipral_media_capture`] (to run the frame just
     /// captured), and — with [`SipralProcessorFrame`]'s `reset` set — whenever
     /// this call's media forgets what it has learned, a device change or a
     /// codec change mid-call. All three run on whichever thread called the
-    /// entry point that triggered them. In consequence, **it must not call
-    /// back into the media handle it was attached through**, on this thread
-    /// or on any other — doing so does not deadlock, since every media entry
-    /// point takes its session's lock without waiting and answers
-    /// `SIPRAL_STATUS_BUSY` rather than block, but it is refused outright
-    /// rather than relied on. A *different* call's media, or this stack's
-    /// own entry points, are unaffected. It must not unwind: a panic that
-    /// reached C across this boundary would take the host process with it,
-    /// the same rule every callback in this ABI is held to.
+    /// entry point that triggered them. **From inside `callback`, call
+    /// nothing on any media handle and nothing on this call's stack**: every
+    /// such call answers `SIPRAL_STATUS_BUSY` and does nothing. Another
+    /// thread that calls into this call's media meanwhile waits for the
+    /// frame to finish, so a processor that reached into a second call's
+    /// media while that call's processor reached into this one would wait on
+    /// the other for ever; refusing every media handle from inside a frame
+    /// is what rules that out. It must not unwind: a panic that reached C
+    /// across this boundary would take the host process with it, the same
+    /// rule every callback in this ABI is held to.
     ///
-    /// `user_data` is handed back to `process` untouched on every call, read
+    /// `user_data` is handed back to `callback` untouched on every call, read
     /// by nothing here, and has to outlive the last one — which the caller
     /// who installed it is the one to know is over:
-    /// `sipral_call_detach_processor` or the call ending are the two ways.
+    /// `sipral_media_detach_processor` returning, or `sipral_media_release`
+    /// of this handle, are the two ways.
     ///
     /// # Safety
     ///
-    /// `process` is called on whichever thread calls
+    /// `callback` is called on whichever thread calls
     /// [`sipral_media_playback`] or [`sipral_media_capture`] on this call,
     /// for as long as the processor stays attached, and `user_data` has to
     /// outlive the last such call.
-    fn sipral_call_attach_processor(
+    fn sipral_media_attach_processor(
         media: SipralHandle,
-        process: SipralProcessorCallback,
+        callback: SipralProcessorCallback,
         user_data: *mut c_void,
     ) {
-        let Some(callback) = process else {
+        let Some(callback) = callback else {
             return Err(fail(
                 SipralStatus::InvalidArgument,
-                "process is null: there is nothing to attach",
+                "callback is null: there is nothing to attach",
             ));
         };
         with_media(media, |session, _| {
@@ -2491,20 +2537,20 @@ entry! {
 }
 
 entry! {
-    /// Stop running the processor [`sipral_call_attach_processor`] attached,
+    /// Stop running the processor [`sipral_media_attach_processor`] attached,
     /// if there was one.
     ///
     /// `out_was_attached`, when not null, says whether there was one to stop:
     /// 1 if a processor was attached and is now detached, 0 if there was
     /// none. The frames the application hands over reach the encoder
     /// untouched again from the next one, and the loudspeaker history kept
-    /// for it is released. Once this returns, `process` is not called again
+    /// for it is released. Once this returns, `callback` is not called again
     /// for this attachment — the moment `user_data` may be freed.
     ///
     /// # Safety
     ///
     /// `out_was_attached` must point at one `uint32_t` or be null.
-    fn sipral_call_detach_processor(media: SipralHandle, out_was_attached: *mut u32) {
+    fn sipral_media_detach_processor(media: SipralHandle, out_was_attached: *mut u32) {
         let was_attached = with_media(media, |session, _| Ok(session.detach_processor()))?;
         if !out_was_attached.is_null() {
             unsafe { out_was_attached.write(u32::from(was_attached)) };
@@ -2520,7 +2566,7 @@ entry! {
     /// What a device change asks for: the estimate was built for a different
     /// loudspeaker and a different microphone, and carrying it forward makes
     /// the processor fight it for a while instead of adapting cleanly. Calls
-    /// the `process` given to [`sipral_call_attach_processor`] with
+    /// the `callback` given to [`sipral_media_attach_processor`] with
     /// [`SipralProcessorFrame`]'s `reset` set.
     ///
     /// `out_was_attached`, when not null, says whether there was a processor
@@ -2529,7 +2575,7 @@ entry! {
     /// # Safety
     ///
     /// `out_was_attached` must point at one `uint32_t` or be null.
-    fn sipral_call_reset_processor(media: SipralHandle, out_was_attached: *mut u32) {
+    fn sipral_media_reset_processor(media: SipralHandle, out_was_attached: *mut u32) {
         let was_attached = with_media(media, |session, _| Ok(session.reset_processor()))?;
         if !out_was_attached.is_null() {
             unsafe { out_was_attached.write(u32::from(was_attached)) };
@@ -2597,8 +2643,18 @@ entry! {
         }
         let origin = MEDIA.get(media_a).map_err(handle_failed)?.origin;
         let now = instant_at(origin, now_ms)?;
-        let taken = unsafe { slice::from_raw_parts(mic, mic_count) };
-        let room = unsafe { slice::from_raw_parts_mut(local, local_count) };
+        // a slice is never built over a null pointer, not even an empty one:
+        // (NULL, 0) is a pair the checks above let through
+        let taken: &[i16] = if mic_count == 0 {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(mic, mic_count) }
+        };
+        let room: &mut [i16] = if local_count == 0 {
+            &mut []
+        } else {
+            unsafe { slice::from_raw_parts_mut(local, local_count) }
+        };
         let outcome = with_media_pair(media_a, media_b, |session_a, session_b| {
             let frame = session_a.frame_samples();
             if session_b.frame_samples() != frame || mic_count != frame || local_count != frame {
@@ -2693,9 +2749,9 @@ entry! {
         let mut out = unsafe { read_versioned(packet) }?;
         prepare(&mut out)?;
         with_media(media, |session, entry| {
-            // the clock is read and checked like every other entry point's,
-            // so that a caller which drives this one alone still cannot walk
-            // a stack's time backwards
+            // the clock is read the way every other media entry point reads
+            // it: against the stack's origin, and not held to the stack's
+            // last reading, which a media thread does not share
             #[cfg_attr(
                 not(any(feature = "dtls", feature = "ice")),
                 allow(clippy::let_underscore_untyped)
@@ -2737,7 +2793,7 @@ entry! {
     /// One at a time, like every other poll in this crate: call it after
     /// every `sipral_stack_poll` that delivered `SIPRAL_EVENT_KIND_CALL_ENDED`
     /// for a call this stack was running media on, and keep calling until
-    /// `out_packet` comes back with a `len` of zero. A call whose media never
+    /// `packet` comes back with a `len` of zero. A call whose media never
     /// ran leaves nothing here, but for one thing.
     ///
     /// A call given a relay on a TURN server (`turn_server` on the stack's
@@ -2752,17 +2808,17 @@ entry! {
     ///
     /// # Safety
     ///
-    /// `out_call` must point at one `sipral_handle_t`, and `out_packet` at a
+    /// `out_call` must point at one `sipral_handle_t`, and `packet` at a
     /// `sipral_media_packet_t` as [`sipral_media_capture`] describes.
     fn sipral_stack_poll_farewell(
         stack: SipralHandle,
         out_call: *mut SipralHandle,
-        out_packet: *mut SipralMediaPacket,
+        packet: *mut SipralMediaPacket,
     ) {
         if out_call.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_call is null"));
         }
-        let mut out = unsafe { read_versioned(out_packet) }?;
+        let mut out = unsafe { read_versioned(packet) }?;
         prepare(&mut out)?;
         let call = with_stack(stack, |state| {
             let Some((call, destination, payload, protocol)) = state.farewells.pop_front() else {
@@ -2772,7 +2828,7 @@ entry! {
             Ok(call)
         })?;
         unsafe { out_call.write(call) };
-        unsafe { write_versioned(out_packet, out) }
+        unsafe { write_versioned(packet, out) }
     }
 }
 
@@ -2830,6 +2886,14 @@ pub(crate) unsafe fn put_datagram(
 
 /// Put one datagram in the caller's buffers.
 ///
+/// [`prepare`] promised the caller a datagram no longer than
+/// [`SIPRAL_MEDIA_PACKET_BYTES`] and checked the buffer holds that much, and
+/// RTP and RTCP are built in buffers that size. A DTLS record, an ICE check
+/// or a TURN-wrapped packet is built elsewhere, so the length is compared
+/// with the room here rather than trusted: one that does not fit is
+/// `SIPRAL_STATUS_BUFFER_TOO_SMALL`, naming how many bytes it needed, and
+/// nothing is written.
+///
 /// # Safety
 ///
 /// The buffers in `packet` must be writable for the capacities beside them,
@@ -2840,6 +2904,16 @@ pub(crate) unsafe fn put(
     payload: &[u8],
     protocol: u32,
 ) -> Result<(), Fail> {
+    if payload.len() > packet.capacity {
+        return Err(fail(
+            SipralStatus::BufferTooSmall,
+            format!(
+                "a datagram of {} bytes is waiting and the packet buffer has room for {}",
+                payload.len(),
+                packet.capacity
+            ),
+        ));
+    }
     unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), packet.data, payload.len()) };
     packet.len = payload.len();
     packet.protocol = protocol;
@@ -3046,6 +3120,7 @@ a=sendrecv\r\n";
     /// nothing can be told from one that wrote zeroes.
     pub(crate) fn media_info_zeroed() -> SipralMediaInfo {
         SipralMediaInfo {
+            reserved: 0,
             size: size_of::<SipralMediaInfo>(),
             codec: u32::MAX,
             payload_type: u32::MAX,
@@ -3086,6 +3161,7 @@ a=sendrecv\r\n";
 
         pub(crate) fn packet(&mut self) -> SipralMediaPacket {
             SipralMediaPacket {
+                reserved: 0,
                 size: size_of::<SipralMediaPacket>(),
                 data: self.packet.as_mut_ptr(),
                 capacity: self.packet.len(),
@@ -3342,6 +3418,7 @@ a=sendrecv\r\n";
         let mut seen = Vec::new();
         for index in 0..count {
             let mut info = SipralCodecInfo {
+                reserved: 0,
                 size: size_of::<SipralCodecInfo>(),
                 codec: u32::MAX,
                 clock_rate: u32::MAX,
@@ -3383,6 +3460,7 @@ a=sendrecv\r\n";
     #[test]
     fn there_is_no_codec_past_the_end() {
         let mut info = SipralCodecInfo {
+            reserved: 0,
             size: size_of::<SipralCodecInfo>(),
             codec: u32::MAX,
             clock_rate: 0,
@@ -3727,6 +3805,7 @@ a=sendrecv\r\n";
 
     fn candidate_zeroed() -> SipralCodecCandidate {
         SipralCodecCandidate {
+            reserved: 0,
             size: size_of::<SipralCodecCandidate>(),
             codec: u32::MAX,
             outcome: u32::MAX,
@@ -3830,7 +3909,8 @@ a=sendrecv\r\n";
     #[test]
     fn a_candidate_struct_shorter_than_its_min_size_is_unsupported_version() {
         let mut candidate = candidate_zeroed();
-        candidate.size = crate::versioned::min_size::CODEC_CANDIDATE - 1;
+        candidate.size =
+            <crate::media::SipralCodecCandidate as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_media_codec_candidate_at(SIPRAL_HANDLE_NONE, 0, &raw mut candidate) },
             SipralStatus::UnsupportedVersion
@@ -3852,7 +3932,7 @@ a=sendrecv\r\n";
     fn a_media_info_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
         let mut info = media_info_zeroed();
-        info.size = crate::versioned::min_size::MEDIA_INFO - 1;
+        info.size = <crate::media::SipralMediaInfo as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_media_info(SIPRAL_HANDLE_NONE, &raw mut info) },
             SipralStatus::UnsupportedVersion
@@ -4157,7 +4237,7 @@ a=sendrecv\r\n";
     fn a_stream_stats_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
         let mut stats = empty_stats();
-        stats.size = crate::versioned::min_size::STREAM_STATS - 1;
+        stats.size = <crate::media::SipralStreamStats as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_media_statistics(SIPRAL_HANDLE_NONE, 0, &raw mut stats) },
             SipralStatus::UnsupportedVersion
@@ -4174,7 +4254,8 @@ a=sendrecv\r\n";
         let samples = [0_i16; FRAME];
         let mut buffers = Buffers::new();
         let mut packet = buffers.packet();
-        packet.size = crate::versioned::min_size::MEDIA_PACKET - 1;
+        packet.size =
+            <crate::media::SipralMediaPacket as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe {
                 sipral_media_capture(
@@ -4462,6 +4543,58 @@ a=sendrecv\r\n";
         );
     }
 
+    /// `sipral_media_mix` accepts (NULL, 0) for both sample buffers, as its
+    /// argument checks say, and answers for the frame length rather than
+    /// building a slice over a null pointer — which a debug build's own
+    /// precondition checks abort the process for, before any answer.
+    #[test]
+    fn a_mix_given_no_samples_at_all_is_answered_rather_than_sliced() {
+        let mut observed = Observed::default();
+        let (stack, call_a, call_b) = media_call_pair(&mut observed);
+        let mut media_a = SIPRAL_HANDLE_NONE;
+        let mut media_b = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call_a, &raw mut media_a) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_call_media(stack, call_b, &raw mut media_b) },
+            SipralStatus::Ok
+        );
+        let mut buffers_a = Buffers::new();
+        let mut buffers_b = Buffers::new();
+        let mut packet_a = buffers_a.packet();
+        let mut packet_b = buffers_b.packet();
+        let status = unsafe {
+            sipral_media_mix(
+                media_a,
+                media_b,
+                0,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                0,
+                &raw mut packet_a,
+                &raw mut packet_b,
+            )
+        };
+        assert_eq!(
+            status,
+            SipralStatus::InvalidArgument,
+            "{}",
+            last_error_text()
+        );
+        assert!(
+            last_error_text().contains("mic was 0"),
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
     /// A call that hangs up while joined tells its former partner over the C
     /// ABI too — `SIPRAL_EVENT_KIND_MEDIA_UNJOINED`, naming the call that is
     /// still up — and that survivor keeps carrying its own audio directly,
@@ -4554,6 +4687,7 @@ a=sendrecv\r\n";
         let media = media_of(stack, call);
         let mut small = [0_u8; 64];
         let mut packet = SipralMediaPacket {
+            reserved: 0,
             size: size_of::<SipralMediaPacket>(),
             data: small.as_mut_ptr(),
             capacity: small.len(),
@@ -5083,6 +5217,56 @@ a=sendrecv\r\n";
             near_end,
             [20, -40, -2], // 32_767_i16.wrapping_mul(2)
             "the callback's own frame never reached the caller's buffer"
+        );
+    }
+
+    /// A datagram longer than the room the caller gave is refused with the
+    /// length it needed, and not a byte of it lands past the buffer — or in
+    /// it. Before the comparison the copy trusted every producer to stay
+    /// within 1500 bytes, which only RTP and RTCP are built to.
+    #[test]
+    fn a_datagram_longer_than_the_packet_buffer_is_refused_and_nothing_is_written() {
+        let mut room = [0xAA_u8; 16];
+        // Safety: every member of the struct is valid when zero
+        let mut packet: SipralMediaPacket = unsafe { std::mem::zeroed() };
+        packet.size = size_of::<SipralMediaPacket>();
+        packet.data = room.as_mut_ptr();
+        packet.capacity = 8;
+        let destination = SocketAddr::from(([192, 0, 2, 1], 4_000));
+        let put = unsafe { super::put(&mut packet, destination, &[1_u8; 12], 0) };
+        let failure = put.expect_err("twelve bytes do not fit in eight");
+        assert_eq!(failure.status, SipralStatus::BufferTooSmall);
+        assert!(
+            failure.message().contains("12 bytes"),
+            "{}",
+            failure.message()
+        );
+        assert_eq!(room, [0xAA; 16], "nothing was written");
+        assert_eq!(packet.len, 0);
+    }
+
+    /// A thread inside a frame of one call's media — which only a processor
+    /// or a local conference's tick running on it can be — is refused every
+    /// media handle, a second call's included, and the same call is served
+    /// again once the frame is over. Two processors on two threads that each
+    /// reached into the other's call would otherwise wait on each other's
+    /// frame for ever.
+    #[test]
+    fn a_media_handle_called_from_inside_a_frame_is_busy_whichever_call_it_names() {
+        let mut observed = Observed::default();
+        let (stack, call) = media_call_offering(&mut observed, "PCMU,PCMA,G722", TWO_FORMATS);
+        let media = media_of(stack, call);
+        {
+            let _frame_of_another_call = super::Inside::enter(SipralHandle::MAX);
+            let mut info = media_info_zeroed();
+            let status = unsafe { sipral_media_info(media, &raw mut info) };
+            assert_eq!(status, SipralStatus::Busy, "{}", last_error_text());
+        }
+        let _ = media_info(media);
+        assert_eq!(unsafe { sipral_media_release(media) }, SipralStatus::Ok);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
         );
     }
 

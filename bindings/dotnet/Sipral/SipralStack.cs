@@ -494,7 +494,7 @@ public sealed partial class SipralStack : IDisposable
             config.AudioActivation = (uint)audioActivation;
             if (AudioMode == SipralAudio.Device)
             {
-                config.AudioTransmitCallback = _audioTransmit;
+                config.AudioTransmitCallback = Marshal.GetFunctionPointerForDelegate(_audioTransmit);
             }
             config.AudioProbeMs = audioProbeMs;
             config.AudioDeviceRateHz = audioDeviceRateHz;
@@ -627,7 +627,7 @@ public sealed partial class SipralStack : IDisposable
         if (handler is null || level == SipralLogLevel.Off)
         {
             SipralErrors.Call(
-                () => NativeMethods.sipral_stack_log(Handle, (uint)SipralLogLevel.Off, null!, IntPtr.Zero),
+                () => NativeMethods.sipral_stack_log(Handle, (uint)SipralLogLevel.Off, IntPtr.Zero, IntPtr.Zero),
                 "sipral_stack_log");
             return;
         }
@@ -645,12 +645,12 @@ public sealed partial class SipralStack : IDisposable
             _logCallbacks.Add(callback);
         }
         SipralErrors.Call(
-            () => NativeMethods.sipral_stack_log(Handle, (uint)level, callback, IntPtr.Zero),
+            () => NativeMethods.sipral_stack_log(Handle, (uint)level, Marshal.GetFunctionPointerForDelegate(callback), IntPtr.Zero),
             "sipral_stack_log");
     }
 
     /// <summary>Everything this stack is holding, as the redacted text
-    /// <c>sipral_stack_state</c> writes for a crash report: accounts, calls,
+    /// <c>sipral_stack_state_text</c> writes for a crash report: accounts, calls,
     /// transports, media sessions, the last refused calls, the queues, the
     /// RTP range and the counters. Safe from any thread, and never
     /// waits.</summary>
@@ -659,8 +659,8 @@ public sealed partial class SipralStack : IDisposable
         var buffer = new sbyte[(int)global::Sipral.Sipral.StateTextMax];
         nuint length = 0;
         SipralErrors.Call(
-            () => NativeMethods.sipral_stack_state(Handle, buffer, (nuint)buffer.Length, out length),
-            "sipral_stack_state");
+            () => NativeMethods.sipral_stack_state_text(Handle, buffer, (nuint)buffer.Length, out length),
+            "sipral_stack_state_text");
         var bytes = (byte[])(Array)buffer;
         return Encoding.UTF8.GetString(bytes, 0, (int)length - 1);
     }
@@ -1093,11 +1093,11 @@ public sealed partial class SipralStack : IDisposable
         for (nuint index = 0; index < count; index++)
         {
             var buffer = new sbyte[256];
-            var status = NativeMethods.sipral_call_identity_text(Handle, call, (uint)which, index, buffer, (nuint)buffer.Length, out var needed);
+            var status = NativeMethods.sipral_call_identity_text(Handle, call, index, (uint)which, buffer, (nuint)buffer.Length, out var needed);
             if (status == SipralStatus.BufferTooSmall)
             {
                 buffer = new sbyte[(int)needed];
-                status = NativeMethods.sipral_call_identity_text(Handle, call, (uint)which, index, buffer, (nuint)buffer.Length, out needed);
+                status = NativeMethods.sipral_call_identity_text(Handle, call, index, (uint)which, buffer, (nuint)buffer.Length, out needed);
             }
             SipralErrors.Check(status, "sipral_call_identity_text");
             // `needed` counts the NUL the text is copied out with

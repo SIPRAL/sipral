@@ -260,7 +260,7 @@ private fun dnsMatches(pattern: String, name: String): Boolean {
 /**
  * The one connection a [SipralClient] signals on over TCP or TLS: made
  * again, backing off, whenever it is lost, and every loss told to the stack
- * with its reason (`sipral_stack_transport_failure`), which says so as
+ * with its reason (`sipral_stack_transport_failed_with`), which says so as
  * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
  */
 internal class SignallingLink(
@@ -355,11 +355,11 @@ internal class SignallingLink(
         }
     }
 
-    /** `sipral_stack_transport_failure`, never throwing on the way out. */
+    /** `sipral_stack_transport_failed_with`, never throwing on the way out. */
     fun report(refused: SignallingRefused) {
         try {
             retryBusy {
-                Sipral.stackTransportFailure(
+                Sipral.stackTransportFailedWith(
                     client.handle,
                     SipralTransportFailure(
                         transport = 0,
@@ -423,7 +423,7 @@ internal class SignallingLink(
 
     /** Close [open] if it is still the connection, tell the stack how it
      * ended -- `sipral_stack_stream_closed` for an orderly close ([refused]
-     * null), `sipral_stack_transport_failure` otherwise, nothing when not
+     * null), `sipral_stack_transport_failed_with` otherwise, nothing when not
      * [tell] -- and connect again. */
     private fun lose(open: Open, refused: SignallingRefused?, tell: Boolean) {
         if (!current.compareAndSet(open, null)) {

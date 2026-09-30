@@ -34,21 +34,23 @@ def _last_error_message() -> str:
 
     A first call with a modest buffer covers every message this library
     writes; the rare longer one answers `SIPRAL_STATUS_BUFFER_TOO_SMALL`
-    with the length actually needed in ``out_len``, and a second call with
+    with the length actually needed in ``out_needed``, and a second call with
     a buffer that size is guaranteed to fit it, since the message a thread
     last set does not change between the two calls made here.
     """
     capacity = 256
     buffer = ffi.new(f"char[{capacity}]")
-    out_len = ffi.new("size_t *")
-    status = lib.sipral_last_error_message(buffer, capacity, out_len)
+    out_needed = ffi.new("size_t *")
+    status = lib.sipral_last_error_message(buffer, capacity, out_needed)
     if status == lib.SIPRAL_STATUS_BUFFER_TOO_SMALL:
-        capacity = int(out_len[0])
+        capacity = int(out_needed[0])
         buffer = ffi.new(f"char[{capacity}]")
-        status = lib.sipral_last_error_message(buffer, capacity, out_len)
-    if status != lib.SIPRAL_STATUS_OK:
+        status = lib.sipral_last_error_message(buffer, capacity, out_needed)
+    if status != lib.SIPRAL_STATUS_OK or out_needed[0] == 0:
         return ""
-    return ffi.buffer(buffer, int(out_len[0]))[:].decode("utf-8", "replace")
+    # the length the library reports counts the trailing NUL, which is not
+    # part of the message
+    return ffi.buffer(buffer, int(out_needed[0]) - 1)[:].decode("utf-8", "replace")
 
 
 class SipralError(Exception):

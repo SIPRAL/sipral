@@ -154,19 +154,19 @@ fn with_message<R>(read: impl FnOnce(&str) -> R) -> Option<R> {
 ///
 /// # Safety
 ///
-/// `buffer` is written for `capacity` bytes and `out_len` for one `size_t`.
+/// `buffer` is written for `capacity` bytes and `out_needed` for one `size_t`.
 unsafe fn copy_out(
     message: &str,
     buffer: *mut c_char,
     capacity: usize,
-    out_len: *mut usize,
+    out_needed: *mut usize,
 ) -> Result<(), SipralStatus> {
     if buffer.is_null() && capacity != 0 {
         return Err(SipralStatus::InvalidArgument);
     }
     let needed = message.len().saturating_add(1);
-    if !out_len.is_null() {
-        unsafe { out_len.write(needed) };
+    if !out_needed.is_null() {
+        unsafe { out_needed.write(needed) };
     }
     if capacity < needed {
         return Err(SipralStatus::BufferTooSmall);
@@ -184,7 +184,7 @@ entry! {
     /// Copy the calling thread's last error message into `buffer`.
     ///
     /// The message is UTF-8 and is written with a trailing NUL, which is not
-    /// counted in the length. `out_len`, when it is not null, always receives
+    /// counted in the length. `out_needed`, when it is not null, always receives
     /// the number of bytes the message needs including that NUL, so a caller
     /// that passes a capacity of zero and a null buffer gets the length back
     /// and `SIPRAL_STATUS_BUFFER_TOO_SMALL`. Nothing is written to a buffer
@@ -200,17 +200,17 @@ entry! {
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or null with a capacity
-    /// of zero, and `out_len` must point to one `size_t` or be null.
+    /// of zero, and `out_needed` must point to one `size_t` or be null.
     quiet fn sipral_last_error_message(
         buffer: *mut c_char,
         capacity: usize,
-        out_len: *mut usize,
+        out_needed: *mut usize,
     ) {
-        let copied = with_message(|message| unsafe { copy_out(message, buffer, capacity, out_len) });
+        let copied = with_message(|message| unsafe { copy_out(message, buffer, capacity, out_needed) });
         match copied {
             Some(result) => result,
             // the thread's locals are already gone, so there is no message
-            None => unsafe { copy_out("", buffer, capacity, out_len) },
+            None => unsafe { copy_out("", buffer, capacity, out_needed) },
         }
     }
 }

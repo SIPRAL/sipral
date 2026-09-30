@@ -93,7 +93,13 @@ Rules for the ABI:
   `SIPRAL_STATUS_BUSY` and does nothing. The lock is held for the work of the
   call that took it and no longer — never across the callback and never for a
   frame of audio — so Busy means two threads that really did arrive together,
-  or a frame calling out into its own stack, as the next rule says.
+  or a frame calling out into its own stack, as the next rule says. The
+  `sipral_audio_*` calls are the one family that waits, and on the audio
+  engine rather than the stack: asking the platform about its devices holds
+  the engine for up to `audio_probe_ms`. A poll only tries the engine's
+  lock, leaves the engine's news for the next poll when another thread holds
+  it, and asks for that poll twenty milliseconds on, so a slow platform never
+  holds the stack's lock with it.
   The reasoning is the module documentation of
   `crates/sipral-ffi/src/stack.rs`, and the generated header puts the rules in
   a few sentences at the top, so a binding author meets them wherever they
@@ -125,10 +131,14 @@ Rules for the ABI:
   locks for the length of one mixed frame, in a fixed order (by handle value,
   never by which one was named first) so that two threads mixing the same
   pair cannot deadlock against each other. So `SIPRAL_STATUS_BUSY` from a
-  media entry point means one thing: the thread is already inside that same
-  call's media further down its own stack — which only code run during a
-  frame, such as a processor, can arrange — and answering it is how re-entry
-  stays a status rather than a deadlock. The same code calling into the
+  media entry point means one thing: the thread is already inside a frame of
+  a call's media further down its own stack — which only code run during a
+  frame, a processor or a local conference's tick, can arrange — and
+  answering it is how re-entry stays a status rather than a deadlock. It is
+  refused for every media handle, not only the frame's own call: a
+  processor on one call reaching into a second call's media while that
+  call's processor, on another thread, reached into the first would have
+  each thread waiting for the other's frame. The same code calling into the
   call's stack instead — hanging up, polling, destroying it — is answered
   `SIPRAL_STATUS_BUSY` by that entry point too, even with no other thread
   inside: the stack's work can need the very session the frame is holding.
@@ -150,13 +160,15 @@ Rules for the ABI:
 
   Signalling makes a smaller version of the same allowance rather than none at
   all. It *is* checked against the stack's own clock — `sipral_stack_poll` and
-  every other entry point that takes `now_ms` still refuse a caller whose
-  reading has gone backwards — but signalling may be called from any thread,
+  every other signalling entry point that takes `now_ms` still refuse a caller
+  whose reading has gone backwards; the media entry points above, and
+  `sipral_account_freeze`, which only stamps a snapshot, read it unchecked —
+  but signalling may be called from any thread,
   and two threads reading the same clock a moment apart do not agree to the
   millisecond any more than a media thread and the poll thread do. So a
   `now_ms` up to fifty milliseconds behind the last one this stack saw is
   honoured rather than refused, and only a jump further back than that is
-  `SIPRAL_STATUS_INVALID_ARGUMENT`. Honouring one never moves the clock
+  `SIPRAL_STATUS_CLOCK_BEHIND`. Honouring one never moves the clock
   backward to it: the stack's high-water mark only ever advances, so a
   fifty-millisecond straggler from one thread cannot make a second thread's
   later, larger reading look like a jump forward it was not. And the clock
@@ -287,21 +299,22 @@ whoever adds a table.
   or the call, and answered `SIPRAL_STATUS_OK` for a hang-up that named no call
   at all. The four bits of kind are what a handle now carries to say which
   table it came from — a stack, an account, a call, a call's media, a
-  subscription, an announced call, a message send, or a dialog — and
+  subscription, an announced call, a message send, a dialog, or a local
+  conference — and
   every lookup refuses a handle of another kind with
   `SIPRAL_STATUS_INVALID_HANDLE` before it looks at a slot, naming the kind it
   actually got. Every handle of every kind, tag included, is put together by one
   function in `crates/sipral-ffi/src/handle.rs` that takes both, so a table
-  added later cannot mint without either. Seven of the eight kinds are handed
-  out by a call the application made; the eighth, a dialog waiting to be
+  added later cannot mint without either. Eight of the nine kinds are handed
+  out by a call the application made; the ninth, a dialog waiting to be
   resolved, is minted by the library when it raises the event that carries it,
   and is named rather than inserted so a dialog asking again keeps the handle
   it was first given.
 - **The widths.** Twenty-four bits of slot is sixteen million live objects on
   one stack. Eight bits of tag is 256 stacks alive in one process, and that is
   the limit: the next `sipral_stack_create` is `SIPRAL_STATUS_EXHAUSTED` and
-  writes no handle. Four bits of kind is sixteen values for the eight this
-  library mints; a ninth kind is still eight away. What is left for the
+  writes no handle. Four bits of kind is sixteen values for the nine this
+  library mints; a tenth kind is still seven away. What is left for the
   generation is twenty-eight bits rather than the thirty-two a handle with no
   kind could give it: ten calls a second through one slot ran for about
   thirteen and a half years on thirty-two bits and runs about three hundred and
@@ -677,9 +690,9 @@ says which by `stage`:
   from a cache or over HTTPS, and hand the chain to
   `sipral_call_stir_certificate(stack, call, chain, len, now_ms)` — null and
   zero for one that could not be had. The call waits, and has not been
-  announced: `call` names it all the same. Calling back into the stack from
-  the callback is refused as ever (`SIPRAL_STATUS_BUSY`), so the answer comes
-  after the poll returns.
+  announced: `call` names it all the same. The event callback runs with
+  nothing held, so the answer may be handed over from inside it, or later
+  from wherever the fetch finishes.
 - `SIPRAL_VERIFICATION_STAGE_VERIFIED`: the verdict — `outcome`, `failure`,
   `attestation`, `verstat`, `orig`, `origid`, `certificate_url`, `detail`,
   and `response_code`, the response §6.2.2 prescribes. It arrives just before
@@ -1034,10 +1047,9 @@ ABI 0.30 hands the application the ceilings every endpoint underneath already
 had, and the counters that say how close to them a stack runs.
 `SIPRAL_FEATURE_LIMITS` (`1 << 15`) is set in every build.
 
-`sipral_stack_config_t` appends four members after `audio_device_rate_hz`,
-with the pinned `MIN_SIZE` unmoved, so a caller built against 0.29 gets every
-default. Each is zero for its default, and `sipral_stack_settings_t` appends
-the same four, read back with the default filled in:
+`sipral_stack_config_t` has four members after `audio_device_rate_hz` for
+them. Each is zero for its default, and `sipral_stack_settings_t` has the
+same four, read back with the default filled in:
 
 | Member | Default | Past it |
 |---|---|---|
@@ -1118,7 +1130,7 @@ then reported "the connection to the server closed" whether the server was
 down, its certificate was self-signed, it named another host or it had
 expired.
 
-`sipral_stack_transport_failure(stack, &failure, now_ms)` is
+`sipral_stack_transport_failed_with(stack, &failure, now_ms)` is
 `sipral_stack_transport_failed` with the reason carried along. The caller fills
 in `sipral_transport_failure_t`: the transport, a `SipralTransportError`, a
 `SipralTlsFailure` — `UNTRUSTED` (1), `NAME_MISMATCH` (2), `EXPIRED` (3) or
@@ -1161,7 +1173,7 @@ they carry and why is `docs/17-observability.md`.
 typedef void (*sipral_log_callback_t)(const sipral_log_record_t *record, void *user_data);
 sipral_status_t sipral_stack_log(sipral_handle_t stack, uint32_t level,
                                  sipral_log_callback_t callback, void *user_data);
-sipral_status_t sipral_stack_state(sipral_handle_t stack, char *buffer,
+sipral_status_t sipral_stack_state_text(sipral_handle_t stack, char *buffer,
                                    size_t capacity, size_t *out_len);
 sipral_status_t sipral_stack_rtp_port_reserve(sipral_handle_t stack, uint32_t *out_port);
 sipral_status_t sipral_stack_rtp_port_release(sipral_handle_t stack, uint32_t port);
@@ -1183,7 +1195,7 @@ line is already redacted; every refused call into the stack is a debug line
 under the target `api` with the status and the sentence
 `sipral_last_error_message` would give.
 
-**The state.** `sipral_stack_state` copies a text snapshot for a crash report
+**The state.** `sipral_stack_state_text` copies a text snapshot for a crash report
 into `buffer`: accounts and registrations, calls and their states,
 transports, media sessions, the last refused calls, the queues, the RTP range
 and the counters, redacted. It is never longer than `SIPRAL_STATE_TEXT_MAX`
@@ -1344,9 +1356,8 @@ the configuration for: `sipral_call_answer_media` with the call's own
 `srtp`, `codecs`, `ice`, `text_address`, `feedback` and `focus`.
 
 `sipral_call_config_t`, `sipral_media_info_t` and `sipral_stream_stats_t`
-append their members at the tail with the pinned `MIN_SIZE` unmoved, and a
-caller built against 0.30 reads and sends none of them. The four bindings'
-generated layers carry every entry point, struct and name above.
+carry the members above at their tails. The generated layers carry every
+entry point, struct and name above.
 
 ## Media across the boundary
 
@@ -1500,7 +1511,7 @@ recording that stopped by itself arrive as
 `SIPRAL_FEATURE_LOCAL_CONFERENCE` (`1 << 24`), and `docs/05-media.md` has
 the mixer underneath.
 
-**A processor attached with `sipral_call_attach_processor` runs on the media
+**A processor attached with `sipral_media_attach_processor` runs on the media
 path, not on the poll thread.** Unlike `sipral_event_callback_t`, which is
 called from inside `sipral_stack_poll` with nothing held, `process` is
 called from inside `sipral_media_playback` and `sipral_media_capture`, on
@@ -1518,7 +1529,7 @@ here is held to: a panic that reached C uncaught would abort the host
 process rather than fail one call. A *different* call's media, and this
 stack's own entry points reached through `sipral_stack_config_t`, are both
 unaffected — the lock is the one session's, not the stack's.
-`sipral_call_reset_processor` calls `process` the same way, from whichever
+`sipral_media_reset_processor` calls `process` the same way, from whichever
 thread called it, with `sipral_processor_frame_t::reset` set instead of a
 frame to run.
 
@@ -1576,11 +1587,8 @@ ABI 0.29, RFC 6188's `AES256_CM80`/`_CM32` (4, 5) and RFC 7714's
 `AEAD_AES128_GCM`/`AEAD_AES256_GCM` (6, 7) included; `UNKNOWN` is left for an
 event that is not about a transform.
 
-`srtp` is appended at the tail of both structs, and the pinned `MIN_SIZE` of
-each is unmoved: a caller built against a header from before this member
-existed still works, unlike `media_seed`, and what it never sent reads as the
-zero that means "unspecified" — exactly what leaving it alone on a current
-header does too.
+`srtp` sits at the tail of both structs, and zero means "unspecified" —
+exactly what leaving it alone does.
 
 **The codec order is a property of the call, not of the process** (D6).
 `sipral_stack_config_t::codecs` is the stack's order and
@@ -1967,7 +1975,7 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   and the lab's measurement through VB-CABLE reads 0 dB of echo return loss
   with the flag set) and what the devices report as `render_delay_ms`; the
   application that wants the echo gone regardless attaches a canceller to
-  each call through `sipral_call_attach_processor` as before, and the engine
+  each call through `sipral_media_attach_processor` as before, and the engine
   tells every managed call that delay itself, again after every device
   change.
 
@@ -2260,15 +2268,16 @@ default: `SipralEvent.referralData` carries `SipralEventKind.referral`, and
 does, takes the referral and returns that call as a `Call`, while
 `rejectReferral` refuses it.
 
-One gotcha worth knowing before reaching for `sipral_stack_receive_datagram`
-from Swift directly: its generated `to: String` parameter has no way to carry
-a true null pointer, since `Array("".utf8).withUnsafeBufferPointer`'s
-`baseAddress` for an empty array is not the null pointer
-`sipral_stack_receive_datagram`'s "empty means take my own bind address"
-reads for (`crates/sipral-ffi/src/transport.rs`'s `optional_address`) — an
-empty `to` is refused rather than treated as absent. `SipralStack.run()`
-passes its own `bindAddress` explicitly instead, which is what an empty `to`
-was always meant to mean for a socket bound to one address.
+An empty string passed where the library reads an optional address — `to`
+on `sipral_stack_receive_datagram`, `remote` on
+`sipral_stack_transport_bind` — is left out, like every optional text in the
+ABI: a length of zero is absent whatever the pointer, since
+`Array("".utf8).withUnsafeBufferPointer`'s `baseAddress` for an empty array
+is not a null pointer. Up to minor 32 such an empty `to` was refused.
+`SipralStack.run()` passes its own `bindAddress` explicitly all the same.
+The generated wrappers that install a listener take an optional callback
+and an optional `userData`, so `stackLog` and `stackScreen` with `nil`
+remove what was installed.
 
 ## .NET
 
@@ -2307,8 +2316,10 @@ an `await foreach` consumer, matching `docs/08-ffi.md`'s own "Events arrive
 on one callback" for the first and staying off that thread entirely for the
 second. `SipralErrors.Call` retries an ordinary `SIPRAL_STATUS_BUSY` for up
 to half a second, the same allowance `sipral.errors.call` gives it, and
-also retries the signalling clock's own "more than the ABI's slack behind
-this stack's last reading" `SIPRAL_STATUS_INVALID_ARGUMENT` — this layer
+also retries `SIPRAL_STATUS_CLOCK_BEHIND`, the signalling clock's own "more
+than the ABI's slack behind this stack's last reading" — by its status,
+where up to minor 32 it had to read the English of an
+`SIPRAL_STATUS_INVALID_ARGUMENT` for it. This layer
 always reads `now_ms` fresh right before the call, so what beat it there is
 the OS scheduler on the calling thread, not a stale value, and the stack's
 high-water mark only ever advances, so a retry with a later reading is
@@ -2543,9 +2554,11 @@ first touch of the binding surfaces as the cause of an
 **What still crosses as an address.** `sipral_media_packet_t` and
 `sipral_transmit_t`, and `sipral_path_candidate_t` beside them, the structs a
 caller part-fills with buffers the library writes into, cross as a `Long`, so
-`mediaCapture`, `mediaPollRtcp`, `mediaPollTransmit`, `stackPollTransmit`,
-`stackPollStun`, `stackPollFarewell` and `mediaPathCandidateAt` cannot be
-called from Kotlin alone through the generated shim; `org.sipral.idiomatic` reaches all of them through a second,
+`mediaCapture`, `mediaMix`, `mediaPollRtcp`, `mediaPollTransmit`,
+`mediaPollText`, `mediaPollRecording`, `stackPollTransmit`, `stackPollStun`,
+`stackPollFarewell`, `localConferencePollTransmit` and
+`mediaPathCandidateAt` cannot be called from Kotlin alone through the
+generated shim; `org.sipral.idiomatic` reaches all of them through a second,
 hand-written one (`idiomatic_media.c`) linked into the same library, and
 `SipralClient.open` takes `ice`, `stunServer`, `turn` and `g729AnnexB` and runs
 the media-socket loop "Behind a NAT" describes. It takes `referrals` as well,
@@ -2649,8 +2662,9 @@ it for good, and this stack would never poll again.
 `bindings/python/tests/test_abi.py` is what holds the generated `cdef` to
 account: every `#define` and enumerator the header declares, read back off
 `lib` and compared against the number the header itself gives it, and
-`ffi.sizeof` for every struct named in `bindings/c/abi-sizes.txt`, compared
-against that file's own current-build column — the one check nothing else
+`ffi.sizeof` for every record in `RECORD_LAYOUTS`, compared against the
+length tools/abi-gen worked out for the layout the process runs on and
+against `sipral_abi_struct_size` — the one check nothing else
 here can stand in for, since `cffi`'s ABI mode lays a struct out for
 itself from the `cdef` text alone rather than linking against a compiled
 definition of it. `bindings/python/tests/test_call.py` is what
@@ -2760,32 +2774,61 @@ is what they mean:
 
 A member appended to a config struct is the ordinary case of that, and what
 decides whether it costs the caller anything is the **pinned length**.
-`declared_size` refuses anything below `Versioned::MIN_SIZE`, and that
-constant is the length the struct had in the **first published header** —
-written once as a literal in `crates/sipral-ffi`, never recomputed. Pinned
-that way, an appended member is genuinely additive: the old caller's smaller
-`sizeof` is still at or above the pin, so it is still accepted, and the
-members it never sent come back zero.
+`declared_size` refuses anything below `Versioned::MIN_SIZE`, and that is
+where the oldest version of the struct the frozen ABI publishes ended. It is
+written as the member that version ended with — `pin!(SipralAbiVersion,
+reserved)` — and the number is where the compiler puts the end of that member
+on the target being built, so it stands still while the struct grows and is
+right on a 32-bit target as well as a 64-bit one. Pinned that way, an
+appended member is genuinely additive: the old caller's smaller `sizeof` is
+still at or above the pin, so it is still accepted, and the members it never
+sent come back zero.
 
-Written as `size_of::<Self>()` instead, which is what every one of these
-constants was until the pinning landed, the arrangement inverts: the pin
-tracks the current build, and the first appended member turns away every
-caller compiled against yesterday's header — from a change whose whole point
-was that it would not. That is the one way to get this wrong, and it is not
-visible in the diff that causes it.
+There are two ways to get this wrong, and the crate has made both. Written
+as `size_of::<Self>()`, the pin tracks the current build, and the first
+appended member turns away every caller compiled against yesterday's header.
+Written as a literal read off a 64-bit build, which is what every pin was up
+to minor 32, it is one number on every target while the length it describes
+is not: on 32-bit ARM `sipral_abi_version_t` is 20 bytes and the literal said
+24, so the library refused every caller doing exactly what its own header
+said — 27 structs on every 32-bit target. A const assertion beside every pin
+now refuses, when the crate is compiled for any target, a pin longer than
+the struct it pins.
+
+**No struct ends in padding, on any target.** Padding after the last member
+is where the next appended member would start on that target, and a caller
+compiled against the shorter header declares a length that includes it and
+never wrote those bytes: the library would read whatever its stack held
+there as a value the caller set. Up to minor 32 seven members were appended
+that way, and fifteen structs ended in padding on 64-bit targets, on 32-bit
+ARM or on both. At minor 33 fourteen of them carry an explicit `reserved`
+member and the fifteenth had a member moved, and three checks keep it so: the
+`record!` macro asserts, when
+the crate is compiled, that a struct with a size ends where its last member
+does on that target; `tools/abi-gen` refuses to print a surface in which one
+ends in padding on any of the three layouts below; and `scripts/check.sh`
+compiles `bindings/c/abi-layout.c` for six targets.
+
+`bindings/c/abi-sizes.txt` is printed beside the header and the bindings,
+and the gate diffs it like the rest: per struct, the pinned member, then for
+each layout the pin and the current length. Three layouts cover every target
+the ABI ships for: `p64` (64-bit pointers), `p32a4` (32-bit pointers, a
+64-bit integer aligned to four inside a struct: i386 System V) and `p32a8`
+(32-bit pointers, a 64-bit integer aligned to eight: ARM EABI and 32-bit
+Windows). `tools/abi-gen` works each out from the declarations rather than
+reading them off the build it runs on; `bindings/c/abi-layout.c` states every
+length, offset and pin as `_Static_assert`s over the header, and the gate
+compiles it with `clang -target` for x86-64, i386, ARM64 and ARMv7 Linux and
+for 64-bit and 32-bit Windows. Every generated binding carries the same table
+and its own size test holds its own layout of each record, and the library's
+answer from `sipral_abi_struct_size`, to the number for the layout it runs
+on. The gate also holds the pins to the last commit: a pin that moved or went
+away within one major fails it.
 
 Turning a caller away is still the right answer when the member is one the
-call cannot proceed without: `media_seed`, added at minor 9, deliberately
-moved its pin, and `sipral_stack_create` says
-`SIPRAL_STATUS_UNSUPPORTED_VERSION` rather than running with one key
-generator where there should be two. That is a decision per member, taken
-once, not a consequence of how the constant happens to be written.
-
-`bindings/c/abi-sizes.txt` is printed from the pins beside the header and the
-four bindings, and the gate diffs it like the rest: the first number per
-struct is the pin, the second is what this build compiled to. Moving a pin is
-therefore a line in a committed file that somebody has to sign, rather than a
-constant nobody re-reads.
+call cannot proceed without: `media_seed` is one of those, and
+`sipral_stack_create` says `SIPRAL_STATUS_INVALID_ARGUMENT` rather than
+running with one key generator where there should be two.
 
 Growing the surface is a minor bump in the same change as the addition, next
 to the regenerated `bindings/`. The gate forces the regeneration — committed
@@ -2852,3 +2895,85 @@ because whether a pointer is readable for the length beside it is the
 caller's promise in every Safety section, not something the library can
 check. The version check is the one call that finds the disagreement before
 anything is read.
+
+## The freeze (ABI 0.33)
+
+Minor 33 is the last minor before 1.0, and the surface it prints is the one
+1.0 promises. From 1.0 on, for the life of major 1:
+
+- **Names stand.** Every entry point, struct, member, parameter, enumeration,
+  enumerator, constant and callback keeps the name it has at 0.33, and every
+  parameter keeps its place.
+- **Numbers stand.** An enumerator, a status, a feature bit and a constant keep
+  their values; new ones are only added. Status 17 stays a hole.
+- **Layouts only grow at the end.** A struct that carries `size` gains members
+  only after its last one, and never ends in padding on any of the three
+  layouts; its pin — `bindings/c/abi-sizes.txt` — never moves. `sipral_header_t`
+  and the event payload arms never change shape.
+- **Behaviour a caller sizes buffers or retries by stands**: which calls
+  write a NUL and count it, which accept a null out-pointer, which status a
+  failure is. The conventions block at the top of `sipral.h` is the list,
+  in one place, and every entry point follows it or says why not in its own
+  comment.
+- **Ownership stands.** The library hands out no memory a caller frees, every
+  pointer a callback is handed is valid for that call, and the table of
+  callbacks at the top of the header says on which thread each runs, what is
+  held while it does, what it may call, and how long its `user_data` must
+  live.
+
+A header from before 0.33 is refused at load by the exact-minor rule, and a
+struct as long as a pre-0.33 header declared it is refused by its pin: the
+oldest version of every struct the frozen ABI serves is minor 33's. The
+sections above that tell how a member was appended "with the pin unmoved"
+describe how the ABI grew before the freeze.
+
+What changed at 0.33, against the audit of 30 September 2026:
+
+- The pins are members, not literals (see Versioning), and hold on 32-bit
+  targets; fourteen structs gained a `reserved` member and
+  `sipral_stack_config_t::dtmf_detection` moved before `stun_fallbacks`, so
+  no struct ends in padding anywhere.
+- `SIPRAL_STATUS_NOT_AFOCUS` is `SIPRAL_STATUS_NOT_A_FOCUS`, the name every
+  sentence already used; the rule that turns a Rust name into a C one now
+  starts a word at a capital that a lower-case letter follows.
+- `sipral_call_attach_processor`, `_detach_processor` and `_reset_processor`
+  take a media handle and are `sipral_media_attach_processor`,
+  `sipral_media_detach_processor` and `sipral_media_reset_processor`; the
+  callback parameter is `callback`, as it is everywhere else.
+- `sipral_call_identity_text` takes `index` before `which`, as
+  `sipral_subscription_dialog_text` and `sipral_subscription_conference_text`
+  do: the entry first, then the piece of it.
+- `sipral_stack_transport_failure` is `sipral_stack_transport_failed_with`,
+  the richer form of `sipral_stack_transport_failed` in the `_with` pattern
+  `sipral_call_answer_with` and `sipral_media_record_start_with` set.
+  `sipral_stack_state` is `sipral_stack_state_text`: it copies text, where
+  every other `_state` returns an enumerator.
+- Text out is one family: `out_needed` everywhere (it was `out_len` on five
+  calls), null accepted everywhere (four calls refused it), the NUL written
+  and counted everywhere — `sipral_audio_device_at` wrote neither, and wrote
+  its struct even when it answered `SIPRAL_STATUS_BUFFER_TOO_SMALL`; it now
+  writes nothing then. The .NET, Python and Dart layers each read one byte too
+  many of the last error and handed the NUL on in every exception message.
+- `SIPRAL_STATUS_CLOCK_BEHIND` (24) is what a `now_ms` more than fifty
+  milliseconds behind the stack's last reading answers; it was
+  `SIPRAL_STATUS_INVALID_ARGUMENT`, which a binding could only tell apart by
+  reading the English. `SIPRAL_STATUS_EXHAUSTED` is documented as what it
+  already was: no room, in a table, a port range or a queue.
+- An optional address (`to` on `sipral_stack_receive_datagram`, `remote`
+  on `sipral_stack_transport_bind`) and
+  the `sdp` beside a `media_address` are absent when their length is zero,
+  whatever the pointer, like every other optional text: a binding that hands
+  every string over as a buffer had no way to leave one out.
+- Every callback crosses the generated .NET binding as a function pointer
+  (`IntPtr`), in a struct and as a parameter, so no struct holds a delegate;
+  the generated Swift wrappers take an optional callback and an optional
+  `user_data`, so a log or a screening policy can be removed through them;
+  the Kotlin layer reaches `sipral_media_mix` through its own shim.
+- Safety: a datagram longer than the caller's packet buffer is refused rather
+  than copied past it; `sipral_media_mix` builds no slice over a null
+  pointer; every media entry point called from inside a frame of any call's
+  media is `SIPRAL_STATUS_BUSY`, which rules out two processors each waiting
+  on the other's call; a poll never waits for the audio engine; and
+  `sipral_stack_destroy` from the audio transmit callback is
+  `SIPRAL_STATUS_BUSY` rather than a thread waiting for itself to end.
+- `stdbool.h` is no longer included: nothing in the surface is a `bool`.

@@ -243,14 +243,15 @@ names — are what `SipralMedia`/`SipralClient` need to drive real RTP, to
 drain outgoing SIP messages and to say which ICE paths a call tried;
 `sipral/src/main/jni/idiomatic_media.c` is a second, hand-written shim beside
 the generated one, exposing the ABI calls that take them
-(`sipral_media_capture`, `sipral_media_poll_rtcp`,
-`sipral_media_poll_transmit`, `sipral_stack_poll_farewell`,
-`sipral_stack_poll_transmit`, `sipral_stack_poll_stun`,
-`sipral_media_path_candidate_at`) as plain byte arrays, linked into the same
-`libsipral_jni` the generated shim already loads -- and
-`sipral_stack_transport_bind` with no remote, which the generated
-`stackTransportBind` cannot say: it hands an empty array over as a remote
-address.
+(`sipral_media_capture`, `sipral_media_mix`, `sipral_media_poll_rtcp`,
+`sipral_media_poll_transmit`, `sipral_media_poll_text`,
+`sipral_media_poll_recording`, `sipral_stack_poll_farewell`,
+`sipral_local_conference_poll_transmit`, `sipral_stack_poll_transmit`,
+`sipral_stack_poll_stun`, `sipral_media_path_candidate_at`) as plain byte
+arrays, linked into the same `libsipral_jni` the generated shim already
+loads. An empty string is a length of zero, which the library reads as an
+address left out, so the generated `stackTransportBind` with a remote of
+`""` binds with no remote.
 
 It depends on `kotlinx-coroutines-core-jvm` (Apache-2.0,
 `THIRD-PARTY-NOTICES.md`), fetched once into a cache outside the repository

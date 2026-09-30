@@ -153,7 +153,7 @@ record! {
 // members, and the library is the only one that fills it in.
 unsafe impl Versioned for SipralConference {
     const NAME: &'static str = "sipral_conference";
-    const MIN_SIZE: usize = crate::versioned::min_size::CONFERENCE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralConference, locked);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -175,13 +175,19 @@ record! {
         pub status: u32,
         /// How many media streams the first of them has.
         pub media: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
 // Safety: as for `SipralConference`.
 unsafe impl Versioned for SipralConferenceUser {
     const NAME: &'static str = "sipral_conference_user";
-    const MIN_SIZE: usize = crate::versioned::min_size::CONFERENCE_USER;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralConferenceUser, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -316,6 +322,7 @@ entry! {
             let user = user_of(picture_of(state, subscription)?, index)?;
             let first = user.endpoints.first();
             let out = SipralConferenceUser {
+                reserved: 0,
                 size: size_of::<SipralConferenceUser>(),
                 endpoints: count(user.endpoints.len()),
                 status: status_of(first.and_then(|endpoint| endpoint.status.as_ref())) as u32,
@@ -338,8 +345,9 @@ entry! {
     ///
     /// # Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     fn sipral_subscription_conference_text(
         stack: SipralHandle,
         subscription: SipralHandle,
@@ -349,9 +357,6 @@ entry! {
         capacity: usize,
         out_needed: *mut usize,
     ) {
-        if out_needed.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_needed is null"));
-        }
         let wanted = match which {
             1 => SipralConferenceText::Entity,
             2 => SipralConferenceText::Subject,
@@ -432,8 +437,9 @@ entry! {
     ///
     /// # Safety
     ///
-    /// `buffer` must be writable for `capacity` bytes, and `out_needed` must
-    /// point at one `size_t`.
+    /// `buffer` must be writable for `capacity` bytes or be null with a
+    /// capacity of zero, and `out_needed` must point at one `size_t` or be
+    /// null.
     fn sipral_call_conference_uri(
         stack: SipralHandle,
         call: SipralHandle,
@@ -441,9 +447,6 @@ entry! {
         capacity: usize,
         out_needed: *mut usize,
     ) {
-        if out_needed.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_needed is null"));
-        }
         with_stack(stack, |state| {
             let id = state.calls.get(call).map_err(handle_failed)?;
             let conference = state
@@ -647,6 +650,7 @@ Content-Length: {}\r\n\r\n",
         index: usize,
     ) -> (SipralStatus, SipralConferenceUser) {
         let mut out = SipralConferenceUser {
+            reserved: 0,
             size: size_of::<SipralConferenceUser>(),
             endpoints: u32::MAX,
             status: u32::MAX,

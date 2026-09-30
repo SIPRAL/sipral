@@ -31,7 +31,7 @@ constants! {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 32;
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 33;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;
@@ -51,13 +51,19 @@ record! {
         pub minor: u32,
         /// A fix that changed no declaration.
         pub patch: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
 // Safety: four integers, and zero is a valid value of each.
 unsafe impl Versioned for SipralAbiVersion {
     const NAME: &'static str = "sipral_abi_version";
-    const MIN_SIZE: usize = crate::versioned::min_size::ABI_VERSION;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralAbiVersion, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -76,6 +82,7 @@ entry! {
             write_versioned(
                 out_version,
                 SipralAbiVersion {
+                    reserved: 0,
                     size: size_of::<SipralAbiVersion>(),
                     major: SIPRAL_ABI_VERSION_MAJOR,
                     minor: SIPRAL_ABI_VERSION_MINOR,
@@ -144,6 +151,9 @@ entry! {
     /// `name` must be readable for `name_len` bytes, and `out_size` must
     /// point at one `size_t`.
     fn sipral_abi_struct_size(name: *const c_char, name_len: usize, out_size: *mut usize) {
+        if out_size.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_size is null"));
+        }
         let Some(wanted) = (unsafe { text(name, name_len, "name") })? else {
             return Err(fail(SipralStatus::InvalidArgument, "name is empty"));
         };
@@ -157,9 +167,6 @@ entry! {
                 format!("this ABI has no struct called {wanted}"),
             ));
         };
-        if out_size.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_size is null"));
-        }
         unsafe { out_size.write(record.size) };
         Ok(())
     }
@@ -221,6 +228,7 @@ mod tests {
 
     fn empty_version() -> SipralAbiVersion {
         SipralAbiVersion {
+            reserved: 0,
             size: size_of::<SipralAbiVersion>(),
             major: u32::MAX,
             minor: u32::MAX,
@@ -433,6 +441,20 @@ mod tests {
         assert_eq!(
             unsafe { sipral_abi_struct_size(name.as_ptr().cast(), name.len(), ptr::null_mut()) },
             SipralStatus::InvalidArgument
+        );
+        // said before the name is looked at, so the sentence is about the
+        // argument that was wrong and not about a name that was not
+        let unknown = "sipral_nothing_t";
+        assert_eq!(
+            unsafe {
+                sipral_abi_struct_size(unknown.as_ptr().cast(), unknown.len(), ptr::null_mut())
+            },
+            SipralStatus::InvalidArgument
+        );
+        assert!(
+            crate::error::last_error_text().contains("out_size"),
+            "{}",
+            crate::error::last_error_text()
         );
     }
 

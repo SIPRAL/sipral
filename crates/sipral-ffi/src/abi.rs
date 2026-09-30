@@ -99,6 +99,50 @@ impl Record {
     }
 }
 
+/// Whether a struct that starts with its own `size` ends exactly where its
+/// last member does, with no padding after it on the target this build is
+/// for. A struct without a `size` is not asked: it never grows.
+///
+/// Padding at the end is where the next appended member would land on one
+/// target and not on another. A caller compiled against the shorter header
+/// declares the padded length, and a library that has since put a member in
+/// that padding reads whatever the caller's stack held there as a value it
+/// set. `ends` is the end of each member in declaration order, so the last
+/// member's end is the largest of them.
+#[must_use]
+pub const fn ends_with_its_last_member(names: &[&str], ends: &[usize], size: usize) -> bool {
+    let [first, ..] = names else {
+        return true;
+    };
+    if !same_text(first, "size") {
+        return true;
+    }
+    let mut last = 0;
+    let mut rest = ends;
+    while let [end, after @ ..] = rest {
+        if *end > last {
+            last = *end;
+        }
+        rest = after;
+    }
+    last == size
+}
+
+/// `str` equality that a `const fn` can call.
+const fn same_text(left: &str, right: &str) -> bool {
+    let (mut left, mut right) = (left.as_bytes(), right.as_bytes());
+    loop {
+        match (left, right) {
+            ([], []) => return true,
+            ([one, left_rest @ ..], [other, right_rest @ ..]) if *one == *other => {
+                left = left_rest;
+                right = right_rest;
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// The one rule for turning a Rust name into the name the C side spells:
 /// `SipralStackConfig` becomes `sipral_stack_config`.
 ///
@@ -106,20 +150,31 @@ impl Record {
 /// about the C names too — [`crate::version::sipral_abi_struct_size`] is asked one
 /// — and a derivation written twice is a derivation that can disagree with
 /// itself.
+///
+/// A capital starts a word after a lower-case letter or a digit, and also
+/// after another capital when a lower-case letter follows it: the `F` in
+/// `NotAFocus` starts `focus`, so the name is `not_a_focus` and not the
+/// `not_afocus` a rule that only looked backwards printed into the header,
+/// under a name no sentence in the documentation used.
 #[must_use]
 pub fn snake(name: &str) -> String {
     let mut out = String::new();
     let mut previous_lower = false;
-    for letter in name.chars() {
+    let mut previous_upper = false;
+    let mut letters = name.chars().peekable();
+    while let Some(letter) = letters.next() {
         if letter.is_ascii_uppercase() {
-            if previous_lower {
+            let next_lower = letters.peek().is_some_and(char::is_ascii_lowercase);
+            if previous_lower || (previous_upper && next_lower) {
                 out.push('_');
             }
             out.push(letter.to_ascii_lowercase());
             previous_lower = false;
+            previous_upper = true;
         } else {
             out.push(letter);
             previous_lower = letter.is_ascii_lowercase() || letter.is_ascii_digit();
+            previous_upper = false;
         }
     }
     out
@@ -275,6 +330,26 @@ macro_rules! record {
                 size: ::std::mem::size_of::<$name>(),
             };
         }
+
+        // Checked on whatever target this is compiled for, which is the
+        // point: a struct that ends where its last member does on this Mac
+        // can still end in padding on a 32-bit ARM phone.
+        const _: () = assert!(
+            $crate::abi::ends_with_its_last_member(
+                &[$(stringify!($member)),*],
+                &[$(
+                    ::std::mem::offset_of!($name, $member)
+                        + ::std::mem::size_of::<$member_type>()
+                ),*],
+                ::std::mem::size_of::<$name>(),
+            ),
+            concat!(
+                stringify!($name),
+                " carries a size and ends in padding on this target, so the next member \
+                 appended to it would start inside a length callers already declare; give it \
+                 a `reserved: u32` or move a member (docs/08-ffi.md, \"Versioning\")"
+            )
+        );
     };
     (
         @doc [$($doc:literal)*]
@@ -466,112 +541,61 @@ macro_rules! alias {
 
 pub(crate) use {alias, codes, constants, record};
 
-/// Every versioned struct and the length it first shipped at, for the
-/// generator and for the test that says the table is complete.
+/// One line of [`MIN_SIZES`] for a struct, read off its [`Record`] and its
+/// `Versioned` impl so that nothing in it is spelled a second time.
+macro_rules! pinned {
+    ($($record:path),* $(,)?) => {
+        &[$((
+            <$record>::ABI.name,
+            <$record as $crate::versioned::Versioned>::PIN.member,
+            <$record as $crate::versioned::Versioned>::MIN_SIZE,
+        )),*]
+    };
+}
+
+/// Every versioned struct a caller declares to us, the member its oldest
+/// frozen version ends with, and where that member ends on the target this
+/// was compiled for — for the generator, which prints the same length for
+/// every other layout from the member's name, and for the test that says the
+/// table is complete.
 ///
-/// The Rust name, so that it can be matched against
-/// [`SURFACE`] without anything being spelled twice.
-pub const MIN_SIZES: &[(&str, usize)] = &[
-    ("SipralAbiVersion", crate::versioned::min_size::ABI_VERSION),
-    (
-        "SipralAudioDevice",
-        crate::versioned::min_size::AUDIO_DEVICE,
-    ),
-    ("SipralAudioInfo", crate::versioned::min_size::AUDIO_INFO),
-    (
-        "SipralAccountConfig",
-        crate::versioned::min_size::ACCOUNT_CONFIG,
-    ),
-    ("SipralCallConfig", crate::versioned::min_size::CALL_CONFIG),
-    (
-        "SipralCapabilities",
-        crate::versioned::min_size::CAPABILITIES,
-    ),
-    (
-        "SipralCodecCandidate",
-        crate::versioned::min_size::CODEC_CANDIDATE,
-    ),
-    ("SipralCodecInfo", crate::versioned::min_size::CODEC_INFO),
-    ("SipralCounters", crate::versioned::min_size::COUNTERS),
-    ("SipralMediaInfo", crate::versioned::min_size::MEDIA_INFO),
-    (
-        "SipralMediaPacket",
-        crate::versioned::min_size::MEDIA_PACKET,
-    ),
-    (
-        "SipralPathCandidate",
-        crate::versioned::min_size::PATH_CANDIDATE,
-    ),
-    ("SipralPollResult", crate::versioned::min_size::POLL_RESULT),
-    (
-        "SipralStackConfig",
-        crate::versioned::min_size::STACK_CONFIG,
-    ),
-    (
-        "SipralStackSettings",
-        crate::versioned::min_size::STACK_SETTINGS,
-    ),
-    (
-        "SipralStreamStats",
-        crate::versioned::min_size::STREAM_STATS,
-    ),
-    (
-        "SipralSubscribeConfig",
-        crate::versioned::min_size::SUBSCRIBE_CONFIG,
-    ),
-    (
-        "SipralWatchedDialog",
-        crate::versioned::min_size::WATCHED_DIALOG,
-    ),
-    ("SipralPushEcho", crate::versioned::min_size::PUSH_ECHO),
-    ("SipralStirConfig", crate::versioned::min_size::STIR_CONFIG),
-    (
-        "SipralStreamEncryption",
-        crate::versioned::min_size::STREAM_ENCRYPTION,
-    ),
-    (
-        "SipralProgressConfig",
-        crate::versioned::min_size::PROGRESS_CONFIG,
-    ),
-    (
-        "SipralConsentTone",
-        crate::versioned::min_size::CONSENT_TONE,
-    ),
-    (
-        "SipralRecordingOptions",
-        crate::versioned::min_size::RECORDING_OPTIONS,
-    ),
-    ("SipralTransmit", crate::versioned::min_size::TRANSMIT),
-    (
-        "SipralTransportFailure",
-        crate::versioned::min_size::TRANSPORT_FAILURE,
-    ),
-    // 32, the same literal `crate::lifecycle::SipralSuspending`'s own
-    // `Versioned` impl pins its `MIN_SIZE` at — see the comment there for why
-    // it is not `crate::versioned::min_size::SUSPENDING` beside the rest.
-    ("SipralSuspending", 32),
-    ("SipralConference", crate::versioned::min_size::CONFERENCE),
-    (
-        "SipralConferenceUser",
-        crate::versioned::min_size::CONFERENCE_USER,
-    ),
-    ("SipralPresence", crate::versioned::min_size::PRESENCE),
-    (
-        "SipralRecordConfig",
-        crate::versioned::min_size::RECORD_CONFIG,
-    ),
-    (
-        "SipralLocalConferenceConfig",
-        crate::versioned::min_size::LOCAL_CONFERENCE_CONFIG,
-    ),
-    (
-        "SipralLocalConferenceInfo",
-        crate::versioned::min_size::LOCAL_CONFERENCE_INFO,
-    ),
-    (
-        "SipralLocalConferenceMember",
-        crate::versioned::min_size::LOCAL_CONFERENCE_MEMBER,
-    ),
+/// The Rust name, so that it can be matched against [`SURFACE`] without
+/// anything being spelled twice.
+pub const MIN_SIZES: &[(&str, &str, usize)] = pinned![
+    crate::version::SipralAbiVersion,
+    crate::audio::SipralAudioDevice,
+    crate::audio::SipralAudioInfo,
+    crate::account::SipralAccountConfig,
+    crate::call::SipralCallConfig,
+    crate::capabilities::SipralCapabilities,
+    crate::media::SipralCodecCandidate,
+    crate::media::SipralCodecInfo,
+    crate::counters::SipralCounters,
+    crate::media::SipralMediaInfo,
+    crate::media::SipralMediaPacket,
+    crate::media::SipralPathCandidate,
+    crate::stack::SipralPollResult,
+    crate::stack::SipralStackConfig,
+    crate::stack::SipralStackSettings,
+    crate::media::SipralStreamStats,
+    crate::subscription::SipralSubscribeConfig,
+    crate::subscription::SipralWatchedDialog,
+    crate::announce::SipralPushEcho,
+    crate::security::SipralStirConfig,
+    crate::security::SipralStreamEncryption,
+    crate::inband::SipralProgressConfig,
+    crate::inband::SipralConsentTone,
+    crate::record::SipralRecordingOptions,
+    crate::transport::SipralTransmit,
+    crate::transport::SipralTransportFailure,
+    crate::lifecycle::SipralSuspending,
+    crate::conference::SipralConference,
+    crate::conference::SipralConferenceUser,
+    crate::presence::SipralPresence,
+    crate::siprec::SipralRecordConfig,
+    crate::local_conference::SipralLocalConferenceConfig,
+    crate::local_conference::SipralLocalConferenceInfo,
+    crate::local_conference::SipralLocalConferenceMember,
 ];
 
 /// The versioned-shaped structs with no pinned length, and why.
@@ -843,9 +867,9 @@ pub const SURFACE: Surface = Surface {
         crate::media::sipral_media_receive::ABI,
         crate::media::sipral_media_playback::ABI,
         crate::media::sipral_media_capture::ABI,
-        crate::media::sipral_call_attach_processor::ABI,
-        crate::media::sipral_call_detach_processor::ABI,
-        crate::media::sipral_call_reset_processor::ABI,
+        crate::media::sipral_media_attach_processor::ABI,
+        crate::media::sipral_media_detach_processor::ABI,
+        crate::media::sipral_media_reset_processor::ABI,
         crate::media::sipral_media_mix::ABI,
         crate::media::sipral_media_poll_rtcp::ABI,
         crate::media::sipral_media_poll_transmit::ABI,
@@ -860,7 +884,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::sipral_stack_receive_stream::ABI,
         crate::transport::sipral_stack_transport_bind::ABI,
         crate::transport::sipral_stack_transport_failed::ABI,
-        crate::transport::sipral_stack_transport_failure::ABI,
+        crate::transport::sipral_stack_transport_failed_with::ABI,
         crate::transport::sipral_stack_stream_closed::ABI,
         crate::nat::sipral_stack_stun_servers::ABI,
         crate::nat::sipral_stack_nat_map::ABI,
@@ -921,7 +945,7 @@ pub const SURFACE: Surface = Surface {
         crate::audio::sipral_audio_stop_ringing::ABI,
         crate::audio::sipral_audio_info::ABI,
         crate::log::sipral_stack_log::ABI,
-        crate::log::sipral_stack_state::ABI,
+        crate::log::sipral_stack_state_text::ABI,
         crate::ports::sipral_stack_rtp_port_reserve::ABI,
         crate::ports::sipral_stack_rtp_port_release::ABI,
         crate::security::sipral_stack_stir::ABI,
@@ -1068,6 +1092,8 @@ mod tests {
         assert_eq!(snake("SipralAbiVersion"), "sipral_abi_version");
         assert_eq!(snake("SipralRtcp"), "sipral_rtcp");
         assert_eq!(snake("bind_address_len"), "bind_address_len");
+        assert_eq!(snake("NotAFocus"), "not_a_focus");
+        assert_eq!(snake("G729AnnexB"), "g729_annex_b");
     }
 
     /// The size is the compiler's answer, carried so that the one entry point

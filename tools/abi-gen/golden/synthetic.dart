@@ -339,20 +339,26 @@ final class Sipral {
   /// Raised by anything the header gains.
   static const int abiVersionMinor = 8;
 
-  /// How many bytes this binding lays each struct and union out in, by
-  /// the name the header gives it: what `sipral_abi_struct_size` says
-  /// of the same name, in a library that agrees with this file.
-  static Map<String, int> recordSizes() => {
-        'sipral_counters_t': ffi.sizeOf<SipralCounters>(),
-        'sipral_header_t': ffi.sizeOf<SipralHeader>(),
-        'sipral_stack_config_t': ffi.sizeOf<SipralStackConfig>(),
-        'sipral_media_packet_t': ffi.sizeOf<SipralMediaPacket>(),
-        'sipral_registration_event_t': ffi.sizeOf<SipralRegistrationEvent>(),
-        'sipral_media_event_t': ffi.sizeOf<SipralMediaEvent>(),
-        'sipral_event_payload_t': ffi.sizeOf<SipralEventPayload>(),
-        'sipral_event_t': ffi.sizeOf<SipralEvent>(),
-        'sipral_screen_event_t': ffi.sizeOf<SipralScreenEvent>(),
-        'sipral_processor_event_t': ffi.sizeOf<SipralProcessorEvent>(),
+  /// Every struct and union the header declares, with how long tools/abi-gen
+  /// worked it out to be on each of the three layouts the ABI ships for:
+  /// 64-bit pointers (p64), then 32-bit pointers with 64-bit integers aligned
+  /// to four (p32a4, i386) and to eight (p32a8, ARM and Windows x86). A size
+  /// test holds this binding's own layout of each record, and the library's
+  /// answer from sipral_abi_struct_size, to the number for the layout it runs
+  /// on; bindings/c/abi-layout.c holds a C compiler to all three.
+  /// Each list is this binding's own length first, then p64, p32a4
+  /// and p32a8.
+  static Map<String, List<int>> recordLayouts() => {
+        'sipral_counters_t': [ffi.sizeOf<SipralCounters>(), 24, 16, 24],
+        'sipral_header_t': [ffi.sizeOf<SipralHeader>(), 32, 16, 16],
+        'sipral_stack_config_t': [ffi.sizeOf<SipralStackConfig>(), 64, 32, 32],
+        'sipral_media_packet_t': [ffi.sizeOf<SipralMediaPacket>(), 56, 28, 28],
+        'sipral_registration_event_t': [ffi.sizeOf<SipralRegistrationEvent>(), 8, 8, 8],
+        'sipral_media_event_t': [ffi.sizeOf<SipralMediaEvent>(), 32, 16, 16],
+        'sipral_event_payload_t': [ffi.sizeOf<SipralEventPayload>(), 32, 16, 16],
+        'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 72, 40, 48],
+        'sipral_screen_event_t': [ffi.sizeOf<SipralScreenEvent>(), 24, 12, 12],
+        'sipral_processor_event_t': [ffi.sizeOf<SipralProcessorEvent>(), 40, 20, 20],
       };
 
   /// Whether this library can serve a binding generated against `major`.`minor`.

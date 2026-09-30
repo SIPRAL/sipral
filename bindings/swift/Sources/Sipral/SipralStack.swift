@@ -561,7 +561,7 @@ public final class SipralStack: @unchecked Sendable {
         )
     }
 
-    /// `sipral_stack_transport_failure`, never throwing on the way out.
+    /// `sipral_stack_transport_failed_with`, never throwing on the way out.
     private func report(_ refusal: SignallingRefusal) {
         let detail = refusal.detail
         detail.withCString { text in
@@ -571,7 +571,7 @@ public final class SipralStack: @unchecked Sendable {
             failure.tls = signalling == .tls ? refusal.tls.rawValue : SipralTlsFailure.none.rawValue
             failure.detail = detail.isEmpty ? nil : text
             failure.detail_len = detail.utf8.count
-            _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+            _ = try? retryingBusy { try Sipral.stackTransportFailedWith(stack: handle, failure: failure, nowMs: nowMs()) }
         }
     }
 
@@ -595,7 +595,7 @@ public final class SipralStack: @unchecked Sendable {
 
     /// Close `made` if it is still the connection, tell the stack how it
     /// ended -- `sipral_stack_stream_closed` for an orderly close (`refusal`
-    /// nil), `sipral_stack_transport_failure` otherwise, nothing when not
+    /// nil), `sipral_stack_transport_failed_with` otherwise, nothing when not
     /// `tell` -- and connect again.
     private func lose(_ made: SignallingConnection, _ refusal: SignallingRefusal?, tell: Bool) {
         let current = signallingQueue.sync { () -> Bool in
@@ -735,7 +735,7 @@ public final class SipralStack: @unchecked Sendable {
                 failure.error = refusal.error.rawValue
                 failure.detail = detail.isEmpty ? nil : text
                 failure.detail_len = detail.utf8.count
-                _ = try? retryingBusy { try Sipral.stackTransportFailure(stack: handle, failure: failure, nowMs: nowMs()) }
+                _ = try? retryingBusy { try Sipral.stackTransportFailedWith(stack: handle, failure: failure, nowMs: nowMs()) }
             }
         } else {
             _ = try? retryingBusy { try Sipral.stackStreamClosed(stack: handle, transport: id, nowMs: nowMs()) }
@@ -992,12 +992,12 @@ public final class SipralStack: @unchecked Sendable {
     }
 
     /// Everything this stack is holding, as the redacted text
-    /// `sipral_stack_state` writes for a crash report: accounts, calls,
+    /// `sipral_stack_state_text` writes for a crash report: accounts, calls,
     /// transports, media sessions, the last refused calls, the queues, the
     /// RTP range and the counters. Safe from any thread, and never waits.
     public func state() throws -> String {
         var buffer = [CChar](repeating: 0, count: Sipral.stateTextMax)
-        let length = try Sipral.stackState(stack: handle, buffer: &buffer)
+        let length = try Sipral.stackStateText(stack: handle, buffer: &buffer)
         let bytes = buffer.prefix(max(0, length - 1)).map { UInt8(bitPattern: $0) }
         return String(decoding: bytes, as: UTF8.self)
     }
@@ -1929,7 +1929,7 @@ public final class SipralStack: @unchecked Sendable {
                     packet.destination = UnsafeMutableRawPointer(destinationBuf.baseAddress!)
                         .assumingMemoryBound(to: CChar.self)
                     packet.destination_capacity = destinationBuf.count
-                    guard let call = try? Sipral.stackPollFarewell(stack: handle, outPacket: &packet),
+                    guard let call = try? Sipral.stackPollFarewell(stack: handle, packet: &packet),
                           packet.len > 0 else { return nil }
                     return (
                         call,

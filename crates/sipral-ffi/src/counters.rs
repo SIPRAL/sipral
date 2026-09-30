@@ -82,16 +82,11 @@ record! {
         pub active_calls: u64,
         /// Events a poll raised and had nowhere to queue, because the
         /// callback had not kept up and the outbox was already at its ceiling
-        /// (task 8.4.21). Appended here rather than woven in among the
-        /// others: it counts something about delivery itself rather than
-        /// about a call or a registration, and a build from before it existed
-        /// still reads every counter that did.
+        /// (task 8.4.21).
         pub events_dropped: u64,
         /// RTCP goodbyes dropped, oldest first, because the application had
         /// not called `sipral_stack_poll_farewell` and the queue behind it
-        /// was already at its ceiling. Appended at the tail for the same
-        /// reason `events_dropped` was: a build from before this member
-        /// existed still reads every counter that did.
+        /// was already at its ceiling.
         pub farewells_dropped: u64,
         /// INVITEs a `sipral_stack_screen` policy refused (A8, D7).
         pub screened_refused_by_policy: u64,
@@ -111,8 +106,6 @@ record! {
         /// they acknowledge arrived again. Only ever over UDP: nothing
         /// retransmits over a stream. A figure that climbs while calls still
         /// connect is a path losing packets before it loses calls.
-        ///
-        /// Appended at the tail (task 8.10), with the three below.
         pub requests_retransmitted: u64,
         /// Responses sent again: timer G, a reliable provisional response's
         /// own timer, and the last answer repeated because the far end sent
@@ -133,7 +126,8 @@ record! {
 // each — a stack that has done nothing reads all zero.
 unsafe impl Versioned for SipralCounters {
     const NAME: &'static str = "sipral_counters";
-    const MIN_SIZE: usize = crate::versioned::min_size::COUNTERS;
+    const PIN: crate::versioned::Pin =
+        crate::versioned::pin!(SipralCounters, requests_refused_at_limit);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -398,7 +392,7 @@ mod tests {
         // published (`events_dropped`, task 8.4.21), and a size one short of
         // the *current* build is a perfectly good caller compiled against an
         // older header, not the wrong size this test means
-        out.size = crate::versioned::min_size::COUNTERS - 1;
+        out.size = <crate::counters::SipralCounters as crate::versioned::Versioned>::MIN_SIZE - 1;
         let status = unsafe { sipral_stack_counters(stack, &raw mut out) };
         assert_eq!(status, SipralStatus::UnsupportedVersion);
         assert_eq!(out.registrations_attempted, u64::MAX, "nothing was written");
@@ -411,7 +405,7 @@ mod tests {
     fn a_counters_struct_shorter_than_its_min_size_is_unsupported_version_even_for_an_invalid_handle()
      {
         let mut out = zeroed();
-        out.size = crate::versioned::min_size::COUNTERS - 1;
+        out.size = <crate::counters::SipralCounters as crate::versioned::Versioned>::MIN_SIZE - 1;
         assert_eq!(
             unsafe { sipral_stack_counters(SIPRAL_HANDLE_NONE, &raw mut out) },
             SipralStatus::UnsupportedVersion

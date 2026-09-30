@@ -398,22 +398,23 @@ entry! {
     /// the field did not write — is one byte, the NUL. An index past the
     /// end is `SIPRAL_STATUS_INVALID_ARGUMENT`.
     ///
+    /// `index` comes before `which`, as it does in every other entry point
+    /// that reads a piece of text about one of several things: the entry
+    /// first, then the piece of it.
+    ///
     /// # Safety
     ///
     /// `buffer` must be writable for `capacity` bytes or null with a capacity
-    /// of zero, and `out_needed` must point at one `size_t`.
+    /// of zero, and `out_needed` must point at one `size_t` or be null.
     fn sipral_call_identity_text(
         stack: SipralHandle,
         call: SipralHandle,
-        which: u32,
         index: usize,
+        which: u32,
         buffer: *mut c_char,
         capacity: usize,
         out_needed: *mut usize,
     ) {
-        if out_needed.is_null() {
-            return Err(fail(SipralStatus::InvalidArgument, "out_needed is null"));
-        }
         let which = which_of(which)?;
         with_stack(stack, |state| {
             let identity = identity_of(state, call)?;

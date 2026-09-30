@@ -128,7 +128,9 @@ fn start_line(message: &[u8]) -> String {
 /// that says the library broke. `Panic` is not among them — a caught panic
 /// is still a bug, and this is the test that would find one. `LimitReached`
 /// is: the workers place calls faster than they hang them up, and past
-/// `max_dialogs` a call placed is refused before anything is sent.
+/// `max_dialogs` a call placed is refused before anything is sent. So is
+/// `ClockBehind`: eight threads reading one clock and racing for the stack
+/// hand it readings more than the slack apart when the machine is loaded.
 const TOLERATED: &[SipralStatus] = &[
     SipralStatus::Ok,
     SipralStatus::Busy,
@@ -139,6 +141,7 @@ const TOLERATED: &[SipralStatus] = &[
     SipralStatus::NotSent,
     SipralStatus::Exhausted,
     SipralStatus::LimitReached,
+    SipralStatus::ClockBehind,
 ];
 
 /// A stack that asserts on a thread it was not told about brings the whole
@@ -274,6 +277,7 @@ fn one_call(
             let target = "sip:2001@example.com";
             let package = "dialog";
             let settings = SipralSubscribeConfig {
+                reserved: 0,
                 size: size_of::<SipralSubscribeConfig>(),
                 target: target.as_ptr().cast::<c_char>(),
                 target_len: target.len(),
@@ -311,6 +315,7 @@ fn subscribe(stack: SipralHandle, account: SipralHandle, now: u64) -> (SipralSta
     let target = "sip:2001@example.com";
     let package = "dialog";
     let settings = SipralSubscribeConfig {
+        reserved: 0,
         size: size_of::<SipralSubscribeConfig>(),
         target: target.as_ptr().cast::<c_char>(),
         target_len: target.len(),
@@ -601,6 +606,7 @@ fn text_handed_in_is_read_for_its_length_and_not_to_a_nul() {
     let account = account_on(stack);
     let package = "dialog";
     let settings = SipralSubscribeConfig {
+        reserved: 0,
         size: size_of::<SipralSubscribeConfig>(),
         target: buffer.as_ptr().cast::<c_char>(),
         target_len: length,

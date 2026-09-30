@@ -257,18 +257,98 @@ pub(crate) fn header(surface: &Surface) -> Result<String, Refused> {
          \x20* Do not edit: `cargo run -p sipral-abi-gen` writes it again, and\n\
          \x20* `scripts/check.sh` fails when what is committed is not what came out.\n\
          \x20*\n\
-         \x20* Every function here returns a sipral_status_t except where its own\n\
-         \x20* comment says otherwise, sets the calling thread's last error on\n\
-         \x20* failure, and catches any panic rather than letting one reach C. A\n\
-         \x20* stack may be used from any thread but only one at a time: a second\n\
-         \x20* thread gets SIPRAL_STATUS_BUSY rather than a wait. The event callback\n\
-         \x20* runs with nothing held, so the library may be called from inside it.\n\
-         \x20* A call's media is reached through a handle of its own, from\n\
-         \x20* sipral_call_media, and never waits on the stack.\n\
+         \x20* CONVENTIONS. Every declaration below follows these; a comment that\n\
+         \x20* says otherwise is the exception, and says so.\n\
+         \x20*\n\
+         \x20* Status. Every function returns a sipral_status_t, except the three\n\
+         \x20* that return a static name (sipral_status_name, sipral_codec_name,\n\
+         \x20* sipral_event_kind_name: NUL-terminated, the library's, valid while it\n\
+         \x20* is loaded). sipral_status_t is the one signed type: zero is success,\n\
+         \x20* every failure is positive, none is negative, and a newer library may\n\
+         \x20* return one an older header has no name for, which is a failure like\n\
+         \x20* any other. A failure sets the calling thread's last error\n\
+         \x20* (sipral_last_error_message); a success clears it. A panic never\n\
+         \x20* crosses: it is SIPRAL_STATUS_PANIC.\n\
+         \x20*\n\
+         \x20* Enumerations. Each is a typedef of a fixed-width integer and the\n\
+         \x20* names as constants, so no compiler picks a width. Values are only\n\
+         \x20* ever added, never renumbered. In the enumerations that start at 1\n\
+         \x20* zero names nothing: read it as absent.\n\
+         \x20*\n\
+         \x20* Structs that carry `size`. Zero the whole struct, padding included,\n\
+         \x20* then set `size` to its sizeof, on a struct handed in and on one the\n\
+         \x20* library fills alike. A library that knows fewer members reads what\n\
+         \x20* it knows and refuses a nonzero byte past it with\n\
+         \x20* SIPRAL_STATUS_NOT_SUPPORTED; one that fills fewer writes back the\n\
+         \x20* `size` it filled and zeroes the rest. A struct only ever grows by appending members\n\
+         \x20* at its end, and no struct here ends in padding on any target, so an\n\
+         \x20* appended member never lands inside a length a caller declares. The\n\
+         \x20* least a caller may declare is where the oldest version of each\n\
+         \x20* struct ended (bindings/c/abi-sizes.txt). sipral_header_t is the one\n\
+         \x20* struct without a size: it is the element of an array, and never\n\
+         \x20* grows. The event payload union is zeroed whole before the one arm\n\
+         \x20* its kind names is written.\n\
+         \x20*\n\
+         \x20* Text and bytes in. A pointer and a length in bytes, the pointer\n\
+         \x20* read for that length during the call and never kept. Text is UTF-8\n\
+         \x20* with no NUL expected or read, and at most 65536 bytes. For an\n\
+         \x20* optional piece a length of zero is absent, whatever the pointer.\n\
+         \x20*\n\
+         \x20* Text out. `buffer`, `capacity`, `out_needed`: the text is written\n\
+         \x20* with a trailing NUL, and `out_needed`, which may be null, receives\n\
+         \x20* the bytes it needs with that NUL counted. Too small a buffer is\n\
+         \x20* SIPRAL_STATUS_BUFFER_TOO_SMALL and nothing is written; a null\n\
+         \x20* buffer with a capacity of zero asks for the length alone.\n\
+         \x20* Bytes out (sipral_account_freeze, sipral_stack_codec_order,\n\
+         \x20* sipral_media_playback) are counted without a NUL and say so. A\n\
+         \x20* packet struct (sipral_media_packet_t, sipral_transmit_t) brings\n\
+         \x20* buffers at least as large as the constant each member's comment\n\
+         \x20* names, is refused whole with SIPRAL_STATUS_BUFFER_TOO_SMALL when one\n\
+         \x20* is smaller, and comes back with a `len` of zero when nothing was\n\
+         \x20* waiting.\n\
+         \x20*\n\
+         \x20* Handles. 64-bit, zero never valid. A handle that never came from\n\
+         \x20* this library, or from another stack, is\n\
+         \x20* SIPRAL_STATUS_INVALID_HANDLE; one whose object is gone is\n\
+         \x20* SIPRAL_STATUS_STALE_HANDLE. The library hands out no memory for a\n\
+         \x20* caller to free.\n\
+         \x20*\n\
+         \x20* Threads. A stack may be used from any thread, one at a time: a\n\
+         \x20* second thread gets SIPRAL_STATUS_BUSY rather than a wait. A call's\n\
+         \x20* media is reached through a handle of its own (sipral_call_media) and\n\
+         \x20* never waits on the stack; it waits only for a frame another thread\n\
+         \x20* is in the middle of on that same call. The sipral_audio_* calls wait\n\
+         \x20* for the audio engine, which a platform probe holds for up to\n\
+         \x20* sipral_stack_config_t::audio_probe_ms; nothing else waits on them.\n\
+         \x20*\n\
+         \x20* Callbacks. None may unwind into the library. Each gets back its\n\
+         \x20* `user_data` untouched and reads nothing else the caller owns.\n\
+         \x20*   event (sipral_stack_config_t::event_callback): on the thread in\n\
+         \x20*     sipral_stack_poll, with nothing held; may call anything, this\n\
+         \x20*     stack included. user_data lives as long as the stack.\n\
+         \x20*   screen (sipral_stack_screen): on the thread feeding the stack\n\
+         \x20*     bytes, with the stack's lock held; a call into this stack is\n\
+         \x20*     SIPRAL_STATUS_BUSY. user_data lives until the policy is replaced\n\
+         \x20*     or removed and no thread is inside the stack.\n\
+         \x20*   processor (sipral_media_attach_processor): on the thread in\n\
+         \x20*     sipral_media_capture or sipral_media_playback, with that call's\n\
+         \x20*     media held; a call on any media handle, or into that call's\n\
+         \x20*     stack, is SIPRAL_STATUS_BUSY. user_data lives until\n\
+         \x20*     sipral_media_detach_processor returns or the handle is released.\n\
+         \x20*   audio transmit (sipral_stack_config_t::audio_transmit_callback):\n\
+         \x20*     on the audio engine's own thread, with nothing of the library's\n\
+         \x20*     held; sipral_stack_destroy from it is SIPRAL_STATUS_BUSY.\n\
+         \x20*     user_data lives as long as the stack.\n\
+         \x20*   log (sipral_stack_log): on the thread that just finished a call\n\
+         \x20*     into the stack, with nothing held, one line at a time; may call\n\
+         \x20*     anything. user_data lives until the log is replaced or turned off\n\
+         \x20*     and no thread is inside the stack.\n\
+         \x20* Every pointer a callback is handed points into the library's memory\n\
+         \x20* and is valid for that one call.\n\
          \x20*/\n\n",
     );
     out.push_str("#ifndef SIPRAL_H\n#define SIPRAL_H\n\n");
-    out.push_str("#include <stdbool.h>\n#include <stddef.h>\n#include <stdint.h>\n\n");
+    out.push_str("#include <stddef.h>\n#include <stdint.h>\n\n");
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
     aliases(&mut out, surface)?;

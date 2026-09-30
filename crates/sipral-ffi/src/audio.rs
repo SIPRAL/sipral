@@ -33,6 +33,7 @@
 //! apart, because an application that re-applies its own choice on hearing
 //! itself announced is a loop.
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::fmt::Write as _;
 use std::slice;
@@ -49,7 +50,6 @@ use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
 use crate::stack::{SipralStackConfig, SipralTransport, audio_of};
 use crate::status::SipralStatus;
-use crate::text::copy_bytes_out;
 use crate::versioned::{Versioned, write_versioned};
 
 codes! {
@@ -186,7 +186,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralAudioDevice {
     const NAME: &'static str = "sipral_audio_device";
-    const MIN_SIZE: usize = crate::versioned::min_size::AUDIO_DEVICE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralAudioDevice, present);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -210,7 +210,7 @@ record! {
         /// own processing behind it where the endpoint has any — a virtual
         /// cable has none, and cancels nothing. An application that wants
         /// the echo gone regardless attaches a processor to each call with
-        /// `sipral_call_attach_processor`; the delay it needs is
+        /// `sipral_media_attach_processor`; the delay it needs is
         /// `render_delay_ms`, and the engine tells each managed call that
         /// number itself, again after every device change.
         pub system_echo_cancellation: u32,
@@ -228,6 +228,12 @@ record! {
         /// The device the ringer is running on, or zero when the ring goes
         /// through the loudspeaker.
         pub ringer: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. The library writes zero here and reads nothing
+        /// from it.
+        pub reserved: u32,
     }
 }
 
@@ -235,7 +241,7 @@ record! {
 // each.
 unsafe impl Versioned for SipralAudioInfo {
     const NAME: &'static str = "sipral_audio_info";
-    const MIN_SIZE: usize = crate::versioned::min_size::AUDIO_INFO;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralAudioInfo, reserved);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
@@ -265,6 +271,12 @@ record! {
         /// socket's connection to its TURN server, as `sipral_media_capture`
         /// marks them.
         pub protocol: u32,
+        /// Zero. Keeps the members after it where a 32-bit and a 64-bit target
+        /// both put them without padding at the end of the struct, so that a
+        /// member a later version appends starts past the length a caller built
+        /// against this header declares. The library writes zero here and reads
+        /// nothing from it.
+        pub reserved: u32,
         /// Where to send it, `host:port`, UTF-8 and not NUL-terminated.
         pub destination: *const c_char,
         /// How many bytes of it.
@@ -355,6 +367,7 @@ impl CTransmit {
         self.destination.clear();
         let _ = write!(self.destination, "{}", packet.destination);
         let transmit = SipralAudioTransmit {
+            reserved: 0,
             size: size_of::<SipralAudioTransmit>(),
             call,
             protocol: match packet.transport {
@@ -367,11 +380,30 @@ impl CTransmit {
             payload: packet.payload.as_ptr(),
             payload_len: packet.payload.len(),
         };
+        IN_TRANSMIT.set(IN_TRANSMIT.get().saturating_add(1));
         // SAFETY: the callback is the caller's, given with the user pointer
         // it expects, and the record points into buffers that outlive the
         // call.
         unsafe { (self.callback)(&raw const transmit, self.user_data as *mut c_void) };
+        IN_TRANSMIT.set(IN_TRANSMIT.get().saturating_sub(1));
     }
+}
+
+thread_local! {
+    /// How deep this thread is inside the audio transmit callback: the
+    /// engine's pump, handing the application a packet.
+    static IN_TRANSMIT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Whether this thread is the engine's pump, inside the transmit callback.
+///
+/// The pump holds no lock of the library's while it calls out, so nothing
+/// stops a `sipral_stack_destroy` made from there — and destroying the stack
+/// drops the engine, which joins the pump: the thread waiting for itself to
+/// finish. That call is refused with `SIPRAL_STATUS_BUSY` instead, the way a
+/// processor's call into its own stack is.
+pub(crate) fn inside_transmit() -> bool {
+    IN_TRANSMIT.get() != 0
 }
 
 #[cfg(test)]
@@ -616,10 +648,13 @@ entry! {
 entry! {
     /// The device at `index` in the list, and its name into `buffer`.
     ///
-    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end.
-    /// `SIPRAL_STATUS_BUFFER_TOO_SMALL` when the name does not fit, with the
-    /// length needed in `out_needed` and the struct filled in all the same;
-    /// the name is UTF-8 and not NUL-terminated.
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for an index past the end. The name
+    /// is written the way every other text this ABI hands out is: UTF-8 with
+    /// a trailing NUL, and `out_needed`, when it is not null, receives the
+    /// bytes it needs with that NUL counted. When the name does not fit, the
+    /// answer is `SIPRAL_STATUS_BUFFER_TOO_SMALL` and nothing is written,
+    /// neither to `buffer` nor to `out_device`: ask with a capacity of zero
+    /// to learn the length, then again with room.
     ///
     /// # Safety
     ///
@@ -657,8 +692,8 @@ entry! {
                 found.name.clone(),
             ))
         })?;
-        unsafe { write_versioned(out_device, device) }?;
-        unsafe { copy_bytes_out(text.as_bytes(), buffer.cast::<u8>(), capacity, out_needed) }
+        unsafe { crate::diagnostics::copy_out(&text, buffer, capacity, out_needed) }?;
+        unsafe { write_versioned(out_device, device) }
     }
 }
 
@@ -947,6 +982,7 @@ entry! {
         let info = with_engine(stack, |engine| {
             let info = engine.info();
             Ok(SipralAudioInfo {
+                reserved: 0,
                 size: size_of::<SipralAudioInfo>(),
                 active: u32::from(info.active),
                 system_echo_cancellation: u32::from(info.system_echo_cancellation),
@@ -965,13 +1001,13 @@ entry! {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{
-        FAKE_PLATFORM, GAIN_UNITY, SipralAudio, SipralAudioActivation, SipralAudioChange,
-        SipralAudioDevice, SipralAudioDirection, SipralAudioInfo, SipralAudioOrigin,
-        SipralAudioRole, SipralAudioTransmit, sipral_audio_activate, sipral_audio_deactivate,
-        sipral_audio_device_at, sipral_audio_device_count, sipral_audio_gain, sipral_audio_info,
-        sipral_audio_level, sipral_audio_muted, sipral_audio_refresh, sipral_audio_ring,
-        sipral_audio_select, sipral_audio_selection, sipral_audio_set_gain, sipral_audio_set_muted,
-        sipral_audio_stop_ringing,
+        CTransmit, FAKE_PLATFORM, GAIN_UNITY, Outgoing, SipralAudio, SipralAudioActivation,
+        SipralAudioChange, SipralAudioDevice, SipralAudioDirection, SipralAudioInfo,
+        SipralAudioOrigin, SipralAudioRole, SipralAudioTransmit, Transport, sipral_audio_activate,
+        sipral_audio_deactivate, sipral_audio_device_at, sipral_audio_device_count,
+        sipral_audio_gain, sipral_audio_info, sipral_audio_level, sipral_audio_muted,
+        sipral_audio_refresh, sipral_audio_ring, sipral_audio_select, sipral_audio_selection,
+        sipral_audio_set_gain, sipral_audio_set_muted, sipral_audio_stop_ringing,
     };
     use crate::call::tests::{hangup, media_call_tuned};
     use crate::error::last_error_text;
@@ -1069,7 +1105,11 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
-        (device, String::from_utf8_lossy(&name[..len]).into_owned())
+        assert_eq!(name[len - 1], 0, "the name ends in the NUL it counts");
+        (
+            device,
+            String::from_utf8_lossy(&name[..len - 1]).into_owned(),
+        )
     }
 
     fn id_of(stack: SipralHandle, name: &str) -> u32 {
@@ -1086,6 +1126,7 @@ pub(crate) mod tests {
 
     fn info(stack: SipralHandle) -> SipralAudioInfo {
         let mut info = SipralAudioInfo {
+            reserved: 0,
             size: size_of::<SipralAudioInfo>(),
             active: u32::MAX,
             system_echo_cancellation: u32::MAX,
@@ -1128,6 +1169,93 @@ pub(crate) mod tests {
             SipralStatus::WrongState
         );
         assert!(last_error_text().contains("application mode"));
+    }
+
+    /// An audio call on another thread holds the engine for as long as the
+    /// platform takes to answer about its devices. A poll that waited for it
+    /// held the stack's lock all that while, so every signalling call on
+    /// every other thread answered BUSY until the platform did; now the poll
+    /// leaves the engine for the next one and says to come back soon.
+    #[test]
+    fn a_poll_does_not_wait_for_an_engine_another_thread_holds() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        let (stack, _, _) = device_call(&mut observed, &fake, SipralAudioActivation::Manual);
+        let shared = crate::stack::audio_of(stack)
+            .expect("the stack")
+            .expect("device mode has an engine");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _engine = shared.lock().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(1_500));
+        });
+        held_rx.recv().unwrap();
+        let started = Instant::now();
+        let mut result = crate::stack::tests::poll_result();
+        let status = unsafe { crate::stack::sipral_stack_poll(stack, 5_000, &raw mut result) };
+        let waited = started.elapsed();
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert!(
+            waited < Duration::from_secs(1),
+            "the poll waited {waited:?} for the engine"
+        );
+        assert_eq!(result.has_deadline, 1);
+        assert!(result.next_poll_in_ms <= 20, "{}", result.next_poll_in_ms);
+        holder.join().unwrap();
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// What `sipral_stack_destroy` answered from inside the transmit
+    /// callback below.
+    static DESTROYED_FROM_THE_PUMP: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(i32::MIN);
+
+    /// A transmit callback that destroys the stack whose handle it was given.
+    unsafe extern "C" fn destroys_its_stack(
+        _transmit: *const SipralAudioTransmit,
+        user_data: *mut c_void,
+    ) {
+        let stack = unsafe { *user_data.cast::<SipralHandle>() };
+        let status = unsafe { crate::stack::sipral_stack_destroy(stack) };
+        DESTROYED_FROM_THE_PUMP.store(status as i32, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The pump holds no lock of the library's while it hands a packet over,
+    /// so a destroy made from the transmit callback went through: it dropped
+    /// the engine, and dropping the engine joins the pump, which is the thread
+    /// making the call. It is refused now, like a processor's call into its
+    /// own stack, and the stack is still there to destroy from elsewhere.
+    #[test]
+    fn a_stack_is_not_destroyed_from_inside_its_transmit_callback() {
+        let mut observed = Observed::default();
+        let config = config(record, &mut observed);
+        let (status, stack) = create(&config);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let mut handle = stack;
+        let mut transmit = CTransmit {
+            callback: destroys_its_stack,
+            user_data: ptr::from_mut(&mut handle) as usize,
+            destination: String::new(),
+        };
+        let packet = Outgoing {
+            destination: "192.0.2.1:4000".parse().unwrap(),
+            payload: vec![0; 12],
+            transport: Transport::Udp,
+        };
+        transmit.send(stack, &packet);
+        assert_eq!(
+            DESTROYED_FROM_THE_PUMP.load(std::sync::atomic::Ordering::SeqCst),
+            SipralStatus::Busy as i32
+        );
+        assert!(!super::inside_transmit(), "the mark goes with the callback");
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
     }
 
     #[test]
@@ -1191,8 +1319,10 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(status, SipralStatus::InvalidArgument);
-        // a name that does not fit is said so, and the length given
-        let mut short = [0_u8; 3];
+        // a name that does not fit is said so, and the length given with its
+        // NUL counted, as every other text-out call counts it; nothing is
+        // written, the struct included
+        let mut short = [0_u8; 11];
         let mut needed = 0;
         let status = unsafe {
             sipral_audio_device_at(
@@ -1205,7 +1335,9 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(status, SipralStatus::BufferTooSmall);
-        assert_eq!(needed, "USB Headset".len());
+        assert_eq!(needed, "USB Headset".len() + 1);
+        assert_eq!(short, [0; 11], "nothing of the name was written");
+        assert_eq!(device.id, 0, "nothing of the struct was written");
         hangup(stack, call, 3_000);
     }
 

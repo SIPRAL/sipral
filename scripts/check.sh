@@ -1273,6 +1273,53 @@ else
     pass "no header in the last commit to hold this one against"
 fi
 
+# The library is built for 32-bit Android as well as for 64-bit everything,
+# and a struct of pointers is one length on each. tools/abi-gen works out
+# every length and offset on the three layouts those targets fall in and
+# prints them into bindings/c/abi-layout.c as assertions over the header;
+# compiling that file for a target is the test, so a C compiler has the last
+# word on each layout rather than the build this runs on. No sysroot is
+# needed: -ffreestanding takes stddef.h and stdint.h from clang itself.
+step "the layout on every target"
+if ! command -v clang >/dev/null 2>&1; then
+    fail "clang not found, and bindings/c/abi-layout.c is only checked by compiling it"
+else
+    for target in x86_64-linux-gnu aarch64-linux-gnu i386-linux-gnu armv7-linux-gnueabihf \
+        x86_64-pc-windows-msvc i686-pc-windows-msvc; do
+        if said=$(clang -target "$target" -ffreestanding -std=c11 -fsyntax-only -Werror \
+            -I bindings/c/include bindings/c/abi-layout.c 2>&1); then
+            pass "every length, offset and pin in bindings/c/abi-layout.c holds on $target"
+        else
+            fail "bindings/c/abi-layout.c does not hold on $target:"
+            printf '%s\n' "$said" | grep 'error:' | head -5 | sed 's/^/        /'
+        fi
+    done
+fi
+
+# A pin is the least a caller may declare, and the one number about a struct
+# that must never move while the major stands: a caller built against the
+# oldest header of this major declares exactly that. Held against the last
+# commit, like the declarations above; the columns compared are the member
+# and the pin on each layout, not the lengths, which grow.
+pins() {
+    printf '%s\n' "$1" | awk '!/^#/ && NF == 8 { print $1, $2, $3, $5, $7 }' | sort
+}
+if published_sizes=$(git show HEAD:bindings/c/abi-sizes.txt 2>/dev/null); then
+    moved=$(comm -23 <(pins "$published_sizes") <(pins "$(cat bindings/c/abi-sizes.txt)"))
+    read -r was_major _ <<<"$(version_of "$(git show HEAD:"$HEADER" 2>/dev/null)")"
+    read -r is_major _ <<<"$(version_of "$(cat "$HEADER")")"
+    if [ -z "$moved" ]; then
+        pass "no pinned length moved against the last commit"
+    elif [ -n "$was_major" ] && [ "$is_major" -gt "$was_major" ]; then
+        pass "pinned lengths moved, and the ABI major with them ($was_major to $is_major)"
+    else
+        fail "a pinned length moved or went away within ABI major $is_major:"
+        printf '%s\n' "$moved" | sed 's/^/        was: /'
+    fi
+else
+    pass "no bindings/c/abi-sizes.txt in the last commit to hold the pins to"
+fi
+
 # Sixteen fuzz targets in a workspace of its own, on a nightly pin of its
 # own, and nothing else here reads them: `cargo test --workspace`, `cargo
 # fmt --all` and the clippy run above all stop at the workspace boundary. A

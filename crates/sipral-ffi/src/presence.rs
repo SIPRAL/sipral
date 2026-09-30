@@ -156,7 +156,7 @@ record! {
 // zero, and a zero `basic` is refused by name.
 unsafe impl Versioned for SipralPresence {
     const NAME: &'static str = "sipral_presence";
-    const MIN_SIZE: usize = crate::versioned::min_size::PRESENCE;
+    const PIN: crate::versioned::Pin = crate::versioned::pin!(SipralPresence, note_len);
 
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;

@@ -231,7 +231,7 @@ public final class LocalConference: @unchecked Sendable {
                     packet.capacity = 1500
                     packet.destination = destBuf.baseAddress
                     packet.destination_capacity = 128
-                    guard let call = try? Sipral.localConferencePollTransmit(conference: handle, outPacket: &packet),
+                    guard let call = try? Sipral.localConferencePollTransmit(conference: handle, packet: &packet),
                           packet.len > 0 else { return nil }
                     let payload = Array(UnsafeBufferPointer(start: dataBuf.baseAddress, count: packet.len))
                     let text = destBuf.withMemoryRebound(to: UInt8.self) {

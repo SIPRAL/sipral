@@ -124,7 +124,7 @@ static void expect_about(const char *what, const char *about, int held)
  * `sipral_abi_struct_size` answers with the current length and nothing across
  * the ABI answers with the pinned one, so the pins are read from
  * abi-sizes.txt beside this file, which tools/abi-gen prints from them and
- * the gate diffs. The file is held to the library before any number in it is
+ * the gate diffs, in the column for the layout this was compiled for. The file is held to the library before any number in it is
  * used: every current length in it is the one the library reports, and it
  * lists exactly as many structs as `sipral_abi_versioned_count` says there
  * are. Every pinned struct then has to find the entry point below that takes
@@ -998,7 +998,7 @@ static sipral_status_t transport_failure_at(struct fixture *fixture, size_t decl
     failure.tls = SIPRAL_TLS_FAILURE_NONE;
     failure.detail = detail;
     failure.detail_len = strlen(detail);
-    return sipral_stack_transport_failure(fixture->stack, &failure, 0);
+    return sipral_stack_transport_failed_with(fixture->stack, &failure, 0);
 }
 
 /* A local conference on the fixture's stack, made as declared and ended
@@ -1274,20 +1274,33 @@ static void oldest_lengths_still_work(void)
         return;
     }
 
+    /* the three layouts abi-sizes.txt lists, in its order: 64-bit pointers,
+     * then 32-bit ones with a 64-bit integer aligned to four inside a struct
+     * (i386) or to eight (ARM, Windows x86) */
+    struct layout_probe {
+        char before;
+        uint64_t value;
+    };
+    size_t layout = sizeof(void *) == 8 ? 0 : offsetof(struct layout_probe, value) == 4 ? 1 : 2;
+
     size_t listed = 0;
     unsigned tried[HANDOVERS] = { 0 };
-    char line[256];
+    char line[512];
     while (fgets(line, sizeof line, sizes) != NULL) {
         if (line[0] == '#' || line[0] == '\n') {
             continue;
         }
         char name[64];
-        char pinned_text[32];
-        size_t current = 0;
-        if (sscanf(line, "%63s %31s %zu", name, pinned_text, &current) != 3) {
+        char member[64];
+        char pins[3][32];
+        size_t lengths[3] = { 0 };
+        if (sscanf(line, "%63s %63s %31s %zu %31s %zu %31s %zu", name, member, pins[0],
+                   &lengths[0], pins[1], &lengths[1], pins[2], &lengths[2]) != 8) {
             expect("abi-sizes.txt has a line smoke.c cannot read", 0);
             continue;
         }
+        const char *pinned_text = pins[layout];
+        size_t current = lengths[layout];
         listed++;
 
         size_t reported = 0;
@@ -1587,8 +1600,8 @@ static void headers_cross_a_call(void)
 
 /* -- a processor attached, detached and reset through the C ABI -------------
  *
- * sipral_call_attach_processor, sipral_call_detach_processor and
- * sipral_call_reset_processor, exercised on a real call's real media handle:
+ * sipral_media_attach_processor, sipral_media_detach_processor and
+ * sipral_media_reset_processor, exercised on a real call's real media handle:
  * a null callback refused, nothing-attached answered honestly, a reset seen
  * clean, a played frame and a captured frame hand the callback exactly what
  * sipral_media_info_t says the call's frame is shaped like, replacing the
@@ -1711,24 +1724,24 @@ static void a_processor_runs_the_frames_of_a_call(void)
                info.frame_samples <= sizeof playback_frame / sizeof playback_frame[0]);
 
     /* A null callback is refused rather than read as a request to attach
-     * nothing -- sipral_call_detach_processor is that request. */
+     * nothing -- sipral_media_detach_processor is that request. */
     expect("a null process callback was accepted",
-           sipral_call_attach_processor(media, NULL, &seen) ==
+           sipral_media_attach_processor(media, NULL, &seen) ==
                SIPRAL_STATUS_INVALID_ARGUMENT);
 
     expect("detaching a processor never attached said there was one",
-           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+           sipral_media_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
                was_attached == 0);
     expect("resetting a processor never attached said there was one",
-           sipral_call_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+           sipral_media_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
                was_attached == 0);
 
     expect("the processor would not attach",
-           sipral_call_attach_processor(media, on_processor_frame, &seen) ==
+           sipral_media_attach_processor(media, on_processor_frame, &seen) ==
                SIPRAL_STATUS_OK);
 
     expect("resetting the freshly attached processor did not run it",
-           sipral_call_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+           sipral_media_reset_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
                was_attached == 1 && seen.resets == 1 && seen.reset_was_clean);
 
     for (i = 0; i < info.frame_samples; i++) {
@@ -1758,7 +1771,7 @@ static void a_processor_runs_the_frames_of_a_call(void)
     /* Attaching again replaces what was there: the callback the first
      * attachment was given must not be reached from here on. */
     expect("re-attaching the processor did not succeed",
-           sipral_call_attach_processor(media, on_processor_frame, &other) ==
+           sipral_media_attach_processor(media, on_processor_frame, &other) ==
                SIPRAL_STATUS_OK);
     for (i = 0; i < info.frame_samples; i++) {
         capture_frame[i] = (int16_t)(3000 + (int)i);
@@ -1770,10 +1783,10 @@ static void a_processor_runs_the_frames_of_a_call(void)
            seen.calls == 1 && other.calls == 1 && other.near_first == capture_frame[0]);
 
     expect("detaching the processor did not say one was attached",
-           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+           sipral_media_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
                was_attached == 1);
     expect("detaching an already detached processor said one was attached",
-           sipral_call_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
+           sipral_media_detach_processor(media, &was_attached) == SIPRAL_STATUS_OK &&
                was_attached == 0);
 
     for (i = 0; i < info.frame_samples; i++) {

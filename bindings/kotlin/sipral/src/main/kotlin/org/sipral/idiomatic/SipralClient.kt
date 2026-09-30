@@ -596,13 +596,13 @@ class SipralClient private constructor(
 
     /**
      * Everything this client's stack is holding, as the redacted text
-     * `sipral_stack_state` writes for a crash report: accounts, calls,
+     * `sipral_stack_state_text` writes for a crash report: accounts, calls,
      * transports, media sessions, the last refused calls, the queues, the
      * RTP range and the counters. Safe from any thread, and never waits.
      */
     fun state(): String {
         val buffer = ByteArray(Sipral.STATE_TEXT_MAX.toInt())
-        val length = Sipral.stackState(handle, buffer).toInt()
+        val length = Sipral.stackStateText(handle, buffer).toInt()
         return String(buffer, 0, maxOf(0, length - 1), Charsets.UTF_8)
     }
 

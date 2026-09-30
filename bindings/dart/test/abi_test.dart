@@ -24,12 +24,20 @@ void main() {
     expect(version.ref.minor, greaterThanOrEqualTo(Sipral.abiVersionMinor));
   });
 
-  test('every record is laid out as long as the library compiled it', () {
-    final sizes = Sipral.recordSizes();
-    expect(sizes, isNotEmpty);
+  test('every record is laid out as long as the layout it runs on says', () {
+    final layouts = Sipral.recordLayouts();
+    expect(layouts.length, greaterThan(50));
+    // 64-bit pointers, or 32-bit ones with a 64-bit integer aligned to four
+    // (i386 everywhere but Windows) or to eight (ARM, Windows x86)
+    final column = ffi.sizeOf<ffi.IntPtr>() == 8
+        ? 1
+        : ffi.Abi.current() == ffi.Abi.linuxIA32 ||
+                ffi.Abi.current() == ffi.Abi.androidIA32
+            ? 2
+            : 3;
     using((arena) {
       final out = arena<ffi.Size>();
-      for (final MapEntry(key: name, value: size) in sizes.entries) {
+      for (final MapEntry(key: name, value: lengths) in layouts.entries) {
         final bytes = utf8.encode(name);
         final text = arena<ffi.Uint8>(bytes.length);
         text.asTypedList(bytes.length).setAll(0, bytes);
@@ -38,7 +46,10 @@ void main() {
           SipralStatus.ok,
           reason: '$name is not a struct the library knows',
         );
-        expect(size, out.value, reason: name);
+        expect(lengths[0], lengths[column],
+            reason: '$name as dart:ffi lays it out');
+        expect(out.value, lengths[column],
+            reason: '$name as the library compiled it');
       }
     });
   });
