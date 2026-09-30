@@ -13878,11 +13878,12 @@ fn wire_header(message: &[u8], name: sipral_core::msg::HeaderName<'_>) -> String
         .unwrap_or_default()
 }
 
-/// The 401 a PBX answers an INVITE with, its nonce long enough that the
-/// answer takes the INVITE past what a datagram may carry.
-fn a_long_challenge_to(invite: &[u8]) -> Vec<u8> {
+/// The 401 a PBX answers an INVITE with, its nonce `nonce_bytes` long:
+/// enough, at 700, that the answer takes the INVITE past what a datagram may
+/// carry even with one SDES suite fewer.
+fn a_long_challenge_to(invite: &[u8], nonce_bytes: usize) -> Vec<u8> {
     use sipral_core::msg::HeaderName;
-    let nonce = "n".repeat(700);
+    let nonce = "n".repeat(nonce_bytes);
     format!(
         "SIP/2.0 401 Unauthorized\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=pbx\r\nCall-ID: {}\r\n\
          CSeq: {}\r\nWWW-Authenticate: Digest realm=\"asterisk\", nonce=\"{nonce}\", \
@@ -13900,6 +13901,15 @@ fn a_long_challenge_to(invite: &[u8]) -> Vec<u8> {
 /// at [`callee_sip`] has just challenged: the stack, the call, and what the
 /// challenge left it saying.
 fn a_secure_call_challenged_past_the_line(now: Instant) -> (Stack, CallHandle, Vec<Event>) {
+    a_secure_call_challenged_with(now, 700)
+}
+
+/// [`a_secure_call_challenged_past_the_line`], with a nonce of
+/// `nonce_bytes`.
+fn a_secure_call_challenged_with(
+    now: Instant,
+    nonce_bytes: usize,
+) -> (Stack, CallHandle, Vec<Event>) {
     let catalog = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
         .with_srtp(SrtpPolicy::Offered)
@@ -13940,7 +13950,11 @@ fn a_secure_call_challenged_past_the_line(now: Instant) -> (Stack, CallHandle, V
         "both suites are offered"
     );
     caller.heard.clear();
-    caller.deliver(&a_long_challenge_to(&invite), callee_sip(), now);
+    caller.deliver(
+        &a_long_challenge_to(&invite, nonce_bytes),
+        callee_sip(),
+        now,
+    );
     caller.drain(now, false);
     let out = caller.outbound();
     assert!(
@@ -14054,4 +14068,77 @@ fn a_secure_call_nobody_opens_a_stream_for_ends_when_the_wait_runs_out() {
         Event::Signalling(UaEvent::CallEnded { call: ended, status: Some(status), .. })
             if *ended == call && status.get() == 513
     )));
+}
+
+/// Where no stream comes, the INVITE goes again over the datagram with the
+/// one suite every SDES answerer takes, under the tag it had, and the call is
+/// keyed under that suite once the far end answers with it — the answer a
+/// PBX that takes no AEAD suite gives.
+#[test]
+fn a_secure_call_trimmed_into_a_datagram_is_keyed_under_the_suite_it_kept() {
+    use sipral_core::msg::HeaderName;
+    let now = Instant::now();
+    // how large the whole retry is with the long nonce; the stack's seed is
+    // the same, so the second exchange is the same bytes with a nonce that
+    // leaves the whole retry just over the line and the trimmed one under it
+    let (_, _, heard) = a_secure_call_challenged_past_the_line(now);
+    let whole = heard
+        .iter()
+        .find_map(|event| match *event {
+            Event::Signalling(UaEvent::Unclaimed(
+                sipral_core::endpoint::Event::TransportWanted { request_bytes, .. },
+            )) => Some(request_bytes),
+            _ => None,
+        })
+        .expect("a stream was asked for");
+    let (mut caller, call, _) = a_secure_call_challenged_with(now, 700 - (whole - 1_305));
+
+    caller.agent.stream_unavailable(now);
+    caller.drain(now, false);
+    let retry = caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE went again over the datagram");
+    assert!(retry.len() <= 1_300, "{} bytes", retry.len());
+    let text = String::from_utf8_lossy(&retry).into_owned();
+    assert_eq!(text.matches("a=crypto:").count(), 1, "{text}");
+    assert!(
+        text.contains("a=crypto:2 AES_CM_128_HMAC_SHA1_80 "),
+        "{text}"
+    );
+    assert!(!wire_header(&retry, HeaderName::Authorization).is_empty());
+
+    let answer = format!(
+        "v=0\r\no=pbx 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+         a=crypto:2 AES_CM_128_HMAC_SHA1_80 {THEIRS}\r\na=sendrecv\r\n"
+    );
+    let ok = format!(
+        "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=pbx\r\nCall-ID: {}\r\n\
+         CSeq: {}\r\nContact: <sip:bob@192.0.2.2>\r\nContent-Type: application/sdp\r\n\
+         Content-Length: {}\r\n\r\n{answer}",
+        wire_header(&retry, HeaderName::Via),
+        wire_header(&retry, HeaderName::From),
+        wire_header(&retry, HeaderName::To),
+        wire_header(&retry, HeaderName::CallId),
+        wire_header(&retry, HeaderName::CSeq),
+        answer.len(),
+    );
+    caller.deliver(ok.as_bytes(), callee_sip(), now);
+    caller.drain(now, false);
+    assert!(
+        caller.heard.iter().any(|event| matches!(
+            event,
+            Event::Signalling(UaEvent::CallConfirmed { call: confirmed, .. }) if *confirmed == call
+        )),
+        "the call is up"
+    );
+    let suite = caller
+        .engine
+        .encryption(call)
+        .expect("the call's streams")
+        .iter()
+        .find_map(|stream| stream.suite);
+    assert_eq!(suite, Some(sipral_rtp::srtp::Suite::AesCm80));
 }

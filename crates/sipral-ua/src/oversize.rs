@@ -22,12 +22,13 @@
 //! end of it stops:
 //!
 //! - an INVITE that opens a call gets one last try over the datagram with a
-//!   smaller offer, every media section keeping only the first `a=crypto`
-//!   line of its SDES offer (RFC 4568 §6.1). The first is the suite this end
-//!   prefers, a far end can only answer with a suite it was offered, and the
-//!   suites dropped are the ones it would have chosen only instead of that
-//!   one. When that fits, the call goes on; when it does not, or there was
-//!   only one suite to begin with, the call ends as
+//!   smaller offer, every media section keeping one `a=crypto` line of its
+//!   SDES offer: `AES_CM_128_HMAC_SHA1_80` when it offered that, the first
+//!   otherwise ([`one_suite_each`]). That is SRTP's mandatory-to-implement
+//!   suite (RFC 3711 §5), the one suite a far end that takes SDES at all
+//!   can answer, which is what a retry that has no other way out needs
+//!   more than the strongest suite. When that fits, the call goes on; when
+//!   it does not, or there was only one suite to begin with, the call ends as
 //!   [`CallEndReason::Unreachable`] with a status of 513 and a `Reason`
 //!   whose text names the size and the limit;
 //! - a REGISTER fails for good with [`RegistrationFailure::Unreachable`] and
@@ -340,27 +341,60 @@ impl UserAgent {
     }
 }
 
-/// An SDES offer with only the first `a=crypto` line of each media section,
-/// or `None` when no section had more than one.
+/// The one suite every SDES answerer takes: RFC 3711 §5's default and
+/// mandatory-to-implement transforms, AES in counter mode with an 80-bit
+/// HMAC-SHA1 tag, under the name RFC 4568 §6.2.1 gives them.
+const EVERYONE_TAKES: &[u8] = b" AES_CM_128_HMAC_SHA1_80 ";
+
+/// An SDES offer with one `a=crypto` line in each media section, or `None`
+/// when no section had more than one.
 ///
-/// Lines are kept byte for byte, the line ending included, so that nothing
-/// but the suites dropped differs from the offer the application was told
-/// about.
+/// The line kept is the `AES_CM_128_HMAC_SHA1_80` one when the section offers
+/// it, and the first otherwise. The offer is only trimmed when the request is
+/// otherwise lost, and this is the retry that has to be answered rather than
+/// the one this end would like best: a far end can take only a suite it was
+/// offered, and SRTP's mandatory-to-implement suite is the one every SDES
+/// answerer takes — Asterisk, offered `AEAD_AES_256_GCM` alone, answers 488.
+/// It is still a suite this account offered.
+///
+/// Lines are kept byte for byte, the line ending and the tag included, so
+/// that nothing but the suites dropped differs from the offer the
+/// application was told about, and the answer names a tag this end keyed.
 pub(crate) fn one_suite_each(body: &[u8]) -> Option<Vec<u8>> {
-    let mut kept = Vec::with_capacity(body.len());
-    let mut seen_in_section = false;
-    let mut dropped = false;
+    let is_crypto = |line: &&[u8]| line.starts_with(b"a=crypto:");
+    let everyone_takes = |line: &&[u8]| {
+        line.windows(EVERYONE_TAKES.len())
+            .any(|window| window == EVERYONE_TAKES)
+    };
+    // the session part, then one group per `m=` line and what follows it
+    let mut sections: Vec<Vec<&[u8]>> = vec![Vec::new()];
     for line in body.split_inclusive(|byte| *byte == b'\n') {
         if line.starts_with(b"m=") {
-            seen_in_section = false;
-        } else if line.starts_with(b"a=crypto:") {
-            if seen_in_section {
-                dropped = true;
-                continue;
-            }
-            seen_in_section = true;
+            sections.push(Vec::new());
         }
-        kept.extend_from_slice(line);
+        if let Some(section) = sections.last_mut() {
+            section.push(line);
+        }
+    }
+    let mut kept = Vec::with_capacity(body.len());
+    let mut dropped = false;
+    for section in &sections {
+        let offered: Vec<&[u8]> = section.iter().copied().filter(is_crypto).collect();
+        // which of the section's `a=crypto` lines stays, counted among them
+        let chosen =
+            (offered.len() > 1).then(|| offered.iter().position(everyone_takes).unwrap_or(0));
+        let mut crypto_seen = 0_usize;
+        for line in section {
+            if is_crypto(line) {
+                let at = crypto_seen;
+                crypto_seen += 1;
+                if chosen.is_some_and(|chosen| chosen != at) {
+                    dropped = true;
+                    continue;
+                }
+            }
+            kept.extend_from_slice(line);
+        }
     }
     dropped.then_some(kept)
 }
@@ -370,7 +404,7 @@ mod tests {
     use super::one_suite_each;
 
     #[test]
-    fn every_media_section_keeps_its_first_suite_and_nothing_else_moves() {
+    fn every_media_section_keeps_the_suite_everyone_takes_and_nothing_else_moves() {
         let offer = b"v=0\r\n\
             o=- 1 1 IN IP4 192.0.2.1\r\n\
             s=-\r\n\
@@ -379,11 +413,12 @@ mod tests {
             m=audio 4000 RTP/SAVP 0\r\n\
             a=crypto:1 AEAD_AES_256_GCM inline:AAAA\r\n\
             a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:BBBB\r\n\
+            a=crypto:3 AEAD_AES_128_GCM inline:EEEE\r\n\
             a=sendrecv\r\n\
             m=text 4002 RTP/SAVP 98\r\n\
             a=crypto:1 AEAD_AES_256_GCM inline:CCCC\r\n\
             a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:DDDD\r\n";
-        let trimmed = one_suite_each(offer).expect("two suites to drop");
+        let trimmed = one_suite_each(offer).expect("three suites to drop");
         let text = String::from_utf8(trimmed).expect("text");
         assert_eq!(
             text,
@@ -393,10 +428,26 @@ mod tests {
              c=IN IP4 192.0.2.1\r\n\
              t=0 0\r\n\
              m=audio 4000 RTP/SAVP 0\r\n\
-             a=crypto:1 AEAD_AES_256_GCM inline:AAAA\r\n\
+             a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:BBBB\r\n\
              a=sendrecv\r\n\
              m=text 4002 RTP/SAVP 98\r\n\
-             a=crypto:1 AEAD_AES_256_GCM inline:CCCC\r\n"
+             a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:DDDD\r\n"
+        );
+    }
+
+    #[test]
+    fn a_section_without_the_suite_everyone_takes_keeps_its_first() {
+        let offer = b"v=0\r\nm=audio 4000 RTP/SAVP 0\r\n\
+            a=crypto:1 AEAD_AES_256_GCM inline:AAAA\r\n\
+            a=crypto:2 AES_256_CM_HMAC_SHA1_80 inline:BBBB\r\n\
+            a=rtcp-mux\r\n";
+        assert_eq!(
+            one_suite_each(offer).as_deref(),
+            Some(
+                &b"v=0\r\nm=audio 4000 RTP/SAVP 0\r\n\
+                   a=crypto:1 AEAD_AES_256_GCM inline:AAAA\r\n\
+                   a=rtcp-mux\r\n"[..]
+            )
         );
     }
 

@@ -16154,8 +16154,8 @@ fn a_retry_one_suite_would_fit_goes_over_the_datagram_with_one_suite() {
     let body = body_of(&retry);
     assert_eq!(body.matches("a=crypto:").count(), 1, "{body}");
     assert!(
-        body.contains("a=crypto:1 AEAD_AES_256_GCM "),
-        "the suite kept is the one preferred: {body}"
+        body.contains("a=crypto:2 AES_CM_128_HMAC_SHA1_80 "),
+        "the suite kept is the one every SDES answerer takes, under its tag: {body}"
     );
     assert!(
         text(&retry, HeaderName::Via).starts_with("SIP/2.0/UDP "),
