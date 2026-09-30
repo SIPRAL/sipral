@@ -43,6 +43,7 @@
 
 mod account;
 mod admission;
+pub mod advertise;
 mod agent;
 mod announce;
 mod answering;

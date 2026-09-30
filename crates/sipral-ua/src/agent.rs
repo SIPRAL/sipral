@@ -775,6 +775,8 @@ impl UserAgent {
         let Some(registrar) = config.registrar.as_ref() else {
             return Err(UaError::NoRegistrar);
         };
+        // a Contact the registrar would store and never reach this end at
+        crate::advertise::check_contact(&config.contact, config.remote)?;
         let reg = self
             .registrations
             .get(&account)
@@ -855,8 +857,7 @@ impl UserAgent {
             // rather than declaring the account dead for the life of the
             // process. Nothing on the wire said otherwise.
             if let Err(error) = self.send_register(account, false, now) {
-                self.retry_later(account, None, None, None, now);
-                let _ = error;
+                self.register_unsent(account, &error, now);
             }
         }
     }
@@ -1427,6 +1428,17 @@ impl UserAgent {
                 status,
                 response,
             );
+        }
+    }
+
+    /// A REGISTER this layer sent on its own could not leave. One whose
+    /// `Contact` the registrar cannot reach stops there, since no retry can
+    /// change the address; anything else backs off and tries again.
+    pub(crate) fn register_unsent(&mut self, account: AccountId, error: &UaError, now: Instant) {
+        if matches!(error, UaError::UnreachableAddress { .. }) {
+            self.give_up(account, RegistrationFailure::UnreachableContact, None, None);
+        } else {
+            self.retry_later(account, None, None, None, now);
         }
     }
 

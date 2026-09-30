@@ -55,7 +55,12 @@
 //! everywhere else in this tree: it reads a datagram and hands it over, and it
 //! takes a frame of PCM and gives it to whichever `sipral-io-*` it linked. A
 //! facade that opened a socket would be a facade that could not be embedded in
-//! the runtimes this stack exists to be embedded in.
+//! the runtimes this stack exists to be embedded in. The one exception is
+//! [`route_to`], which opens a datagram socket of its own, connects it to ask
+//! the operating system which address its route toward a peer leaves from,
+//! and closes it, without sending anything: the answer to "which address do
+//! I advertise", which an application that forgot to choose would otherwise
+//! answer with `127.0.0.1` ([`advertised_address`]).
 //!
 //! **No clock.** `now: Instant` arrives at every entry point that needs one,
 //! which is what makes an hour of a call a test that finishes in a
@@ -177,6 +182,7 @@ mod ports;
 mod record;
 #[cfg(feature = "ice")]
 mod relay;
+mod route;
 mod session;
 mod share;
 mod siprec;
@@ -231,6 +237,7 @@ pub use ports::{PortsExhausted, RtpPorts, RtpPortsError};
 pub use record::{RecordingFormat, RecordingLayout, RecordingOptions, RecordingSink};
 #[cfg(feature = "ice")]
 pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
+pub use route::{AdvertiseError, advertised_address, route_to};
 pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback, StreamEncryption};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// Why a STUN transaction ended without an address, as

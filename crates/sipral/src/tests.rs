@@ -1039,6 +1039,35 @@ fn l16_at_one_rate_does_not_answer_l16_at_another() {
     );
 }
 
+/// The trial's silent call: media bound to loopback and a far end on another
+/// machine. The offer is refused before the INVITE is written, with the
+/// address named, rather than sent and answered into silence.
+#[test]
+fn media_on_loopback_is_never_offered_to_a_far_end_elsewhere() {
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let refused = pair.caller.engine.place(
+        &mut pair.caller.agent,
+        account,
+        OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+        "127.0.0.1:40000".parse().expect("an address"),
+        pair.now,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(MediaError::Signalling(crate::UaError::UnreachableAddress { advertised, .. }))
+                if advertised == std::net::IpAddr::from([127, 0, 0, 1])
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        pair.caller.agent.poll_transmit().is_none(),
+        "no INVITE went"
+    );
+}
+
 /// A call placed to reach a person, told to listen: the far end answers with
 /// a greeting that runs on, and the caller hears that a machine answered —
 /// which only happens if the answer itself started the deciding.

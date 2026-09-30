@@ -336,11 +336,13 @@ impl UserAgent {
             targets: self.located_targets(account),
         });
         match waiting {
-            Some(unregistering) if self.send_register(account, unregistering, now).is_err() => {
-                self.retry_later(account, None, None, None, now);
+            Some(unregistering) => {
+                if let Err(error) = self.send_register(account, unregistering, now) {
+                    self.register_unsent(account, &error, now);
+                }
             }
             None if moved => self.follow_move(account, now),
-            Some(_) | None => {}
+            None => {}
         }
     }
 
@@ -363,8 +365,8 @@ impl UserAgent {
         if !live || reg.unregistering {
             return;
         }
-        if self.send_register(account, false, now).is_err() {
-            self.retry_later(account, None, None, None, now);
+        if let Err(error) = self.send_register(account, false, now) {
+            self.register_unsent(account, &error, now);
         }
     }
 

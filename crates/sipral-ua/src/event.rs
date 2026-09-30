@@ -115,6 +115,12 @@ pub enum RegistrationFailure {
     /// address, and resolving one is the caller's, so the redirect is reported
     /// rather than chased.
     Redirected,
+    /// The account's `Contact` names an address the registrar cannot reach
+    /// this end at — loopback, to a registrar that is not, or the unspecified
+    /// address — and nothing was sent (see [`crate::UaError::UnreachableAddress`]).
+    /// Trying again cannot help until the account is given an address the
+    /// registrar can reach ([`UserAgent::rebind`](crate::UserAgent::rebind)).
+    UnreachableContact,
 }
 
 impl RegistrationFailure {
@@ -132,6 +138,10 @@ impl RegistrationFailure {
                 "a registrar that refuses every binding is usually configured to allow none; \
                  check max_contacts on the address of record",
             ),
+            Self::UnreachableContact => Some(
+                "the Contact names a loopback address the registrar cannot reach; bind to the \
+                 address of the interface that routes to the registrar",
+            ),
             Self::BadCredentials | Self::Unreachable | Self::Redirected => None,
         }
     }
@@ -144,6 +154,7 @@ impl core::fmt::Display for RegistrationFailure {
             Self::BadCredentials => "credentials refused",
             Self::Unreachable => "registrar unreachable",
             Self::Redirected => "registrar moved",
+            Self::UnreachableContact => "contact unreachable from the registrar",
         })
     }
 }

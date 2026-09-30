@@ -107,8 +107,18 @@ impl UserAgent {
         // before anything is kept or built, so a refused field leaves no call
         // behind and nothing on the wire
         HeadersFor::Call.check_each(&outgoing.extra)?;
-        if outgoing.destination.is_none() && config.destination().is_none() {
+        let Some((_, remote)) = outgoing.destination.or_else(|| config.destination()) else {
             return Err(UaError::NotLocated);
+        };
+        // neither the Contact nor the offer may hand the far end an address
+        // it cannot reach this end at
+        crate::advertise::check_contact(&config.contact, remote)?;
+        if let Some(offered) = outgoing
+            .offer
+            .as_deref()
+            .and_then(|sdp| sdp::parse_with_limits(sdp, self.sdp_limits).ok())
+        {
+            crate::advertise::check_description(&offered, remote)?;
         }
         let asked = config.session_interval;
         let from = config.caller_value();
@@ -274,6 +284,7 @@ impl UserAgent {
             StatusCode::RINGING
         };
         let contact = self.current_contact(call, now);
+        self.check_advertised(call, &contact, early.as_deref())?;
         let mut response = onto_response(
             OutgoingResponse::new(status)
                 .contact(&contact)
@@ -355,6 +366,7 @@ impl UserAgent {
         let transaction = self.answerable(call)?;
         let limits = self.sdp_limits;
         let contact = self.current_contact(call, now);
+        self.check_advertised(call, &contact, sdp.as_deref())?;
         let mut supported: Vec<u8> = b"timer".to_vec();
         // RFC 5627 §4.4 SHOULD, folded in beside `timer`: "a 2xx ... response
         // to an INVITE which contains a To tag" is among what carries it
@@ -517,6 +529,9 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let described = sdp::parse_with_limits(sdp, self.sdp_limits).map_err(UaError::Sdp)?;
+        if let Some(peer) = self.calls.get(&call).and_then(|held| held.peer) {
+            crate::advertise::check_description(&described, peer)?;
+        }
         let (provisional, state) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             (
@@ -890,6 +905,27 @@ impl UserAgent {
     /// The call's feature parameters (`isfocus`, `+sip.src`) follow whichever
     /// address it is: they say what the dialog is, which does not change with
     /// the registration.
+    /// Refuse to hand the far end of `call` a `Contact` or a session
+    /// description it cannot reach this end at ([`crate::advertise`]). A call
+    /// whose far end the transport never named is not checked.
+    fn check_advertised(
+        &self,
+        call: CallHandle,
+        contact: &[u8],
+        sdp: Option<&[u8]>,
+    ) -> Result<(), UaError> {
+        let Some(peer) = self.calls.get(&call).and_then(|held| held.peer) else {
+            return Ok(());
+        };
+        crate::advertise::check_contact_value(contact, peer)?;
+        if let Some(described) =
+            sdp.and_then(|sdp| sdp::parse_with_limits(sdp, self.sdp_limits).ok())
+        {
+            crate::advertise::check_description(&described, peer)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn current_contact(&self, call: CallHandle, now: Instant) -> Box<[u8]> {
         let Some(held) = self.calls.get(&call) else {
             return Box::from(&b""[..]);
