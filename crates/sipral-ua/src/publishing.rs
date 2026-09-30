@@ -116,6 +116,10 @@ struct Held {
     /// A 401 or 407 to the request in flight, until the drain ends and it is
     /// known whether a retry followed.
     unanswered: Option<StatusCode>,
+    /// The refused transaction whose answer RFC 3261 §18.1.1 took off the
+    /// datagram, held by the endpoint until a stream is bound or the wait for
+    /// one ends ([`crate::oversize`]).
+    waiting_for_stream: Option<AnyTransactionId>,
 }
 
 /// Every publication an agent keeps, and the transactions they have in
@@ -317,6 +321,7 @@ impl UserAgent {
                 machine: Publication::new(&wanted.event).expires(wanted.expires),
                 presence,
                 unanswered: None,
+                waiting_for_stream: None,
             },
         );
         Ok(handle)
@@ -520,19 +525,98 @@ impl UserAgent {
         let Some(credentials) = credentials else {
             return;
         };
-        let Ok(retried) = self
+        match self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
-        else {
-            return;
-        };
+        {
+            Ok(retried) => self.publish_retry_went(publication, transaction, retried),
+            // §18.1.1 wants a connection first, and the endpoint is still
+            // holding the challenge
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let Some(held) = self.publications.held.get_mut(&publication) {
+                    held.waiting_for_stream = Some(transaction);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The retry is a transaction now, and the publication names it.
+    fn publish_retry_went(
+        &mut self,
+        publication: PublicationHandle,
+        transaction: AnyTransactionId,
+        retried: AnyTransactionId,
+    ) {
         self.publications.by_transaction.remove(&transaction);
         self.publications
             .by_transaction
             .insert(retried, publication);
         if let Some(held) = self.publications.held.get_mut(&publication) {
             held.unanswered = None;
+            held.waiting_for_stream = None;
         }
+    }
+
+    fn publications_waiting(&self) -> Vec<(PublicationHandle, AnyTransactionId)> {
+        self.publications
+            .held
+            .iter()
+            .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .collect()
+    }
+
+    /// Send the PUBLISH retries §18.1.1 held back, now that there is a
+    /// connection.
+    pub(crate) fn resume_parked_publications(&mut self, now: Instant) {
+        for (publication, failed) in self.publications_waiting() {
+            let credentials = self
+                .publications
+                .held
+                .get(&publication)
+                .and_then(|held| self.accounts.get(&held.account))
+                .and_then(|config| config.credentials.clone());
+            let outcome = credentials.map(|credentials| {
+                self.endpoint
+                    .retry_with_credentials(failed, &credentials, now)
+            });
+            match outcome {
+                Some(Ok(retried)) => self.publish_retry_went(publication, failed, retried),
+                Some(Err(error)) if crate::agent::wants_a_stream(&error) => {}
+                // the next settle reports the refusal it still carries
+                _ => {
+                    if let Some(held) = self.publications.held.get_mut(&publication) {
+                        held.waiting_for_stream = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// No stream is coming for the PUBLISHes whose answer to a challenge
+    /// outgrew the datagram: each fails as unreachable with `status`, rather
+    /// than as the 401 or 407 its credentials never got to answer.
+    pub(crate) fn give_up_publications(&mut self, status: StatusCode, now: Instant) {
+        for (publication, failed) in self.publications_waiting() {
+            self.endpoint.abandon_challenge(failed);
+            self.publications
+                .by_transaction
+                .retain(|_, owner| *owner != publication);
+            if let Some(held) = self.publications.held.get_mut(&publication) {
+                held.waiting_for_stream = None;
+                held.unanswered = None;
+                held.machine.too_large(status);
+            }
+            self.pump_publication(publication, now);
+        }
+    }
+
+    /// Whether a PUBLISH's answer to a challenge waits for a stream.
+    pub(crate) fn publications_wait_for_a_stream(&self) -> bool {
+        self.publications
+            .held
+            .values()
+            .any(|held| held.waiting_for_stream.is_some())
     }
 
     /// A challenge that got no retry was a refusal. Called at the end of
@@ -542,6 +626,9 @@ impl UserAgent {
             .publications
             .held
             .iter_mut()
+            // except one the endpoint is holding until a connection exists:
+            // its answer has not been sent yet
+            .filter(|(_, held)| held.waiting_for_stream.is_none())
             .filter_map(|(handle, held)| held.unanswered.take().map(|status| (*handle, status)))
             .collect();
         for (publication, status) in refused {

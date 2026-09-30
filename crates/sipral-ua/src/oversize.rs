@@ -38,6 +38,9 @@
 //!   and the call carries on as it was (§14.1);
 //! - a BYE, a REFER, an INFO and the rest a call sends settle as refused
 //!   with a 513, and a SUBSCRIBE ends its subscription the same way;
+//! - a MESSAGE is reported sent with a 513, and a PUBLISH fails as
+//!   unreachable with a 513, rather than as the 401 or 407 their credentials
+//!   never got to answer;
 //! - what this layer was holding back by itself goes nowhere, once the
 //!   application has said no stream is coming: a hangup it had decided on
 //!   ends the call here, a session change it was offering again fails, and
@@ -125,6 +128,8 @@ impl UserAgent {
                 .subscriptions
                 .values()
                 .any(|held| held.waiting_for_stream.is_some())
+            || self.messages_wait_for_a_stream()
+            || self.publications_wait_for_a_stream()
     }
 
     /// Start the wait when the first request starts waiting, and stop it when
@@ -173,6 +178,10 @@ impl UserAgent {
         self.give_up_requests(status);
         self.give_up_offers(status);
         self.give_up_subscriptions(status, now);
+        if let Some(status) = status {
+            self.give_up_messages(status);
+            self.give_up_publications(status, now);
+        }
     }
 
     fn give_up_calls(&mut self, text: &str, status: Option<StatusCode>, now: Instant) {

@@ -100,6 +100,12 @@ pub(crate) struct SentMessage {
     /// the drain, because whether this is a refusal or the first half of a
     /// retry is decided by whether a [`Event::Challenged`] follows it.
     unanswered: Option<OwnedMessage>,
+    /// The refused transaction whose answer RFC 3261 §18.1.1 took off the
+    /// datagram, held by the endpoint until a stream is bound or the wait for
+    /// one ends ([`crate::oversize`]). Its refusal is not settled meanwhile:
+    /// the challenge has not been answered yet, so it says nothing about the
+    /// credentials.
+    waiting_for_stream: Option<AnyTransactionId>,
     /// The call this MESSAGE rode inside, for one sent by
     /// [`UserAgent::message_in_call`] on a route that is not known to be
     /// congestion-controlled — kept so §8's "MUST NOT [initiate overlapping
@@ -173,6 +179,7 @@ impl UserAgent {
                 account: Some(account),
                 target: Some(target_key),
                 unanswered: None,
+                waiting_for_stream: None,
                 overlap_call: None,
             },
         );
@@ -237,6 +244,7 @@ impl UserAgent {
                 account,
                 target: None,
                 unanswered: None,
+                waiting_for_stream: None,
                 overlap_call: (!congestion_controlled).then_some(call),
             },
         );
@@ -339,21 +347,91 @@ impl UserAgent {
             // `settle_message_challenges` reports it once the drain ends
             return;
         };
-        let Ok(retried) = self
+        match self
             .endpoint
             .retry_with_credentials(transaction, &credentials, now)
-        else {
-            // includes the rare `NeedsStreamTransport`: a MESSAGE this end
-            // sent that grew too large once a challenge answer was added is
-            // not something this layer parks and waits on the way a
-            // subscription refresh does, and the refusal above stands
-            return;
-        };
+        {
+            Ok(retried) => self.message_retry_went(message, transaction, retried),
+            // §18.1.1 wants a connection first, and the endpoint is still
+            // holding the challenge
+            Err(error) if crate::agent::wants_a_stream(&error) => {
+                if let Some(held) = self.messages.get_mut(&message) {
+                    held.waiting_for_stream = Some(transaction);
+                }
+            }
+            // the refusal held above stands
+            Err(_) => {}
+        }
+    }
+
+    /// The retry is a transaction now, and the handle names it.
+    fn message_retry_went(
+        &mut self,
+        message: MessageHandle,
+        transaction: AnyTransactionId,
+        retried: AnyTransactionId,
+    ) {
         self.by_message.remove(&transaction);
         self.by_message.insert(retried, message);
         if let Some(held) = self.messages.get_mut(&message) {
             held.unanswered = None;
+            held.waiting_for_stream = None;
         }
+    }
+
+    /// Send the MESSAGE retries §18.1.1 held back, now that there is a
+    /// connection.
+    pub(crate) fn resume_parked_messages(&mut self, now: Instant) {
+        let waiting: Vec<(MessageHandle, AnyTransactionId)> = self
+            .messages
+            .iter()
+            .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .collect();
+        for (message, failed) in waiting {
+            let credentials = self
+                .messages
+                .get(&message)
+                .and_then(|held| held.account)
+                .and_then(|account| self.accounts.get(&account))
+                .and_then(|config| config.credentials.clone());
+            let outcome = credentials.map(|credentials| {
+                self.endpoint
+                    .retry_with_credentials(failed, &credentials, now)
+            });
+            match outcome {
+                Some(Ok(retried)) => self.message_retry_went(message, failed, retried),
+                Some(Err(error)) if crate::agent::wants_a_stream(&error) => {}
+                // the next settle reports the refusal it still carries
+                _ => {
+                    if let Some(held) = self.messages.get_mut(&message) {
+                        held.waiting_for_stream = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// No stream is coming for the MESSAGEs whose answer to a challenge
+    /// outgrew the datagram: each is reported with `status`, the 513 that
+    /// stands for this end's own verdict, rather than as the 401 or 407 its
+    /// credentials never got to answer.
+    pub(crate) fn give_up_messages(&mut self, status: StatusCode) {
+        let waiting: Vec<(MessageHandle, AnyTransactionId)> = self
+            .messages
+            .iter()
+            .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
+            .collect();
+        for (message, failed) in waiting {
+            self.endpoint.abandon_challenge(failed);
+            self.finish_message(message, status, None);
+        }
+    }
+
+    /// Whether a MESSAGE's answer to a challenge waits for a stream.
+    pub(crate) fn messages_wait_for_a_stream(&self) -> bool {
+        self.messages
+            .values()
+            .any(|held| held.waiting_for_stream.is_some())
     }
 
     /// A refusal that carried a challenge and got no retry was a refusal.
@@ -363,6 +441,9 @@ impl UserAgent {
         let refused: Vec<(MessageHandle, OwnedMessage)> = self
             .messages
             .iter_mut()
+            // except one the endpoint is holding until a connection exists:
+            // its answer has not been sent yet
+            .filter(|(_, held)| held.waiting_for_stream.is_none())
             .filter_map(|(handle, held)| held.unanswered.take().map(|response| (*handle, response)))
             .collect();
         for (message, response) in refused {

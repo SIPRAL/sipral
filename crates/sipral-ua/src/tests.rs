@@ -16243,6 +16243,131 @@ fn a_register_whose_answer_outgrew_the_datagram_goes_over_the_stream() {
     assert!(text(&retry, HeaderName::Via).starts_with("SIP/2.0/TCP "));
 }
 
+/// A MESSAGE whose challenge carries a nonce long enough that the answer
+/// outgrows the datagram, and what the challenge left said.
+fn message_challenged_past_the_line(
+    now: Instant,
+) -> (UserAgent, crate::MessageHandle, Vec<UaEvent>) {
+    let mut agent = agent(now);
+    let id = agent.add_account(credentialled());
+    let handle = agent
+        .message(id, uri("sip:bob@example.com"), b"text/plain", b"hello", now)
+        .expect("the MESSAGE goes");
+    let first = only(&transmits(&mut agent), "MESSAGE ");
+    deliver(&mut agent, &long_challenge(&first, 1_400), now);
+    assert!(
+        !transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"MESSAGE ")),
+        "the retry waits"
+    );
+    let said = events(&mut agent);
+    (agent, handle, said)
+}
+
+/// The statuses a MESSAGE was reported sent with.
+fn message_outcomes(said: &[UaEvent]) -> Vec<u16> {
+    said.iter()
+        .filter_map(|event| match *event {
+            UaEvent::MessageSent { status, .. } => Some(status.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_message_whose_answer_outgrew_the_datagram_waits_for_the_stream_rather_than_failing_as_refused()
+{
+    let t0 = Instant::now();
+    let (mut agent, handle, said) = message_challenged_past_the_line(t0);
+    assert!(wanted_bytes(&said).is_some(), "{said:?}");
+    assert_eq!(
+        message_outcomes(&said),
+        Vec::<u16>::new(),
+        "a challenge whose answer has not gone yet says nothing about the password"
+    );
+    open_the_stream(&mut agent, t0);
+    let retry = on_the_stream(&written(&mut agent), "MESSAGE ");
+    credentials_of_long(&retry);
+    stream(&mut agent, &reply(&retry, 200, "OK", ""), t0);
+    let said = events(&mut agent);
+    assert!(
+        said.iter().any(|event| matches!(
+            *event,
+            UaEvent::MessageSent { message, status, .. }
+                if message == handle && status == StatusCode::OK
+        )),
+        "{said:?}"
+    );
+}
+
+#[test]
+fn a_message_whose_answer_outgrew_the_datagram_is_reported_too_large_when_no_stream_comes() {
+    let t0 = Instant::now();
+    let (mut agent, _, _) = message_challenged_past_the_line(t0);
+    agent.handle_timeout(t0 + STREAM_WAIT);
+    assert_eq!(message_outcomes(&events(&mut agent)), vec![513]);
+    open_the_stream(&mut agent, t0 + STREAM_WAIT);
+    not_written(&written(&mut agent), "MESSAGE ");
+}
+
+/// A presence PUBLISH whose challenge pushes the answer past the datagram.
+fn publish_challenged_past_the_line(now: Instant) -> UserAgent {
+    let mut agent = agent(now);
+    let id = agent.add_account(credentialled());
+    agent
+        .publish_presence(id, &presence_of(crate::presence::Activity::Busy), now)
+        .expect("the PUBLISH goes");
+    let publish = only(&transmits(&mut agent), "PUBLISH ");
+    deliver(&mut agent, &long_challenge(&publish, 1_400), now);
+    assert!(
+        !transmits(&mut agent)
+            .iter()
+            .any(|bytes| bytes.starts_with(b"PUBLISH ")),
+        "the retry waits"
+    );
+    agent
+}
+
+#[test]
+fn a_publish_whose_answer_outgrew_the_datagram_goes_over_the_stream() {
+    let t0 = Instant::now();
+    let mut agent = publish_challenged_past_the_line(t0);
+    assert!(
+        published(&mut agent).is_empty(),
+        "a challenge whose answer has not gone yet is nobody's news"
+    );
+    open_the_stream(&mut agent, t0);
+    let retry = on_the_stream(&written(&mut agent), "PUBLISH ");
+    credentials_of_long(&retry);
+    stream(
+        &mut agent,
+        &reply(&retry, 200, "OK", "SIP-ETag: e1\r\nExpires: 3600\r\n"),
+        t0,
+    );
+    assert!(matches!(
+        published(&mut agent).as_slice(),
+        [crate::PublishEvent::Published { .. }]
+    ));
+}
+
+#[test]
+fn a_publish_whose_answer_outgrew_the_datagram_fails_as_unreachable_when_no_stream_comes() {
+    let t0 = Instant::now();
+    let mut agent = publish_challenged_past_the_line(t0);
+    published(&mut agent);
+    agent.stream_unavailable(t0);
+    assert_eq!(
+        published(&mut agent),
+        vec![crate::PublishEvent::Failed {
+            reason: crate::PublishFailure::Unreachable,
+            status: StatusCode::new(513).ok(),
+        }]
+    );
+    open_the_stream(&mut agent, t0);
+    not_written(&written(&mut agent), "PUBLISH ");
+}
+
 /// A call up over UDP whose re-INVITE a proxy challenges with a nonce long
 /// enough that the answer outgrows the datagram.
 fn hold_challenged_past_the_line(now: Instant) -> (UserAgent, CallHandle) {

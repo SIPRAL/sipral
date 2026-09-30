@@ -438,6 +438,19 @@ impl Publication {
         self.after_answer();
     }
 
+    /// The answer to the 401 or 407 that refused the PUBLISH in flight
+    /// outgrew the datagram, and no stream came to carry it (RFC 3261
+    /// §18.1.1). The compositor was never reached with credentials, so this
+    /// is [`PublishFailure::Unreachable`] with `status`, the 513 that stands
+    /// for this end's own verdict, rather than a refusal.
+    pub(crate) fn too_large(&mut self, status: StatusCode) {
+        if self.in_flight.take().is_none() {
+            return;
+        }
+        self.fail(PublishFailure::Unreachable, Some(status));
+        self.after_answer();
+    }
+
     fn answer(
         &mut self,
         status: StatusCode,

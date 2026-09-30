@@ -477,6 +477,8 @@ impl UserAgent {
         self.resume_parked_requests(now);
         self.resume_parked_offers(now);
         self.resume_parked_subscriptions(now);
+        self.resume_parked_messages(now);
+        self.resume_parked_publications(now);
         // Then what this layer sends inside a dialog by itself, last because
         // hanging a call up drains on its way out
         self.resume_parked_sends(now);
