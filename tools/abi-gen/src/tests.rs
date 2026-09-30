@@ -817,7 +817,8 @@ fn the_load_check_is_read_from_the_declarations() {
     let printed = csharp::binding(&SYNTHETIC).unwrap();
     assert!(
         printed.contains(
-            "    static Sipral()\n    {\n        AbiCheck(AbiVersionMajor, AbiVersionMinor);\n    }\n"
+            "    static Sipral()\n    {\n        BeforeLoad();\n        AbiCheck(AbiVersionMajor, \
+             AbiVersionMinor);\n    }\n"
         ),
         "{printed}"
     );

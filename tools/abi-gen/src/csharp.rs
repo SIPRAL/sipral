@@ -922,7 +922,16 @@ fn class_opening(surface: &Surface) -> Result<String, Refused> {
     Ok(format!(
         "/// <summary>Everything the library does, with the C conventions read\n\
          /// off it.</summary>\n\
-         public static class Sipral\n{{\n\
+         public static partial class Sipral\n{{\n\
+         \x20   /// <summary>\n\
+         \x20   /// Whatever has to happen before the first call reaches the\n\
+         \x20   /// native library: finding it, for a layer that knows where to\n\
+         \x20   /// look. Run first by the static constructor, so a caller whose\n\
+         \x20   /// first use of the library is this class is served as one\n\
+         \x20   /// whose first use is anything else; with no body written\n\
+         \x20   /// anywhere, the compiler drops the call.\n\
+         \x20   /// </summary>\n\
+         \x20   static partial void BeforeLoad();\n\n\
          \x20   /// <summary>\n\
          \x20   /// Fails fast, before any of the rest of this class can be used,\n\
          \x20   /// if the native library loaded under this assembly cannot serve\n\
@@ -940,6 +949,7 @@ fn class_opening(surface: &Surface) -> Result<String, Refused> {
          \x20   /// </summary>\n\
          \x20   static Sipral()\n\
          \x20   {{\n\
+         \x20       BeforeLoad();\n\
          \x20       {}({}, {});\n\
          \x20   }}\n\n",
         upper_camel(

@@ -601,7 +601,7 @@ record! {
         /// calls a support case is about are the ones written most recently.
         pub diagnostic_records: u32,
         /// When a call listens for keypad digits in the far end's audio, as a
-        /// [`SipralDtmfDetection`](crate::inband::SipralDtmfDetection): zero
+        /// [`SipralDtmfDetection`]: zero
         /// on exactly the calls that negotiated no telephone event, which is
         /// when such a far end has no other way to send one.
         /// `sipral_call_dtmf_detection` changes it for one call.

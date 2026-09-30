@@ -1174,7 +1174,7 @@ record! {
         pub asserted_display: *const u8,
         /// How many bytes of it.
         pub asserted_display_len: usize,
-        /// A [`SipralVerstat`](crate::identity::SipralVerstat): what the
+        /// A [`SipralVerstat`]: what the
         /// network concluded about the caller's number.
         pub verstat: Number<SipralVerstat>,
         /// The `SIPRAL_PRIVACY_*` bits the caller's `Privacy` asked for.
@@ -1193,7 +1193,7 @@ record! {
         pub diversion_count: u32,
         /// How many `History-Info` entries it carried.
         pub history_count: u32,
-        /// A [`SipralAnswerMode`](crate::identity::SipralAnswerMode): the
+        /// A [`SipralAnswerMode`]: the
         /// INVITE's `Answer-Mode` (RFC 5373).
         pub answer_mode: Number<SipralAnswerMode>,
         /// Whether that field said `;require`: the caller would rather the
@@ -1211,7 +1211,7 @@ record! {
         pub has_answer_after: u32,
         /// After how long, when `has_answer_after` is set.
         pub answer_after_ms: u64,
-        /// A [`SipralRingSource`](crate::identity::SipralRingSource): whether
+        /// A [`SipralRingSource`]: whether
         /// the ring says the caller is internal or external.
         pub ring_source: Number<SipralRingSource>,
         /// The first `Alert-Info` URI, without the angle brackets. Null and
@@ -1219,16 +1219,16 @@ record! {
         pub alert_info: *const u8,
         /// How many bytes of it.
         pub alert_info_len: usize,
-        /// A [`SipralVerificationOutcome`](crate::security::SipralVerificationOutcome):
+        /// A [`SipralVerificationOutcome`]:
         /// this stack's own verdict on the caller (RFC 8224 §6.2), for an
         /// account that verifies; zero when nothing was verified. Unlike
         /// `verstat`, which is what a network before this end concluded,
         /// this is what this end checked itself. ABI 0.31.
         pub verification: Number<SipralVerificationOutcome>,
-        /// A [`SipralAttestation`](crate::security::SipralAttestation): the
+        /// A [`SipralAttestation`]: the
         /// level a valid SHAKEN PASSporT claimed.
         pub attestation: Number<SipralAttestation>,
-        /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
+        /// A [`SipralVerificationFailure`]:
         /// why the verdict did not hold. `sipral_call_identity_text` reads
         /// the number it was signed for, its `origid` and its certificate URL.
         pub verification_failure: Number<SipralVerificationFailure>,
@@ -1286,10 +1286,10 @@ record! {
     /// the ones that do not are zero or null.
     #[derive(Clone, Copy)]
     pub struct SipralMediaEvent {
-        /// A [`SipralCodec`](crate::media::SipralCodec): what the negotiation
+        /// A [`SipralCodec`]: what the negotiation
         /// settled on, zero where the event is not about a codec.
         pub codec: Number<SipralCodec>,
-        /// A [`SipralDirection`](crate::media::SipralDirection): which way audio
+        /// A [`SipralDirection`]: which way audio
         /// may flow, as seen from here.
         pub direction: Number<SipralDirection>,
         /// How long the stream has been silent, for a stall and for its recovery.
@@ -1297,7 +1297,7 @@ record! {
         /// How much audio reached the file, for a recording that stopped by
         /// itself.
         pub recorded_ms: u64,
-        /// A [`SipralMediaFault`](crate::media::SipralMediaFault), zero when
+        /// A [`SipralMediaFault`], zero when
         /// nothing failed.
         pub fault: Number<SipralMediaFault>,
         /// The sentence behind `fault`, as UTF-8. Not NUL-terminated, and null
@@ -1319,7 +1319,7 @@ record! {
         /// own `Duration=0` — a peer that held the key for no time at all.
         /// The Rust facade keeps the two apart; this ABI does not.
         pub held_ms: u64,
-        /// A [`SipralSrtpSuite`](crate::media::SipralSrtpSuite): the transform
+        /// A [`SipralSrtpSuite`]: the transform
         /// this call's media is protected with, for
         /// [`SipralEventKind::MediaSecured`] and zero on every other kind.
         pub suite: Number<SipralSrtpSuite>,
@@ -1330,7 +1330,7 @@ record! {
         /// [`SipralEventKind::QualityReportSent`] and zero on every other
         /// kind. Not whether a collector accepted it.
         pub quality_report_sent: u32,
-        /// A [`SipralKeyExchange`](crate::security::SipralKeyExchange): how
+        /// A [`SipralKeyExchange`]: how
         /// the call's keys were exchanged, for
         /// [`SipralEventKind::MediaStarted`], [`SipralEventKind::MediaChanged`]
         /// and [`SipralEventKind::MediaSecured`], which carry the encryption
@@ -1441,7 +1441,7 @@ record! {
         pub subscription: SipralHandle,
         /// A [`SipralSubscriptionState`].
         pub state: Number<SipralSubscriptionState>,
-        /// A [`SipralSubscriptionEnd`](crate::subscription::SipralSubscriptionEnd):
+        /// A [`SipralSubscriptionEnd`]:
         /// why it is not live. Zero while it is.
         pub reason: Number<SipralSubscriptionEnd>,
         /// The SIP status a response gave for it, when one did. Zero
@@ -1478,7 +1478,7 @@ record! {
     #[derive(Clone, Copy)]
     pub struct SipralTransportWantedEvent {
         /// What to open, as a
-        /// [`SipralTransport`](crate::stack::SipralTransport). Zero for a
+        /// [`SipralTransport`]. Zero for a
         /// protocol this build has no number for, which
         /// `sipral_stack_transport_bind` then cannot be asked to open
         /// either — nothing this build originates ever measures against a
@@ -1522,7 +1522,7 @@ record! {
         /// an SRV answer carries a port of its own.
         pub port: u32,
         /// The transport the URI or the scheme named, as a
-        /// [`SipralTransport`](crate::stack::SipralTransport), or zero for
+        /// [`SipralTransport`], or zero for
         /// neither — which leaves §4.1's NAPTR step to the caller, and is
         /// also what a protocol this build has no number for reads as.
         pub protocol: Number<SipralTransport>,
@@ -1594,19 +1594,19 @@ record! {
     /// the verification of who is calling (RFC 8224 §6.2).
     #[derive(Clone, Copy)]
     pub struct SipralVerificationEvent {
-        /// A [`SipralVerificationStage`](crate::security::SipralVerificationStage):
+        /// A [`SipralVerificationStage`]:
         /// the certificate is wanted, or the verdict is in.
         pub stage: Number<SipralVerificationStage>,
-        /// A [`SipralVerificationOutcome`](crate::security::SipralVerificationOutcome),
+        /// A [`SipralVerificationOutcome`],
         /// for a verdict.
         pub outcome: Number<SipralVerificationOutcome>,
-        /// A [`SipralVerificationFailure`](crate::security::SipralVerificationFailure):
+        /// A [`SipralVerificationFailure`]:
         /// why it did not hold.
         pub failure: Number<SipralVerificationFailure>,
-        /// A [`SipralAttestation`](crate::security::SipralAttestation): the
+        /// A [`SipralAttestation`]: the
         /// level a valid SHAKEN PASSporT claimed.
         pub attestation: Number<SipralAttestation>,
-        /// A [`SipralVerstat`](crate::identity::SipralVerstat): the `verstat`
+        /// A [`SipralVerstat`]: the `verstat`
         /// this verdict comes to (3GPP TS 24.229).
         pub verstat: Number<SipralVerstat>,
         /// The response RFC 8224 §6.2.2 prescribes for the failure, zero for

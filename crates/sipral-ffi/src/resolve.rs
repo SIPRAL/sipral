@@ -93,7 +93,7 @@ entry! {
     /// convenience — it is what makes failover possible at all, and one
     /// address is a list of one that cannot fail over.
     ///
-    /// `protocol` is a [`SipralTransport`](crate::stack::SipralTransport) when
+    /// `protocol` is a [`SipralTransport`] when
     /// the lookup named one, which a NAPTR or SRV answer does, and zero when
     /// it did not — an A lookup with nothing above it — in which case the flow
     /// keeps speaking whatever it already spoke. It is looked for, never

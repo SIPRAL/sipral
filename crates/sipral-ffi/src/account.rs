@@ -170,7 +170,7 @@ record! {
         pub quality_report_uri: *const c_char,
         /// How many bytes of it.
         pub quality_report_uri_len: usize,
-        /// A [`SipralSessionTimer`](crate::identity::SipralSessionTimer): how
+        /// A [`SipralSessionTimer`]: how
         /// this account's calls ask for a session timer (RFC 4028). Zero is
         /// the stack's default, thirty minutes.
         pub session_timer: Number<SipralSessionTimer>,

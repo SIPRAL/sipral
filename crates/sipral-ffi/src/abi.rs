@@ -277,7 +277,7 @@ pub struct Surface {
     pub functions: &'static [Function],
 }
 
-/// An enumeration [`codes`] declared, and the plain integer its numbers cross
+/// An enumeration `codes!` declared, and the plain integer its numbers cross
 /// as.
 pub trait Enumerated {
     /// The integer the `repr` fixes it to.

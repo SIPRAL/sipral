@@ -517,8 +517,18 @@ internal static class NativeMethods
 
 /// <summary>Everything the library does, with the C conventions read
 /// off it.</summary>
-public static class Sipral
+public static partial class Sipral
 {
+    /// <summary>
+    /// Whatever has to happen before the first call reaches the
+    /// native library: finding it, for a layer that knows where to
+    /// look. Run first by the static constructor, so a caller whose
+    /// first use of the library is this class is served as one
+    /// whose first use is anything else; with no body written
+    /// anywhere, the compiler drops the call.
+    /// </summary>
+    static partial void BeforeLoad();
+
     /// <summary>
     /// Fails fast, before any of the rest of this class can be used,
     /// if the native library loaded under this assembly cannot serve
@@ -536,6 +546,7 @@ public static class Sipral
     /// </summary>
     static Sipral()
     {
+        BeforeLoad();
         AbiCheck(AbiVersionMajor, AbiVersionMinor);
     }
 
