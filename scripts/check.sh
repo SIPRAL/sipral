@@ -1878,8 +1878,8 @@ else
         repo="$PKG_WORK/rn-maven/org/sipral/sipral/$version"
         mkdir -p "$repo"
         cp "$PKG_WORK/aar/sipral.aar" "$repo/sipral-$version.aar"
-        printf '<?xml version="1.0" encoding="UTF-8"?>\n<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>org.sipral</groupId><artifactId>sipral</artifactId><version>%s</version><packaging>aar</packaging><dependencies><dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-core</artifactId><version>1.11.0</version><scope>runtime</scope></dependency></dependencies></project>\n' \
-            "$version" >"$repo/sipral-$version.pom"
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>org.sipral</groupId><artifactId>sipral</artifactId><version>%s</version><packaging>aar</packaging><dependencies><dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-core</artifactId><version>%s</version><scope>runtime</scope></dependency></dependencies></project>\n' \
+            "$version" "$COROUTINES_VERSION" >"$repo/sipral-$version.pom"
         rm -rf "$RN/android/build"
         if ANDROID_HOME="$android_sdk" "$RN/android/gradlew" -p "$RN/android" --offline --no-daemon --console=plain \
             -Psipral.repo="$PKG_WORK/rn-maven" assembleRelease >"$PKG_WORK/rn-gradle" 2>&1; then

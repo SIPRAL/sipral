@@ -137,6 +137,9 @@ describe('accounts', () => {
     expect(onClient).toEqual(onAccount);
     expect(onClient[1]).toEqual({account, state: 'registered', statusCode: 200, retryInMs: 0});
     expect(native.methods()).toEqual(['open', 'addAccount', 'register']);
+
+    await account.unregister();
+    expect(native.calls.at(-1)).toEqual({method: 'unregister', args: [account.id]});
   });
 
   it('resolves registerAndWait on registered and rejects it on failed', async () => {
@@ -375,6 +378,8 @@ describe('a transfer the far end asks for', () => {
     expect((await refusal(call.rejectTransfer(200))).code).toBe('invalidArgument');
     await call.rejectTransfer();
     expect(native.calls.at(-1)).toEqual({method: 'rejectTransfer', args: [call.id, 603]});
+    await call.rejectTransfer(486);
+    expect(native.calls.at(-1)).toEqual({method: 'rejectTransfer', args: [call.id, 486]});
   });
 });
 
