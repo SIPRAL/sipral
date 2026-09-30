@@ -2771,8 +2771,10 @@ the isolate that opened the stack: the sockets are `RawDatagramSocket`s, the
 poll and each call's frame clock are timers, and the event callback is a
 `NativeCallable.isolateLocal` the library calls from inside
 `sipral_stack_poll`, on that same thread; the events reach the application
-as a `Stream`. The application carries each call's audio, as in application
-mode everywhere. Signalling is UDP only: unlike the four layers above, this
+as a `Stream`, and `SipralStack.onRawEvent` is handed each one whole, as the
+printed `SipralEvent`, while it is still the library's, for any payload arm
+the typed copy does not carry. The application carries each call's audio,
+as in application mode everywhere. Signalling is UDP only: unlike the four layers above, this
 one does not answer `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, so a request too
 large for a datagram gets the ten seconds an application that says nothing
 gets. `bindings/dart/test/loopback_test.dart` places a call between

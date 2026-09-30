@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:sipral/sipral.dart';
+import 'package:sipral/sipral_abi.dart' show SipralCodec, SipralEvent;
 import 'package:test/test.dart';
 
 /// Poll [probe] every 20 ms until it holds, or fail after [within].
@@ -104,6 +105,44 @@ void main() {
     callA.close();
     callB.close();
     expect(callA.media, isNull);
+  });
+
+  test('an event\'s whole payload is read through the raw event', () async {
+    // the codec a call's media started on is in no field SipralStackEvent
+    // copies out; the raw event carries every arm the ABI declares
+    final codecs = <int>[];
+    final confirmedStates = <int>[];
+    alice.onRawEvent = (SipralEvent event) {
+      if (event.kind == SipralEventKind.mediaStarted) {
+        codecs.add(event.payload.media.codec);
+      }
+      if (event.kind == SipralEventKind.callConfirmed) {
+        confirmedStates.add(event.payload.call.state);
+      }
+    };
+    final fromAlice = alice.addAccount(
+      'sip:alice@sipral.invalid',
+      registrarAddress: bob.bindAddress,
+    );
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
+    final call = await alice.placeCall(fromAlice, 'sip:bob@${bob.bindAddress}');
+    final answered = await bob.answerCall(
+      await ringing.timeout(const Duration(seconds: 15)),
+    );
+    await call.confirmed(timeout: const Duration(seconds: 15));
+    await until(() => codecs.isNotEmpty);
+    expect(codecs.first, isNot(SipralCodec.unknown));
+    expect(confirmedStates, contains(SipralCallState.confirmed));
+    call.hangup();
+    await call.whenEnded(timeout: const Duration(seconds: 15));
+    call.close();
+    answered.close();
   });
 
   test('a call that is refused ends without being confirmed', () async {

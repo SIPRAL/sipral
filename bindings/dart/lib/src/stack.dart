@@ -72,6 +72,16 @@ final class SipralStack {
   /// own are also on [SipralCall.events].
   Stream<SipralStackEvent> get events => _events.stream;
 
+  /// Called with each event as the library hands it over, before its copy
+  /// reaches [events]: the whole `sipral_event_t`, so every payload arm the
+  /// ABI declares is readable through `package:sipral/sipral_abi.dart`'s
+  /// [SipralEvent] (`event.payload.subscription`, `event.payload.message`,
+  /// and the rest), not only what [SipralStackEvent] copies out. It runs on
+  /// this isolate, inside the poll, and the struct and every pointer in it
+  /// are the library's only until it returns: copy out what is kept, and
+  /// call nothing on this stack from inside it.
+  void Function(SipralEvent event)? onRawEvent;
+
   /// Milliseconds since the stack was created: what every `now_ms` the
   /// library takes is measured in.
   int nowMs() => _clock.elapsedMilliseconds;
@@ -431,6 +441,11 @@ final class SipralStack {
   }
 
   void _onEvent(ffi.Pointer<SipralEvent> raw, ffi.Pointer<ffi.Void> userData) {
+    try {
+      onRawEvent?.call(raw.ref);
+    } catch (error, trace) {
+      _report(error, trace);
+    }
     try {
       final event = SipralStackEvent._read(raw.ref);
       final call = _calls[event.call];

@@ -20,7 +20,11 @@ program or a Flutter application.
 - `lib/src/{idiomatic,stack,account,call,media,events}.dart` are written by
   hand against it, and are what `package:sipral/sipral.dart` exports:
   `SipralStack`, `SipralAccount`, `SipralCall`, `SipralMedia` and the
-  stack's events as a `Stream<SipralStackEvent>`.
+  stack's events as a `Stream<SipralStackEvent>`. `SipralStackEvent` copies
+  out a call's state, a registration's and a digit; `SipralStack.onRawEvent`
+  is handed every event whole, as the printed `SipralEvent`, inside the
+  poll, so any payload arm (a subscription, a message, a recovery) is read
+  there before the library takes the struct back.
 
 ```dart
 final stack = await SipralStack.open(bindHost: '192.0.2.10');
