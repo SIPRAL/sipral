@@ -189,9 +189,6 @@ impl Backend for WasapiBackend {
         stream.start().map_err(|error| refused(&error))?;
         Ok(Box::new(Playback {
             identity: stream.device().id.as_str().to_owned(),
-            depth: config
-                .depth_frames
-                .saturating_mul(stream.format().frame_samples()),
             lost: false,
             stream,
         }))
@@ -242,7 +239,6 @@ impl CaptureStream for Capture {
 struct Playback {
     stream: WasapiPlayback,
     identity: String,
-    depth: usize,
     lost: bool,
 }
 
@@ -277,6 +273,8 @@ impl PlaybackStream for Playback {
     }
 
     fn queued(&self) -> usize {
-        self.depth.saturating_sub(self.stream.room())
+        // the ring's own count: it rounds the depth asked for up to a power
+        // of two, so the depth less the room is short by the rounding
+        self.stream.queued()
     }
 }

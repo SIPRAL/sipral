@@ -200,6 +200,24 @@ and from a peer on loopback alike (`docs/08-ffi.md`, "What ABI 0.34 added").
 What the route gives is still the local address; behind a NAT, STUN below
 is what finds the public one.
 
+The default stays the wildcard, rather than a socket bound at the route's
+address, for four reasons. The stack's socket is bound when the stack is
+made, before any account names a server, so there is no route to bind to
+yet; binding at the first account would move the socket under whatever was
+already listening on it. A second account whose server is reached another
+way — one over a VPN, one on the office network — is answered from the
+same socket only when that socket is on every interface. A network change
+that keeps the socket's address (a second interface coming up) needs
+nothing done to a wildcard socket, where a socket on one address loses
+every peer that reaches the machine on the other. And the prompt it was
+meant to spare is not spared: the macOS application firewall asks about an
+application that accepts incoming connections whatever address it listens
+on, and Windows Defender asks for any socket bound to an address other
+than loopback. An application that wants one interface names it with
+`bindHost`; after a network change the Swift, Kotlin, .NET and Python
+layers bind the UDP socket again at the new address on the same port, and
+say when that port was taken there (`keptSignallingPort`).
+
 ## STUN
 
 RFC 8489, and RFC 5389 compatibility for servers that have not moved.

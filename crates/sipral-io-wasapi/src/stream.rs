@@ -868,6 +868,15 @@ impl PlaybackStream {
         self.session.ring().map_or(0, Ring::free)
     }
 
+    /// Samples queued and not yet taken by the endpoint: the ring's own
+    /// count. Not the depth asked for less [`room`](Self::room) — the ring
+    /// rounds that depth up to a power of two, and the difference would be
+    /// read as audio that is not there.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.session.ring().map_or(0, Ring::filled)
+    }
+
     session_methods!();
 }
 
@@ -2107,6 +2116,31 @@ mod tests {
         session.started = true;
         assert_eq!(session.stop(), Ok(()));
         assert!(!session.started);
+    }
+
+    /// The ring rounds the depth it was asked for up to a power of two, so
+    /// that depth less the room is short of what is queued by the
+    /// rounding; what is queued is what the ring holds.
+    #[test]
+    fn what_is_queued_is_what_the_ring_holds_not_the_depth_less_the_room() {
+        let channel = channel();
+        let session = detached(&channel);
+        let depth = 1_000;
+        assert!(
+            session.shared.ring.set(crate::ring::Ring::new(depth)).is_ok(),
+            "a detached session has no ring yet"
+        );
+        let mut speaker = PlaybackStream { session };
+        assert_eq!(speaker.queued(), 0);
+        assert!(speaker.write(&[1_000; 160]));
+        assert!(speaker.write(&[1_000; 160]));
+        assert_eq!(speaker.queued(), 320);
+        assert_eq!(speaker.room(), 1_024 - 320);
+        assert_ne!(
+            depth - speaker.room(),
+            speaker.queued(),
+            "the depth less the room is what the rounding hides"
+        );
     }
 
     #[test]
