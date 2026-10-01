@@ -570,6 +570,34 @@ fn crypto_lines(stream: &MediaDescription) -> impl Iterator<Item = Crypto> + '_ 
         .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
 }
 
+/// Whether a stream carries an `a=crypto` line at all, whether or not any of
+/// them parses: what separates a far end that wrote no keys from one that
+/// wrote keys this end could not read.
+pub(crate) fn wrote_crypto(stream: &MediaDescription) -> bool {
+    stream
+        .attributes
+        .iter()
+        .any(|attribute| attribute.name == "crypto")
+}
+
+/// [`SrtpPolicy::BestEffort`]'s one failure: an offer on the plain profile
+/// that wrote `a=crypto` lines, none of which this end can take — a line that
+/// does not parse, a suite this end does not allow, terms it will not be held
+/// to. The offerer asked for keys and an answer without one would be a plain
+/// call nobody chose, so it is refused, where an offer that wrote no line at
+/// all is answered plainly.
+pub(crate) fn best_effort_unkeyable(
+    policy: SrtpPolicy,
+    allowed: Option<&[Suite]>,
+    offered: &MediaDescription,
+) -> bool {
+    policy.on_plain_profile()
+        && !offered.is_rejected()
+        && !is_secure(&offered.proto)
+        && wrote_crypto(offered)
+        && acceptable(offered, allowed).is_none()
+}
+
 /// The SDP name of a transform: [`transform`] the other way.
 pub(crate) const fn crypto_suite(suite: Suite) -> CryptoSuite {
     match suite {

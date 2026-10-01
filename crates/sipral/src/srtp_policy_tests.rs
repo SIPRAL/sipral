@@ -423,6 +423,106 @@ mod best_effort {
         );
     }
 
+    /// Crypto lines in the answer that give no key — one that does not
+    /// parse, a suite this end never offered, a tag it never wrote — end the
+    /// call with a 488 reason rather than leaving it plain.
+    #[test]
+    fn an_answer_whose_crypto_lines_give_no_key_ends_the_call() {
+        for line in [
+            "1 AES_CM_128_HMAC_SHA1_80 inline:not*base64",
+            "garbage",
+            &format!("1 AEAD_AES_256_GCM {PBX_KEY}"),
+            &format!("9 AES_CM_128_HMAC_SHA1_80 {PBX_KEY}"),
+        ] {
+            let mut pair = Pair::asymmetric(best_effort(), pcmu());
+            let call = answered_by_a_pbx(&mut pair, &pbx_answer(Some(line)));
+            assert!(
+                pair.caller
+                    .media_events()
+                    .iter()
+                    .any(|event| matches!(event, MediaEvent::Failed(MediaError::UnusableKeying))),
+                "{line}: {:?}",
+                pair.caller.media_events()
+            );
+            let bye = pair
+                .caller
+                .outbound()
+                .into_iter()
+                .find(|bytes| bytes.starts_with(b"BYE "))
+                .unwrap_or_else(|| panic!("{line}: the call is hung up"));
+            let mut scratch = ParseScratch::new();
+            let message = parse_message(&bye, &mut scratch, ParseMode::Lenient).expect("a BYE");
+            let reason = String::from_utf8_lossy(
+                message
+                    .header(HeaderName::Extension("Reason"))
+                    .unwrap_or_default(),
+            )
+            .into_owned();
+            assert!(
+                reason.contains("cause=488") && reason.contains("No usable SRTP key"),
+                "{line}: {reason}"
+            );
+            assert!(
+                pair.caller
+                    .engine
+                    .encryption(call)
+                    .is_none_or(|streams| streams.iter().all(|stream| !stream.encrypted)),
+                "{line}"
+            );
+        }
+    }
+
+    /// Answering, an offer on the plain profile whose crypto lines this end
+    /// cannot take is refused with 488; one with none is answered plainly.
+    #[test]
+    fn an_offer_whose_crypto_lines_give_no_key_is_refused_with_488() {
+        let offer = |line: Option<&str>| {
+            format!(
+                "v=0\r\no=pbx 7 7 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+                 m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n{}a=sendrecv\r\n",
+                line.map_or_else(String::new, |line| format!("a=crypto:{line}\r\n"))
+            )
+        };
+        for (line, refused) in [
+            (Some("1 AES_CM_128_HMAC_SHA1_80 inline:not*base64"), true),
+            (Some(&*format!("1 AEAD_AES_256_GCM {PBX_KEY}")), true),
+            (None, false),
+        ] {
+            let mut pair = Pair::asymmetric(pcmu(), best_effort());
+            let account = pair.caller.account("alice", callee_sip());
+            let _ = pair.callee.account("bob", crate::tests::caller_sip());
+            pair.caller
+                .agent
+                .call(
+                    account,
+                    &OutgoingCall::new(uri("sip:bob@example.com"))
+                        .to_address(UDP, callee_sip())
+                        .offer(std::sync::Arc::from(offer(line).as_bytes())),
+                    pair.now,
+                )
+                .expect("the INVITE goes");
+            for datagram in pair.caller.outbound() {
+                pair.callee
+                    .deliver(&datagram, crate::tests::caller_sip(), pair.now);
+            }
+            pair.callee.drain(pair.now, false);
+            let remote = pair.callee.call().expect("the INVITE arrived");
+            let _ = pair.callee.outbound();
+            let answered =
+                pair.callee
+                    .engine
+                    .answer(&mut pair.callee.agent, remote, callee_media(), pair.now);
+            let sent = statuses(&pair.callee.outbound());
+            if refused {
+                assert_eq!(answered, Err(MediaError::UnusableKeying), "{line:?}");
+                assert_eq!(sent, ["SIP/2.0 488 Not Acceptable Here"], "{line:?}");
+            } else {
+                assert_eq!(answered, Ok(()), "{line:?}");
+                assert_eq!(sent, ["SIP/2.0 200 OK"], "{line:?}");
+            }
+        }
+    }
+
     #[test]
     fn two_ends_on_best_effort_key_their_call_and_one_that_does_not_offer_keeps_it_plain() {
         let mut pair = Pair::new(best_effort());

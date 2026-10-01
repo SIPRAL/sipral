@@ -247,7 +247,9 @@ struct Managed {
     /// §14.1 leaves the session.
     pending: Option<Pending>,
     /// Whether the far end answered this end's offer in a way the call's
-    /// SRTP policy refuses ([`MediaError::SrtpRequired`]): a call placed from
+    /// SRTP policy refuses ([`MediaError::SrtpRequired`], or under
+    /// [`SrtpPolicy::BestEffort`] [`MediaError::UnusableKeying`] for crypto
+    /// lines both ends wrote and no key came of): a call placed from
     /// here that is to be hung up, with a `Reason` saying why, once its 2xx
     /// has been acknowledged.
     refused_keying: bool,
@@ -2379,6 +2381,9 @@ impl MediaEngine {
         if !keying_allows(&catalog, Some(&offer)) {
             return Err(refuse_insecure(agent, call, now));
         }
+        if best_effort_refuses(&catalog, Some(&offer)) {
+            return Err(refuse_unkeyable(agent, call, now));
+        }
         let keys = will_key(&catalog, Some(&offer))
             .then(|| draw_key_for(suite_for_own_key(Some(&offer), &catalog), &mut self.keys));
         let dtls = self.dtls_lines(&catalog, Side::Answering, Some(&offer), None, now)?;
@@ -2526,6 +2531,9 @@ impl MediaEngine {
         let offered = managed.remote.clone();
         if !keying_allows(&catalog, offered.as_ref()) {
             return Err(refuse_insecure(agent, call, now));
+        }
+        if best_effort_refuses(&catalog, offered.as_ref()) {
+            return Err(refuse_unkeyable(agent, call, now));
         }
         // an INVITE with no offer leaves this end offering, so which side it
         // is on is decided by what arrived rather than by which method was
@@ -3505,12 +3513,18 @@ impl MediaEngine {
     /// want the dialog an acknowledged 2xx made sends a BYE), the `Reason`
     /// saying 488 so the far end's logs say why (RFC 3326).
     fn hang_up_insecure(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
-        let refused = self
-            .calls
-            .get_mut(&call)
-            .is_some_and(|managed| core::mem::take(&mut managed.refused_keying));
-        if refused {
-            let reason = Reason::sip(488, "SRTP required");
+        let refused = self.calls.get_mut(&call).and_then(|managed| {
+            core::mem::take(&mut managed.refused_keying).then(|| managed.catalog.srtp())
+        });
+        if let Some(policy) = refused {
+            // best effort ends a call only over keys both ends wrote and
+            // neither could use; every other policy over keys it required
+            let text = if policy.on_plain_profile() {
+                "No usable SRTP key"
+            } else {
+                "SRTP required"
+            };
+            let reason = Reason::sip(488, text);
             // a call already ending needs no second goodbye
             let _ = agent.hangup_for(call, &[reason], now);
         }
@@ -3826,6 +3840,12 @@ impl MediaEngine {
         if !keying_allows(&catalog, Some(&offer)) {
             self.events
                 .push_back((call, MediaEvent::Failed(MediaError::SrtpRequired)));
+            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            return;
+        }
+        if best_effort_refuses(&catalog, Some(&offer)) {
+            self.events
+                .push_back((call, MediaEvent::Failed(MediaError::UnusableKeying)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
@@ -5205,6 +5225,25 @@ fn keying_allows(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -
     !catalog.srtp().requires() || offered.is_none_or(any_secure_stream)
 }
 
+/// Whether an offer is one [`SrtpPolicy::BestEffort`] refuses: its stream
+/// wrote `a=crypto` lines on the plain profile and none of them is one this
+/// call can take (`keying::best_effort_unkeyable`).
+fn best_effort_refuses(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
+    offered
+        .and_then(|offer| offer.media.first())
+        .is_some_and(|stream| {
+            keying::best_effort_unkeyable(catalog.srtp(), catalog.srtp_suites(), stream)
+        })
+}
+
+/// Refuse an INVITE whose offer wrote keys this call's best-effort policy
+/// cannot take: 488, as [`refuse_insecure`] refuses one with none, and the
+/// error that says which.
+fn refuse_unkeyable(agent: &mut UserAgent, call: CallHandle, now: Instant) -> MediaError {
+    let _ = agent.reject(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+    MediaError::UnusableKeying
+}
+
 /// Whether the description this end is about to write will carry a key: it
 /// offers one, or it answers an offer that asked for one.
 fn will_key(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
@@ -5254,12 +5293,36 @@ fn keyed_plan(
         Err(SdpError::CryptoMissing { .. }) if catalog.srtp().requires() => {
             return Err((MediaError::SrtpRequired, true));
         }
+        // best effort, answered with a line naming a tag or a key this end
+        // never offered: keys both ends wrote that agree on nothing, which
+        // ends the call as a line that does not parse does, below
+        Err(
+            SdpError::CryptoNotOffered { .. }
+            | SdpError::CryptoMissing { .. }
+            | SdpError::CryptoKeyReused { .. },
+        ) if catalog.srtp().on_plain_profile() => {
+            return Err((MediaError::UnusableKeying, true));
+        }
         Err(error) => return Err((MediaError::from(error), false)),
     };
     keying_holds(catalog, &plan, remote).map_err(|error| {
         let refused = error == MediaError::SrtpRequired;
         (error, refused)
     })?;
+    // `SrtpPolicy::BestEffort`: both ends wrote crypto lines and no key came
+    // of them — a line that does not parse, a suite or a tag this end never
+    // offered. The far end meant to encrypt and this end offered to, so a
+    // plain call here is one neither chose, and it ends instead
+    if plan.keying.is_none()
+        && catalog.srtp().on_plain_profile()
+        && local.media.first().is_some_and(keying::wrote_crypto)
+        && remote
+            .media
+            .first()
+            .is_some_and(|stream| !stream.is_rejected() && keying::wrote_crypto(stream))
+    {
+        return Err((MediaError::UnusableKeying, true));
+    }
     Ok(plan)
 }
 
@@ -5412,10 +5475,12 @@ fn take_stream(
         }
     } else if catalog.srtp().on_plain_profile() {
         // `SrtpPolicy::BestEffort`, answering its own kind of offer: a line
-        // on the plain profile this end can take keys the stream, and an
-        // offer with none is answered plainly rather than refused
+        // on the plain profile this end can take keys the stream, an offer
+        // with none is answered plainly, and an offer whose lines this end
+        // cannot take is refused rather than answered in the clear
         match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
             (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
+            _ if keying::wrote_crypto(offered) => return StreamAnswer::Reject,
             _ => None,
         }
     } else {
