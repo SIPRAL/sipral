@@ -237,6 +237,37 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     fun level(direction: SipralAudioDirection): Double =
         Sipral.audioLevel(stack, direction.value.toLong()) / Short.MAX_VALUE.toDouble()
 
+    /**
+     * One call's own gain in one direction, as a factor, on top of the
+     * direction's ([setGain]): the input direction is what the microphone
+     * sends that call alone, the output how loud that call is in the
+     * loudspeaker beside the others. Kept while the call is held or in a
+     * local conference and back, and gone when it ends; `WRONG_STATE` before
+     * the call's media starts and after it ends.
+     */
+    fun setGain(call: SipralCall, direction: SipralAudioDirection, gain: Double) {
+        Sipral.audioCallSetGain(stack, call.handle, direction.value.toLong(), Math.round(maxOf(gain, 0.0) * UNITY))
+    }
+
+    /** The gain [setGain] set for one call, as a factor. */
+    fun gain(call: SipralCall, direction: SipralAudioDirection): Double =
+        Sipral.audioCallGain(stack, call.handle, direction.value.toLong()) / UNITY
+
+    /** Mute or unmute one call in one direction while every other call goes
+     * on: the far end of that call alone hears silence, or that call alone
+     * is silent in the loudspeaker. Kept and refused as the call's gain is. */
+    fun setMuted(call: SipralCall, direction: SipralAudioDirection, muted: Boolean) {
+        Sipral.audioCallSetMuted(stack, call.handle, direction.value.toLong(), if (muted) 1L else 0L)
+    }
+
+    fun isMuted(call: SipralCall, direction: SipralAudioDirection): Boolean =
+        Sipral.audioCallMuted(stack, call.handle, direction.value.toLong()) != 0L
+
+    /** One call's meter in one direction, 0 to 1, after its own gain and
+     * mute. */
+    fun level(call: SipralCall, direction: SipralAudioDirection): Double =
+        Sipral.audioCallLevel(stack, call.handle, direction.value.toLong()) / Short.MAX_VALUE.toDouble()
+
     /** Open the devices, under `SipralAudioActivation.MANUAL`: what the
      * telecom framework's audio focus, or CallKit's `didActivate`, is for.
      * Calls whose media started before this are carried from here on. */

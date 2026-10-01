@@ -13,6 +13,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -23,6 +27,7 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.sipral.SipralCallState;
 import org.sipral.SipralEventKind;
+import org.sipral.SipralTransport;
 import org.sipral.idiomatic.SipralAccount;
 import org.sipral.idiomatic.SipralCall;
 import org.sipral.idiomatic.SipralClient;
@@ -89,6 +94,42 @@ class LoopbackCallJavaIT {
             }
             assertThrows(TimeoutException.class, () -> SipralJava.awaitNext(
                 bob.getEvents(), EnumSet.of(SipralEventKind.INCOMING_CALL), 100, () -> null));
+        }
+    }
+
+    /** An account on a TCP connection of its own, beside one on the client's
+     * UDP socket, added from Java: its REGISTER reaches a registrar that
+     * takes TCP alone, over a connection the client opened. */
+    @Test
+    void anAccountOnAConnectionOfItsOwnRegistersOverTcp() throws Exception {
+        try (ServerSocket registrar = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+             SipralClient client = SipralJava.open("127.0.0.1")) {
+            String address = "127.0.0.1:" + registrar.getLocalPort();
+            CompletableFuture<String> register = CompletableFuture.supplyAsync(() -> {
+                try (Socket connection = registrar.accept()) {
+                    connection.setSoTimeout((int) WAIT_MS);
+                    StringBuilder held = new StringBuilder();
+                    byte[] buffer = new byte[65536];
+                    while (held.indexOf("\r\n\r\n") < 0) {
+                        int read = connection.getInputStream().read(buffer);
+                        if (read < 0) {
+                            break;
+                        }
+                        held.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+                    }
+                    return held.toString();
+                } catch (Exception failed) {
+                    throw new IllegalStateException(failed);
+                }
+            });
+            SipralAccount account = SipralJava.addAccount(
+                client, "sip:alice@example.invalid", address, "sip:example.invalid", null, null, SipralTransport.TCP);
+            assertSame(SipralTransport.TCP, account.getStreamProtocol());
+            account.register();
+            String message = register.get(WAIT_MS, TimeUnit.MILLISECONDS);
+            assertTrue(message.startsWith("REGISTER "), message);
+            assertTrue(message.contains("Via: SIP/2.0/TCP "), message);
+            assertTrue(message.contains(";transport=tcp"), message);
         }
     }
 

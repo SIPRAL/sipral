@@ -224,6 +224,54 @@ private suspend fun aCallInDeviceModeIsPumpedByTheEngine(): String {
     return "a call in device mode was pumped by the engine both ways"
 }
 
+/** A call's own gain and mute: held by the engine from the moment its media
+ * starts -- the devices left closed under manual activation -- to the
+ * moment it ends, beside the client's own, and refused outside that and in
+ * application mode. */
+private suspend fun aCallsOwnGainAndMuteLastFromItsMediaToItsEnd(): String {
+    deviceClient().use { alice ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
+            val audio = assertNotNull(alice.audio)
+            val account = alice.addAccount(aor = "sip:alice@sipral.invalid", registrarAddress = bob.bindAddress)
+            bob.addAccount(aor = "sip:bob@sipral.invalid", registrarAddress = alice.bindAddress)
+            val (placed, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 10_000) {
+                alice.placeCall(account, "sip:bob@${bob.bindAddress}")
+            }
+            placed.use {
+                val early = assertFailsWith<SipralException> { audio.setGain(placed, SipralAudioDirection.OUTPUT, 0.5) }
+                assertEquals(SipralStatus.WRONG_STATE, early.status, "before its media starts")
+                bob.answerCall(incoming).use { answered ->
+                    placed.waitConfirmed(10_000)
+                    assertTrue(
+                        until(5_000) { runCatching { audio.setGain(placed, SipralAudioDirection.OUTPUT, 0.5) }.isSuccess },
+                        "the engine never took the call's media",
+                    )
+                    audio.setMuted(placed, SipralAudioDirection.INPUT, true)
+                    assertEquals(0.5, audio.gain(placed, SipralAudioDirection.OUTPUT))
+                    assertEquals(1.0, audio.gain(placed, SipralAudioDirection.INPUT))
+                    assertTrue(audio.isMuted(placed, SipralAudioDirection.INPUT))
+                    assertFalse(audio.isMuted(placed, SipralAudioDirection.OUTPUT))
+                    assertFalse(audio.isMuted(SipralAudioDirection.INPUT), "the client's own mute is another")
+                    assertEquals(0.0, audio.level(placed, SipralAudioDirection.OUTPUT), "the devices are closed")
+                    val application = assertFailsWith<SipralException> {
+                        Sipral.audioCallSetMuted(bob.handle, answered.handle, SipralAudioDirection.INPUT.value.toLong(), 1)
+                    }
+                    assertEquals(SipralStatus.WRONG_STATE, application.status, "in application mode")
+                    placed.hangup()
+                    assertTrue(
+                        until(5_000) {
+                            (runCatching { audio.gain(placed, SipralAudioDirection.OUTPUT) }.exceptionOrNull() as? SipralException)
+                                ?.status == SipralStatus.WRONG_STATE
+                        },
+                        "a call that ended still has controls",
+                    )
+                }
+            }
+        }
+    }
+    return "a call's own gain and mute last from its media to its end"
+}
+
 /** The Android context goes to the shim, which checks it is one: on a JVM
  * that is not Android there is no `android.content.Context` at all, and an
  * object is refused rather than kept. */
@@ -246,6 +294,7 @@ internal suspend fun audioChecks(): String {
     }
     said += theListKeepsItsIdsAndEachRoleIsRefusedByStatus()
     said += gainAndMuteSurviveAChangeOfDevice()
+    said += aCallsOwnGainAndMuteLastFromItsMediaToItsEnd()
     if (opensDevices) {
         said += activationRingAndTheEnginesOwnChoice()
         said += aCallInDeviceModeIsPumpedByTheEngine()

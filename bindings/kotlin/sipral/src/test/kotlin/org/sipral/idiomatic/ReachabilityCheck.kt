@@ -42,7 +42,7 @@ private fun header(name: String, message: String): String? =
 
 /** A registrar on a loopback UDP port: every REGISTER answered 200, every
  * datagram kept as text. */
-private class DatagramRegistrar : AutoCloseable {
+internal class DatagramRegistrar : AutoCloseable {
     private val udp = DatagramSocket(0, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 50 }
     @Volatile private var stopped = false
     val port = udp.localPort

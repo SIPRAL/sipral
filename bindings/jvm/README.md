@@ -71,7 +71,11 @@ try (SipralClient client = SipralJava.open("192.0.2.10")) {
 ```
 
 A client opened here runs in application mode: a server has no sound card,
-and `SipralMedia` carries each call's PCM.
+and `SipralMedia` carries each call's PCM. `SipralJava.addAccount` takes a
+`SipralTransport.TCP` or `TLS` (and a certificate pin) after the
+credentials, for an account on a connection of its own beside the client's
+UDP socket; `client.settings()` is a plain method.
+
 
 ## Tests
 
@@ -80,6 +84,7 @@ and `SipralMedia` carries each call's PCM.
   running JVM loads its own pair once.
 - `LoopbackCallKotlinIT` and `LoopbackCallJavaIT`: two stacks on loopback in
   one JVM, one calling the other, RTP both ways, three digits, a hang-up;
+  and, from Java, an account on a TCP connection of its own registering;
   run by failsafe against the packaged jar under `-Xcheck:jni`.
   `jvm.sh` without `--dry-run` runs all three again on an arm64 JVM under
   qemu.

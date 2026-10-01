@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
@@ -78,7 +79,10 @@ object SipralJava {
     /**
      * [SipralClient.addAccount]: [registrarAddress] is where requests go,
      * `host:port`; with [registrar] the account can register there, as
-     * [authUser] with [authPassword] when challenged.
+     * [authUser] with [authPassword] when challenged. [streamProtocol]
+     * (`SipralTransport.TCP` or `TLS`) puts the account on a connection of
+     * its own to that server, beside accounts on the client's UDP socket to
+     * others; a TLS one is held to [tlsPin] when given.
      */
     @JvmStatic
     @JvmOverloads
@@ -89,12 +93,16 @@ object SipralJava {
         registrar: String? = null,
         authUser: String? = null,
         authPassword: String? = null,
+        streamProtocol: SipralTransport? = null,
+        tlsPin: String? = null,
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
         registrar = registrar,
         authUser = authUser,
         authPassword = authPassword,
+        streamProtocol = streamProtocol,
+        tlsPin = tlsPin,
     )
 
     /** [SipralClient.placeCall] to [target], its media socket bound on

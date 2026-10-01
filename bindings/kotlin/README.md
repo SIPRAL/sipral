@@ -148,6 +148,20 @@ cancels the echo. `audioOf(event)` reads `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGE
 `changeKind`, and `originKind` -- `SYSTEM` or `ENGINE`, and an application
 re-applies nothing on the second.
 
+Each call has a gain, a mute and a meter of its own on top of the
+direction's: `setGain(call, direction, factor)`, `gain(call, direction)`,
+`setMuted(call, direction, muted)`, `isMuted(call, direction)` and
+`level(call, direction)`. The input direction is what the microphone sends
+that call alone and the output how loud it is in the loudspeaker beside the
+others -- mute the call being spoken about in a consultation, turn one
+conference member down. They hold from the moment the call's media starts
+to its end, through a hold or a local conference and back, and throw with
+`WRONG_STATE` outside that. `open(systemEchoCancellation = false)` opens the
+devices past the platform's echo cancellation -- on Android the microphone
+with the voice-recognition preset rather than the voice-communication one --
+for a headset, which has no echo to cancel, or an application that cancels
+it on each call itself; `status()` says what the platform did.
+
 ### Who is calling, why a call ended, and where it goes
 
 ```kotlin
@@ -500,6 +514,34 @@ and `SSLSocket`'s own `detail`. The client connects again, one second later
 and up to thirty seconds apart, registering every account again once it is
 back; `client.connected` says whether it is up, and `account.register()`
 asked meanwhile is kept for then. `docs/22-tls.md` has the whole mapping.
+
+An account can have a connection of its own on a client that signals over
+UDP, so that one client and one audio engine hold an account on UDP with
+one PBX and another on TCP or TLS with a second:
+
+```kotlin
+val client = SipralClient.open()
+val office = client.addAccount("sip:alice@office.example", "192.0.2.10:5060", registrar = "sip:office.example")
+val carrier = client.addAccount(
+    "sip:+15550100@carrier.example", "198.51.100.20:5061", registrar = "sip:carrier.example",
+    tlsPin = "sha256 Fingerprint=AB:CD:...", streamProtocol = SipralTransport.TLS,
+)
+```
+
+The stack asks for the connection with `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`,
+nothing outgrown, and the client opens it to the account's server whatever
+`streamFallback` says: a TLS one held to the account's `tlsPin` when it has
+one, to `tlsTrust` under `tlsServerName` otherwise. The account's REGISTER
+and every request of its calls go over it, its `Contact` names the
+protocol, and a connection that closes is opened again and the account
+registered again. Until it is open a call the account places throws with
+`TRANSPORT_DOWN`.
+
+`client.settings()` reads back what the stack runs with, every default
+filled in (`SipralSettings`): the timers, the codecs' count, the SRTP
+suites its calls offer in order, whether a pseudonym salt was given,
+whether the diagnostic trace is whole now, and whether the platform's echo
+cancellation is asked for.
 
 `inviteLimit` is how fast one address may ring the client: every client
 starts at `SipralInviteLimit.DEFAULT`, ten INVITEs at once and one every

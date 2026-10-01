@@ -14,6 +14,7 @@ import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
 import org.sipral.SipralSubscribeConfig
 import org.sipral.SipralToggle
+import org.sipral.SipralTransport
 
 /**
  * `sipral_account_add`, and the entry points that take its handle.
@@ -34,6 +35,13 @@ class SipralAccount internal constructor(
     private val givenContact: String?,
     /** The server named by a URI RFC 3263 locates, or null. */
     val serverUri: String? = null,
+    /** The protocol of the connection of its own the account's requests go
+     * over, [SipralTransport.TCP] or [SipralTransport.TLS], or null for the
+     * client's own transport ([SipralClient.addAccount]'s `streamProtocol`). */
+    val streamProtocol: SipralTransport? = null,
+    /** The certificate pin it was added with, which a TLS connection of its
+     * own is held to. */
+    internal val tlsPin: String? = null,
 ) {
     /** Where the account's requests go, `host:port`: the address it was
      * added with, or -- for one added with a [serverUri] -- the address it
@@ -54,7 +62,7 @@ class SipralAccount internal constructor(
     /** `sipral_account_rebind` toward [remote], reached at [advertised]
      * (`host:port`), unless its `Contact` names that already. */
     internal fun reach(advertised: String, remote: String) {
-        val next = client.defaultContact(aor, advertised)
+        val next = client.defaultContact(aor, advertised, streamProtocol)
         if (next == contact) {
             return
         }
@@ -87,6 +95,7 @@ class SipralAccount internal constructor(
         val keepaliveMs: Long,
         val tlsPin: String?,
         val advertised: String?,
+        val streamProtocol: SipralTransport? = null,
     )
     /** Where this account says it can be reached, as its `Contact` carries
      * it now: after [SipralClient.networkChanged], the new address. */
@@ -113,9 +122,9 @@ class SipralAccount internal constructor(
             security: SipralAccountSecurity,
         ): SipralAccount {
             val written = contact ?: if (location.advertised != null) {
-                client.defaultContact(aor, location.advertised)
+                client.defaultContact(aor, location.advertised, location.streamProtocol)
             } else {
-                client.defaultContact(aor)
+                client.defaultContact(aor, stream = location.streamProtocol)
             }
             val (timer, seconds) = sessionTimer.raw
             val config = SipralAccountConfig(
@@ -148,9 +157,13 @@ class SipralAccount internal constructor(
                 serverUri = location.serverUri,
                 tlsPinSha256 = location.tlsPin,
                 serverNaptr = if (location.serverNaptr) SipralToggle.ON.value.toLong() else 0,
+                streamProtocol = (location.streamProtocol?.value ?: 0).toLong(),
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
-            return SipralAccount(client, accountHandle, aor, registrarAddress ?: "", written, contact, location.serverUri)
+            return SipralAccount(
+                client, accountHandle, aor, registrarAddress ?: "", written, contact, location.serverUri,
+                location.streamProtocol, location.tlsPin,
+            )
         }
     }
 
@@ -162,7 +175,7 @@ class SipralAccount internal constructor(
      */
     internal fun rebind(local: String, previous: String?) {
         val next = if (givenContact == null) {
-            client.defaultContact(aor, local)
+            client.defaultContact(aor, local, streamProtocol)
         } else if (previous != null && previous.isNotEmpty() && contact.contains(previous)) {
             contact.replace(previous, local.substringBeforeLast(':'))
         } else {

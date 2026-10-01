@@ -94,6 +94,8 @@ private class Registrar(credential: Credential? = null, private val plainToTls: 
     private val open: MutableList<Socket> = Collections.synchronizedList(ArrayList())
     val requests: MutableList<Pair<Int, String>> = Collections.synchronizedList(ArrayList())
 
+    fun all(): List<Pair<Int, String>> = synchronized(requests) { requests.toList() }
+
     val address: String
         get() = "127.0.0.1:${listener.localPort}"
 
@@ -467,6 +469,132 @@ private fun theVoiceAgentPresetTakesARushTheDefaultAnswers480(): String {
     return "the voice-agent preset takes a rush the default answers 480"
 }
 
+/** ABI 0.35: an account on a TLS connection of its own beside one on the
+ * client's UDP socket, each registered with its own loopback registrar and
+ * each placing a call through it, with `streamFallback` off, which leaves
+ * an account's own connection alone. */
+private suspend fun anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good: Credential): String {
+    val pin = "sha256 Fingerprint=" + java.security.MessageDigest.getInstance("SHA-256").digest(good.certificate.encoded)
+        .joinToString(":") { "%02X".format(it) }
+    DatagramRegistrar().use { udp ->
+        Registrar(good).use { tls ->
+            SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", streamFallback = false).use { client ->
+                val wanted = Collections.synchronizedList(ArrayList<org.sipral.SipralTransportWantedEvent>())
+                val overUdp = client.addAccount(
+                    aor = "sip:alice@udp.sipral.test", registrarAddress = udp.address, registrar = "sip:udp.sipral.test",
+                )
+                val overTls = client.addAccount(
+                    aor = "sip:bob@$SERVER_NAME", registrarAddress = tls.address, registrar = "sip:$SERVER_NAME",
+                    tlsPin = pin, streamProtocol = SipralTransport.TLS,
+                )
+                assertEquals(SipralTransport.TLS, overTls.streamProtocol)
+                assertEquals(null, overUdp.streamProtocol)
+                assertTrue(overTls.contact.endsWith(";transport=tls"), overTls.contact)
+                client.events.awaitNext(SipralEventKind.TRANSPORT_WANTED, timeoutMs = 10_000) {
+                    overUdp.register()
+                    overTls.register()
+                }.let { (_, event) -> wanted += assertNotNull(transportWantedOf(event)) }
+                registered(client, overUdp)
+                registered(client, overTls)
+                assertEquals(SipralTransport.TLS.value.toLong(), wanted.single().protocol)
+                assertEquals(tls.address, wanted.single().destination)
+                assertEquals(0L, wanted.single().requestBytes)
+                val (connection, register) = tls.registers().single()
+                assertTrue(header("Via", register)!!.startsWith("SIP/2.0/TLS "), register)
+                assertTrue(register.contains("sip:bob@"))
+                assertTrue(udp.registers.isNotEmpty() && udp.registers.all { it.contains("sip:alice@") })
+
+                client.placeCall(overUdp, "sip:carol@udp.sipral.test").use {
+                    client.placeCall(overTls, "sip:dave@$SERVER_NAME").use {
+                        assertTrue(
+                            eventually { synchronized(udp.received) { udp.received.any { it.startsWith("INVITE sip:carol@") } } },
+                            "the UDP account's call never reached its server",
+                        )
+                        assertTrue(
+                            eventually { tls.all().any { it.second.startsWith("INVITE sip:dave@") } },
+                            "the TLS account's call never reached its server",
+                        )
+                        val invite = tls.all().first { it.second.startsWith("INVITE ") }
+                        assertEquals(connection, invite.first, "the call went over the account's own connection")
+                        assertTrue(header("Via", invite.second)!!.startsWith("SIP/2.0/TLS "))
+                        assertFalse(synchronized(udp.received) { udp.received.any { it.contains("dave@") } })
+                        assertFalse(tls.all().any { it.second.contains("carol@") })
+                    }
+                }
+            }
+        }
+    }
+    return "an account over TLS and one over UDP each reached their own server"
+}
+
+/** ABI 0.35: an account on a TCP connection of its own registers again
+ * over a new one when its server drops it; anything but TCP or TLS is
+ * refused. */
+private suspend fun anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(): String {
+    Registrar().use { registrar ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+                streamProtocol = SipralTransport.TCP,
+            )
+            account.register()
+            registered(client, account)
+            val (_, register) = registrar.registers().single()
+            assertTrue(header("Via", register)!!.startsWith("SIP/2.0/TCP "), register)
+            assertTrue(header("Contact", register)!!.contains(";transport=tcp"))
+            registrar.drop()
+            assertTrue(
+                eventually { registrar.registers().any { it.first == 2 } },
+                "the account did not register again over a new connection",
+            )
+            assertFailsWith<IllegalArgumentException> {
+                client.addAccount(
+                    aor = "sip:carol@example.com", registrarAddress = "127.0.0.1:5060", streamProtocol = SipralTransport.UDP,
+                )
+            }
+        }
+    }
+    return "an account over TCP opened again when its server dropped it"
+}
+
+/** The settings read back, every default filled in, and what was given. */
+private fun theSettingsAreReadBack(): String {
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { plain ->
+        val defaults = plain.settings()
+        assertEquals(SipralTransport.UDP, defaults.transport)
+        assertTrue(defaults.retransmits)
+        assertTrue(defaults.systemEchoCancellation)
+        assertFalse(defaults.pseudonymSalted)
+        assertFalse(defaults.diagnosticTrace)
+        assertTrue(defaults.srtpSuites.isNotEmpty(), "this build's own suites")
+        assertTrue(defaults.codecCount > 0)
+        assertEquals(null, defaults.rtpPorts)
+    }
+    SipralClient.open(
+        audio = SipralAudioMode.Application, bindHost = "127.0.0.1", rtpPortMin = 40000, rtpPortMax = 40100,
+        srtpSuites = listOf("AES_CM_128_HMAC_SHA1_32", "AES_CM_128_HMAC_SHA1_80"),
+        pseudonymSalt = ByteArray(16) { 7 }, diagnosticTrace = true, systemEchoCancellation = false,
+    ).use { given ->
+        val settings = given.settings()
+        assertEquals(listOf(org.sipral.SipralSrtpSuite.AES_CM32, org.sipral.SipralSrtpSuite.AES_CM80), settings.srtpSuites)
+        assertTrue(settings.pseudonymSalted)
+        assertTrue(settings.diagnosticTrace)
+        assertFalse(settings.systemEchoCancellation)
+        assertEquals(40000L..40100L, settings.rtpPorts)
+        given.setDiagnosticTrace(false)
+        assertFalse(given.settings().diagnosticTrace)
+    }
+    return "the settings read back with the defaults filled in"
+}
+
+private suspend fun eventually(seconds: Int = 8, what: () -> Boolean): Boolean {
+    repeat(seconds * 50) {
+        if (what()) return true
+        delay(20)
+    }
+    return what()
+}
+
 internal suspend fun tlsSignallingChecks(): String {
     val directory = Files.createTempDirectory("sipral-tls").toFile()
     try {
@@ -481,6 +609,9 @@ internal suspend fun tlsSignallingChecks(): String {
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),
+            anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good),
+            anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(),
+            theSettingsAreReadBack(),
         ).joinToString(", ")
     } finally {
         directory.deleteRecursively()
