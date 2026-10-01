@@ -69,6 +69,13 @@ impl Ring {
         }
     }
 
+    /// How many samples it holds when full: what it was asked for, rounded
+    /// up to a power of two.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Room for more, as the producer sees it.
     ///
     /// Acquire on the consumer's index: the cells it has finished with are
@@ -185,6 +192,8 @@ mod tests {
         assert_eq!(Ring::new(160).free(), 256);
         assert_eq!(Ring::new(1024).free(), 1024);
         assert_eq!(Ring::new(usize::MAX).free(), MAX_CAPACITY);
+        assert_eq!(Ring::new(160).capacity(), 256);
+        assert_eq!(Ring::new(usize::MAX).capacity(), MAX_CAPACITY);
     }
 
     #[test]

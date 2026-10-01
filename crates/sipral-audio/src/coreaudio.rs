@@ -371,12 +371,18 @@ impl PlaybackStream for Half {
     }
 
     fn queued(&self) -> usize {
-        self.unit.stream().as_mut().map_or(0, |stream| {
-            let (_, playback) = stream.split();
-            // the ring's depth is a frame count; what is queued is what is
-            // not free
-            let depth = self.unit.format.frame_samples.saturating_mul(16);
-            depth.saturating_sub(playback.room())
-        })
+        // the ring's own count: it is sized for the slowest device's slice,
+        // not for a number of frames this side could work it out from
+        self.unit
+            .stream()
+            .as_mut()
+            .map_or(0, |stream| stream.split().1.queued())
+    }
+
+    fn burst(&self) -> usize {
+        self.unit
+            .stream()
+            .as_mut()
+            .map_or(0, |stream| stream.split().1.burst())
     }
 }

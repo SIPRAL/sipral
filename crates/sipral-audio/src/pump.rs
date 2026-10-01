@@ -37,6 +37,28 @@ pub(crate) const FRAME: Duration = Duration::from_millis(20);
 /// buffering nobody asked for.
 const TARGET_QUEUED_FRAMES: usize = 2;
 
+/// Whether a loudspeaker takes another frame this tick, `written` being how
+/// many it has already been given in it.
+///
+/// The first frame of a tick goes in while less than the target plus what
+/// the device takes at once is queued; a second only while less than the
+/// target itself. A device fed a frame at a time takes nothing at once, so
+/// for it the two are the one rule. A device that takes a long slice in one
+/// callback empties a slice's worth at a stroke: refilling to the top there
+/// and then would pull the calls in bursts of that slice, faster than the
+/// far end sends, so the queue is rebuilt a frame a tick instead — the pace
+/// the device drains it at — and the second frame only catches up a tick
+/// the pump missed.
+fn takes_frame(stream: &dyn PlaybackStream, frame_samples: usize, written: usize) -> bool {
+    let target = TARGET_QUEUED_FRAMES.saturating_mul(frame_samples);
+    let limit = if written == 0 {
+        target.saturating_add(stream.burst())
+    } else {
+        target
+    };
+    stream.queued() < limit
+}
+
 /// A ring tone: the application's own samples, at their own rate, looped or
 /// played once.
 #[derive(Clone, Debug)]
@@ -582,9 +604,7 @@ impl Pump {
         let mut frames = 0_usize;
         loop {
             let room = match self.speaker.as_ref() {
-                Some(stream) => {
-                    stream.queued() < TARGET_QUEUED_FRAMES.saturating_mul(format.frame_samples)
-                }
+                Some(stream) => takes_frame(stream.as_ref(), format.frame_samples, frames),
                 None => frames == 0,
             };
             if !room || frames >= TARGET_QUEUED_FRAMES {
@@ -652,7 +672,7 @@ impl Pump {
         };
         let mut frames = 0_usize;
         while frames < TARGET_QUEUED_FRAMES
-            && stream.queued() < TARGET_QUEUED_FRAMES.saturating_mul(format.frame_samples)
+            && takes_frame(stream.as_ref(), format.frame_samples, frames)
         {
             frames += 1;
             self.ring_frame.clear();

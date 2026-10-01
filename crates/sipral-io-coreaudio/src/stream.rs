@@ -23,7 +23,7 @@
 //! other.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::cell::UnsafeCell;
 use std::panic::{self, AssertUnwindSafe};
@@ -277,6 +277,9 @@ struct Shared {
     gate: Gate,
     capture: Ring,
     playback: Ring,
+    /// The most samples one output callback has asked for: the device's
+    /// slice at the stream's rate, which whoever writes has to keep queued.
+    burst: AtomicUsize,
     /// Where the input callback renders to before the samples reach the ring.
     /// The framework runs one input callback at a time for a unit, so the
     /// exclusivity given up here is handed straight back by the framework.
@@ -307,13 +310,17 @@ impl Shared {
         microphone: Arc<Channel>,
         speaker: Arc<Channel>,
     ) -> Self {
-        let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap_or(0);
-        // never smaller than one slice: a ring that cannot hold what the
-        // device hands over in one callback would drop samples every time
-        let samples = format
-            .frame_samples()
+        // Never smaller than one slice of the slowest device at this
+        // stream's rate, with two frames beside it: the unit converts the
+        // device's slice before either callback sees it, so a narrowband
+        // headset hands a 48 kHz stream half a second at a stroke, and a
+        // ring that cannot hold that, on top of what the reader has not come
+        // for yet, drops samples on every callback — and starves the speaker
+        // on every one of its own.
+        let frame = format.frame_samples();
+        let samples = frame
             .saturating_mul(depth_frames.max(2))
-            .max(slice);
+            .max(capture_capacity(format).saturating_add(frame.saturating_mul(2)));
         // the meters count in samples, so a stream reopened at another rate
         // has to be told what a tenth of a second is now worth
         let window = window_samples(format.sample_rate_hz());
@@ -324,6 +331,7 @@ impl Shared {
             gate: Gate::new(),
             capture: Ring::new(samples),
             playback: Ring::new(samples),
+            burst: AtomicUsize::new(0),
             scratch: UnsafeCell::new(vec![0; capture_capacity(format)].into_boxed_slice()),
             meters: Meters::default(),
             microphone,
@@ -362,6 +370,8 @@ impl Shared {
             // SAFETY: the caller's list.
             return unsafe { silence(buffers) };
         }
+        // Relaxed: a number for the writer to pace by, ordering nothing
+        self.burst.fetch_max(wanted, Ordering::Relaxed);
         // SAFETY: `wanted` samples fit in the octets the buffer declares, and
         // the unit hands over memory aligned for the format it was given.
         let out = unsafe { core::slice::from_raw_parts_mut(buffer.data.cast::<i16>(), wanted) };
@@ -1203,6 +1213,24 @@ impl Playback<'_> {
     pub fn room(&self) -> usize {
         self.shared.playback.free()
     }
+
+    /// Samples queued and not yet taken by the device.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.shared
+            .playback
+            .capacity()
+            .saturating_sub(self.shared.playback.free())
+    }
+
+    /// The most samples the device has taken in one callback so far, at the
+    /// stream's rate. Under the voice unit a narrowband headset takes half a
+    /// second at a stroke; a writer that keeps less than this queued is heard
+    /// as a gap on every one of those callbacks.
+    #[must_use]
+    pub fn burst(&self) -> usize {
+        self.shared.burst.load(Ordering::Relaxed)
+    }
 }
 
 /// Everything between opening the instance and initialising it.
@@ -1591,6 +1619,81 @@ mod tests {
         assert!(held >= seen, "{held} samples cannot take {seen}");
         assert!(held >= worst, "{held} samples cannot take {worst}");
         assert_eq!(super::capture_capacity(StreamFormat::narrowband()), slice);
+    }
+
+    #[test]
+    fn a_slice_of_the_slowest_device_fits_in_either_ring_beside_two_frames() {
+        let (microphone, speaker) = channels();
+        let wideband = StreamFormat::with_frame_millis(48_000, 20).unwrap();
+        let shared = Shared::new(
+            ptr::null_mut(),
+            wideband,
+            DEFAULT_DEPTH_FRAMES,
+            microphone,
+            speaker,
+        );
+        let frame = wideband.frame_samples();
+        // a narrowband headset's slice, as the unit hands it to a 48 kHz
+        // stream: half a second in one callback
+        let slice = super::capture_capacity(wideband);
+
+        // two frames the reader has not come for yet, then the slice
+        shared.captured(&mut vec![1; frame * 2]);
+        shared.captured(&mut vec![1; slice]);
+        let counters = shared.meters.read();
+        assert_eq!(counters.capture_dropped, 0, "the microphone lost samples");
+        assert_eq!(counters.captured, u64::try_from(slice + frame * 2).unwrap());
+
+        let queued = vec![1; slice + frame * 2];
+        assert_eq!(
+            shared.playback.write(&queued),
+            queued.len(),
+            "the speaker cannot be kept a slice ahead"
+        );
+    }
+
+    #[test]
+    fn the_most_a_render_has_asked_for_is_kept() {
+        let mut stream = detached();
+        assert_eq!(stream.split().1.burst(), 0, "nothing was asked yet");
+        let mut samples = [0i16; 4];
+        rendered(&stream.shared, &mut samples);
+        assert_eq!(stream.split().1.burst(), 4);
+        // a shorter render after it does not make the device's slice shorter
+        let mut list = abi::BufferList {
+            count: 1,
+            buffers: [abi::Buffer {
+                channels: 1,
+                byte_size: 8,
+                data: samples.as_mut_ptr().cast::<c_void>(),
+            }],
+        };
+        let mut flags = 0u32;
+        let status = unsafe {
+            play(
+                context(&stream.shared),
+                &raw mut flags,
+                ptr::null(),
+                abi::BUS_OUTPUT,
+                2,
+                &raw mut list,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(stream.split().1.burst(), 4);
+    }
+
+    #[test]
+    fn what_is_queued_is_what_was_written_whatever_the_ring_holds() {
+        let mut stream = detached();
+        let frame = vec![1i16; stream.format().frame_samples()];
+        for _ in 0..3 {
+            assert!(stream.write(&frame));
+        }
+        assert_eq!(stream.split().1.queued(), frame.len() * 3);
+        let mut samples = [0i16; 4];
+        rendered(&stream.shared, &mut samples);
+        assert_eq!(stream.split().1.queued(), frame.len() * 3 - 4);
     }
 
     #[test]

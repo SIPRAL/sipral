@@ -1060,3 +1060,129 @@ fn a_duplex_reopen_waits_for_the_old_unit_even_behind_a_slow_pump() {
         "the new unit opened beside the old"
     );
 }
+
+// -- a device that takes a long slice at once -----------------------------
+
+/// What a loudspeaker of [`SliceSpeaker`] holds and has been short of.
+#[derive(Default)]
+struct SliceState {
+    queued: usize,
+    largest: usize,
+}
+
+/// A loudspeaker the way the voice unit drives a narrowband headset: the
+/// device takes a whole long slice in one callback, half a second of it at a
+/// time, and says the most it has taken at once.
+struct SliceSpeaker {
+    state: Arc<Mutex<SliceState>>,
+    channel: Arc<sipral_io_common::level::Channel>,
+}
+
+impl crate::backend::StreamCommon for SliceSpeaker {
+    fn format(&self) -> crate::backend::Format {
+        crate::backend::Format::twenty_ms(RATE)
+    }
+
+    fn identity(&self) -> &'static str {
+        "headset"
+    }
+
+    fn lost(&mut self) -> bool {
+        false
+    }
+
+    fn controls(&self) -> sipral_io_common::level::Controls {
+        sipral_io_common::level::Controls::new(&self.channel)
+    }
+
+    fn latency(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+impl crate::backend::PlaybackStream for SliceSpeaker {
+    fn write(&mut self, frame: &[i16]) -> bool {
+        self.state.lock().unwrap().queued += frame.len();
+        true
+    }
+
+    fn queued(&self) -> usize {
+        self.state.lock().unwrap().queued
+    }
+
+    fn burst(&self) -> usize {
+        self.state.lock().unwrap().largest
+    }
+}
+
+/// A device that takes a slice longer than the pump's own target is kept a
+/// slice ahead, so every callback after the first few finds a whole slice;
+/// and the call is pulled a frame a tick, as the far end sends, rather than
+/// in bursts of what the slice took.
+#[test]
+fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
+    use crate::pump::{Command, Pump, Report, Stream};
+
+    const TICKS_PER_SLICE: usize = 25;
+    const SLICES: usize = 12;
+    const WARM_UP: usize = 3;
+    let frame = crate::backend::Format::twenty_ms(RATE).frame_samples;
+    let slice = TICKS_PER_SLICE * frame;
+
+    let (commands, receiver) = std::sync::mpsc::channel();
+    let mut pump = Pump::new(
+        receiver,
+        Arc::new(Report::default()),
+        Box::new(|_, _| {}),
+        Arc::new(Instant::now),
+        RATE,
+    );
+    let state = Arc::new(Mutex::new(SliceState::default()));
+    let speaker = SliceSpeaker {
+        state: Arc::clone(&state),
+        channel: Arc::new(sipral_io_common::level::Channel::new(1)),
+    };
+    commands
+        .send(Command::Replace(
+            Role::Speaker,
+            Some(Stream::Playback(Box::new(speaker))),
+        ))
+        .unwrap();
+    let call = FakeCallControl::new(RATE, 7, destination());
+    commands.send(Command::Attach(1, call.call())).unwrap();
+
+    let steady_from = TICKS_PER_SLICE * WARM_UP;
+    let mut starved = 0;
+    let mut idle_ticks = 0;
+    let mut pulled_from = 0;
+    for tick in 0..TICKS_PER_SLICE * SLICES {
+        if tick % TICKS_PER_SLICE == 0 {
+            let mut device = state.lock().unwrap();
+            let taken = device.queued.min(slice);
+            device.queued -= taken;
+            device.largest = device.largest.max(slice);
+            if tick >= steady_from {
+                starved += slice - taken;
+            }
+        }
+        if tick == steady_from {
+            pulled_from = call.pulls();
+        }
+        let before = call.pulls();
+        pump.tick();
+        if tick >= steady_from && call.pulls() == before {
+            idle_ticks += 1;
+        }
+    }
+    let steady_ticks = TICKS_PER_SLICE * (SLICES - WARM_UP);
+    assert_eq!(starved, 0, "a callback found less than its slice queued");
+    let pulled = call.pulls() - pulled_from;
+    assert!(
+        pulled.abs_diff(steady_ticks) <= 2,
+        "{pulled} frames pulled in {steady_ticks} ticks"
+    );
+    assert!(
+        idle_ticks <= 2,
+        "the call was pulled in bursts: {idle_ticks} of {steady_ticks} ticks pulled nothing"
+    );
+}

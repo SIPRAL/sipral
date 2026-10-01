@@ -221,4 +221,12 @@ pub trait PlaybackStream: StreamCommon {
     fn write(&mut self, frame: &[i16]) -> bool;
     /// Samples queued and not yet played.
     fn queued(&self) -> usize;
+    /// The most samples the device has taken in one go so far, or nothing
+    /// for a device fed a frame at a time. The pump keeps this much queued
+    /// on top of its own couple of frames, so that a device which takes a
+    /// long slice at once — a narrowband headset under the voice unit asks
+    /// for half a second — finds all of it.
+    fn burst(&self) -> usize {
+        0
+    }
 }
