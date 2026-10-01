@@ -3792,3 +3792,66 @@ fn a_request_that_timed_out_is_kept_for_the_next_server() {
         .expect("the INVITE");
     assert!(kept.invite);
 }
+
+/// RFC 3261 §26.2.2: a request that names a `sips:` URI where that asks for
+/// TLS — the Request-URI, the first `Route`, the `Contact`, a REGISTER's
+/// address of record — is refused on a transport that is not TLS, before
+/// anything is drawn or written; the same request on a TLS connection goes,
+/// and a `sip:` one goes on UDP as it always did.
+#[test]
+fn a_sips_request_never_leaves_on_a_transport_that_is_not_tls() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let tls = TransportId(3);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: tls,
+                protocol: TransportProtocol::Tls,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding a TLS connection");
+    let _ = transmits(&mut endpoint);
+
+    let secure_target = || {
+        OutgoingRequest::new(Method::Invite, uri("sips:bob@example.com"), UDP, peer())
+            .to(b"<sips:bob@example.com>")
+            .from(b"Alice <sips:alice@example.com>")
+    };
+    let refusals = [
+        endpoint.invite(&secure_target(), t0).err(),
+        endpoint
+            .request(&options_request().route(b"<sips:proxy.example.com;lr>"), t0)
+            .err(),
+        endpoint
+            .request(&options_request().contact(b"<sips:alice@192.0.2.1>"), t0)
+            .err(),
+        endpoint
+            .request(
+                &OutgoingRequest::new(Method::Register, uri("sip:example.com"), UDP, peer())
+                    .to(b"<sips:alice@example.com>")
+                    .from(b"<sips:alice@example.com>")
+                    .contact(b"<sip:alice@192.0.2.1>"),
+                t0,
+            )
+            .err(),
+    ];
+    for refusal in refusals {
+        assert_eq!(refusal, Some(super::SendError::SipsNeedsTls));
+    }
+    assert!(transmits(&mut endpoint).is_empty(), "something went in clear");
+
+    let mut over_tls = secure_target();
+    over_tls.transport = tls;
+    endpoint.invite(&over_tls, t0).expect("the INVITE goes over TLS");
+    endpoint
+        .request(&options_request(), t0)
+        .expect("a sip: request goes over UDP");
+    let out = transmits(&mut endpoint);
+    assert_eq!(out.len(), 2);
+    assert!(out[0].payload.starts_with(b"INVITE sips:bob@example.com SIP/2.0\r\n"));
+    assert_eq!(out[0].protocol, TransportProtocol::Tls);
+}

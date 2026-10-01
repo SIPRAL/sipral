@@ -1415,6 +1415,14 @@ impl Endpoint {
             .transports
             .get(request.transport)
             .ok_or(SendError::UnknownTransport)?;
+        // §26.2.2: a SIPS request goes over TLS on every hop, from here on.
+        // Asked before anything is drawn or assembled, so a refusal leaves
+        // no trace; and only once, because the one flow it could be moved
+        // to afterwards — a stream for a request too big for a datagram —
+        // is moved to from a datagram flow, which this already refused
+        if !bound.protocol.is_secure() && asks_for_tls(request) {
+            return Err(SendError::SipsNeedsTls);
+        }
         let mut flow = Flow {
             transport: request.transport,
             destination: request.remote,
@@ -1901,6 +1909,22 @@ struct Minted<'a> {
     /// `Authorization` and `Proxy-Authorization`, when a challenge from this
     /// destination is remembered and the caller handed over a password.
     credentials: &'a [(HeaderName<'static>, String)],
+}
+
+/// Whether a request outside a dialog names a `sips:` URI where RFC 3261
+/// §26.2.2 makes that a demand for TLS: the Request-URI, the first `Route`
+/// (the hop it is sent to), the `Contact` (§8.1.1.8: a SIPS Contact says this
+/// end is reached securely), and a REGISTER's `To`, the address of record a
+/// binding is made for (§10.2: a SIPS AOR is reached over TLS only).
+fn asks_for_tls(request: &OutgoingRequest) -> bool {
+    let sips = |value: &[u8]| {
+        crate::msg::NameAddrRef::parse(value).is_ok_and(|addr| addr.uri().scheme().is_secure())
+    };
+    request.request_uri.is_secure()
+        || request.route.first().is_some_and(|hop| sips(hop))
+        || request.contact.as_deref().is_some_and(sips)
+        || (request.method.as_ref() == Method::Register.as_str().as_bytes()
+            && request.to.as_deref().is_some_and(sips))
 }
 
 /// Whether a `From` or `To` value already carries a tag.

@@ -2450,10 +2450,10 @@ Content-Length: {}\r\n\r\n{body}",
         let t0 = Instant::now();
         let (mut agent, account) = agent(t0);
         agent
-            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .subscribe_conference(account, uri("sip:conf233@example.com"), t0)
             .expect("the SUBSCRIBE goes");
         let subscribe = only_subscribe(&sent(&mut agent));
-        assert!(subscribe.starts_with(b"SUBSCRIBE sips:conf233@example.com SIP/2.0\r\n"));
+        assert!(subscribe.starts_with(b"SUBSCRIBE sip:conf233@example.com SIP/2.0\r\n"));
         assert_eq!(header(&subscribe, HeaderName::Event), "conference");
         assert_eq!(
             header(&subscribe, HeaderName::Accept),
@@ -2462,12 +2462,43 @@ Content-Length: {}\r\n\r\n{body}",
         assert_eq!(header(&subscribe, HeaderName::Expires), "3600");
     }
 
+    /// RFC 3261 §26.2.2: a focus named by a `sips:` URI is reached over TLS
+    /// or not at all. On this agent's UDP transport no SUBSCRIBE goes out,
+    /// and the subscription ends as one that could not be sent.
+    #[test]
+    fn a_sips_focus_on_a_transport_that_is_not_tls_is_never_sent_to() {
+        let t0 = Instant::now();
+        let (mut agent, account) = agent(t0);
+        let handle = agent
+            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .expect("the subscription is taken");
+        assert!(
+            !sent(&mut agent)
+                .iter()
+                .any(|bytes| bytes.starts_with(b"SUBSCRIBE ")),
+            "a SUBSCRIBE went out in clear"
+        );
+        let mut ended = None;
+        while let Some(event) = agent.poll_event() {
+            if let UaEvent::SubscriptionEnded {
+                subscription,
+                reason,
+                ..
+            } = event
+                && subscription == handle
+            {
+                ended = Some(reason);
+            }
+        }
+        assert_eq!(ended, Some(crate::SubscriptionEnd::Unreachable));
+    }
+
     #[test]
     fn notifications_build_the_conference_and_a_gap_refreshes_the_subscription() {
         let t0 = Instant::now();
         let (mut agent, account) = agent(t0);
         let handle = agent
-            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .subscribe_conference(account, uri("sip:conf233@example.com"), t0)
             .expect("the SUBSCRIBE goes");
         let subscribe = only_subscribe(&sent(&mut agent));
         deliver(&mut agent, &accepted(&subscribe), t0);
@@ -2524,7 +2555,7 @@ Content-Length: {}\r\n\r\n{body}",
         let t0 = Instant::now();
         let (mut agent, account) = agent(t0);
         agent
-            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .subscribe_conference(account, uri("sip:conf233@example.com"), t0)
             .expect("the SUBSCRIBE goes");
         let subscribe = only_subscribe(&sent(&mut agent));
         deliver(&mut agent, &accepted(&subscribe), t0);
@@ -2566,7 +2597,7 @@ Content-Length: {}\r\n\r\n{body}",
         let t0 = Instant::now();
         let (mut agent, account) = agent(t0);
         let handle = agent
-            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .subscribe_conference(account, uri("sip:conf233@example.com"), t0)
             .expect("the SUBSCRIBE goes");
         let subscribe = only_subscribe(&sent(&mut agent));
         deliver(&mut agent, &accepted(&subscribe), t0);
@@ -2611,7 +2642,7 @@ Content-Length: {}\r\n\r\n{body}",
         let t0 = Instant::now();
         let (mut agent, account) = agent(t0);
         let handle = agent
-            .subscribe_conference(account, uri("sips:conf233@example.com"), t0)
+            .subscribe_conference(account, uri("sip:conf233@example.com"), t0)
             .expect("the SUBSCRIBE goes");
         let subscribe = only_subscribe(&sent(&mut agent));
         deliver(&mut agent, &accepted(&subscribe), t0);
