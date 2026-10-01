@@ -150,6 +150,8 @@
 mod capabilities;
 mod clock;
 mod codec;
+#[cfg(test)]
+mod compact_tests;
 mod counters;
 #[cfg(feature = "redaction")]
 mod diagnostics;
@@ -308,12 +310,13 @@ pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
 pub use sipral_ua::{
-    Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
-    EndpointConfig, ForkPolicy, Hold, Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle,
-    MessageSummary, Network, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery,
-    Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
-    StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
-    TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+    Account, AccountId, CallEndReason, CallHandle, CallState, ChallengeRefusal, Compaction,
+    Credentials, DatagramLimit, DtmfError, DtmfInfoForm, EndpointConfig, ForkPolicy, Hold,
+    Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle, MessageSummary, Network,
+    OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery, Refusals,
+    RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening, StatusCode,
+    Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
+    TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 pub use sipral_ua::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
@@ -337,9 +340,11 @@ pub use sipral_ua::{
 /// verifier with [`CertificatePin::check`].
 pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// STIR/SHAKEN in calls: what an account signs with, and what the agent
-/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`].
+/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`] —
+/// and the dialling plan numbers are read under,
+/// [`UserAgent::set_number_plan`].
 #[cfg(feature = "stir")]
-pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
+pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

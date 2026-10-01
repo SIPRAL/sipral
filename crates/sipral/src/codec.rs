@@ -542,6 +542,7 @@ pub struct CodecCatalog {
     ice: IcePolicy,
     annex_b: bool,
     feedback: bool,
+    voip_metrics: bool,
 }
 
 impl CodecCatalog {
@@ -571,6 +572,7 @@ impl CodecCatalog {
             ice: IcePolicy::Off,
             annex_b: true,
             feedback: false,
+            voip_metrics: true,
         }
     }
 
@@ -811,6 +813,27 @@ impl CodecCatalog {
         self.feedback
     }
 
+    /// Whether an offer asks for, and an answer offers, the VoIP metrics
+    /// report of RFC 3611 §4.7 (`a=rtcp-xr:voip-metrics`, §5.1).
+    ///
+    /// On by default: it is what lets a call this end placed hear what the
+    /// far end measured of its audio, for the quality report. Off, the
+    /// line is not written — twenty-four bytes off an INVITE that has to fit
+    /// a datagram — and a call reports only what this end measured itself;
+    /// an offer that asks for the report is still sent it, since RFC 3611
+    /// §5.2 makes that the offerer's request and not this end's.
+    #[must_use]
+    pub const fn with_voip_metrics(mut self, voip_metrics: bool) -> Self {
+        self.voip_metrics = voip_metrics;
+        self
+    }
+
+    /// Whether this catalogue asks for the VoIP metrics report.
+    #[must_use]
+    pub const fn voip_metrics(&self) -> bool {
+        self.voip_metrics
+    }
+
     /// The `a=fmtp` parameters this catalogue offers `codec` with:
     /// [`Codec::fmtp`], but for G.729, whose `annexb` is this catalogue's
     /// to say.
@@ -882,6 +905,7 @@ impl CodecCatalog {
             .collect();
         MediaCapabilities::new(codecs)
             .with_dtmf(self.dtmf)
+            .with_voip_metrics_xr(self.voip_metrics)
             // an ICE stream has one component, and that is what asking for
             // multiplexing makes true
             .with_rtcp_mux(self.rtcp_mux || self.ice.offers())

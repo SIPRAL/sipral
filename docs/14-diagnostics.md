@@ -74,6 +74,7 @@ parser took and whose fields could not be read.
 | `transport.promoted.size` | §18.1.1: the request would not fit a datagram, so it went over a stream instead. Carries **size and limit**. |
 | `transport.refused.size` | The same rule with nowhere to go. The request was **not emitted**; the caller was asked to open a connection. Carries size and limit. |
 | `transport.kept.datagram` | The same rule set aside, by configuration: the caller said no connection could be had, and `DatagramLimit::without_stream_bytes` let the request go over UDP anyway. Carries size and **that** limit. |
+| `transport.compacted.size` | The same rule met by writing the request smaller: too large for a datagram in full, so it went in RFC 3261 §7.3.3's compact form (`DatagramLimit::compaction`), without its `Allow` when that was not enough. Carries the size it went at and the limit; a promotion or refusal that still followed is its own entry. |
 | `transport.lost` | A transport closed or failed, and what was running on it was failed with it. |
 | `transport.flow.dead` | RFC 5626 §4.4.1: ten seconds with no pong on a flow that has answered one before, so the flow was taken down. |
 | `request.sent` | A request went on the wire, at the size the caller writes. |
@@ -90,6 +91,7 @@ parser took and whose fields could not be read.
 | `dialog.fork.dropped` | A 2xx to a forked INVITE found no room under `max_dialogs`, so it was silently neither reported nor acknowledged — the far end gives the call up with a `BYE` of its own. |
 | `auth.challenge.received` | A refusal arrived carrying a challenge this stack can answer. |
 | `auth.challenge.answered` | The request went again with credentials — the send that is certain to have grown, and the one that fragmented in the field. |
+| `auth.challenge.declined` | A challenge the account's password is not for — from an address that is not the account's server, or for a realm that is not the account's (RFC 3261 §22.1) — was not answered, and its realms are not answered ahead of a challenge either. Carries the address it came from. |
 | `dialog.created` | A dialog was created (§12.1). |
 | `dialog.destroyed` | A dialog is over and its handle is stale. |
 | `failure.refused` | A final response of 300 or above ended a request or a call. |

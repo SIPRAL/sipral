@@ -265,6 +265,23 @@ impl AuthCache {
         }
     }
 
+    /// The same for one protection domain named outright: stop answering it,
+    /// and stop offering the credentials ahead of it.
+    ///
+    /// For a challenge the caller decided not to answer at all — one from
+    /// somebody the password is not for. Learning it already put it here,
+    /// and left there [`Self::authorize`] would hand that party an answer
+    /// on the next request to the same destination without being asked. A
+    /// later challenge with a nonce not answered opens the entry again, and
+    /// the caller decides about that one too.
+    pub fn refuse_realm(&mut self, proxy: bool, realm: &str) {
+        for entry in &mut self.entries {
+            if entry.challenge.proxy == proxy && *entry.challenge.realm == *realm {
+                entry.refused = true;
+            }
+        }
+    }
+
     /// `answered` is whether the refused request carried an answer to this
     /// very challenge — its realm and its nonce.
     fn take(

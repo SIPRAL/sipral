@@ -23,6 +23,8 @@
 //! peer that challenges everything and a caller that never retries must not
 //! be able to grow it.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::driver::Endpoint;
@@ -77,6 +79,30 @@ pub(super) struct Challenged {
     /// outlive it too: a server that draws a fresh nonce every time is
     /// exactly a server that keeps making new transactions.
     pub(super) spent: u8,
+    /// The protection domains the refusal asked to be answered for, each
+    /// with whether a proxy (407) asked: what the caller weighs before it
+    /// lets a password near the challenge ([`Endpoint::challenge_origin`]).
+    pub(super) realms: Vec<(bool, Arc<str>)>,
+}
+
+/// Who asked for credentials, as far as this end can tell: where the
+/// challenged request went — the address the refusal came back from — and
+/// the realms it named.
+///
+/// What a user agent needs to decide whether a password is for this
+/// challenge at all. RFC 3261 §22.1: "each such protection domain has its
+/// own set of usernames and passwords", and an answer is material for an
+/// offline search of the password whoever chose the nonce can run (RFC 7616
+/// §5.10, §5.11), so a password answers its own server's realm and nobody
+/// else's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChallengeOrigin {
+    /// Where the request that was refused went.
+    pub destination: SocketAddr,
+    /// The realms asked for, each once, in the order the refusal named them.
+    pub realms: Vec<Arc<str>>,
+    /// Whether any of them was a proxy's (407).
+    pub proxy: bool,
 }
 
 /// The challenges waiting for an answer.
@@ -158,6 +184,14 @@ impl Challenges {
     pub(super) fn take(&mut self, id: AnyTransactionId) -> Option<Challenged> {
         let at = self.entries.iter().position(|(known, _)| *known == id)?;
         Some(self.entries.remove(at).1)
+    }
+
+    /// The one held under `id`, left where it is.
+    pub(super) fn get(&self, id: AnyTransactionId) -> Option<&Challenged> {
+        self.entries
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map(|(_, held)| held)
     }
 
     /// How many are waiting.
@@ -356,6 +390,58 @@ impl Endpoint {
         self.challenges.take(failed).is_some()
     }
 
+    /// Who is asking, for the challenge held under `failed`
+    /// ([`ChallengeOrigin`]), before anything answers it. `None` when no
+    /// challenge is held there.
+    #[must_use]
+    pub fn challenge_origin(&self, failed: AnyTransactionId) -> Option<ChallengeOrigin> {
+        let held = self.challenges.get(failed)?;
+        let mut realms: Vec<Arc<str>> = Vec::new();
+        for (_, realm) in &held.realms {
+            if !realms.contains(realm) {
+                realms.push(Arc::clone(realm));
+            }
+        }
+        Some(ChallengeOrigin {
+            destination: held.flow.destination,
+            realms,
+            proxy: held.realms.iter().any(|(proxy, _)| *proxy),
+        })
+    }
+
+    /// Answer the challenge held under `failed` with nothing, ever: the
+    /// caller decided its password is not for whoever asked.
+    ///
+    /// The challenge is dropped as [`Self::abandon_challenge`] drops it, and
+    /// the realms it named are closed in the destination's cache as well,
+    /// so that §22.2's answer ahead of a challenge does not hand the same
+    /// party an answer on the next request without being asked. The refusal
+    /// stands, and is recorded as `auth.challenge.declined`. `true` when
+    /// there was one.
+    pub fn decline_challenge(&mut self, failed: AnyTransactionId) -> bool {
+        let Some(held) = self.challenges.take(failed) else {
+            return false;
+        };
+        let raw = held.request.as_raw();
+        if let Some(cache) = raw
+            .header(HeaderName::To)
+            .and_then(destination)
+            .and_then(|to| self.known.peek_mut(&to))
+        {
+            for (proxy, realm) in &held.realms {
+                cache.refuse_realm(*proxy, realm);
+            }
+        }
+        let call = raw.call_id().ok();
+        self.note(
+            call,
+            crate::diag::Decision::of(Reason::ChallengeDeclined)
+                .at_address(held.flow.destination)
+                .over(held.flow.protocol),
+        );
+        true
+    }
+
     /// The retry itself, with the challenge already out of the store.
     ///
     /// Split from [`Self::retry_with_credentials`] only so that the one error
@@ -434,6 +520,9 @@ impl Endpoint {
 
         let mut message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
+        message = self
+            .written_for_the_datagram(flow, message)
+            .map_err(AuthRetryError::Unsendable)?;
 
         // The credentials are what made it large. §18.1.1 has to be applied
         // here as well as on the first send, or the one request in a call that
@@ -628,6 +717,10 @@ impl Endpoint {
             Direction::Inbound,
             flow,
         );
+        let realms = answering
+            .iter()
+            .map(|(realm, proxy, _, _)| (*proxy, Arc::clone(realm)))
+            .collect();
         for (realm, proxy, algorithm, stale) in answering {
             self.events.push_back(Event::Challenged {
                 transaction: id,
@@ -645,6 +738,7 @@ impl Endpoint {
                 flow,
                 dialog,
                 spent,
+                realms,
             },
         );
     }
@@ -838,6 +932,7 @@ Content-Length: 0\r\n\
             },
             dialog: None,
             spent: 0,
+            realms: Vec::new(),
         }
     }
 

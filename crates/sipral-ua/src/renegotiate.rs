@@ -1004,13 +1004,8 @@ impl UserAgent {
         let Some(call) = self.by_offer.get(&id).copied() else {
             return;
         };
-        let credentials = self
-            .calls
-            .get(&call)
-            .and_then(|held| held.account)
-            .and_then(|account| self.accounts.get(&account))
-            .and_then(|config| config.credentials.clone());
-        let Some(credentials) = credentials else {
+        let account = self.calls.get(&call).and_then(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, id) else {
             return;
         };
         match self.endpoint.retry_with_credentials(id, &credentials, now) {
@@ -1058,13 +1053,8 @@ impl UserAgent {
             .map(|(id, parked)| (*id, parked.call))
             .collect();
         for (id, call) in waiting {
-            let credentials = self
-                .calls
-                .get(&call)
-                .and_then(|held| held.account)
-                .and_then(|account| self.accounts.get(&account))
-                .and_then(|config| config.credentials.clone());
-            let Some(credentials) = credentials else {
+            let account = self.calls.get(&call).and_then(|held| held.account);
+            let Some(credentials) = self.credentials_for_challenge(account, id) else {
                 self.stop_waiting_for_offer(id);
                 continue;
             };

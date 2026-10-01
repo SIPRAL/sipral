@@ -1454,6 +1454,7 @@ impl Endpoint {
                 .at_address(flow.destination)
                 .over(flow.protocol),
         );
+        message = self.written_for_the_datagram(flow, message)?;
 
         // 18.1.1: too large for a datagram means it leaves over something
         // congestion controlled, and the Via has to say so
@@ -1491,6 +1492,54 @@ impl Endpoint {
         }
 
         Ok((message, flow))
+    }
+
+    /// A request bound for a datagram, written as small as
+    /// [`Compaction`](super::Compaction) says it should be.
+    ///
+    /// Run on every path a request is built on, before §18.1.1 measures it,
+    /// so that the size the rule weighs is the size that would go out. A
+    /// stream is never written compact. Under `WhenOversize` a request that
+    /// fits is left as it was built; one that does not is written compact,
+    /// and without its `Allow` when compact is not enough. What comes back
+    /// may still be too large, and the rule then moves the request to a
+    /// stream, where it is written in full again.
+    ///
+    /// Recorded as `transport.compacted.size` when the size was what made
+    /// it compact, with the size it went at and the limit.
+    pub(super) fn written_for_the_datagram(
+        &mut self,
+        flow: Flow,
+        message: OwnedMessage,
+    ) -> Result<OwnedMessage, SendError> {
+        use super::config::Compaction;
+
+        let limit = self.config.datagram_limit;
+        let oversize = limit.too_big_for_a_datagram(message.len());
+        let wanted = match limit.compaction {
+            Compaction::Never => false,
+            Compaction::WhenOversize => oversize,
+            Compaction::Always => true,
+        };
+        if flow.protocol.is_reliable() || !wanted {
+            return Ok(message);
+        }
+        let mut compact = crate::msg::compact_request(&message.as_raw(), &[])?;
+        if limit.too_big_for_a_datagram(compact.len()) {
+            compact = crate::msg::compact_request(&message.as_raw(), &[HeaderName::Allow])?;
+        }
+        if oversize {
+            let call = message.as_raw().call_id().ok().map(<[u8]>::to_vec);
+            let limit_bytes = self.datagram_limit_bytes();
+            self.note(
+                call.as_deref(),
+                Decision::of(Reason::TransportCompactedBySize)
+                    .at_address(flow.destination)
+                    .over(flow.protocol)
+                    .measured(compact.len(), limit_bytes),
+            );
+        }
+        Ok(compact)
     }
 
     /// §18.1.1 for a request assembled somewhere other than `build_request`.
@@ -1727,6 +1776,7 @@ impl Endpoint {
             .local;
         let branch = self.tokens.branch();
         let message = self.assemble_in_dialog(plan, flow, local, &branch, extra, body)?;
+        let message = self.written_for_the_datagram(flow, message)?;
         let promoted = {
             let call = message.as_raw().call_id().ok();
             self.promote_if_too_big(flow, message.len(), call)?

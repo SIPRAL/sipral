@@ -49,6 +49,8 @@ mod announce;
 mod answering;
 #[cfg(test)]
 mod audit_tests;
+#[cfg(test)]
+mod auth_scope_tests;
 mod call;
 mod calls;
 /// The conference event package (RFC 4575): the document a focus notifies,
@@ -136,7 +138,7 @@ pub use dialoginfo::{
 };
 pub use dtmf::{DtmfError, DtmfInfo, DtmfInfoForm, InfoRefusal};
 pub use error::UaError;
-pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+pub use event::{ChallengeRefusal, RegistrationFailure, RegistrationState, UaEvent};
 pub use headers::{HeaderRefused, HeadersFor};
 pub use identity::{
     CallerIdentity, Diversion, HistoryEntry, Party, Privacy, RemoteParty, Retarget, Verstat,
@@ -161,7 +163,7 @@ pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, RateError, Refusals, Replacing, Screen, Screening};
 pub use session::Hold;
 #[cfg(feature = "stir")]
-pub use stir::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
+pub use stir::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 pub use subscription::{
     DEFAULT_EXPIRES, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState,
 };
@@ -179,7 +181,8 @@ pub use sipral_core::endpoint::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
 pub use sipral_core::endpoint::{
-    EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
+    Compaction, DatagramLimit, EndpointConfig, Input, ReceiveError, Transmit, TransportId,
+    TransportProtocol,
 };
 pub use sipral_core::msg::{StatusCode, Uri};
 /// A TLS server certificate trusted by its SHA-256 fingerprint, per account

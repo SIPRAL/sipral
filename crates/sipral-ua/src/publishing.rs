@@ -517,13 +517,12 @@ impl UserAgent {
         transaction: AnyTransactionId,
         now: Instant,
     ) {
-        let credentials = self
+        let account = self
             .publications
             .held
             .get(&publication)
-            .and_then(|held| self.accounts.get(&held.account))
-            .and_then(|config| config.credentials.clone());
-        let Some(credentials) = credentials else {
+            .map(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, transaction) else {
             return;
         };
         match self
@@ -583,12 +582,12 @@ impl UserAgent {
     /// connection.
     pub(crate) fn resume_parked_publications(&mut self, now: Instant) {
         for (publication, failed) in self.publications_waiting() {
-            let credentials = self
+            let account = self
                 .publications
                 .held
                 .get(&publication)
-                .and_then(|held| self.accounts.get(&held.account))
-                .and_then(|config| config.credentials.clone());
+                .map(|held| held.account);
+            let credentials = self.credentials_for_challenge(account, failed);
             let outcome = credentials.map(|credentials| {
                 self.endpoint
                     .retry_with_credentials(failed, &credentials, now)

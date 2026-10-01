@@ -91,6 +91,32 @@ impl core::fmt::Display for RegistrationState {
     }
 }
 
+/// Why an account's password did not answer a challenge
+/// ([`UaEvent::ChallengeDeclined`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChallengeRefusal {
+    /// The challenged request went somewhere other than the account's own
+    /// server — its registrar, or the outbound proxy of an account that does
+    /// not register — so whoever asked is the far end of a call, or a peer
+    /// reached directly, and not the party that issued the password.
+    NotTheAccountsServer,
+    /// The account's server asked for a realm that is not the account's: not
+    /// one of [`Account::realms`](crate::Account::realms), or, with none
+    /// named, not the one its server first challenged with. A proxy passing
+    /// on a far end's own challenge is what this looks like.
+    NotTheAccountsRealm,
+}
+
+impl core::fmt::Display for ChallengeRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match *self {
+            Self::NotTheAccountsServer => "challenged by somebody other than the account's server",
+            Self::NotTheAccountsRealm => "challenged for a realm that is not the account's",
+        })
+    }
+}
+
 /// Why a registration is not live.
 ///
 /// The split that matters is whether trying again can help. Everything that
@@ -304,6 +330,26 @@ pub enum UaEvent {
         call: CallHandle,
         /// The `info` URL of its `Identity` header field.
         url: Box<str>,
+    },
+    /// A request of `account`'s was challenged by somebody its password is
+    /// not for, and the challenge was not answered (RFC 3261 §22.1: "each
+    /// such protection domain has its own set of usernames and passwords").
+    ///
+    /// Raised before the refusal settles the way any unanswered challenge
+    /// does — a call ending with the 401 or 407, a registration failing
+    /// with [`RegistrationFailure::BadCredentials`], a request inside a call
+    /// refused — so the application reading in order knows why first. Every
+    /// answer is material for an offline search of the password by whoever
+    /// chose the nonce (RFC 7616 §5.10, §5.11), which is why nothing is sent.
+    ChallengeDeclined {
+        /// Whose password was asked for.
+        account: AccountId,
+        /// Where the challenged request went, and the refusal came from.
+        from: std::net::SocketAddr,
+        /// The realms it was challenged for.
+        realms: Vec<std::sync::Arc<str>>,
+        /// Why the password is not for it.
+        why: ChallengeRefusal,
     },
     /// This end's verification service reached its verdict on who is
     /// calling (RFC 8224 §6.2).

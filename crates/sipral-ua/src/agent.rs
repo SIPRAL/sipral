@@ -21,8 +21,10 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sipral_core::auth::Credentials;
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     AuthRetryError, Endpoint, EndpointConfig, Event, FailureReason, Input, OutgoingRequest,
@@ -1339,12 +1341,70 @@ impl UserAgent {
         self.retry_later(account, None, None, None, now);
     }
 
+    /// `account`'s password for the challenge held under `transaction`, when
+    /// the password is for it — and `None` when the account has none, or
+    /// when it is not for whoever asked (RFC 3261 §22.1).
+    ///
+    /// Every path that answers a challenge comes through here, so that the
+    /// rule holds for all of them: the challenged request went to the
+    /// account's own server — its address, on whatever port — and every
+    /// realm it was challenged for is the
+    /// account's — the ones [`Account::realms`](crate::Account::realms)
+    /// names, or with none named, the ones the server first challenged with,
+    /// taken here the first time and kept. A challenge that fails either is
+    /// declined at the endpoint, so that nothing is answered ahead of the
+    /// next one either, and reported as [`UaEvent::ChallengeDeclined`]; the
+    /// caller then treats it as a challenge with nothing to answer it, which
+    /// is what it is.
+    ///
+    /// No challenge held under `transaction` hands the password back: the
+    /// endpoint's own retry then says there is nothing to answer.
+    pub(crate) fn credentials_for_challenge(
+        &mut self,
+        account: Option<AccountId>,
+        transaction: AnyTransactionId,
+    ) -> Option<Arc<Credentials>> {
+        let account = account?;
+        let config = self.accounts.get(&account)?;
+        let credentials = config.credentials.clone()?;
+        let Some(origin) = self.endpoint.challenge_origin(transaction) else {
+            return Some(credentials);
+        };
+        // the host, not the port: a PBX that takes TCP on another port than
+        // UDP is the same server over the stream §18.1.1 moved a request to
+        let why = if origin.destination.ip() == config.remote.ip() {
+            let known = if config.realms.is_empty() {
+                &config.pinned_realms
+            } else {
+                &config.realms
+            };
+            let foreign =
+                !known.is_empty() && origin.realms.iter().any(|realm| !known.contains(realm));
+            foreign.then_some(crate::event::ChallengeRefusal::NotTheAccountsRealm)
+        } else {
+            Some(crate::event::ChallengeRefusal::NotTheAccountsServer)
+        };
+        let Some(why) = why else {
+            if let Some(config) = self.accounts.get_mut(&account)
+                && config.realms.is_empty()
+                && config.pinned_realms.is_empty()
+            {
+                config.pinned_realms.clone_from(&origin.realms);
+            }
+            return Some(credentials);
+        };
+        self.endpoint.decline_challenge(transaction);
+        self.events.push_back(UaEvent::ChallengeDeclined {
+            account,
+            from: origin.destination,
+            realms: origin.realms,
+            why,
+        });
+        None
+    }
+
     fn on_challenged(&mut self, account: AccountId, transaction: AnyTransactionId, now: Instant) {
-        let Some(credentials) = self
-            .accounts
-            .get(&account)
-            .and_then(|config| config.credentials.clone())
-        else {
+        let Some(credentials) = self.credentials_for_challenge(Some(account), transaction) else {
             // nothing to answer with; the refusal stands, and it stands the
             // same way every time, so there is no point trying again
             return;
@@ -1399,10 +1459,7 @@ impl UserAgent {
             .filter_map(|(account, reg)| reg.waiting_for_stream.map(|failed| (*account, failed)))
             .collect();
         for (account, failed) in waiting {
-            let credentials = self
-                .accounts
-                .get(&account)
-                .and_then(|config| config.credentials.clone());
+            let credentials = self.credentials_for_challenge(Some(account), failed);
             let Some(credentials) = credentials else {
                 self.stop_waiting(account);
                 continue;

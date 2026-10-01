@@ -520,6 +520,116 @@ impl<'a> ResponseBuilder<'a> {
     }
 }
 
+/// The fields RFC 3261 itself gives a one-letter form (§7.3.3, §20).
+///
+/// The extensions registered more since — `o`, `u`, `r`, `b`, `x`, `y` and the
+/// rest — are left long on purpose. A field an extension defines is read by
+/// that extension's module in the far end, and a module that looks for the
+/// long name only does not refuse the message: it misses the field, and a
+/// session timer, a transfer target or an `Identity` silently goes unread.
+/// The ten below are in every parser that reads SIP at all, because §7.3.3
+/// makes accepting them a MUST.
+const RFC3261_COMPACT: &[HeaderName<'static>] = &[
+    HeaderName::CallId,
+    HeaderName::Contact,
+    HeaderName::ContentEncoding,
+    HeaderName::ContentLength,
+    HeaderName::ContentType,
+    HeaderName::From,
+    HeaderName::Subject,
+    HeaderName::Supported,
+    HeaderName::To,
+    HeaderName::Via,
+];
+
+/// Fields whose value is a comma-separated list of tokens, and so is the same
+/// list with no whitespace around its commas.
+const TOKEN_LISTS: &[HeaderName<'static>] = &[
+    HeaderName::Allow,
+    HeaderName::Supported,
+    HeaderName::Require,
+    HeaderName::ProxyRequire,
+    HeaderName::Unsupported,
+];
+
+/// The same request in fewer bytes: RFC 3261 §7.3.3's compact form for every
+/// field that has one, no space after a colon, and no whitespace around the
+/// commas of a list of tokens. "A compact form MAY be substituted for the
+/// longer form of a header field name at any time without changing the
+/// semantics of the message", and §7.3.1 makes the space after a colon a
+/// matter of style; both are there for a request that would "otherwise become
+/// too large to be carried on the transport available to it".
+///
+/// The fields named in `leave_out` are not written at all. That is for
+/// `Allow`, the one field a request bound for a datagram has that RFC 3261
+/// both expects and lets go: §13.2.1 says it SHOULD be in an INVITE, and
+/// §20.5 says its absence "implies that the UA is not providing any
+/// information on what methods it supports". Trimming it instead would break
+/// §20.5's MUST that every method the UA understands is listed when it is
+/// there.
+///
+/// The body, the start line and the order of the fields are left exactly as
+/// they were.
+///
+/// # Errors
+/// [`BuildError::IllegalValue`] for a value with a line break in it that is
+/// not a fold, and [`BuildError::NotWellFormed`] if what comes out does not
+/// parse, which would be a bug here.
+pub fn compact_request(
+    request: &super::message::RawMessage<'_>,
+    leave_out: &[HeaderName<'_>],
+) -> Result<OwnedMessage, BuildError> {
+    let bytes = request.as_bytes();
+    let start = bytes
+        .windows(2)
+        .position(|pair| pair == b"\r\n")
+        .and_then(|end| bytes.get(..end))
+        .ok_or(BuildError::MissingField("start line"))?;
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(start);
+    out.extend_from_slice(b"\r\n");
+    for (written, value) in request.raw_headers() {
+        let name = HeaderName::from_bytes(written);
+        if name.is_some_and(|name| leave_out.contains(&name)) {
+            continue;
+        }
+        match name {
+            Some(known) if RFC3261_COMPACT.contains(&known) => {
+                out.push(known.compact().unwrap_or_default());
+            }
+            _ => out.extend_from_slice(written),
+        }
+        out.push(b':');
+        if name.is_some_and(|name| TOKEN_LISTS.contains(&name)) {
+            write_tight_list(&mut out, value)?;
+        } else {
+            write_value(&mut out, value)?;
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(request.body());
+    finish(out)
+}
+
+/// A list of tokens with the whitespace around its commas taken out, folds
+/// included.
+fn write_tight_list(out: &mut Vec<u8>, value: &[u8]) -> Result<(), BuildError> {
+    let mut first = true;
+    for item in value.split(|&byte| byte == b',') {
+        let item = super::lex::trim(item);
+        if item.is_empty() {
+            continue;
+        }
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        write_value(out, item)?;
+    }
+    Ok(())
+}
+
 fn has_tag(value: Value<'_>) -> bool {
     match value {
         Value::Bytes(v) => super::addr::NameAddrRef::parse(v).is_ok_and(|a| a.tag().is_some()),
@@ -935,6 +1045,97 @@ Content-Length: 0\r\n\
                 "Supported",
                 "Content-Length",
             ]
+        );
+    }
+
+    fn a_long_invite() -> OwnedMessage {
+        RequestBuilder::new(Method::Invite, b"sip:bob@example.com")
+            .via(b"SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKnashds8;rport")
+            .max_forwards(70)
+            .from(b"<sip:alice@example.com>;tag=1928301774")
+            .to(b"<sip:bob@example.com>")
+            .call_id(b"a84b4c76e66710")
+            .cseq(1)
+            .contact(b"<sip:alice@192.0.2.1>")
+            .header(HeaderName::Supported, b"timer, replaces,\r\n 100rel")
+            .header(HeaderName::Allow, b"INVITE, ACK, CANCEL, BYE")
+            .header(HeaderName::SessionExpires, b"1800")
+            .header(HeaderName::UserAgent, b"a phone")
+            .body(b"application/sdp", b"v=0\r\n")
+            .build()
+            .expect("a request")
+    }
+
+    #[test]
+    fn a_compacted_request_uses_the_rfc_3261_short_names_and_tight_lists() {
+        let compact =
+            super::compact_request(&a_long_invite().as_raw(), &[]).expect("a compact request");
+        assert_eq!(
+            compact.as_raw().as_bytes(),
+            b"INVITE sip:bob@example.com SIP/2.0\r\n\
+v:SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bKnashds8;rport\r\n\
+Max-Forwards:70\r\n\
+f:<sip:alice@example.com>;tag=1928301774\r\n\
+t:<sip:bob@example.com>\r\n\
+i:a84b4c76e66710\r\n\
+CSeq:1 INVITE\r\n\
+m:<sip:alice@192.0.2.1>\r\n\
+k:timer,replaces,100rel\r\n\
+Allow:INVITE,ACK,CANCEL,BYE\r\n\
+Session-Expires:1800\r\n\
+User-Agent:a phone\r\n\
+c:application/sdp\r\n\
+l:5\r\n\
+\r\n\
+v=0\r\n"
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn a_compacted_request_reads_as_the_same_request() {
+        let long = a_long_invite();
+        let compact = super::compact_request(&long.as_raw(), &[]).expect("a compact request");
+        let (long, compact) = (long.as_raw(), compact.as_raw());
+        assert!(compact.len() < long.len());
+        for name in HeaderName::KNOWN {
+            let one: Vec<Vec<u8>> = long
+                .header_values(*name)
+                .map(|value| crate::msg::unfold(value).into_owned())
+                .collect();
+            let other: Vec<Vec<u8>> = compact
+                .header_values(*name)
+                .map(|value| crate::msg::unfold(value).into_owned())
+                .collect();
+            if matches!(name, HeaderName::Supported | HeaderName::Allow) {
+                assert_eq!(one.len(), other.len(), "{name:?}");
+                continue;
+            }
+            assert_eq!(one, other, "{name:?}");
+        }
+        assert_eq!(
+            long.supported().collect::<Vec<_>>(),
+            compact.supported().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            long.allow().collect::<Vec<_>>(),
+            compact.allow().collect::<Vec<_>>()
+        );
+        assert_eq!(long.body(), compact.body());
+        let mut scratch = ParseScratch::new();
+        assert!(parse(compact.as_bytes(), &mut scratch, ParseMode::Strict).is_ok());
+    }
+
+    #[test]
+    fn a_field_left_out_of_a_compacted_request_is_gone_and_nothing_else_is() {
+        let long = a_long_invite();
+        let lean = super::compact_request(&long.as_raw(), &[HeaderName::Allow])
+            .expect("a compact request");
+        let lean = lean.as_raw();
+        assert_eq!(lean.header_count(HeaderName::Allow), 0);
+        assert_eq!(
+            lean.header_names().count() + 1,
+            long.as_raw().header_names().count()
         );
     }
 }

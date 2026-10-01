@@ -52,6 +52,13 @@ pub enum Reason {
     /// stream could be had, and `DatagramLimit::without_stream_bytes` sent it
     /// over the datagram anyway. Carries the size and that limit.
     TransportKeptOnDatagram,
+    /// The same rule met by writing the request smaller: too large for a
+    /// datagram in full, so it went out in RFC 3261 §7.3.3's compact form
+    /// (`DatagramLimit::compaction`), and without its `Allow` when that was
+    /// not enough. Carries the size it went out at and the limit; the
+    /// promotion or refusal that follows, when it still did not fit, is an
+    /// entry of its own.
+    TransportCompactedBySize,
     /// A transport closed or failed, and everything running on it was failed
     /// with it.
     TransportLost,
@@ -113,6 +120,11 @@ pub enum Reason {
     ChallengeReceived,
     /// The request went again carrying credentials.
     ChallengeAnswered,
+    /// A challenge was not answered because the password is not for
+    /// whoever asked: it came from somewhere other than the account's own
+    /// server, or for a realm that is not the account's (RFC 3261 §22.1).
+    /// The refusal stands. Carries the address the challenge came from.
+    ChallengeDeclined,
     /// A dialog was created (§12.1).
     DialogCreated,
     /// A dialog is over and its handle is stale.
@@ -146,6 +158,7 @@ impl Reason {
             Self::TransportPromotedBySize => "transport.promoted.size",
             Self::TransportRefusedBySize => "transport.refused.size",
             Self::TransportKeptOnDatagram => "transport.kept.datagram",
+            Self::TransportCompactedBySize => "transport.compacted.size",
             Self::TransportLost => "transport.lost",
             Self::FlowDead => "transport.flow.dead",
             Self::RequestSent => "request.sent",
@@ -162,6 +175,7 @@ impl Reason {
             Self::ForkDroppedAtLimit => "dialog.fork.dropped",
             Self::ChallengeReceived => "auth.challenge.received",
             Self::ChallengeAnswered => "auth.challenge.answered",
+            Self::ChallengeDeclined => "auth.challenge.declined",
             Self::DialogCreated => "dialog.created",
             Self::DialogDestroyed => "dialog.destroyed",
             Self::FailedRefused => "failure.refused",
@@ -186,11 +200,12 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 28] = [
+    const ALL: [Reason; 30] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
         Reason::TransportKeptOnDatagram,
+        Reason::TransportCompactedBySize,
         Reason::TransportLost,
         Reason::FlowDead,
         Reason::RequestSent,
@@ -207,6 +222,7 @@ mod tests {
         Reason::ForkDroppedAtLimit,
         Reason::ChallengeReceived,
         Reason::ChallengeAnswered,
+        Reason::ChallengeDeclined,
         Reason::DialogCreated,
         Reason::DialogDestroyed,
         Reason::FailedRefused,
@@ -257,6 +273,14 @@ mod tests {
             "auth.challenge.answered"
         );
         assert_eq!(Reason::RequestSent.to_string(), "request.sent");
+        assert_eq!(
+            Reason::TransportCompactedBySize.as_str(),
+            "transport.compacted.size"
+        );
+        assert_eq!(
+            Reason::ChallengeDeclined.as_str(),
+            "auth.challenge.declined"
+        );
         assert_eq!(
             Reason::RequestAnsweredByTimeout.as_str(),
             "request.answered.timeout"

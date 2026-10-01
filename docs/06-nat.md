@@ -100,10 +100,17 @@ the headers every INVITE this stack writes carries (`Via` with `rport`,
 the documentation ranges. Keyed by SDES, whose offer names two suites and so
 carries two `a=crypto` lines, it is **1428 bytes**, 128 over; keyed by
 DTLS-SRTP, with its `a=fingerprint` and `a=setup`, it is **1391**, 91 over.
-The endpoint sends neither on UDP — it answers `NeedsStreamTransport` and asks
-for a stream, as it does for any request past the floor. The test holds both
-between 1301 and 1450, so neither moves far without this paragraph being read
-again. Three things the measurement leaves out push a real INVITE further:
+Those are the INVITEs written in full. Before it asks for a stream the
+endpoint writes a request that is over the floor compact
+(`DatagramLimit::compaction`): RFC 3261 §7.3.3's one-letter field names, no
+space after a colon, lists of tokens without spaces, and, when that is not
+enough, no `Allow`. Both INVITEs go over UDP that way, the SDES one at
+**1278 bytes** and the DTLS-SRTP one at **1241**. Under
+`Compaction::Never` the endpoint sends neither on UDP — it answers
+`NeedsStreamTransport` and asks for a stream, as it does for any request still
+past the floor. The test holds the full sizes between 1301 and 1450 and the
+compact ones between 1150 and 1300, so none moves far without this paragraph
+being read again. Three things the measurement leaves out push a real INVITE further:
 longer addresses than the documentation ranges' (up to six bytes more for each
 of the dozen an INVITE names), a longer user and domain, and the credentials
 on the retry after a digest challenge, which are a couple of hundred bytes by

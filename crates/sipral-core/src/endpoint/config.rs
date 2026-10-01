@@ -50,6 +50,41 @@ pub struct DatagramLimit {
     /// the datagram this way is recorded as `transport.kept.datagram`, with
     /// its size and this limit.
     pub without_stream_bytes: Option<u32>,
+    /// When a request bound for a datagram is written in its compact form
+    /// ([`Compaction`]). Only when it would not fit otherwise, by default.
+    pub compaction: Compaction,
+}
+
+/// When a request bound for a datagram is written small, before RFC 3261
+/// §18.1.1 moves it to a stream.
+///
+/// Compact means what `msg::compact_request` writes: the one-letter names
+/// §7.3.3 gives `Via`, `From`, `To`, `Call-ID`, `Contact`, `Supported`,
+/// `Content-Type`, `Content-Length` and the rest of RFC 3261's own, no space
+/// after a colon, and lists of tokens without spaces. That is about ninety
+/// bytes off an INVITE, the same message to every parser §7.3.3 holds to
+/// accepting both forms. A request still too large then goes without its
+/// `Allow` (§20.5 lets it, §13.2.1 asks for it in an INVITE), which is eighty
+/// more; one still too large after that goes to a stream as before, written
+/// in full there, where size is not a question.
+///
+/// A stream transport is never written compact: the rule is for a datagram.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compaction {
+    /// Every request in full, and §18.1.1 decides on the full size.
+    Never,
+    /// A request too large for a datagram is written compact first, and only
+    /// what is too large even so leaves the datagram. The default: a request
+    /// that fits goes out as readable as it was built, and one that would
+    /// have asked for a stream — which a server on UDP alone never answers —
+    /// goes out over the datagram whenever being compact is enough.
+    #[default]
+    WhenOversize,
+    /// Every request bound for a datagram is written compact, whatever its
+    /// size, for a path known to be narrower than the limit says: a tunnel
+    /// with a 1280-byte MTU fragments what §18.1.1's 1300 still lets
+    /// through. `Allow` is still only left out of one that does not fit.
+    Always,
 }
 
 impl DatagramLimit {
@@ -59,6 +94,7 @@ impl DatagramLimit {
         headroom_bytes: 200,
         max_datagram_bytes: 1_300,
         without_stream_bytes: None,
+        compaction: Compaction::WhenOversize,
     };
 
     /// Whether a request of this size goes over the datagram once no stream

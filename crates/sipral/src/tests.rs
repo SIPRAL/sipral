@@ -7089,16 +7089,34 @@ fn a_closed_connection_takes_the_relay_and_the_path_through_it() {
 /// SRTP keyed under `srtp`, and ICE with every candidate the facade gathers
 /// (host, server-reflexive and relayed), and say what became of the INVITE
 /// on the datagram transport: `Ok` with its bytes when it went, `Err` with
-/// the size §18.1.1 refused it at when it did not.
+/// the size §18.1.1 refused it at when it did not. The caller's endpoint
+/// writes requests compact as `compaction` says.
 #[cfg(all(feature = "ice", feature = "dtls", feature = "opus"))]
-fn invite_with_every_candidate(srtp: SrtpPolicy) -> Result<Vec<u8>, usize> {
+fn invite_with_every_candidate(
+    srtp: SrtpPolicy,
+    compaction: crate::Compaction,
+) -> Result<Vec<u8>, usize> {
     use sipral_core::diag::Reason;
     use sipral_core::endpoint::SendError;
 
     let catalog = CodecCatalog::new()
         .with_srtp(srtp)
         .with_ice(crate::IcePolicy::Offered);
-    let mut pair = Pair::new(catalog.clone());
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.compaction = compaction;
+    let now = Instant::now();
+    let mut pair = Pair {
+        caller: Stack::configured(
+            11,
+            caller_sip(),
+            caller_media(),
+            catalog.clone(),
+            config,
+            now,
+        ),
+        callee: Stack::new(22, callee_sip(), callee_media(), catalog.clone(), now),
+        now,
+    };
     let account = pair.caller.account("alice", callee_sip());
     let relay = relay_for_the_caller(&mut pair);
     let media = CallMedia::new(catalog, MediaConfig::default()).relay(relay);
@@ -7146,16 +7164,37 @@ fn invite_with_every_candidate(srtp: SrtpPolicy) -> Result<Vec<u8>, usize> {
 /// The sizes are the ones the endpoint wrote in the call's record when it
 /// refused. The page quotes both numbers, and the bounds here keep either
 /// from moving far without the page being read again.
+///
+/// That is the INVITE written in full (`Compaction::Never`). Written compact,
+/// which the endpoint does by default before it asks for a stream, and
+/// without its `Allow`, both go over the datagram, at the sizes the page
+/// quotes too.
 #[cfg(all(feature = "ice", feature = "dtls", feature = "opus"))]
 #[test]
 fn an_invite_with_every_candidate_is_measured_against_the_datagram_floor() {
-    let sdes = invite_with_every_candidate(SrtpPolicy::Offered)
+    use crate::Compaction;
+
+    let sdes = invite_with_every_candidate(SrtpPolicy::Offered, Compaction::Never)
         .expect_err("SDES with every candidate needs a stream");
     assert!((1301..=1450).contains(&sdes), "{sdes} bytes with SDES");
 
-    let dtls = invite_with_every_candidate(SrtpPolicy::DtlsOffered)
+    let dtls = invite_with_every_candidate(SrtpPolicy::DtlsOffered, Compaction::Never)
         .expect_err("DTLS-SRTP with every candidate needs a stream");
     assert!((1301..=1450).contains(&dtls), "{dtls} bytes with DTLS-SRTP");
+
+    for (srtp, full) in [(SrtpPolicy::Offered, sdes), (SrtpPolicy::DtlsOffered, dtls)] {
+        let compact = invite_with_every_candidate(srtp, Compaction::WhenOversize)
+            .unwrap_or_else(|size| panic!("{size} bytes compact under {srtp:?}"));
+        let text = String::from_utf8_lossy(&compact).into_owned();
+        assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
+        assert!(
+            (1_150..=1_300).contains(&compact.len()),
+            "{full} bytes in full, {} compact under {srtp:?}",
+            compact.len()
+        );
+        // compact with its `Allow`, each is still over the line
+        assert!(!text.contains("Allow"), "{text}");
+    }
 }
 
 #[cfg(feature = "ice")]

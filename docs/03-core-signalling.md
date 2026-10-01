@@ -144,13 +144,34 @@ the socket.
   `transport=ws` parameter on `Contact` and `Route` are phase 2, and
   `crates/sipral-core/src/endpoint/transport.rs` says so at the declaration.
   An application that binds a WebSocket today does the handshake itself.
+- **Write it compact first.** A request bound for a datagram that is over the
+  line below is written in RFC 3261 §7.3.3's compact form before anything
+  else: the one-letter names RFC 3261 gives `Via`, `From`, `To`, `Call-ID`,
+  `Contact`, `Supported`, `Subject`, `Content-Type`, `Content-Encoding` and
+  `Content-Length`, no space after a colon, and lists of tokens without
+  spaces — about ninety bytes off an INVITE, and the same message to every
+  parser, since §7.3.3 makes accepting both forms a MUST. The compact forms
+  extensions registered later (`o`, `u`, `r`, `b`, `x`, `y`) are not used: a
+  peer's module for that extension may look for the long name only, and miss
+  the field rather than refuse the message. A request still over the line
+  then goes without its `Allow`, which §20.5 lets a UA leave out and §13.2.1
+  asks an INVITE to carry; only what is still over after that moves to a
+  stream, where it is written in full again. The first send, the answer to a
+  challenge, a request inside a dialog and a request moved to another server
+  are all held to this. `DatagramLimit::compaction` turns it off
+  (`Compaction::Never`) or on for every datagram (`Compaction::Always`, for
+  a path known to be narrower than the line, a 1280-byte tunnel say); each
+  request written compact because of its size is recorded as
+  `transport.compacted.size`, with the size it went at.
 - **Switch to TCP** when a request is within 200 bytes of a known path MTU, or
   larger than 1300 bytes when the path MTU is unknown (RFC 3261 §18.1.1). The
   request moves onto a TCP transport the caller has already bound to the same
   destination. If there is none, nothing is sent: the call returns
   `SendError::NeedsStreamTransport`, and `Event::TransportWanted {
   protocol, destination, request_bytes, limit_bytes }` asks the caller to open one and
-  send again. Both figures are configurable (`EndpointConfig::datagram_limit`).
+  send again. The size the event and the record carry is the one the line
+  was drawn against, the compact one unless compaction is off. Both figures
+  are configurable (`EndpointConfig::datagram_limit`).
 - **`Via` handling.** `branch` with the `z9hG4bK` magic cookie, `rport` per RFC
   3581 always requested, `received` and `rport` honoured on responses. Symmetric
   behaviour: responses go back where the request came from, not where the `Via`

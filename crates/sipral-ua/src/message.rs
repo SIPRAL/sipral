@@ -336,13 +336,8 @@ impl UserAgent {
         transaction: AnyTransactionId,
         now: Instant,
     ) {
-        let credentials = self
-            .messages
-            .get(&message)
-            .and_then(|held| held.account)
-            .and_then(|account| self.accounts.get(&account))
-            .and_then(|config| config.credentials.clone());
-        let Some(credentials) = credentials else {
+        let account = self.messages.get(&message).and_then(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, transaction) else {
             // nothing to answer with; the refusal held above stands, and
             // `settle_message_challenges` reports it once the drain ends
             return;
@@ -388,12 +383,8 @@ impl UserAgent {
             .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
             .collect();
         for (message, failed) in waiting {
-            let credentials = self
-                .messages
-                .get(&message)
-                .and_then(|held| held.account)
-                .and_then(|account| self.accounts.get(&account))
-                .and_then(|config| config.credentials.clone());
+            let account = self.messages.get(&message).and_then(|held| held.account);
+            let credentials = self.credentials_for_challenge(account, failed);
             let outcome = credentials.map(|credentials| {
                 self.endpoint
                     .retry_with_credentials(failed, &credentials, now)
