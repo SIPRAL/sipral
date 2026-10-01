@@ -2435,6 +2435,80 @@ fn unregistering_removes_this_binding_and_not_everybody_elses() {
     );
 }
 
+/// A de-registration the registrar refused for now, or never answered, is
+/// retried as a de-registration: an account the application asked to leave
+/// never asks for its binding back on a retry.
+#[test]
+fn a_de_registration_that_failed_is_retried_as_one_and_never_registers_again() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    registered(&mut agent, id, 3_600, t0);
+    let retry_in = |agent: &mut UserAgent| {
+        events(agent)
+            .into_iter()
+            .find_map(|event| match event {
+                UaEvent::RegistrationFailed { retry_in, .. } => retry_in,
+                _ => None,
+            })
+            .expect("a retry is scheduled")
+    };
+
+    agent.unregister(id, t0).expect("the de-registration goes");
+    let leaving = sent(&mut agent);
+    assert_eq!(header(&leaving, HeaderName::Expires), b"0");
+    deliver(
+        &mut agent,
+        &reply(&leaving, 500, "Server Internal Error", ""),
+        t0,
+    );
+    let wait = retry_in(&mut agent);
+    assert_eq!(
+        agent.registration_state(id),
+        Some(RegistrationState::Unregistered),
+        "an account on its way out is not retrying a registration"
+    );
+
+    // the retry, which this time goes unanswered until the transaction
+    // gives up on it (RFC 3261 §17.1.2.2, Timer F)
+    let mut at = t0 + wait;
+    agent.handle_timeout(at);
+    let again = sent(&mut agent);
+    assert!(again.starts_with(b"REGISTER "));
+    assert_eq!(
+        header(&again, HeaderName::Expires),
+        b"0",
+        "the retry asked for the binding back"
+    );
+    let gave_up = at + Duration::from_secs(33);
+    while at < gave_up {
+        at += Duration::from_millis(500);
+        agent.handle_timeout(at);
+        let _ = transmits(&mut agent);
+    }
+    let wait = retry_in(&mut agent);
+
+    at += wait;
+    agent.handle_timeout(at);
+    let third = sent(&mut agent);
+    assert_eq!(
+        header(&third, HeaderName::Expires),
+        b"0",
+        "the retry after a timeout asked for the binding back"
+    );
+    deliver(&mut agent, &reply(&third, 200, "OK", ""), at);
+    assert!(
+        events(&mut agent)
+            .iter()
+            .any(|event| matches!(*event, UaEvent::Unregistered { .. }))
+    );
+    agent.handle_timeout(at + HOUR);
+    assert!(
+        transmits(&mut agent).is_empty(),
+        "an account that left sent something more"
+    );
+}
+
 // -- what this layer does not claim ------------------------------------------
 
 #[test]

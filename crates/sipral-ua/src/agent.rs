@@ -881,8 +881,10 @@ impl UserAgent {
             .map(|(id, _)| *id)
             .collect();
         for account in due {
+            let mut unregistering = false;
             if let Some(reg) = self.registrations.get_mut(&account) {
                 reg.due = None;
+                unregistering = reg.unregistering;
             }
             // A failure here is a refresh that could not leave, which is not
             // the same thing as a registrar that refused. The transport can
@@ -890,8 +892,10 @@ impl UserAgent {
             // case on a machine that slept: the deadline falls due before the
             // socket has been rebuilt -- so it backs off and tries again
             // rather than declaring the account dead for the life of the
-            // process. Nothing on the wire said otherwise.
-            if let Err(error) = self.send_register(account, false, now) {
+            // process. Nothing on the wire said otherwise. And a retry of a
+            // de-registration is a de-registration again, never a REGISTER
+            // that asks for the binding back.
+            if let Err(error) = self.send_register(account, unregistering, now) {
                 self.register_unsent(account, &error, now);
             }
         }
@@ -1565,9 +1569,14 @@ impl UserAgent {
         // "a 503 response to an earlier failed registration attempt with a
         // Retry-After header field value may cause the UA to wait longer"
         let wait = backoff_delay(reg.failures, &entropy).max(asked_for.unwrap_or(Duration::ZERO));
-        reg.state = RegistrationState::Retrying;
+        // a de-registration that did not get through is retried as a
+        // de-registration: the application asked this account to leave, and
+        // a retry that asked for a binding again would put it back on the
+        // registrar behind the application's back
+        if !reg.unregistering {
+            reg.state = RegistrationState::Retrying;
+        }
         reg.transaction = None;
-        reg.unregistering = false;
         reg.due = Some(now + wait);
         self.events.push_back(UaEvent::RegistrationFailed {
             account,
