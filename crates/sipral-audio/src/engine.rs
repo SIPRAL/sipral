@@ -222,6 +222,9 @@ struct Opening {
     /// Whether its roles have already been reported unavailable for taking
     /// longer than the probe wait.
     overdue: bool,
+    /// Set by the open's thread once it is done, including letting go of
+    /// what it opened when nobody wanted it any more.
+    done: Arc<Done>,
 }
 
 /// One of something per role.
@@ -761,7 +764,6 @@ impl Engine {
     /// seen to wait for the main thread — finishes after this returns
     /// rather than never.
     pub fn deactivate(&mut self) {
-        self.finish_opening();
         self.stop(Some(self.config.probe_wait));
     }
 
@@ -902,17 +904,21 @@ impl Engine {
             self.parked = carried;
         }
         self.running = PerRole::default();
+        self.closing.retain(|closed| !closed.is_set());
+        self.closing.push(pump.closed);
         // an open still under way was for this pump: what it brings back
-        // goes on its own thread, and what was still to be opened is not
+        // is let go of on its own thread, which the next open waits for as
+        // it waits for the pump's, and what was still to be opened is not
         if let Some(opening) = self.opening.take() {
-            drop(opening.answer);
+            self.closing.push(opening.done);
         }
         self.wanted.clear();
         if let Some(within) = wait {
-            pump.closed.wait(within);
+            let deadline = Instant::now() + within;
+            for closed in &self.closing {
+                closed.wait(deadline.saturating_duration_since(Instant::now()));
+            }
         }
-        self.closing.retain(|closed| !closed.is_set());
-        self.closing.push(pump.closed);
     }
 
     /// Whether the ringer runs on a stream of its own: only when it was put
@@ -1066,6 +1072,8 @@ impl Engine {
         let format = Format::twenty_ms(self.config.device_rate_hz);
         let wait = self.config.probe_wait;
         let (reply, answer) = mpsc::channel();
+        let done = Arc::new(Done::default());
+        let finished = Arc::clone(&done);
         let spawned = std::thread::Builder::new()
             .name("sipral-audio-open".to_owned())
             .spawn(move || {
@@ -1080,6 +1088,7 @@ impl Engine {
                 // nobody is waiting for it any more: the devices are let go
                 // of here, on this thread, rather than on whoever asked
                 let _ = reply.send(landing);
+                finished.set();
             });
         if spawned.is_err() {
             let refused = BackendError::Refused(
@@ -1094,6 +1103,7 @@ impl Engine {
             answer,
             since: Instant::now(),
             overdue: false,
+            done,
         });
     }
 
@@ -1619,9 +1629,8 @@ fn gone_without_answer() -> BackendError {
 impl Drop for Engine {
     fn drop(&mut self) {
         // the stack is going: what is being opened is let go of where it
-        // lands, and the devices in use go on the pump's thread, waited for
-        // a bounded time rather than for ever
-        self.opening = None;
+        // lands, and the devices in use go on the pump's thread, both
+        // waited for a bounded time rather than for ever
         self.stop(Some(self.config.probe_wait));
     }
 }

@@ -1387,6 +1387,8 @@ fn an_attach_returns_at_once_and_the_call_is_carried_while_the_devices_open() {
         changes.contains(&Change::Reopened(Role::Microphone)),
         "{changes:?}"
     );
+    // a tick already under way when the loudspeaker landed still stood in
+    wait_ticks(&engine, 2);
     let without = engine.frames_without_device(Direction::Output);
     wait_ticks(&engine, 5);
     assert_eq!(
@@ -1527,4 +1529,45 @@ fn the_pump_asks_for_the_audio_scheduling_class_from_its_own_thread() {
         engine.deactivate();
         assert_eq!(engine.pump_scheduling(), None);
     }
+}
+
+/// Teardowns held by the fake let go when this does, however a test ends.
+struct Release(FakeControl);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release_teardown();
+    }
+}
+
+/// A call that ends before its devices have answered leaves the open to
+/// let go of them on its own thread, and the next call's open waits for
+/// that too: the platform's one voice unit is not opened beside one an
+/// abandoned open is still letting go of.
+#[test]
+fn the_next_call_waits_for_an_open_the_last_one_abandoned() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    fake.set_open_delay(Some(Duration::from_millis(50)));
+    // let go however the test ends, so that a failing one does not hang
+    let release = Release(fake.clone());
+    fake.hold_teardown();
+    let first = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, first.call()).unwrap();
+    engine.detach(1);
+    // the abandoned open has opened its unit and is held letting it go
+    let started = Instant::now();
+    while fake.units_opened() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never opened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let second = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(2, second.call()).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(fake.units_opened(), 1, "opened beside the unit still going");
+    drop(release);
+    opened(&mut engine);
+    assert_eq!(fake.units_opened(), 2);
+    assert_eq!(fake.units_at_most(), 1);
 }
