@@ -581,3 +581,190 @@ fn a_service_provider_code_covers_numbers_only_when_the_application_says_so() {
         "{providers:?}"
     );
 }
+
+/// The same INVITE as a new request: another branch, another Call-ID, the
+/// `Identity` it carried left as it was — what someone who captured a signed
+/// call sends again.
+fn replayed(invite: &[u8], tag: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(invite).into_owned();
+    let branch = text
+        .split("branch=")
+        .nth(1)
+        .and_then(|rest| rest.split([';', '\r']).next())
+        .expect("a branch")
+        .to_owned();
+    let call_id = String::from_utf8_lossy(&header(invite, HeaderName::CallId)).into_owned();
+    text.replace(&branch, &format!("z9hG4bK{tag}"))
+        .replace(&call_id, &format!("{tag}@192.0.2.66"))
+        .into_bytes()
+}
+
+/// The verdict `called` reaches on `invite`, its certificate fetched.
+fn verified(
+    called: &mut UserAgent,
+    credentials: &Credentials,
+    invite: &[u8],
+    t0: Instant,
+) -> Arc<CallerVerification> {
+    deliver(called, invite, t0);
+    let (call, _) = wanted(&events(called)).expect("the certificate is wanted");
+    called
+        .stir_certificate(call, Some(credentials.chain.as_bytes()), t0)
+        .expect("the call was waiting");
+    verdict(&events(called)).expect("a verdict")
+}
+
+/// RFC 8224 §12.1: a PASSporT already found valid, presented again in
+/// another request inside its freshness window, is a replay, and the agent
+/// remembers what it verified across calls to say so.
+#[test]
+fn a_passport_verified_once_is_refused_when_it_comes_again() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite(&credentials, t0);
+
+    let (mut verifier, _) = called(&credentials, true, StirVerification::Report, t0);
+    let first = verified(&mut verifier, &credentials, &invite, t0);
+    assert_eq!(first.outcome, VerificationOutcome::Valid, "{first:?}");
+
+    let again = verified(&mut verifier, &credentials, &replayed(&invite, "again"), t0);
+    assert_eq!(again.outcome, VerificationOutcome::Invalid);
+    assert_eq!(again.failure, Some(VerificationFailure::Stale));
+    let detail = again.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("already verified"), "{detail}");
+
+    // another agent has seen nothing, and finds it valid
+    let (mut elsewhere, _) = called(&credentials, true, StirVerification::Report, t0);
+    let fresh = verified(
+        &mut elsewhere,
+        &credentials,
+        &replayed(&invite, "again"),
+        t0,
+    );
+    assert_eq!(fresh.outcome, VerificationOutcome::Valid);
+}
+
+/// A strict account refuses the replay with RFC 8224 §6.2.2's 403 Stale
+/// Date, as it would a PASSporT too old.
+#[test]
+fn a_strict_account_refuses_a_replayed_passport_403() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let invite = signed_invite(&credentials, t0);
+
+    let (mut called, _) = called(&credentials, true, StirVerification::Strict, t0);
+    let first = verified(&mut called, &credentials, &invite, t0);
+    assert_eq!(first.outcome, VerificationOutcome::Valid);
+    transmits(&mut called);
+
+    let again = verified(&mut called, &credentials, &replayed(&invite, "again"), t0);
+    assert!(again.refused);
+    assert_eq!(refusal(&mut called), "SIP/2.0 403 Stale Date");
+}
+
+/// The memory is the size the configuration names: with room for one, a
+/// second PASSporT verified pushes the first out, and the first verifies
+/// again; a configuration that keeps the size keeps what was remembered.
+#[test]
+fn the_agent_remembers_as_many_passports_as_it_is_told() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    let one = signed_invite(&credentials, t0);
+    // signed a second later: another PASSporT, in a request of its own
+    let other = {
+        let mut caller = agent(t0);
+        caller.set_wall_clock(t0, wall(&credentials) + 1);
+        let id = caller.add_account(caller_account(&credentials));
+        caller
+            .call(
+                id,
+                &OutgoingCall::new(uri(&format!("sip:{CALLED}@example.com"))),
+                t0,
+            )
+            .expect("a signed call goes");
+        replayed(&sent(&mut caller), "other")
+    };
+    let anchors = || {
+        let mut trusted = TrustAnchors::new();
+        trusted
+            .add(credentials.anchor.as_bytes())
+            .expect("the test root");
+        trusted
+    };
+
+    let (mut called, _) = called(&credentials, true, StirVerification::Report, t0);
+    called.set_stir(StirConfig::new(anchors()).remember(1));
+    let first = verified(&mut called, &credentials, &one, t0);
+    assert_eq!(first.outcome, VerificationOutcome::Valid);
+    // the same size again keeps what it holds
+    called.set_stir(StirConfig::new(anchors()).remember(1));
+    let replay = verified(&mut called, &credentials, &replayed(&one, "kept"), t0);
+    assert_eq!(replay.failure, Some(VerificationFailure::Stale));
+
+    let second = verified(&mut called, &credentials, &other, t0);
+    assert_eq!(second.outcome, VerificationOutcome::Valid, "{second:?}");
+    let pushed_out = verified(&mut called, &credentials, &replayed(&one, "late"), t0);
+    assert_eq!(
+        pushed_out.outcome,
+        VerificationOutcome::Valid,
+        "{pushed_out:?}"
+    );
+}
+
+/// RFC 8224 §8.3 under a dialling plan: a call placed to a national number
+/// is signed for its international form, and the verifier reading the same
+/// national number under the same plan finds the PASSporT names it. Without
+/// the plan the verifier reads the number as written, and it is not the one
+/// signed.
+#[test]
+fn a_dialling_plan_puts_a_national_number_in_international_form_both_ways() {
+    let t0 = Instant::now();
+    let credentials = credentials(&[CALLER]);
+    // the North American plan, for ten-digit numbers
+    let plan =
+        || crate::NumberPlan::new(|number| (number.len() == 10).then(|| format!("1{number}")));
+    let national = "sip:2125551213@example.com";
+
+    let mut caller = agent(t0);
+    caller.set_wall_clock(t0, wall(&credentials));
+    caller.set_number_plan(Some(plan()));
+    let id = caller.add_account(caller_account(&credentials));
+    caller
+        .call(id, &OutgoingCall::new(uri(national)), t0)
+        .expect("a signed call goes");
+    let invite = sent(&mut caller);
+    let claims = signed_claims(&invite);
+    assert!(
+        claims.contains(&format!("\"tn\":[\"{CALLED}\"]")),
+        "signed for the international number: {claims}"
+    );
+
+    let (mut planned, _) = called(&credentials, true, StirVerification::Report, t0);
+    planned.set_number_plan(Some(plan()));
+    let valid = verified(&mut planned, &credentials, &invite, t0);
+    assert_eq!(valid.outcome, VerificationOutcome::Valid, "{valid:?}");
+
+    let (mut unplanned, _) = called(&credentials, true, StirVerification::Report, t0);
+    let mismatched = verified(&mut unplanned, &credentials, &invite, t0);
+    assert_eq!(
+        mismatched.failure,
+        Some(VerificationFailure::DestMismatch),
+        "{mismatched:?}"
+    );
+}
+
+#[test]
+fn a_number_plan_converts_only_what_is_not_international_already() {
+    let plan = crate::NumberPlan::new(|number| {
+        number
+            .strip_prefix('0')
+            .map(|national| format!("40{national}"))
+    });
+    let tn = |written: &str| plan.canonical(written).map(|tn| tn.as_str().to_owned());
+    assert_eq!(tn("0721 234 567").as_deref(), Some("40721234567"));
+    assert_eq!(tn("+40 721 234 567").as_deref(), Some("40721234567"));
+    assert_eq!(tn("1001").as_deref(), Some("1001"), "the plan kept it");
+    assert_eq!(tn("alice"), None);
+    let wrong = crate::NumberPlan::new(|_| Some("not a number".to_owned()));
+    assert_eq!(wrong.canonical("0721234567"), None);
+}

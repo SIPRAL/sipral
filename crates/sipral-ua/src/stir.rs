@@ -52,8 +52,8 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::OutgoingResponse;
 use sipral_core::msg::{HeaderName, OwnedMessage, RawMessage, StatusCode, Uri, UriRef, UriScheme};
 use sipral_stir::{
-    Attest, Claims, Config, Dest, Failure, InfoProblem, OrigId, Pending, Shaken, Signer, Tn,
-    TrustAnchors, Verdict, Verified, Verifier,
+    Attest, Claims, Config, Dest, Failure, InfoProblem, OrigId, Pending, ReplayCache, Shaken,
+    Signer, Tn, TrustAnchors, Verdict, Verified, Verifier,
 };
 
 use crate::call::{IDENTITY, SignedHeaders};
@@ -70,15 +70,62 @@ use crate::{AccountId, CallEndReason, CallHandle, CallIdentity, UaError, UaEvent
 /// and kept under the five a person waits for a ring before redialling.
 pub const DEFAULT_CERTIFICATE_WAIT: Duration = Duration::from_secs(4);
 
+/// How a number written without a leading `+` becomes one in international
+/// form, for the canonical form of RFC 8224 §8.3 — the deployment's dialling
+/// plan, which this stack cannot guess.
+///
+/// Handed a number with its visual separators already gone (`0721234567`
+/// for `0721 234 567`), the plan gives back the number in international form
+/// (`40721234567`), or `None` to keep it as written, which §8.3 allows when
+/// an implementation "cannot determine how to convert the number". A number
+/// written with `+` is international already and the plan is not asked. What
+/// it gives back is held to the same rules as any number, and one that is not
+/// a number leaves the URI with none.
+///
+/// The agent applies it everywhere it reads a number for STIR
+/// ([`UserAgent::set_number_plan`]): the calling and called numbers of a
+/// request it verifies, and the called number of a call it signs. Signer and
+/// verifier have to convert alike, or the number one signs is not the number
+/// the other checks.
+#[derive(Clone)]
+pub struct NumberPlan(Arc<Conversion>);
+
+/// The function a [`NumberPlan`] is.
+type Conversion = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+impl NumberPlan {
+    /// A plan given as a function from a national or dialled number to its
+    /// international form.
+    #[must_use]
+    pub fn new(plan: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(plan))
+    }
+
+    /// The canonical number `written` is under this plan (RFC 8224 §8.3), or
+    /// `None` when it is not a number ([`Tn::canonical_with`]).
+    #[must_use]
+    pub fn canonical(&self, written: &str) -> Option<Tn> {
+        Tn::canonical_with(written, |number| (self.0)(number)).ok()
+    }
+}
+
+impl fmt::Debug for NumberPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NumberPlan")
+    }
+}
+
 /// The verification service's configuration, one per agent: the trust
-/// anchors, how fresh a PASSporT has to be, and how long a call waits for
-/// the application to fetch a certificate.
+/// anchors, how fresh a PASSporT has to be, how long a call waits for the
+/// application to fetch a certificate, and how many verified PASSporTs it
+/// remembers to refuse one presented again.
 #[derive(Clone)]
 pub struct StirConfig {
     pub(crate) anchors: TrustAnchors,
     pub(crate) freshness: u64,
     pub(crate) certificate_wait: Duration,
     pub(crate) accept_service_provider_codes: bool,
+    pub(crate) remembered: usize,
 }
 
 impl StirConfig {
@@ -93,7 +140,21 @@ impl StirConfig {
             freshness: sipral_stir::DEFAULT_FRESHNESS,
             certificate_wait: DEFAULT_CERTIFICATE_WAIT,
             accept_service_provider_codes: false,
+            remembered: sipral_stir::ReplayCache::DEFAULT_CAPACITY,
         }
+    }
+
+    /// How many verified PASSporTs the agent remembers, so that one
+    /// presented again inside its freshness window is refused as a replay
+    /// (RFC 8224 §12.1) — as `Stale`, with a detail that says it was already
+    /// verified. 1024 unless this says otherwise, and at least one; an entry
+    /// is forgotten once its `iat` has left the window anyway. Only a
+    /// PASSporT whose signature verified is remembered, so only a signer the
+    /// anchors trust can fill it.
+    #[must_use]
+    pub const fn remember(mut self, passports: usize) -> Self {
+        self.remembered = passports;
+        self
     }
 
     /// Whether a certificate whose TNAuthList carries a service provider
@@ -134,6 +195,7 @@ impl fmt::Debug for StirConfig {
                 "accept_service_provider_codes",
                 &self.accept_service_provider_codes,
             )
+            .field("remembered", &self.remembered)
             .finish()
     }
 }
@@ -186,12 +248,15 @@ impl StirSigning {
     }
 }
 
-/// The verification service's state: what it was configured with, and the
-/// calls waiting for a certificate.
+/// The verification service's state: what it was configured with, the
+/// calls waiting for a certificate, the PASSporTs it has found valid, and
+/// the dialling plan numbers are read under.
 #[derive(Debug, Default)]
 pub(crate) struct Service {
     config: Option<StirConfig>,
     waiting: HashMap<CallHandle, Waiting>,
+    seen: ReplayCache,
+    plan: Option<NumberPlan>,
 }
 
 /// A call held back until its certificate arrives.
@@ -265,8 +330,26 @@ impl UserAgent {
     ///
     /// The wall clock must be set too ([`UserAgent::set_wall_clock`]): a
     /// verifier with no idea of the time finds every PASSporT stale.
+    ///
+    /// The PASSporTs already found valid are forgotten when the number this
+    /// remembers changes ([`StirConfig::remember`]), and kept otherwise.
     pub fn set_stir(&mut self, config: StirConfig) {
+        let resized = self
+            .stir
+            .config
+            .as_ref()
+            .is_none_or(|old| old.remembered != config.remembered);
+        if resized {
+            self.stir.seen = ReplayCache::new(config.remembered);
+        }
         self.stir.config = Some(config);
+    }
+
+    /// Read every number STIR signs or verifies under `plan` from now on
+    /// ([`NumberPlan`]); `None` keeps a number written without `+` as it is
+    /// written, which is the default.
+    pub fn set_number_plan(&mut self, plan: Option<NumberPlan>) {
+        self.stir.plan = plan;
     }
 
     /// The certificate chain the `info` URL of a call's `Identity` yielded —
@@ -288,9 +371,20 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let waiting = self.stir.waiting.remove(&call).ok_or(UaError::NoSuchCall)?;
         let unix = self.unix_at(now).unwrap_or(0);
+        // RFC 8224 §12.1: a PASSporT already found valid inside its window
+        // is a replay, and is refused as stale
+        let seen = &mut self.stir.seen;
         let verdict = match (chain, self.stir.config.as_ref()) {
-            (Some(chain), Some(config)) => waiting.pending.verify(chain, &config.anchors, unix),
-            (Some(chain), None) => waiting.pending.verify(chain, &TrustAnchors::new(), unix),
+            (Some(chain), Some(config)) => {
+                waiting
+                    .pending
+                    .verify_once(chain, &config.anchors, unix, seen)
+            }
+            (Some(chain), None) => {
+                waiting
+                    .pending
+                    .verify_once(chain, &TrustAnchors::new(), unix, seen)
+            }
             (None, _) => waiting.pending.unavailable(),
         };
         let verification = judged(&verdict, &waiting.held.numbers);
@@ -352,7 +446,11 @@ impl UserAgent {
             .map_or(StirVerification::default(), |config| {
                 config.stir_verification
             });
-        let numbers = numbers_of(&request.as_raw(), identity.as_deref());
+        let numbers = numbers_of(
+            &request.as_raw(),
+            identity.as_deref(),
+            self.stir.plan.as_ref(),
+        );
         let held = Held {
             account,
             mode,
@@ -543,7 +641,8 @@ impl UserAgent {
         let iat = self.unix_at(now).ok_or(UaError::NoWallClock)?;
         // a name rather than a number is signed as the canonical URI of RFC
         // 8224 §8.5, which is what the verifier derives from its To
-        let dest = number_of(target).map_or_else(|| Dest::uri(target.as_str()), Dest::tn);
+        let dest = number_of(target, self.stir.plan.as_ref())
+            .map_or_else(|| Dest::uri(target.as_str()), Dest::tn);
         let claims = Claims {
             orig: signing.orig.clone(),
             dest,
@@ -613,14 +712,22 @@ const fn attestation_of(attest: Attest) -> Attestation {
 
 /// The numbers a request names, canonical: the caller the application will
 /// be shown — the asserted identity from a trusted peer, otherwise `From` —
-/// and who the request is for, from `To` and the Request-URI.
-fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numbers {
+/// and who the request is for, from `To` and the Request-URI — each number
+/// under the agent's dialling plan.
+fn numbers_of(
+    request: &RawMessage<'_>,
+    identity: Option<&CallIdentity>,
+    plan: Option<&NumberPlan>,
+) -> Numbers {
     let asserted = identity
         .map(|identity| &identity.caller.asserted)
         .and_then(|asserted| {
-            asserted
-                .iter()
-                .find_map(|party| Uri::parse(&party.uri).ok().as_ref().and_then(number_of))
+            asserted.iter().find_map(|party| {
+                Uri::parse(&party.uri)
+                    .ok()
+                    .as_ref()
+                    .and_then(|uri| number_of(uri, plan))
+            })
         });
     let from = || {
         request
@@ -628,7 +735,7 @@ fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numb
             .ok()
             .and_then(|from| Uri::parse(from.uri_bytes()).ok())
             .as_ref()
-            .and_then(number_of)
+            .and_then(|uri| number_of(uri, plan))
     };
     let to = request
         .to()
@@ -639,7 +746,7 @@ fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numb
         .and_then(|uri| Uri::parse(uri).ok());
     let mut called = Vec::new();
     for uri in [to, target].iter().flatten() {
-        for named in called_of(uri) {
+        for named in called_of(uri, plan) {
             if !called.contains(&named) {
                 called.push(named);
             }
@@ -655,9 +762,9 @@ fn numbers_of(request: &RawMessage<'_>, identity: Option<&CallIdentity>) -> Numb
 /// SIP or SIPS URI also as the canonical URI of RFC 8224 §8.5, since a
 /// signer that did not take its user part for a number (§8.1 leaves that to
 /// local policy) signed the URI instead.
-fn called_of(uri: &Uri) -> Vec<Called> {
+fn called_of(uri: &Uri, plan: Option<&NumberPlan>) -> Vec<Called> {
     let mut called = Vec::new();
-    if let Some(number) = number_of(uri) {
+    if let Some(number) = number_of(uri, plan) {
         called.push(Called::Number(number));
     }
     if matches!(uri.scheme(), UriScheme::Sip | UriScheme::Sips) {
@@ -669,8 +776,10 @@ fn called_of(uri: &Uri) -> Vec<Called> {
 /// The telephone number a URI names, canonical (RFC 8224 §8.1, §8.3): a
 /// `tel:` URI's number, or a SIP URI's user part when it is made of digits
 /// and visual separators — `user=phone` or not, which §8.1 leaves to local
-/// policy, since a PBX's extensions are numbers without it.
-pub(crate) fn number_of(uri: &Uri) -> Option<Tn> {
+/// policy, since a PBX's extensions are numbers without it. A number
+/// written without `+` is put in international form by `plan` when there
+/// is one (§8.3).
+pub(crate) fn number_of(uri: &Uri, plan: Option<&NumberPlan>) -> Option<Tn> {
     let written = match uri.as_uri_ref() {
         UriRef::Sip(sip) => sip.user?,
         UriRef::Other {
@@ -682,7 +791,10 @@ pub(crate) fn number_of(uri: &Uri) -> Option<Tn> {
     // a telephone-subscriber's own parameters follow the number (RFC 3966
     // §3), in a SIP user part as in a tel URI
     let number = written.split(';').next().unwrap_or(written);
-    Tn::canonical(number).ok()
+    match plan {
+        Some(plan) => plan.canonical(number),
+        None => Tn::canonical(number).ok(),
+    }
 }
 
 /// A verdict as the call carries it, the request's own numbers held
@@ -958,7 +1070,7 @@ mod tests {
     #[test]
     fn a_number_is_read_out_of_a_tel_uri_or_a_numeric_user_part() {
         let tn = |text: &str| {
-            number_of(&Uri::parse_str(text).expect("a URI")).map(|tn| tn.as_str().to_owned())
+            number_of(&Uri::parse_str(text).expect("a URI"), None).map(|tn| tn.as_str().to_owned())
         };
         assert_eq!(tn("tel:+1-215-555-1212").as_deref(), Some("12155551212"));
         assert_eq!(

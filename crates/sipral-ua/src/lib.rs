@@ -161,7 +161,7 @@ pub use runtime::{Control, Handler, Runtime};
 pub use screening::{Incoming, Rate, RateError, Refusals, Replacing, Screen, Screening};
 pub use session::Hold;
 #[cfg(feature = "stir")]
-pub use stir::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
+pub use stir::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 pub use subscription::{
     DEFAULT_EXPIRES, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState,
 };

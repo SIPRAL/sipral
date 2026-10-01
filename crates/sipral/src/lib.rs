@@ -340,9 +340,11 @@ pub use sipral_ua::{
 /// verifier with [`CertificatePin::check`].
 pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
 /// STIR/SHAKEN in calls: what an account signs with, and what the agent
-/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`].
+/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`] —
+/// and the dialling plan numbers are read under,
+/// [`UserAgent::set_number_plan`].
 #[cfg(feature = "stir")]
-pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, StirConfig, StirSigning};
+pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
