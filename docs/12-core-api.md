@@ -1473,6 +1473,73 @@ is told which one survived. Placing a call mints the first before any dialog
 exists — there has to be something to cancel with — and the first early dialog
 adopts it; each one after that is a sibling.
 
+## The Rust surface under ABI 0.34 and 0.35
+
+What a Rust application reaches without the C ABI, crate by crate, for what
+the last two minors added; each C entry point named is the projection of it.
+
+**`sipral_core::endpoint::locate`** (RFC 3263). `Locator::new(&uri, protocol,
+family, naptr, seed)` starts locating a URI's server for one transport and
+address family; `poll_query()` hands out the next DNS question (`Query`:
+name and `RecordType`), `answer(&query, Answer)` takes what the resolver
+found (`Answer::Records`, `Nothing`, `Failed`), and `outcome()` /
+`take_outcome()` give `Located` (the ordered `targets`, the shortest `ttl`)
+or a `LocateError`. It asks no network itself: the questions are the
+caller's to answer, as `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and
+`sipral_account_looked_up` are in C. `AddressFamily::of(address)` picks the
+family of a bound transport. `Endpoint::unreached`, `send_elsewhere` and
+`forget_unreached` (above, "Endpoint operations") carry §4.3's failover;
+`Endpoint::transport_to(protocol, destination)` finds a bound transport of a
+protocol that reaches an address.
+
+**`sipral_core::pin`**. `CertificatePin::parse(text)` reads a SHA-256
+fingerprint in every form the tools print — bare or colon hex, colons and
+spaces ignored, after `sha256 Fingerprint=`, `SHA256 Fingerprint=`,
+`sha-256 ` or `SHA256=` in any case — and `check(leaf_der, unix_now)` gives
+the pinned certificate's dates or a `PinMismatch`, in constant time
+(`docs/22-tls.md`; `sipral_account_check_certificate` in C).
+
+**`sipral_ua::Account`**, built and then refined:
+
+- `Account::located(aor, registrar, contact, transport)` — an account whose
+  server is a URI RFC 3263 locates, rather than an address; its REGISTER
+  waits for the first answer, and every request outside a dialog to it fails
+  over to the next address (`server_uri` in C). `UserAgent::located_targets`
+  reads where it was found.
+- `.keepalive(every)` — keep the account's flow to its server open at that
+  interval whatever STUN found, 1 to 120 seconds; `keepalive_interval()`
+  reads it back (`keepalive_ms`).
+- `.tls_pin(pin)` — the one certificate the account's TLS server is trusted
+  by; `pinned_certificate()` reads it back (`tls_pin_sha256`).
+- `.on_stream(protocol)` — the account's requests go over a TCP or TLS
+  connection of its own to its server, which the agent asks the
+  application to open (`Event::TransportWanted`, nothing outgrown) and
+  adopts once it is bound under any number; until then a REGISTER waits and
+  a call is refused, and a lost connection is asked for again at once
+  (`sipral_ua::flow`; `stream_protocol` in C). Incoming requests are matched
+  to an account by the transport they arrived on and the server they came
+  from (`docs/04-ua.md`).
+
+**`sipral::route`**. `advertised_address(bound, peer)` — the address a
+socket bound on every interface is reached at by `peer`: the source address
+of the operating system's route toward it, with the socket's port, and
+`AdvertiseError::Loopback` rather than a loopback address advertised to a
+peer elsewhere (`sipral_advertised_address`).
+
+**`sipral_audio::Engine`** (device mode):
+
+- `Config::system_echo_cancellation` — whether the platform's own echo
+  cancellation runs behind the microphone, on by default;
+  `Info::system_echo_cancellation` says what the platform did
+  (`sipral_stack_config_t::system_echo_cancellation`).
+- `set_call_gain`, `call_gain`, `set_call_muted`, `call_muted` and
+  `call_level` take a call's `CallId` and a `Direction` and do for one call
+  what the stack-wide controls do for all of them, in the mix; each answers
+  `false` or `None` for a call the engine is not carrying
+  (`sipral_audio_call_*`, `SIPRAL_STATUS_WRONG_STATE`). A call's controls are
+  made at its first attach, kept across a detach, and dropped by
+  `forget_call`.
+
 ## Projection onto C
 
 - Handles: the C ABI is built over `sipral-ua`, so no transaction or dialog

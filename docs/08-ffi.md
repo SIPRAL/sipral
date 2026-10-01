@@ -3305,6 +3305,11 @@ whole now, after `sipral_stack_diagnostic_trace`; and
   diagnostic trace ends lines at CRLF, LF or a bare CR and does not let
   `Authorization\0:`-style names past (`docs/17-observability.md`).
 
-**In the layers.** Nothing yet: every binding is regenerated from the new
-declarations and every layer builds and passes as before, and the idiomatic
-spellings come with the layers' own step.
+**In the layers.** Every idiomatic layer spells the four: an account's
+stream protocol, opened by the layer when the stack asks and held to the
+account's pin for TLS; a call's own gain, mute and meter beside the
+engine's stack-wide ones (Swift, Kotlin, .NET, Python and React Native — the
+Dart layer runs every call's audio in the application, where there is no
+engine to ask); the echo switch at creation; and the settings read back,
+the suites as `sipral_srtp_suite_t` values in order. Each layer's README says
+how.
