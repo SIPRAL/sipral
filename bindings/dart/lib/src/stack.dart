@@ -242,7 +242,8 @@ final class SipralStack {
   /// the domain for NAPTR records before SRV (RFC 3263 §4.1). [keepaliveMs]
   /// keeps the account's flow to its server open at that interval -- a
   /// double CRLF -- 1 000 to 120 000, 0 for never. [tlsPin] is the SHA-256
-  /// fingerprint of the one TLS certificate the account trusts, for an
+  /// fingerprint of the one TLS certificate the account trusts, in any form
+  /// [sipralPinDigest] reads and an [ArgumentError] for any other, for an
   /// application that runs the account's TLS itself:
   /// [SipralAccount.checkCertificate] is its verdict.
   SipralAccount addAccount(
@@ -279,7 +280,16 @@ final class SipralStack {
         contact ?? _defaultContact(aor, advertised ?? bindAddress),
       );
       final serverText = _text(arena, serverUri);
-      final pinText = _text(arena, tlsPin);
+      // read here, in every form [sipralPinDigest] takes, and handed over
+      // as the bare digits every library takes
+      final pinText = _text(
+        arena,
+        tlsPin == null
+            ? null
+            : sipralPinDigest(
+              tlsPin,
+            ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(),
+      );
       final user = _text(arena, authUser);
       final password = _text(arena, authPassword);
       final display = _text(arena, displayName);
@@ -338,10 +348,10 @@ final class SipralStack {
       if (address != bindAddress) {
         using((arena) {
           final local = _text(arena, address);
-          _check(
+          _checkNow(
             _sipral,
             'sipral_stack_transport_bind',
-            _sipral.stackTransportBind(
+            () => _sipral.stackTransportBind(
               _handle,
               Sipral.transportMain,
               SipralTransport.udp,
@@ -401,16 +411,18 @@ final class SipralStack {
         answer.records.isEmpty ? null : answer.records.join(','),
       );
       // an account removed while the resolver ran is let go of quietly
-      _sipral.accountLookedUp(
-        _handle,
-        account,
-        nameText.$1,
-        nameText.$2,
-        record,
-        answer.answer,
-        records.$1,
-        records.$2,
-        nowMs(),
+      retryingClockBehind(
+        () => _sipral.accountLookedUp(
+          _handle,
+          account,
+          nameText.$1,
+          nameText.$2,
+          record,
+          answer.answer,
+          records.$1,
+          records.$2,
+          nowMs(),
+        ),
       );
     });
     _poll();
@@ -434,10 +446,10 @@ final class SipralStack {
     using((arena) {
       final remote = _text(arena, target);
       final contact = _text(arena, _defaultContact(account.aor, advertised));
-      _check(
+      _checkNow(
         _sipral,
         'sipral_account_rebind',
-        _sipral.accountRebind(
+        () => _sipral.accountRebind(
           _handle,
           handle,
           Sipral.transportMain,
@@ -546,10 +558,11 @@ final class SipralStack {
           ..destination = destinationText.$1
           ..destinationLen = destinationText.$2;
         final out = arena<SipralHandle>();
-        _check(
+        _checkNow(
           _sipral,
           'sipral_call_place',
-          _sipral.callPlace(_handle, account.handle, config, out, nowMs()),
+          () =>
+              _sipral.callPlace(_handle, account.handle, config, out, nowMs()),
         );
         return out.value;
       });
@@ -600,10 +613,10 @@ final class SipralStack {
     try {
       using((arena) {
         final text = _text(arena, mediaAddress);
-        _check(
+        _checkNow(
           _sipral,
           'sipral_call_answer_media',
-          _sipral.callAnswerMedia(
+          () => _sipral.callAnswerMedia(
             _handle,
             incoming.call,
             text.$1,
@@ -624,10 +637,10 @@ final class SipralStack {
   /// Refuse the `SipralEventKind.incomingCall` [incoming] with [code].
   void rejectCall(SipralStackEvent incoming, {int code = 486}) {
     _ensureOpen();
-    _check(
+    _checkNow(
       _sipral,
       'sipral_call_reject',
-      _sipral.callReject(_handle, incoming.call, code, nowMs()),
+      () => _sipral.callReject(_handle, incoming.call, code, nowMs()),
     );
     _poll();
   }
@@ -695,16 +708,18 @@ final class SipralStack {
       _received.asTypedList(length).setAll(0, datagram.data.take(length));
       final from = utf8.encode(_formatAddress(datagram.address, datagram.port));
       _from.asTypedList(from.length).setAll(0, from);
-      _sipral.stackReceiveDatagram(
-        _handle,
-        Sipral.transportMain,
-        _received,
-        length,
-        _from.cast(),
-        from.length,
-        ffi.nullptr,
-        0,
-        nowMs(),
+      retryingClockBehind(
+        () => _sipral.stackReceiveDatagram(
+          _handle,
+          Sipral.transportMain,
+          _received,
+          length,
+          _from.cast(),
+          from.length,
+          ffi.nullptr,
+          0,
+          nowMs(),
+        ),
       );
     }
     _poll();

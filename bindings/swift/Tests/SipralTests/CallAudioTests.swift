@@ -329,10 +329,7 @@ final class CallAudioTests: XCTestCase {
         rig.audio.start()
         rig.audio.pause(.held)
         rig.audio.close()
-        var seen: [CallAudioTransition] = []
-        for await transition in reader {
-            seen.append(transition)
-        }
+        let seen = await drain(reader)
         XCTAssertEqual(seen.last, .stopped)
         XCTAssertTrue(seen.contains(.paused([.held])))
     }

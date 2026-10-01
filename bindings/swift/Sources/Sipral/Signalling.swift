@@ -34,41 +34,44 @@ public enum TLSTrust: Sendable {
     case pinnedCertificate([UInt8])
 
     /// The one certificate whose SHA-256 fingerprint is `fingerprint`,
-    /// written as `openssl x509 -fingerprint -sha256` or RFC 8122 prints it:
-    /// 64 hexadecimal digits, either case, a colon between each byte or
-    /// none, optionally after `sha-256 ` or `SHA256=`. Anything else throws
-    /// `.invalidArgument`.
+    /// written as `openssl x509 -fingerprint -sha256` (`sha256
+    /// Fingerprint=`, or `SHA256 Fingerprint=` before OpenSSL 3) or RFC 8122
+    /// prints it: 64 hexadecimal digits, either case, colons and spaces
+    /// between them ignored, optionally after `sha-256 `, `SHA256=` or
+    /// `SHA256 Fingerprint=`, in any case. Anything else throws
+    /// `.invalidArgument`; `bindings/fixtures/pin-forms.txt` lists what every
+    /// layer takes.
     public static func pinned(_ fingerprint: String) throws -> TLSTrust {
         .pinnedCertificate(try pinDigest(fingerprint))
     }
 
+    /// The prefixes a fingerprint may come after, lower case.
+    private static let pinPrefixes = ["sha256 fingerprint=", "sha-256 ", "sha256="]
+
     /// The 32 bytes a fingerprint names, in any form `pinned(_:)` takes.
     public static func pinDigest(_ fingerprint: String) throws -> [UInt8] {
-        let refused = SipralError(
-            status: .invalidArgument, message: "a certificate pin is 32 bytes of hexadecimal, colons between them or not"
-        )
         var text = Substring(fingerprint.trimmingWhitespace())
-        if let split = text.firstIndex(where: { $0 == " " || $0 == "=" }) {
-            let named = text[text.startIndex..<split].lowercased().filter { $0 != "-" && $0 != "_" }
-            guard named == "sha256" else {
-                throw SipralError(status: .invalidArgument, message: "a certificate pin is a SHA-256 fingerprint")
+        let lowered = text.lowercased()
+        if let prefix = pinPrefixes.first(where: { lowered.hasPrefix($0) }) {
+            text = text.dropFirst(prefix.count)
+        }
+        let digits = Array(text.unicodeScalars.filter { $0 != ":" && $0 != " " })
+        let values = digits.compactMap { $0.properties.isASCIIHexDigit ? UInt8($0.value) : nil }
+        guard digits.count == 64, values.count == 64 else {
+            throw SipralError(
+                status: .invalidArgument,
+                message: "a certificate pin is a SHA-256 fingerprint: 64 hexadecimal digits, "
+                    + "optionally after sha-256, SHA256= or SHA256 Fingerprint="
+            )
+        }
+        func nibble(_ ascii: UInt8) -> UInt8 {
+            switch ascii {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"): return ascii - UInt8(ascii: "0")
+            case UInt8(ascii: "a")...UInt8(ascii: "f"): return ascii - UInt8(ascii: "a") + 10
+            default: return ascii - UInt8(ascii: "A") + 10
             }
-            text = Substring(String(text[text.index(after: split)...]).trimmingWhitespace())
         }
-        let characters = Array(text)
-        let colons = characters.contains(":")
-        if colons {
-            guard characters.count == 95,
-                  characters.indices.allSatisfy({ ($0 % 3 == 2) == (characters[$0] == ":") }) else { throw refused }
-        }
-        let digits = characters.filter { $0 != ":" }
-        guard digits.count == 64 else { throw refused }
-        var digest: [UInt8] = []
-        for at in stride(from: 0, to: 64, by: 2) {
-            guard let byte = UInt8(String(digits[at...at + 1]), radix: 16) else { throw refused }
-            digest.append(byte)
-        }
-        return digest
+        return stride(from: 0, to: 64, by: 2).map { nibble(values[$0]) << 4 | nibble(values[$0 + 1]) }
     }
 }
 

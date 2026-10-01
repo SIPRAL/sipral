@@ -70,10 +70,13 @@ sealed class SipralTlsTrust {
 
     /**
      * The one certificate whose SHA-256 fingerprint is [fingerprint], and
-     * nothing else, written as `openssl x509 -fingerprint -sha256` or RFC
-     * 8122 prints it: 64 hexadecimal digits, either case, a colon between
-     * each byte or none, optionally after `sha-256 ` or `SHA256=`; anything
-     * else throws [IllegalArgumentException]. The fingerprint is the whole
+     * nothing else, written as `openssl x509 -fingerprint -sha256` (`sha256
+     * Fingerprint=`, or `SHA256 Fingerprint=` before OpenSSL 3) or RFC 8122
+     * prints it: 64 hexadecimal digits, either case, colons and spaces
+     * between them ignored, optionally after `sha-256 `, `SHA256=` or
+     * `SHA256 Fingerprint=`, in any case; anything else throws
+     * [IllegalArgumentException] (`bindings/fixtures/pin-forms.txt` lists
+     * what every layer takes). The fingerprint is the whole
      * verdict: no authority, host name or date is consulted, and a
      * certificate with any other fingerprint is refused as untrusted
      * (`docs/22-tls.md`). Compared in constant time, over the DER bytes of
@@ -88,20 +91,20 @@ sealed class SipralTlsTrust {
         /** The 32 bytes a fingerprint names, in any form [Pinned] takes. */
         fun pinDigest(fingerprint: String): ByteArray {
             var text = fingerprint.trim()
-            val split = text.indexOfFirst { it == ' ' || it == '=' }
-            if (split >= 0) {
-                val named = text.substring(0, split).trim().lowercase().replace("-", "").replace("_", "")
-                require(named == "sha256") { "a certificate pin is a SHA-256 fingerprint" }
-                text = text.substring(split + 1).trim()
+            val prefix = PIN_PREFIXES.firstOrNull { text.lowercase().startsWith(it) }
+            if (prefix != null) {
+                text = text.substring(prefix.length)
             }
-            val placed = !text.contains(':') ||
-                (text.length == 95 && text.withIndex().all { (at, ch) -> (at % 3 == 2) == (ch == ':') })
-            val digits = text.replace(":", "")
-            require(placed && digits.length == 64 && digits.all { it in '0'..'9' || it.lowercaseChar() in 'a'..'f' }) {
-                "a certificate pin is 32 bytes of hexadecimal, colons between them or not"
+            val digits = text.filter { it != ':' && it != ' ' }
+            require(digits.length == 64 && digits.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                "a certificate pin is a SHA-256 fingerprint: 64 hexadecimal digits, " +
+                    "optionally after sha-256, SHA256= or SHA256 Fingerprint="
             }
             return ByteArray(32) { digits.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         }
+
+        /** The prefixes a fingerprint may come after, lower case. */
+        private val PIN_PREFIXES = listOf("sha256 fingerprint=", "sha-256 ", "sha256=")
     }
 
     /** The trust managers a handshake is checked with, the platform's
@@ -488,7 +491,7 @@ internal class SignallingLink(
                 retryBusy(deadlineMs = 5_000) { Sipral.stackReceiveStream(client.handle, 0, bytes, client.nowMs()) }
                 true
             } catch (refused: SipralException) {
-                refused.status == SipralStatus.BUSY
+                refused.status == SipralStatus.BUSY || refused.status == SipralStatus.CLOCK_BEHIND
             }
             if (!kept) {
                 // the framing is lost: the stack retired the transport and

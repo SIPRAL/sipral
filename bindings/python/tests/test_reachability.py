@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import pathlib
 import socket
 import threading
 import time
@@ -256,14 +257,26 @@ class AnAccountKeepsItsFlowOpen(_Case):
 
 class ACertificateIsTrustedByItsFingerprint(unittest.TestCase):
     def test_every_form_an_administrator_copies_is_read(self) -> None:
-        digest = hashlib.sha256(b"a certificate").digest()
-        plain = digest.hex()
-        colons = ":".join(f"{byte:02X}" for byte in digest)
-        for text in (plain, plain.upper(), colons, f"sha-256 {colons}", f"SHA256={colons}", f"  {plain}  "):
-            self.assertEqual(parse_pin(text), digest, text)
-        for text in (plain[:-2], f"sha-1 {colons}", colons.replace(":", "", 1), plain + "00"):
-            with self.assertRaises(ValueError, msg=text):
-                parse_pin(text)
+        """Every line of ``bindings/fixtures/pin-forms.txt``, the list each
+        layer's parser is held to."""
+        listed = pathlib.Path(__file__).resolve().parents[2] / "fixtures" / "pin-forms.txt"
+        digest = b""
+        checked = 0
+        for line in listed.read_text(encoding="utf-8").split("\n"):
+            if not line or line.startswith("#"):
+                continue
+            verdict, _, text = line.partition("\t")
+            if verdict == "digest":
+                digest = bytes.fromhex(text)
+            elif verdict == "accept":
+                self.assertEqual(parse_pin(text), digest, text)
+                checked += 1
+            else:
+                with self.assertRaises(ValueError, msg=text):
+                    parse_pin(text)
+                checked += 1
+        self.assertEqual(len(digest), 32)
+        self.assertGreater(checked, 20)
 
     def test_the_accounts_pin_decides_on_the_certificate_a_server_presented(self) -> None:
         certificate = b"the DER bytes of a leaf"

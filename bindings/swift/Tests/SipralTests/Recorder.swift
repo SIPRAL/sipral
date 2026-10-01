@@ -3,6 +3,7 @@
 
 import Dispatch
 import Foundation
+import XCTest
 
 /// Whether `condition` came true within `seconds`, checked every 10 ms.
 func eventually(within seconds: Double, _ condition: () async -> Bool) async -> Bool {
@@ -93,5 +94,40 @@ final class Recorder<Element: Sendable>: @unchecked Sendable {
             if matching >= count || DispatchTime.now() >= deadline { return matching }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+}
+
+/// The first element of `stream` that `predicate` accepts, or `nil` once
+/// `seconds` have passed with none: a `for await` that cannot hang a test
+/// when what it waits for never comes.
+func firstOne<Element: Sendable>(
+    of stream: AsyncStream<Element>, within seconds: Double = 5,
+    where predicate: @escaping (Element) -> Bool = { _ in true }
+) async -> Element? {
+    await Recorder(stream).first(within: seconds, where: predicate)
+}
+
+/// The first element of `stream` that `predicate` accepts, read by a loop
+/// that ends there -- or, once `seconds` have passed with none, `nil`, the
+/// loop cancelled. Unlike `firstOne(of:within:where:)` the reader is gone
+/// afterwards either way, for a test that counts a call's readers.
+func firstOrGiveUp<Element: Sendable>(
+    _ stream: AsyncStream<Element>, within seconds: Double,
+    where predicate: @escaping @Sendable (Element) -> Bool = { _ in true }
+) async -> Element? {
+    await withTaskGroup(of: Element?.self) { group in
+        group.addTask {
+            for await element in stream where predicate(element) {
+                return element
+            }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            return nil
+        }
+        let found = await group.next() ?? nil
+        group.cancelAll()
+        return found
     }
 }

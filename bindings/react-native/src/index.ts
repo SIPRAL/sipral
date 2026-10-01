@@ -27,6 +27,7 @@ export type {
 } from './client';
 export {SipralError} from './errors';
 export type {SipralErrorCode} from './errors';
+export {pinDigest} from './pin';
 export {TypedEmitter} from './emitter';
 export type {Subscription} from './emitter';
 export type {NativeEvent, Spec as NativeSipralSpec} from './NativeSipral';

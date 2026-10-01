@@ -5,7 +5,7 @@
 
 ``Stack``, ``Account`` and ``Call`` are the layer an application is meant
 to use -- built with `cffi` in ABI mode against the same declarations the
-C header, Swift, .NET and Kotlin bindings are printed from
+C header, Swift, .NET, Kotlin and Dart bindings are printed from
 (`docs/08-ffi.md`), so installing this package needs no C compiler and no
 second source of truth for what the library exports. ``sipral._sipral_cffi``
 is that raw layer (``ffi``/``lib``); reach for it directly only for

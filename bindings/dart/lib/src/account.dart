@@ -102,10 +102,10 @@ final class SipralAccount {
   /// Start registering, and keep the binding refreshed.
   void register() {
     stack._ensureOpen();
-    _check(
+    _checkNow(
       stack._sipral,
       'sipral_account_register',
-      stack._sipral.accountRegister(stack.handle, handle, stack.nowMs()),
+      () => stack._sipral.accountRegister(stack.handle, handle, stack.nowMs()),
     );
     stack._poll();
   }
@@ -132,10 +132,11 @@ final class SipralAccount {
   /// Remove the binding, and stop refreshing it.
   void unregister() {
     stack._ensureOpen();
-    _check(
+    _checkNow(
       stack._sipral,
       'sipral_account_unregister',
-      stack._sipral.accountUnregister(stack.handle, handle, stack.nowMs()),
+      () =>
+          stack._sipral.accountUnregister(stack.handle, handle, stack.nowMs()),
     );
     stack._poll();
   }

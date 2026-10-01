@@ -350,6 +350,19 @@ private suspend fun everything(): String {
         assertTrue(callA.ended)
         assertTrue(callB.ended)
 
+        // The end-of-call record is kept on the call, right after its end,
+        // and is what the media answers once the library has nothing left.
+        withTimeout(15_000) {
+            while (callA.finalStatistics == null) {
+                delay(20)
+            }
+        }
+        val record = assertNotNull(callA.finalStatistics)
+        assertTrue(record.packetsSent >= statsA.packetsSent, "the record counts less than was read before the end")
+        val gone = assertFailsWith<SipralException> { Sipral.mediaStatistics(mediaA.handle, clientA.nowMs()) }
+        assertEquals(SipralStatus.WRONG_STATE, gone.status)
+        assertEquals(record.packetsSent, mediaA.statistics().packetsSent)
+
         // The media handle is released on close, and using it afterward is
         // SIPRAL_STATUS_STALE_HANDLE -- not a crash, and not silently
         // ignored, which is the whole point of a handle in the first place

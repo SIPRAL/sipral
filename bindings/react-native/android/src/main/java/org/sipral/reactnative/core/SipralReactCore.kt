@@ -100,7 +100,7 @@ class SipralReactCore(
      * the route toward the far end the Kotlin layer picks. */
     private var mediaHost: String? = null
     private val accounts = ConcurrentHashMap<String, SipralAccount>()
-    private val calls = ConcurrentHashMap<String, SipralCall>()
+    private val calls = SipralCallBook<SipralCall>()
     private val arrived = ConcurrentHashMap<String, SipralEvent>()
     private val transfers = ConcurrentHashMap<String, SipralEvent>()
 
@@ -153,8 +153,7 @@ class SipralReactCore(
         client = null
         scope?.cancel()
         scope = null
-        calls.values.forEach { it.close() }
-        calls.clear()
+        calls.closeAll()
         accounts.clear()
         arrived.clear()
         transfers.clear()
@@ -280,15 +279,21 @@ class SipralReactCore(
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
             arrived.remove(id)
             transfers.remove(id)
-            calls.remove(id)?.close()
+            calls.ended(id)
         }
     }
 
+    /** [call] kept for JavaScript to name -- or closed, when its
+     * `CALL_ENDED` went by before it could be ([SipralCallBook]). */
     private fun keep(call: SipralCall): String {
         val id = call.handle.toString()
-        calls[id] = call
+        calls.keep(id, call, call.ended)
         return id
     }
+
+    /** How many calls are kept, for the module's own check. */
+    internal val keptCalls: Int
+        get() = calls.size
 
     private fun open(): SipralClient = client ?: throw SipralRefusal("closed", "the client is not open")
 

@@ -47,7 +47,7 @@ public enum AudioMode: Sendable, Equatable {
 }
 
 /// One audio device, as `sipral_audio_device_at` lists it.
-public struct AudioDevice: Sendable, Equatable, Identifiable {
+public struct SipralAudioDevice: Sendable, Equatable, Identifiable {
     /// The engine's name for it: stable across refreshes and unplugging,
     /// never reused, never zero -- what `AudioDevices.select` takes, and what
     /// an application saves as a person's choice.
@@ -86,6 +86,12 @@ public struct AudioDevice: Sendable, Equatable, Identifiable {
         role == .microphone ? inputChannels > 0 : outputChannels > 0
     }
 }
+
+/// The name `SipralAudioDevice` had until the package prefixed it: a bare
+/// `AudioDevice` is a name other audio packages an application imports
+/// beside this one use too. Kept for one minor release.
+@available(*, deprecated, renamed: "SipralAudioDevice")
+public typealias AudioDevice = SipralAudioDevice
 
 /// What a role was asked to run on, and what it runs on now: the two differ
 /// while a chosen device is unplugged, when the role runs on the system's
@@ -170,13 +176,13 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     /// `SipralEventKind.audioDevicesChanged`, so this is for a settings
     /// screen opening rather than for polling.
     @discardableResult
-    public func refresh() throws -> [AudioDevice] {
+    public func refresh() throws -> [SipralAudioDevice] {
         _ = try Sipral.audioRefresh(stack: stack.handle)
         return try devices()
     }
 
     /// The list as it stands, present and absent devices alike.
-    public func devices() throws -> [AudioDevice] {
+    public func devices() throws -> [SipralAudioDevice] {
         let count = try Sipral.audioDeviceCount(stack: stack.handle)
         return try (0..<count).map(device(at:))
     }
@@ -185,7 +191,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     /// says it needs: `sipral_audio_device_at` writes the length needed, NUL
     /// counted, even when the name does not fit, which the generated
     /// wrapper, throwing on anything but success, would not hand back.
-    private func device(at index: Int) throws -> AudioDevice {
+    private func device(at index: Int) throws -> SipralAudioDevice {
         var buffer = [CChar](repeating: 0, count: 256)
         var device = sipral_audio_device_t.sized()
         var needed = 0
@@ -206,7 +212,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
             decoding: buffer.prefix(length).map { UInt8(bitPattern: $0) },
             as: UTF8.self
         )
-        return AudioDevice(
+        return SipralAudioDevice(
             id: read.device.id,
             name: name,
             inputChannels: Int(read.device.input_channels),
@@ -236,7 +242,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     }
 
     /// `select(_:for:)` by the device itself.
-    public func select(_ device: AudioDevice?, for role: SipralAudioRole) throws {
+    public func select(_ device: SipralAudioDevice?, for role: SipralAudioRole) throws {
         try select(device?.id, for: role)
     }
 

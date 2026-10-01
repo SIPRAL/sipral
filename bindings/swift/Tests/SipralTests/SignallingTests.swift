@@ -153,13 +153,12 @@ final class SignallingTests: XCTestCase {
     }
 
     private func refusal(_ stack: SipralStack) async throws -> TransportFailedEventData {
-        for await event in stack.events() where event.kind == .transportFailed {
-            XCTAssertFalse(stack.connected)
-            let failed = try XCTUnwrap(event.transportFailedData)
-            XCTAssertEqual(failed.protocolRaw, SipralTransport.tls.rawValue)
-            return failed
-        }
-        throw XCTSkip("the stack closed before it said why")
+        let event = await firstOne(of: stack.events(), within: 10) { $0.kind == .transportFailed }
+        let said = try XCTUnwrap(event, "the stack never said why the connection failed")
+        XCTAssertFalse(stack.connected)
+        let failed = try XCTUnwrap(said.transportFailedData)
+        XCTAssertEqual(failed.protocolRaw, SipralTransport.tls.rawValue)
+        return failed
     }
 
     private func registered(_ account: Account) async throws {
@@ -221,16 +220,35 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(failed.detail?.contains("pinned") == true, failed.detail ?? "")
     }
 
-    func testEveryFormAnAdministratorCopiesIsRead() throws {
-        let digest = Array(SHA256.hash(data: Data("a certificate".utf8)))
-        let plain = digest.map { String(format: "%02x", $0) }.joined()
-        let colons = digest.map { String(format: "%02X", $0) }.joined(separator: ":")
-        for text in [plain, plain.uppercased(), colons, "sha-256 \(colons)", "SHA256=\(colons)", "  \(plain)  "] {
-            XCTAssertEqual(try TLSTrust.pinDigest(text), digest, text)
+    /// Every line of `bindings/fixtures/pin-forms.txt`, the list each
+    /// layer's parser is held to.
+    func testEveryFormAnAdministratorCopiesIsRead(here: String = #filePath) throws {
+        let list = URL(fileURLWithPath: here).deletingLastPathComponent()
+            .appendingPathComponent("../../../fixtures/pin-forms.txt")
+        let lines = try String(contentsOf: list, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
+        var digest: [UInt8] = []
+        var checked = 0
+        for line in lines where !line.hasPrefix("#") && !line.isEmpty {
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            let verdict = String(parts[0])
+            let text = parts.count > 1 ? String(parts[1]) : ""
+            switch verdict {
+            case "digest":
+                digest = stride(from: 0, to: text.count, by: 2).compactMap {
+                    UInt8(String(Array(text)[$0...$0 + 1]), radix: 16)
+                }
+            case "accept":
+                XCTAssertEqual(try TLSTrust.pinDigest(text), digest, text)
+                checked += 1
+            default:
+                XCTAssertThrowsError(try TLSTrust.pinDigest(text), text) { error in
+                    XCTAssertEqual((error as? SipralError)?.status, .invalidArgument, text)
+                }
+                checked += 1
+            }
         }
-        for text in [String(plain.dropLast(2)), "sha-1 \(colons)", String(colons.prefix(2)) + String(colons.dropFirst(3)), plain + "00"] {
-            XCTAssertThrowsError(try TLSTrust.pinDigest(text), text)
-        }
+        XCTAssertEqual(digest.count, 32)
+        XCTAssertGreaterThan(checked, 20)
     }
 
     func testACertificateNoTrustedAuthoritySignedIsUntrusted() async throws {
@@ -327,11 +345,9 @@ final class SignallingTests: XCTestCase {
         try await registered(account)
         let first = stack.bindAddress
         registrar.drop()
-        for await event in events where event.kind == .transportFailed {
-            XCTAssertEqual(event.transportFailedData?.error, .closed)
-            XCTAssertEqual(event.transportFailedData?.protocolRaw, SipralTransport.tcp.rawValue)
-            break
-        }
+        let closed = await firstOne(of: events, within: 10) { $0.kind == .transportFailed }
+        XCTAssertEqual(closed?.transportFailedData?.error, .closed)
+        XCTAssertEqual(closed?.transportFailedData?.protocolRaw, SipralTransport.tcp.rawValue)
         for _ in 0..<200 where !registrar.registers.contains(where: { $0.connection == 2 }) {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -362,10 +378,8 @@ final class SignallingTests: XCTestCase {
                 error: SipralTransportError.timedOut.rawValue, nowMs: stack.nowMs()
             )
         }
-        for await event in events where event.kind == .transportFailed {
-            XCTAssertEqual(event.transportFailedData?.transport, Sipral.transportMain)
-            break
-        }
+        let letGo = await firstOne(of: events, within: 10) { $0.kind == .transportFailed }
+        XCTAssertEqual(letGo?.transportFailedData?.transport, Sipral.transportMain)
         for _ in 0..<200 where !registrar.registers.contains(where: { $0.connection == 2 }) {
             try await Task.sleep(nanoseconds: 50_000_000)
         }

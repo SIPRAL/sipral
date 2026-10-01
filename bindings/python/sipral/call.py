@@ -47,6 +47,13 @@ class Call:
         self._media_address = media_address
         self.media: Media | None = None
         self.ended = False
+        #: What the call's media cost in the end: the record
+        #: `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries, kept from the moment
+        #: it arrives -- right after `SIPRAL_EVENT_KIND_CALL_ENDED` -- and
+        #: ``None`` before that or for a call whose media never started.
+        #: :meth:`sipral.media.Media.statistics` answers with it too once
+        #: the stream is gone.
+        self.final_statistics: dict[str, object] | None = None
         self._suite: SrtpSuite | None = None
 
         #: Every event this call's handle names, decoded whole.
@@ -108,6 +115,12 @@ class Call:
 
         if event.kind == lib.SIPRAL_EVENT_KIND_CALL_ENDED:
             self.ended = True
+
+        record = event.fields.get("statistics")
+        if event.kind == lib.SIPRAL_EVENT_KIND_MEDIA_STATISTICS and record is not None:
+            self.final_statistics = record
+            if self.media is not None:
+                self.media.ended_with(record)
 
         loop = self.stack._loop
         if loop is not None and not loop.is_closed():

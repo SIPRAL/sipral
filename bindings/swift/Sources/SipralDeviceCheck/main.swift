@@ -28,7 +28,7 @@ import Sipral
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-func named(_ variable: String, serving role: SipralAudioRole, in devices: [AudioDevice]) -> AudioDevice? {
+func named(_ variable: String, serving role: SipralAudioRole, in devices: [SipralAudioDevice]) -> SipralAudioDevice? {
     guard let fragment = ProcessInfo.processInfo.environment[variable], !fragment.isEmpty else {
         return nil
     }

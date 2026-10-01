@@ -120,9 +120,10 @@ export interface OpenOptions {
   diagnosticTrace?: boolean;
   /**
    * The SHA-256 fingerprint of the one certificate the TLS connection to
-   * `signallingServer` trusts -- "SHA256=AB:CD:..." as openssl prints it --
-   * for a PBX that signed its own: the whole verdict, no authority or name
-   * consulted.
+   * `signallingServer` trusts -- "SHA256 Fingerprint=AB:CD:..." as openssl
+   * prints it, or any other form `pinDigest` reads -- for a PBX that signed
+   * its own: the whole verdict, no authority or name consulted. Read before
+   * the native half is asked, and handed to it as bare digits.
    */
   tlsPin?: string;
 }

@@ -31,6 +31,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 import kotlinx.coroutines.delay
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -266,17 +267,37 @@ private suspend fun thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good: 
     return "a pinned certificate is trusted whatever its name and signer, and any other refused"
 }
 
+/** Every line of bindings/fixtures/pin-forms.txt, the list each layer's
+ * parser is held to, found from the directory the JVM runs in. */
 private fun everyFormAnAdministratorCopiesIsRead(): String {
-    val digest = java.security.MessageDigest.getInstance("SHA-256").digest("a certificate".toByteArray())
-    val plain = digest.joinToString("") { "%02x".format(it) }
-    val colons = digest.joinToString(":") { "%02X".format(it) }
-    for (text in listOf(plain, plain.uppercase(), colons, "sha-256 $colons", "SHA256=$colons", "  $plain  ")) {
-        assertTrue(SipralTlsTrust.pinDigest(text).contentEquals(digest), text)
+    var at: File? = File(System.getProperty("user.dir")).absoluteFile
+    while (at != null && !File(at, "bindings/fixtures/pin-forms.txt").isFile) {
+        at = at.parentFile
     }
-    for (text in listOf(plain.dropLast(2), "sha-1 $colons", colons.take(2) + colons.drop(3), plain + "00")) {
-        assertTrue(runCatching { SipralTlsTrust.pinDigest(text) }.isFailure, text)
+    val list = File(assertNotNull(at, "bindings/fixtures/pin-forms.txt is not above the JVM's directory"), "bindings/fixtures/pin-forms.txt")
+    var digest = ByteArray(0)
+    var checked = 0
+    for (line in list.readLines(Charsets.UTF_8)) {
+        if (line.isEmpty() || line.startsWith("#")) {
+            continue
+        }
+        val verdict = line.substringBefore('\t')
+        val text = line.substringAfter('\t', "")
+        when (verdict) {
+            "digest" -> digest = ByteArray(text.length / 2) { text.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+            "accept" -> {
+                assertTrue(SipralTlsTrust.pinDigest(text).contentEquals(digest), text)
+                checked++
+            }
+            else -> {
+                assertFailsWith<IllegalArgumentException>(text) { SipralTlsTrust.pinDigest(text) }
+                checked++
+            }
+        }
     }
-    return "every form of a fingerprint is read"
+    assertEquals(32, digest.size)
+    assertTrue(checked > 20, "only $checked forms were read")
+    return "every form of a fingerprint in pin-forms.txt is read or refused"
 }
 
 private suspend fun aPrivateAuthorityIsTrustedBesideThePlatforms(good: Credential): String {

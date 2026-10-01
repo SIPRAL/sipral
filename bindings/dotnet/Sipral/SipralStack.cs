@@ -441,6 +441,7 @@ public sealed partial class SipralStack : IDisposable
         SipralResolver? resolver = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
+        _chosenPort = bindPort;
         _streamFallback = streamFallback;
         _streamServer = streamServer;
         _nat = nat;
@@ -1211,8 +1212,9 @@ public sealed partial class SipralStack : IDisposable
     /// <summary>The network under this stack changed, and
     /// <paramref name="host"/> is this machine's address on the new one.
     ///
-    /// The signalling socket is bound again at <paramref name="host"/> and the
-    /// main transport told (<c>sipral_stack_transport_bind</c>), the change
+    /// The signalling socket is bound again at <paramref name="host"/> —
+    /// over UDP on the port it had, <see cref="KeptSignallingPort"/> saying
+    /// when that port was taken there — and the main transport told (<c>sipral_stack_transport_bind</c>), the change
     /// reported (<c>sipral_stack_network_changed</c>), and every account added
     /// without a <c>Contact</c> of its own pointed at the new address
     /// (<c>sipral_account_rebind</c>). On <see cref="SipralRecovery.Rebuild"/>
@@ -1263,8 +1265,7 @@ public sealed partial class SipralStack : IDisposable
     /// <paramref name="host"/>, and the main transport told.</summary>
     private void MoveSocket(string host)
     {
-        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        socket.Bind(new IPEndPoint(IPAddress.Parse(host), 0));
+        var socket = SignallingSocket(IPAddress.Parse(host));
         socket.Blocking = false;
         var bound = FormatAddress((IPEndPoint)socket.LocalEndPoint!);
         var local = ToSBytes(bound);
@@ -1286,6 +1287,62 @@ public sealed partial class SipralStack : IDisposable
         BindAddress = bound;
         old?.Dispose();
     }
+
+    /// <summary>The UDP signalling socket bound again at
+    /// <paramref name="host"/>, on the port chosen at creation or, when that
+    /// was 0, the port in use now; on a port the system picks only when that
+    /// one is held there by another socket, which
+    /// <see cref="KeptSignallingPort"/> then says. The old socket holds the
+    /// port itself when it is bound on every interface or at
+    /// <paramref name="host"/> already, so it is let go of — a send on it
+    /// meanwhile fails, as one on a replaced socket does — before the port is
+    /// tried a second time.</summary>
+    private Socket SignallingSocket(IPAddress host)
+    {
+        var inUse = (_socket?.LocalEndPoint as IPEndPoint)?.Port ?? 0;
+        var wanted = _chosenPort != 0 ? _chosenPort : inUse;
+        Socket? On(int port)
+        {
+            var made = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                made.Bind(new IPEndPoint(host, port));
+                return made;
+            }
+            catch (SocketException)
+            {
+                made.Dispose();
+                return null;
+            }
+        }
+        var made = wanted == 0 ? null : On(wanted);
+        if (made is null && wanted != 0 && inUse == wanted)
+        {
+            _socket?.Dispose();
+            made = On(wanted);
+        }
+        KeptSignallingPort = made is not null || wanted == 0;
+        if (made is null)
+        {
+            made = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            made.Bind(new IPEndPoint(host, 0));
+        }
+        return made;
+    }
+
+    /// <summary>Whether the last <see cref="MoveTo"/> that bound the UDP
+    /// signalling socket again kept its port — <c>bindPort</c>, or the port
+    /// in use when that was 0. <c>false</c> when another socket held that
+    /// port at the new address and the system chose one instead, which
+    /// <see cref="BindAddress"/> then names: a peer or a firewall rule that
+    /// only knows the old port has to be told. <c>true</c> before any
+    /// move.</summary>
+    public bool KeptSignallingPort { get; private set; } = true;
+
+    /// <summary>The port the application chose for the signalling socket,
+    /// 0 when it let the system choose: what <see cref="MoveTo"/> binds
+    /// again.</summary>
+    private readonly int _chosenPort;
 
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;
 

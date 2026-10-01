@@ -151,15 +151,23 @@ final class SipralMedia {
     _toSend.addAll(pcm);
   }
 
-  /// What the media has done so far.
+  /// What the media has done so far. Once the call has ended the stream is
+  /// gone and the library answers `SipralStatus.wrongState`; from the moment
+  /// the end-of-call record has arrived this answers with that record
+  /// ([SipralCall.finalStatistics]) instead.
   SipralMediaStatistics statistics() => using((arena) {
     final stats = arena<SipralStreamStats>();
     stats.ref.size = ffi.sizeOf<SipralStreamStats>();
-    _check(
-      call.stack._sipral,
-      'sipral_media_statistics',
-      call.stack._sipral.mediaStatistics(handle, call.stack.nowMs(), stats),
+    final status = call.stack._sipral.mediaStatistics(
+      handle,
+      call.stack.nowMs(),
+      stats,
     );
+    final kept = call.finalStatistics;
+    if (status == SipralStatus.wrongState && kept != null) {
+      return kept;
+    }
+    _check(call.stack._sipral, 'sipral_media_statistics', status);
     return SipralMediaStatistics._(stats.ref);
   });
 

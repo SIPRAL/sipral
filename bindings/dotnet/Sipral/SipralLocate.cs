@@ -47,8 +47,9 @@ public delegate SipralLookup SipralResolver(string name, SipralDnsRecordType rec
 /// the platform not saying what the zone's was; and SRV and NAPTR are asked
 /// by this class itself, one UDP query to each of the machine's DNS servers
 /// in turn (<see cref="Servers"/>) until one answers, within
-/// <see cref="Patience"/> each. A truncated answer is read as far as it goes,
-/// with no retry over TCP: SIP's SRV sets fit a datagram.
+/// <see cref="Patience"/> each. Only a reply from the server asked, with the
+/// query's id and its question echoed, is taken (RFC 5452 §9.1), and a
+/// truncated one is asked again over TCP.
 /// </summary>
 public static class SipralDns
 {
@@ -130,36 +131,131 @@ public static class SipralDns
     }
 
     /// <summary>One SRV or NAPTR query for <paramref name="name"/>, to each of
-    /// <paramref name="servers"/> in turn until one answers.</summary>
+    /// <paramref name="servers"/> in turn until one answers.
+    ///
+    /// A reply is taken only as RFC 5452 §9.1 asks: from the address and port
+    /// the query went to, with the query's id, as a response, and with the
+    /// question it was asked echoed back — name (in any case), type and
+    /// class. Anything else arriving on the socket is ignored and the wait
+    /// goes on. A reply with the TC bit set is asked again over TCP, to the
+    /// same server (RFC 1035 §4.2.2, RFC 7766), and checked the same
+    /// way.</summary>
     public static SipralLookup Query(string name, SipralDnsRecordType record, IReadOnlyList<IPEndPoint> servers)
     {
         var type = record == SipralDnsRecordType.Srv ? TypeSrv : TypeNaptr;
-        var id = (ushort)RandomNumberGenerator.GetInt32(0, 0x10000);
-        var question = Question(id, name, type);
         foreach (var server in servers)
         {
+            var id = (ushort)RandomNumberGenerator.GetInt32(0, 0x10000);
+            var question = Question(id, name, type);
             try
             {
-                using var socket = new UdpClient(server.AddressFamily);
-                socket.Client.ReceiveTimeout = (int)Patience.TotalMilliseconds;
-                socket.Send(question, question.Length, server);
-                var deadline = DateTime.UtcNow + Patience;
-                while (DateTime.UtcNow < deadline)
+                var reply = OverUdp(server, question, id, name, type);
+                if (reply is not null && (reply[2] & 0x02) != 0)
                 {
-                    IPEndPoint? from = null;
-                    var reply = socket.Receive(ref from);
-                    if (reply.Length >= 12 && (reply[0] << 8 | reply[1]) == id)
-                    {
-                        return Answer(reply, type, record);
-                    }
+                    reply = OverTcp(server, question, id, name, type);
+                }
+                if (reply is not null)
+                {
+                    return Answer(reply, type, record);
                 }
             }
-            catch (SocketException)
+            catch (Exception ex) when (ex is SocketException or IOException)
             {
                 // silent, or unreachable: the next server
             }
         }
         return SipralLookup.Failed;
+    }
+
+    /// <summary>The reply <paramref name="server"/> sends to
+    /// <paramref name="question"/> over UDP, or <see langword="null"/> when
+    /// none that <see cref="Answers"/> it came within
+    /// <see cref="Patience"/>.</summary>
+    private static byte[]? OverUdp(IPEndPoint server, byte[] question, ushort id, string name, ushort type)
+    {
+        using var socket = new UdpClient(server.AddressFamily);
+        socket.Send(question, question.Length, server);
+        var deadline = DateTime.UtcNow + Patience;
+        while (true)
+        {
+            var left = deadline - DateTime.UtcNow;
+            if (left <= TimeSpan.Zero)
+            {
+                return null;
+            }
+            socket.Client.ReceiveTimeout = Math.Max(1, (int)left.TotalMilliseconds);
+            IPEndPoint? from = null;
+            byte[] reply;
+            try
+            {
+                reply = socket.Receive(ref from);
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
+            {
+                return null;
+            }
+            if (SameEndPoint(from, server) && Answers(reply, id, name, type))
+            {
+                return reply;
+            }
+        }
+    }
+
+    /// <summary>The reply <paramref name="server"/> sends to
+    /// <paramref name="question"/> over TCP, each message after its two-byte
+    /// length (RFC 1035 §4.2.2), or <see langword="null"/> when it does not
+    /// <see cref="Answers"/> it.</summary>
+    private static byte[]? OverTcp(IPEndPoint server, byte[] question, ushort id, string name, ushort type)
+    {
+        using var client = new TcpClient(server.AddressFamily);
+        client.SendTimeout = (int)Patience.TotalMilliseconds;
+        client.ReceiveTimeout = (int)Patience.TotalMilliseconds;
+        if (!client.ConnectAsync(server.Address, server.Port).Wait(Patience))
+        {
+            return null;
+        }
+        using var stream = client.GetStream();
+        var framed = new byte[question.Length + 2];
+        framed[0] = (byte)(question.Length >> 8);
+        framed[1] = (byte)question.Length;
+        question.CopyTo(framed, 2);
+        stream.Write(framed, 0, framed.Length);
+        var length = new byte[2];
+        stream.ReadExactly(length, 0, 2);
+        var reply = new byte[length[0] << 8 | length[1]];
+        stream.ReadExactly(reply, 0, reply.Length);
+        return Answers(reply, id, name, type) ? reply : null;
+    }
+
+    private static bool SameEndPoint(IPEndPoint? from, IPEndPoint server) =>
+        from is not null && from.Port == server.Port
+        && (from.Address.Equals(server.Address)
+            || (from.Address.IsIPv4MappedToIPv6 && from.Address.MapToIPv4().Equals(server.Address)));
+
+    /// <summary>Whether <paramref name="reply"/> is the response to the query
+    /// <paramref name="id"/> asked: that id, the QR bit, one question, and
+    /// that question <paramref name="name"/>, <paramref name="type"/>, class
+    /// IN (RFC 5452 §9.1).</summary>
+    internal static bool Answers(byte[] reply, ushort id, string name, ushort type)
+    {
+        if (reply.Length < 12 || (reply[0] << 8 | reply[1]) != id || (reply[2] & 0x80) == 0
+            || (reply[4] << 8 | reply[5]) != 1)
+        {
+            return false;
+        }
+        try
+        {
+            var at = 12;
+            var asked = Name(reply, ref at);
+            var askedType = reply[at] << 8 | reply[at + 1];
+            var askedClass = reply[at + 2] << 8 | reply[at + 3];
+            return askedType == type && askedClass == 1
+                && string.Equals(asked, name.TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (IndexOutOfRangeException)
+        {
+            return false;
+        }
     }
 
     /// <summary>A recursive query for one name and type (RFC 1035

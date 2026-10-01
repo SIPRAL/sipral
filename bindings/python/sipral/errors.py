@@ -85,6 +85,11 @@ def check(status: int, where: str) -> int:
     return status
 
 
+#: The statuses :func:`call` waits out: another thread inside the stack, and a
+#: clock reading the poll thread overtook.
+PASSING = (lib.SIPRAL_STATUS_BUSY, lib.SIPRAL_STATUS_CLOCK_BEHIND)
+
+
 def call(entry_point: Callable[[], int], where: str) -> None:
     """Call an entry point, waiting out an ordinary `SIPRAL_STATUS_BUSY`.
 
@@ -100,10 +105,16 @@ def call(entry_point: Callable[[], int], where: str) -> None:
     than calls an application has to wrap in its own busy loop. A
     contention that has not cleared in half a second is not ordinary any
     more, and is let through to :func:`check` as whatever it still is.
+
+    `SIPRAL_STATUS_CLOCK_BEHIND` gets the same retry, as the .NET layer
+    gives it: every ``entry_point`` here reads ``now_ms()`` afresh on the
+    calling thread right before the call, so a reading the stack's last
+    one beat was overtaken by the poll thread between the two, not stale,
+    and the next reading can only be later.
     """
     deadline = time.monotonic() + 0.5
     status = entry_point()
-    while status == lib.SIPRAL_STATUS_BUSY and time.monotonic() < deadline:
+    while status in PASSING and time.monotonic() < deadline:
         time.sleep(0.001)
         status = entry_point()
     check(status, where)

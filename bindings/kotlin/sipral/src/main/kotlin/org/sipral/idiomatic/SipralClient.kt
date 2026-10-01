@@ -133,6 +133,22 @@ class SipralClient private constructor(
     @Volatile
     private var socket: DatagramSocket? = socket
 
+    /** The port the application chose for the signalling socket, zero when
+     * it let the system choose: what [networkChanged] binds again. */
+    private var chosenPort = 0
+
+    /**
+     * Whether the last [networkChanged] that bound the UDP signalling socket
+     * again kept its port -- `bindPort`, or the port in use when that was
+     * zero. False when another socket held that port at the new address and
+     * the system chose one instead, which [bindAddress] then names: a peer or
+     * a firewall rule that only knows the old port has to be told. True
+     * before any change.
+     */
+    @Volatile
+    var keptSignallingPort: Boolean = true
+        private set
+
     /** The signalling socket's address, `host:port`: where it was bound, and
      * after [networkChanged] where it is bound now. Over TCP or TLS, the
      * address the connection to the server was made from, which moves with
@@ -466,6 +482,7 @@ class SipralClient private constructor(
                 if (rtpPortMin == 0 && rtpPortMax == 0) null else rtpPortMin to rtpPortMax,
             )
             link?.owner = client
+            client.chosenPort = bindPort
             client.streamFallback = streamFallback
             client.streamServer = streamServer
             client.routes = bindHost == null
@@ -628,7 +645,7 @@ class SipralClient private constructor(
         if (first && address != bindAddress) {
             val status = retryBusy {
                 SipralSignalNative.stackTransportRebind(handle, address.toByteArray(Charsets.UTF_8), nowMs()).also {
-                    if (it == SipralStatus.BUSY.value) throw SipralException(SipralStatus.BUSY, "")
+                    throwIfPassing(it)
                 }
             }
             if (status != SipralStatus.OK.value) {
@@ -1964,7 +1981,7 @@ class SipralClient private constructor(
                 return true
             } catch (refused: SipralException) {
                 when (refused.status) {
-                    SipralStatus.BUSY -> Thread.sleep(1)
+                    SipralStatus.BUSY, SipralStatus.CLOCK_BEHIND -> Thread.sleep(1)
                     SipralStatus.STREAM_BROKEN -> return false
                     else -> return true
                 }
@@ -1995,8 +2012,10 @@ class SipralClient private constructor(
      * and what its answer asks of the client's own sockets.
      *
      * When the address or the interface changed -- `SipralRecovery.REBUILD`
-     * -- the signalling socket is bound again at [next]'s address and handed
-     * to the stack as its transport, and every account is pointed at it
+     * -- the signalling socket is bound again at [next]'s address, over UDP
+     * on the port it had ([keptSignallingPort] says when that port was taken
+     * there), and handed to the stack as its transport, and every account is
+     * pointed at it
      * (`sipral_account_rebind`), so the REGISTER that follows names where
      * this end is now. Every call up at the time then raises
      * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: the far end is still sending
@@ -2015,14 +2034,14 @@ class SipralClient private constructor(
             rebound = link.move(next.address ?: bindAddress.substringBeforeLast(':'))
         } else if (moves) {
             val host = next.address ?: bindAddress.substringBeforeLast(':')
-            val fresh = DatagramSocket(0, InetAddress.getByName(host))
+            val fresh = signallingSocket(InetAddress.getByName(host))
             // the application names the address from here on
             routes = false
             fresh.soTimeout = 20
             val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
             val status = retryBusy {
                 SipralSignalNative.stackTransportRebind(handle, local.toByteArray(Charsets.UTF_8), nowMs()).also {
-                    if (it == SipralStatus.BUSY.value) throw SipralException(SipralStatus.BUSY, "")
+                    throwIfPassing(it)
                 }
             }
             if (status != SipralStatus.OK.value) {
@@ -2052,6 +2071,34 @@ class SipralClient private constructor(
             }
         }
         SipralRecovery.of(raw.toInt()) ?: SipralRecovery.UNKNOWN
+    }
+
+    /**
+     * The UDP signalling socket bound again at [host], on the port chosen at
+     * open or, when that was zero, the port in use now; on a port the system
+     * picks only when that one is held there by another socket, which
+     * [keptSignallingPort] then says. The old socket holds the port itself
+     * when it is bound on every interface or at [host] already, so it is
+     * let go of -- which ends the poll thread's receive on it -- before the
+     * port is tried a second time.
+     */
+    private fun signallingSocket(host: InetAddress): DatagramSocket {
+        val inUse = socket?.localPort ?: 0
+        val wanted = if (chosenPort != 0) chosenPort else inUse
+        fun on(port: Int): DatagramSocket? =
+            try {
+                DatagramSocket(port, host)
+            } catch (_: java.net.SocketException) {
+                null
+            }
+        var made = if (wanted == 0) null else on(wanted)
+        if (made == null && wanted != 0 && inUse == wanted) {
+            socket?.close()
+            socket = null
+            made = on(wanted)
+        }
+        keptSignallingPort = made != null || wanted == 0
+        return made ?: DatagramSocket(0, host)
     }
 
     /** The address the client's sockets are bound on now. */

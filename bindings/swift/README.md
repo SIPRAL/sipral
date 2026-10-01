@@ -209,6 +209,10 @@ connection to a TURN server); received packets go in as before. Where there
 is no engine -- Linux -- `.platformDefault` is `.application`.
 
 `stack.audio` is the engine: `refresh()` and `devices()` list the devices
+(`SipralAudioDevice`, which was `AudioDevice` until the name was prefixed
+so that it does not collide with another package's; the old name stays a
+deprecated alias for one minor release, as `Subscription` does for
+`SipralSubscription`, which Combine's protocol of that name collided with)
 with their channel counts under ids that survive a refresh and an unplug,
 `select(_:for:)` puts the `.microphone`, the `.speaker` or the `.ringer` on
 one (or back on the system's route with `nil`), refused by status before
@@ -610,7 +614,7 @@ for await event in stack.events() {
 ```
 
 `account.subscribe(to:package:)` is any RFC 6665 subscription, kept and
-refreshed by the stack until `Subscription.end()`; `watchPresence(of:)`
+refreshed by the stack until `SipralSubscription.end()`; `watchPresence(of:)`
 is one to `presence`, told as `SipralEventKind.presenceChanged` with
 `presenceData.kind == .watched`. `publishPresence(_:)` publishes the
 account's own (RFC 3903): the first call publishes, every later one
@@ -619,7 +623,7 @@ says what the compositor granted or why it refused; `unpublishPresence()`
 takes it away. A call whose far end is a conference's focus (`isfocus`,
 RFC 4579) names it with `call.conferenceUri()`, and
 `call.subscribeConference()` watches it: each notification is a
-`.conferenceChanged`, and `Subscription.conference()` reads the whole
+`.conferenceChanged`, and `SipralSubscription.conference()` reads the whole
 picture -- subject, counts, and every user with its endpoint and status.
 This end says it is a focus with `placeCall(focus: true)`,
 `answer(focus: true)` or `call.setFocus(true)`.

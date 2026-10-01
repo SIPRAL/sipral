@@ -55,7 +55,7 @@ final class AppModel {
     private(set) var log: [String] = []
 
     // the devices, as the library's engine lists and runs them
-    private(set) var devices: [AudioDevice] = []
+    private(set) var devices: [SipralAudioDevice] = []
     private(set) var speaker: UInt32?
     private(set) var inputLevel = 0.0
     private(set) var outputLevel = 0.0

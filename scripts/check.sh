@@ -1747,16 +1747,20 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
                         "${selected[@]}" 2>&1)
                     exited=$?
                     succeeded=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests successful *\].*/\1/p' | tail -1)
+                    # eachStagedPairIsForItsOwnMachine has no natives to read
+                    # here -- they are staged by a Linux build -- and says so
+                    # as a skip rather than passing with nothing checked
+                    skipped=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests aborted *\].*/\1/p' | tail -1)
                     warned=$(printf '%s\n' "$ran" \
                         | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
-                    if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 7 ]; then
-                        fail "bindings/jvm's tests, the loader's six and the Java loopback call (${succeeded:-0} of 7 passed):"
+                    if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 6 ] || [ "${skipped:-0}" -ne 1 ]; then
+                        fail "bindings/jvm's tests, the loader's five and the Java loopback call (${succeeded:-0} of 6 passed, ${skipped:-0} of 1 skipped by its assumption):"
                         printf '%s\n' "$ran" | grep -vE '^[[:space:]]+at ' | tail -40 | sed 's/^/        /'
                     elif [ -n "$warned" ]; then
                         fail "-Xcheck:jni found something wrong under SipralJava:"
                         printf '%s\n' "$warned" | sed 's/^/        /'
                     else
-                        pass "bindings/jvm: the loader's platform and ELF checks, and a Java loopback call through SipralJava (7 tests)"
+                        pass "bindings/jvm: the loader's platform and ELF checks, and a Java loopback call through SipralJava (6 tests; the staged pairs' check skipped, as no natives are staged off Linux)"
                     fi
                 fi
                 rm -rf "$jvm_classes"
@@ -1914,7 +1918,14 @@ else
         if (cd "$ROOT/bindings/dart" && SIPRAL_LIBRARY="$ROOT/$DYLIB" dart test --reporter expanded) \
             >"$work/test" 2>&1; then
             passed=$(grep -oE '\+[0-9]+: All tests passed' "$work/test" | grep -oE '[0-9]+' | tail -1)
-            pass "dart test, bindings/dart (${passed:-?} tests: record layouts, the ABI version, the loopback call)"
+            # a run that exited zero without its own closing line has not
+            # said what it ran, and is not taken for one that passed
+            if [ -n "$passed" ] && [ "$passed" -gt 0 ]; then
+                pass "dart test, bindings/dart ($passed tests: record layouts, the ABI version, the loopback call)"
+            else
+                fail "dart test, bindings/dart, exited zero without \"All tests passed\":"
+                tail -20 "$work/test" | sed 's/^/        /'
+            fi
         else
             fail "dart test, bindings/dart:"
             tail -40 "$work/test" | sed 's/^/        /'
@@ -2043,6 +2054,10 @@ else
         fail "linux-arm64's cross path is broken:"; printf '        %s\n' $cross_missing
     }
 fi
+
+# scripts/package/jvm.sh builds the server jar on a Linux host with Maven,
+# which this gate never is; that it parses is what can be proved here.
+pkg_run "jvm.sh parses (bash -n)" bash -n scripts/package/jvm.sh
 
 pkg_run "nuget.sh collect (osx-arm64, osx-x64)" \
     scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid osx-arm64 --rid osx-x64

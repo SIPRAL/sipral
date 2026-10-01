@@ -310,21 +310,43 @@ public sealed class SignallingTests
         Assert.Contains("pinned", failed.Detail);
     }
 
+    /// <summary>Every line of <c>bindings/fixtures/pin-forms.txt</c>, the
+    /// list each layer's parser is held to.</summary>
     [Fact]
     public void EveryFormAnAdministratorCopiesIsRead()
     {
-        var digest = SHA256.HashData(Encoding.UTF8.GetBytes("a certificate"));
-        var plain = Convert.ToHexString(digest).ToLowerInvariant();
-        var colons = string.Join(":", digest.Select(b => b.ToString("X2")));
-        foreach (var text in new[] { plain, plain.ToUpperInvariant(), colons, $"sha-256 {colons}", $"SHA256={colons}", $"  {plain}  " })
+        var listed = Path.Combine(Path.GetDirectoryName(Here())!, "..", "..", "fixtures", "pin-forms.txt");
+        var digest = Array.Empty<byte>();
+        var checkedForms = 0;
+        foreach (var line in File.ReadAllText(listed, Encoding.UTF8).Split('\n'))
         {
-            Assert.Equal(digest, SipralTlsTrust.PinDigest(text));
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+            var tab = line.IndexOf('\t');
+            var verdict = tab < 0 ? line : line[..tab];
+            var text = tab < 0 ? "" : line[(tab + 1)..];
+            switch (verdict)
+            {
+                case "digest":
+                    digest = Convert.FromHexString(text);
+                    break;
+                case "accept":
+                    Assert.True(digest.SequenceEqual(SipralTlsTrust.PinDigest(text)), text);
+                    checkedForms++;
+                    break;
+                default:
+                    Assert.Throws<ArgumentException>(() => SipralTlsTrust.PinDigest(text));
+                    checkedForms++;
+                    break;
+            }
         }
-        foreach (var text in new[] { plain[..^2], $"sha-1 {colons}", colons[..2] + colons[3..], plain + "00" })
-        {
-            Assert.Throws<ArgumentException>(() => SipralTlsTrust.PinDigest(text));
-        }
+        Assert.Equal(32, digest.Length);
+        Assert.True(checkedForms > 20, $"only {checkedForms} forms were read");
     }
+
+    private static string Here([System.Runtime.CompilerServices.CallerFilePath] string here = "") => here;
 
     private static async Task<SipralTransportFailedEventInfo> Refused(SipralStack stack)
     {
