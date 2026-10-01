@@ -7605,51 +7605,7 @@ fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
         .expect("an order")
         .with_srtp(SrtpPolicy::Required);
     let mut pair = Pair::new(catalog);
-    let account = pair.caller.account("alice", callee_sip());
-    let _ = pair.callee.account("bob", caller_sip());
-    let call = pair
-        .caller
-        .engine
-        .place(
-            &mut pair.caller.agent,
-            account,
-            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
-            caller_media(),
-            pair.now,
-        )
-        .expect("the INVITE goes");
-    pair.caller.drain(pair.now, false);
-    let invite = pair
-        .caller
-        .outbound()
-        .into_iter()
-        .find(|datagram| datagram.starts_with(b"INVITE "))
-        .expect("the INVITE");
-    pair.callee.deliver(&invite, caller_sip(), pair.now);
-    pair.callee.drain(pair.now, false);
-    let incoming = pair.callee.call().expect("the callee heard the INVITE");
-    pair.callee
-        .agent
-        .ring(incoming, None, pair.now)
-        .expect("a 180");
-    let ringing = pair
-        .callee
-        .outbound()
-        .into_iter()
-        .find(|datagram| datagram.starts_with(b"SIP/2.0 180"))
-        .expect("the 180");
-    // a second phone the proxy forked the INVITE to rings as well
-    pair.caller.deliver(&ringing, callee_sip(), pair.now);
-    pair.caller
-        .deliver(&from_another_branch(&ringing), callee_sip(), pair.now);
-    pair.caller.drain(pair.now, false);
-    assert!(
-        pair.caller
-            .heard
-            .iter()
-            .any(|event| matches!(event, Event::Signalling(UaEvent::CallForked { .. }))),
-        "the INVITE was not seen to fork"
-    );
+    let (call, incoming, invite) = rung_by_two_phones(&mut pair);
 
     pair.callee
         .engine
@@ -7708,6 +7664,58 @@ fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
             .is_err(),
         "the key every branch of the INVITE holds still opens what this end sends"
     );
+}
+
+/// A call placed by the caller and rung by the callee, the 180 also arriving
+/// from a second phone a proxy forked the INVITE to: the caller's call, the
+/// callee's, and the INVITE as it went.
+fn rung_by_two_phones(pair: &mut Pair) -> (CallHandle, CallHandle, Vec<u8>) {
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let invite = pair
+        .caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE");
+    pair.callee.deliver(&invite, caller_sip(), pair.now);
+    pair.callee.drain(pair.now, false);
+    let incoming = pair.callee.call().expect("the callee heard the INVITE");
+    pair.callee
+        .agent
+        .ring(incoming, None, pair.now)
+        .expect("a 180");
+    let ringing = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 180"))
+        .expect("the 180");
+    // a second phone the proxy forked the INVITE to rings as well
+    pair.caller.deliver(&ringing, callee_sip(), pair.now);
+    pair.caller
+        .deliver(&from_another_branch(&ringing), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    assert!(
+        pair.caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallForked { .. }))),
+        "the INVITE was not seen to fork"
+    );
+    (call, incoming, invite)
 }
 
 /// A call placed with a relay, rung plainly by the callee (a 180 with no
