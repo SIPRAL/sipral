@@ -96,11 +96,26 @@ void main() {
     expect(digits, ['4', '2', '#']);
 
     final bobEnded = callB.whenEnded(timeout: const Duration(seconds: 15));
+    final recorded = alice.events
+        .firstWhere(
+          (event) =>
+              event.kind == SipralEventKind.mediaStatistics &&
+              event.call == callA.handle,
+        )
+        .timeout(const Duration(seconds: 15));
     callA.hangup();
     await callA.whenEnded(timeout: const Duration(seconds: 15));
     await bobEnded;
     expect(callA.ended && callB.ended, isTrue);
     expect(callA.state, SipralCallState.terminated);
+
+    // the end-of-call record travels in its event, is kept on the call, and
+    // is what the media answers with once the library has nothing left
+    final record = (await recorded).statistics;
+    expect(record, isNotNull);
+    expect(record!.packetsSent, greaterThan(0));
+    expect(callA.finalStatistics?.packetsSent, record.packetsSent);
+    expect(mediaA.statistics().packetsSent, record.packetsSent);
 
     callA.close();
     callB.close();

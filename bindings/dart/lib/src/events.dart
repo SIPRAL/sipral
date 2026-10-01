@@ -30,6 +30,19 @@ const Set<int> _locateArm = {
   SipralEventKind.locateFailed,
 };
 
+/// The kinds whose payload is the subscription arm.
+const Set<int> _subscriptionArm = {
+  SipralEventKind.subscriptionChanged,
+  SipralEventKind.notified,
+};
+
+/// The kinds whose payload is the transfer arm.
+const Set<int> _transferArm = {
+  SipralEventKind.transferRequested,
+  SipralEventKind.transferProgress,
+  SipralEventKind.transferDone,
+};
+
 /// Something a stack reports, with the part of its payload this layer reads.
 ///
 /// Every union arm the event did not write is left unread: its bytes are
@@ -49,6 +62,11 @@ final class SipralStackEvent {
     this.locatedTargets,
     this.locateFailure,
     this.retryInMs,
+    this.subscription,
+    this.subscriptionState,
+    this.subscriptionStatusCode,
+    this.transferStatusCode,
+    this.statistics,
   });
 
   factory SipralStackEvent._read(SipralEvent event) {
@@ -58,6 +76,14 @@ final class SipralStackEvent {
         kind == SipralEventKind.digitReceived ? event.payload.media.digit : 0;
     final locating = _locateArm.contains(kind);
     final locate = locating ? event.payload.locate : null;
+    final told =
+        _subscriptionArm.contains(kind) ? event.payload.subscription : null;
+    final transfer =
+        _transferArm.contains(kind) ? event.payload.transfer : null;
+    final record =
+        kind == SipralEventKind.mediaStatistics
+            ? event.payload.media.statistics
+            : ffi.nullptr;
     String? text(ffi.Pointer<ffi.Char> data, int length) =>
         data == ffi.nullptr ? null : _decode(data.cast(), length);
     return SipralStackEvent._(
@@ -81,6 +107,12 @@ final class SipralStackEvent {
           locate == null ? null : text(locate.targets, locate.targetsLen),
       locateFailure: locate?.failure,
       retryInMs: locate?.retryInMs,
+      subscription: told?.subscription,
+      subscriptionState: told?.state,
+      subscriptionStatusCode: told?.statusCode,
+      transferStatusCode: transfer?.statusCode,
+      statistics:
+          record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
     );
   }
 
@@ -129,6 +161,26 @@ final class SipralStackEvent {
 
   /// When the name is looked up again after a failure, in milliseconds.
   final int? retryInMs;
+
+  /// Which subscription moved or was notified, for
+  /// `SipralEventKind.subscriptionChanged` and `SipralEventKind.notified`.
+  final int? subscription;
+
+  /// Where that subscription is now, a `sipral_subscription_state_t` value.
+  final int? subscriptionState;
+
+  /// The SIP status behind the subscription's move, or zero.
+  final int? subscriptionStatusCode;
+
+  /// The status code the transfer's target answered with, for the three
+  /// transfer kinds: what the far end's `message/sipfrag` NOTIFY said, or
+  /// zero before it said anything.
+  final int? transferStatusCode;
+
+  /// What the call's media cost in the end, for
+  /// `SipralEventKind.mediaStatistics`: the record the library hands over
+  /// once the stream is gone, copied while the callback still owns it.
+  final SipralMediaStatistics? statistics;
 
   @override
   String toString() =>

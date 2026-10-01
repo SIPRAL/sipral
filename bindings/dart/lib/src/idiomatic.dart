@@ -81,6 +81,65 @@ void _check(Sipral sipral, String operation, int status) {
   throw SipralException(status, operation, detail);
 }
 
+/// The status [entryPoint] returns, called again while that is
+/// `SipralStatus.clockBehind` -- for up to half a second -- the way the .NET
+/// layer waits it out: every [entryPoint] here reads `nowMs()` afresh right
+/// before the call, so a reading the stack's last one beat can only be
+/// followed by a later one. Not part of the package's surface; public only
+/// so that its test can reach it.
+int retryingClockBehind(int Function() entryPoint) {
+  final waited = Stopwatch()..start();
+  var status = entryPoint();
+  while (status == SipralStatus.clockBehind &&
+      waited.elapsedMilliseconds < 500) {
+    sleep(const Duration(milliseconds: 1));
+    status = entryPoint();
+  }
+  return status;
+}
+
+/// [_check] over what [retryingClockBehind] makes of [entryPoint].
+void _checkNow(Sipral sipral, String operation, int Function() entryPoint) =>
+    _check(sipral, operation, retryingClockBehind(entryPoint));
+
+/// The prefixes a certificate fingerprint may come after, lower case.
+const List<String> _pinPrefixes = [
+  'sha256 fingerprint=',
+  'sha-256 ',
+  'sha256=',
+];
+
+/// The 32 bytes a SHA-256 certificate fingerprint names, as `openssl x509
+/// -fingerprint -sha256` (`sha256 Fingerprint=`, or `SHA256 Fingerprint=`
+/// before OpenSSL 3) or RFC 8122 prints it: 64 hexadecimal digits, either
+/// case, colons and spaces between them ignored, optionally after
+/// `sha-256 `, `SHA256=` or `SHA256 Fingerprint=`, in any case. Anything else
+/// throws [ArgumentError]; `bindings/fixtures/pin-forms.txt` lists what every
+/// layer takes. [SipralStack.addAccount]'s `tlsPin` is read with it.
+Uint8List sipralPinDigest(String fingerprint) {
+  var text = fingerprint.trim();
+  final lowered = text.toLowerCase();
+  for (final prefix in _pinPrefixes) {
+    if (lowered.startsWith(prefix)) {
+      text = text.substring(prefix.length);
+      break;
+    }
+  }
+  final digits = text.replaceAll(':', '').replaceAll(' ', '');
+  if (digits.length != 64 || !RegExp(r'^[0-9a-fA-F]+$').hasMatch(digits)) {
+    throw ArgumentError.value(
+      fingerprint,
+      'fingerprint',
+      'a certificate pin is a SHA-256 fingerprint: 64 hexadecimal digits, '
+          'optionally after sha-256, SHA256= or SHA256 Fingerprint=',
+    );
+  }
+  return Uint8List.fromList([
+    for (var at = 0; at < 64; at += 2)
+      int.parse(digits.substring(at, at + 2), radix: 16),
+  ]);
+}
+
 /// [text] as UTF-8 in memory [arena] owns, and its length in bytes; a null
 /// pointer and zero for no text.
 (ffi.Pointer<ffi.Char>, int) _text(Arena arena, String? text) {

@@ -41,6 +41,14 @@ final class SipralCall {
   /// Whether `SipralEventKind.callEnded` has been delivered.
   bool get ended => _ended.isCompleted;
 
+  /// What the call's media cost in the end: the record
+  /// `SipralEventKind.mediaStatistics` carries, kept from the moment it
+  /// arrives -- right after `SipralEventKind.callEnded` -- and null before
+  /// that or for a call whose media never started. [SipralMedia.statistics]
+  /// answers with it too once the stream is gone.
+  SipralMediaStatistics? get finalStatistics => _finalStatistics;
+  SipralMediaStatistics? _finalStatistics;
+
   /// Every event about this call, in order.
   Stream<SipralStackEvent> get events =>
       stack.events.where((event) => event.call == handle);
@@ -86,10 +94,10 @@ final class SipralCall {
     stack._ensureOpen();
     using((arena) {
       final text = _text(arena, digits);
-      _check(
+      _checkNow(
         stack._sipral,
         'sipral_call_send_dtmf',
-        stack._sipral.callSendDtmf(
+        () => stack._sipral.callSendDtmf(
           stack.handle,
           handle,
           text.$1,
@@ -106,10 +114,10 @@ final class SipralCall {
   /// Hang up: a BYE once confirmed, a CANCEL while still ringing out.
   void hangup() {
     stack._ensureOpen();
-    _check(
+    _checkNow(
       stack._sipral,
       'sipral_call_hangup',
-      stack._sipral.callHangup(stack.handle, handle, stack.nowMs()),
+      () => stack._sipral.callHangup(stack.handle, handle, stack.nowMs()),
     );
     stack._poll();
   }
@@ -137,6 +145,8 @@ final class SipralCall {
         if (!_confirmed.isCompleted) {
           _confirmed.complete();
         }
+      case SipralEventKind.mediaStatistics:
+        _finalStatistics = event.statistics ?? _finalStatistics;
       case SipralEventKind.callEnded:
         if (!_confirmed.isCompleted) {
           _confirmed.completeError(
