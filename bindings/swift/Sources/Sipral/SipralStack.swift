@@ -692,7 +692,7 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 try Sipral.stackReceiveStream(stack: handle, transport: Sipral.transportMain, data: bytes, nowMs: nowMs())
                 return
-            } catch let error as SipralError where error.status == .busy {
+            } catch let error as SipralError where error.status == .busy || error.status == .clockBehind {
                 usleep(1000)
             } catch {
                 // the framing is lost: the stack retired the transport and
@@ -847,7 +847,7 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 try Sipral.stackReceiveStream(stack: handle, transport: id, data: bytes, nowMs: nowMs())
                 return
-            } catch let error as SipralError where error.status == .busy {
+            } catch let error as SipralError where error.status == .busy || error.status == .clockBehind {
                 usleep(1000)
             } catch {
                 closeRecordingLink(id)
@@ -1010,7 +1010,7 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 try Sipral.stackReceiveStream(stack: handle, transport: id, data: bytes, nowMs: nowMs())
                 return
-            } catch let error as SipralError where error.status == .busy {
+            } catch let error as SipralError where error.status == .busy || error.status == .clockBehind {
                 usleep(1000)
             } catch {
                 // the framing is lost: the stack retired the transport itself
@@ -1966,7 +1966,7 @@ public final class SipralStack: @unchecked Sendable {
             do {
                 try Sipral.stackTurnReceive(stack: handle, local: local, data: bytes, nowMs: nowMs())
                 return
-            } catch let error as SipralError where error.status == .busy {
+            } catch let error as SipralError where error.status == .busy || error.status == .clockBehind {
                 usleep(1_000)
             } catch let error as SipralError where error.status == .streamBroken {
                 let connection = natQueue.sync { turnConnections.removeValue(forKey: local) }
