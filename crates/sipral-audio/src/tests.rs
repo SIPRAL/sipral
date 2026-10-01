@@ -33,7 +33,7 @@ fn engine_with(activation: Activation, fake: &FakeControl) -> (Engine, Sent) {
             device_rate_hz: RATE,
             system_echo_cancellation: true,
         },
-        Box::new(move |id, packet| recorded.lock().unwrap().push((id, packet))),
+        Box::new(move |id, packet: &Outgoing| recorded.lock().unwrap().push((id, packet.clone()))),
         Arc::new(Instant::now),
     );
     (engine, sent)
@@ -756,12 +756,12 @@ fn an_entry_that_carries_several_calls_names_each_packet_after_its_own() {
             _own: CallId,
             frame: &[i16],
             _now: Instant,
-            send: &mut dyn FnMut(CallId, Outgoing),
+            send: &mut dyn FnMut(CallId, &Outgoing),
         ) -> Result<(), crate::CallGone> {
             for member in [11, 12] {
                 send(
                     member,
-                    Outgoing {
+                    &Outgoing {
                         destination: destination(),
                         payload: vec![u8::try_from(frame.len() / 16).unwrap_or(0)],
                         transport: crate::Transport::Udp,

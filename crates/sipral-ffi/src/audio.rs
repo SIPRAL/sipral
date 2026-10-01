@@ -497,7 +497,7 @@ pub(crate) unsafe fn configured(
     let engine = Engine::new(
         platform,
         settings,
-        Box::new(move |call, packet| transmit.send(call, &packet)),
+        Box::new(move |call, packet: &Outgoing| transmit.send(call, packet)),
         Arc::new(move || clock.now()),
     );
     Ok(Some(Arc::new(Mutex::new(engine))))

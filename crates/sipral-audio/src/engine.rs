@@ -14,7 +14,7 @@ use crate::backend::{
     Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
     RawDevice, Scheduling,
 };
-use crate::call::{CallAudio, CallId, Outgoing};
+use crate::call::{CallAudio, CallId, Transmit};
 use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };
@@ -168,7 +168,7 @@ pub struct Engine {
     running: PerRole<Option<Running>>,
     settings: PerDirection<Setting>,
     pump: Option<PumpHandle>,
-    transmit: Option<Box<dyn FnMut(CallId, Outgoing) + Send>>,
+    transmit: Option<Transmit>,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
     attached: Vec<CallId>,
     /// The attached calls' audio while no pump runs to carry it: a call
@@ -283,7 +283,7 @@ impl Engine {
     pub fn new(
         mut backend: Box<dyn Backend>,
         config: Config,
-        transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
+        transmit: Transmit,
         now: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Self {
         backend.set_system_echo_cancellation(config.system_echo_cancellation);
@@ -322,11 +322,7 @@ impl Engine {
     }
 
     /// The same, on the system's own clock.
-    pub fn on_system_clock(
-        backend: Box<dyn Backend>,
-        config: Config,
-        transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
-    ) -> Self {
+    pub fn on_system_clock(backend: Box<dyn Backend>, config: Config, transmit: Transmit) -> Self {
         Self::new(backend, config, transmit, Arc::new(Instant::now))
     }
 
@@ -1539,6 +1535,14 @@ impl Engine {
         self.pump.as_ref().map_or(0, |pump| {
             pump.report.stand_in(direction == Direction::Input)
         })
+    }
+
+    /// Samples the loudspeaker running now has played silence for, for want
+    /// of anything queued, since it opened: underruns, where the platform
+    /// counts them, and zero where it does not or while no pump runs.
+    #[must_use]
+    pub fn speaker_starved(&self) -> u64 {
+        self.pump.as_ref().map_or(0, |pump| pump.report.starved())
     }
 
     /// What the running pump's thread got when it asked the platform's

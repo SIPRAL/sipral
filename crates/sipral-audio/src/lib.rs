@@ -75,9 +75,11 @@ mod coreaudio;
 mod wasapi;
 
 #[cfg(test)]
+mod realtime_tests;
+#[cfg(test)]
 mod tests;
 
-pub use call::{CallAudio, CallGone, CallId, Outgoing, Transport};
+pub use call::{CallAudio, CallGone, CallId, Outgoing, Transmit, Transport};
 pub use device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };

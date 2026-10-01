@@ -29,10 +29,18 @@ use sipral_io_common::level::Controls;
 use sipral_io_coreaudio::{Stream, StreamConfig, StreamEvent, StreamFormat, StreamKind};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, RawDevice,
-    StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
+    Promoted, RawDevice, StreamCommon,
 };
 use crate::device::Role;
+
+/// What the pump's thread declares to the scheduler: woken once a frame,
+/// needing a few milliseconds of it — a frame encoded and decoded for every
+/// call, and the mix — done well inside the frame. A tick that runs over
+/// is let go back to the ordinary class by the kernel rather than allowed
+/// to starve the machine.
+const PUMP_COMPUTATION: Duration = Duration::from_millis(6);
+const PUMP_CONSTRAINT: Duration = Duration::from_millis(16);
 
 /// How long an open waits for the process's voice unit to be given back by
 /// the halves the engine has just let go of, which the pump drops on its
@@ -302,6 +310,14 @@ impl Backend for CoreAudioBackend {
         self.voice_processing = on;
     }
 
+    fn pump_scheduling(&self) -> Option<Promote> {
+        Some(Arc::new(|| {
+            sipral_io_coreaudio::run_as_audio(crate::pump::FRAME, PUMP_COMPUTATION, PUMP_CONSTRAINT)
+                .ok()
+                .map(|()| Box::new(()) as Promoted)
+        }))
+    }
+
     fn duplex_only(&self) -> bool {
         true
     }
@@ -404,5 +420,12 @@ impl PlaybackStream for Half {
             .stream()
             .as_mut()
             .map_or(0, |stream| stream.split().1.burst())
+    }
+
+    fn starved(&self) -> u64 {
+        self.unit
+            .stream()
+            .as_ref()
+            .map_or(0, |stream| stream.counters().playback_starved)
     }
 }

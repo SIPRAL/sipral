@@ -27,7 +27,7 @@ use sipral_io_common::level::{Channel, window_samples};
 use sipral_media::resample::Resampler;
 
 use crate::backend::{CaptureStream, Format, PlaybackStream, Promote, Scheduling};
-use crate::call::{CallAudio, CallGone, CallId, Outgoing};
+use crate::call::{CallAudio, CallGone, CallId, Transmit};
 use crate::device::Role;
 
 /// One frame's worth of time, which is the tick.
@@ -79,7 +79,7 @@ pub(crate) type Carried = Vec<(CallId, Box<dyn CallAudio>)>;
 /// What a pump's thread hands back when it finishes, before it lets go of
 /// its devices: the transmit function it was given and the calls it was
 /// still carrying.
-pub(crate) type Finished = (Box<dyn FnMut(CallId, Outgoing) + Send>, Carried);
+pub(crate) type Finished = (Transmit, Carried);
 
 /// One call's own gain, mute and meter, per direction, applied in the
 /// mixer: `up` to what the microphone sends the call, `down` to what the
@@ -148,6 +148,9 @@ pub(crate) struct Report {
     /// What the pump's thread got from the scheduler: nothing reported yet,
     /// then one of [`Scheduling`]'s answers.
     scheduling: AtomicU8,
+    /// What the loudspeaker running now has played silence for, for want
+    /// of anything queued, as of the last tick.
+    starved: AtomicU64,
 }
 
 impl Report {
@@ -164,6 +167,12 @@ impl Report {
         if let Some(count) = self.stand_in.get(usize::from(!input)) {
             count.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    /// What the loudspeaker running now has starved for, as of the last
+    /// tick.
+    pub(crate) fn starved(&self) -> u64 {
+        self.starved.load(Ordering::Acquire)
     }
 
     /// What the pump's thread got from the scheduler, once it has asked.
@@ -454,7 +463,7 @@ pub(crate) struct Pump {
     ringer: Option<Box<dyn PlaybackStream>>,
     calls: Vec<Call>,
     ringing: Option<Ringing>,
-    transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
+    transmit: Transmit,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
     device_hz: u32,
     /// The microphone's frame, at its rate.
@@ -473,7 +482,7 @@ impl Pump {
     pub(crate) fn new(
         commands: Receiver<Command>,
         report: Arc<Report>,
-        transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
+        transmit: Transmit,
         now: Arc<dyn Fn() -> Instant + Send + Sync>,
         device_hz: u32,
         promote: Option<Promote>,
@@ -557,6 +566,8 @@ impl Pump {
         self.capture();
         self.play();
         self.ring();
+        let starved = self.speaker.as_ref().map_or(0, |stream| stream.starved());
+        self.report.starved.store(starved, Ordering::Release);
         self.report.ticks.fetch_add(1, Ordering::AcqRel);
     }
 

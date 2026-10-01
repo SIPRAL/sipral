@@ -3,6 +3,7 @@
 
 //! What the pump needs from a call, and the facade's session as one.
 
+use core::cell::RefCell;
 use core::fmt;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -35,6 +36,12 @@ pub struct Outgoing {
     /// How it leaves.
     pub transport: Transport,
 }
+
+/// Where the pump hands every packet it produced, on its own thread: send
+/// it and return. The packet is lent for the length of the call, so that a
+/// call's capture can be copied into one the pump's thread keeps rather
+/// than into a new one every frame.
+pub type Transmit = Box<dyn FnMut(CallId, &Outgoing) + Send>;
 
 /// Why a call could not take a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,10 +100,10 @@ pub trait CallAudio: Send {
         own: CallId,
         frame: &[i16],
         now: Instant,
-        send: &mut dyn FnMut(CallId, Outgoing),
+        send: &mut dyn FnMut(CallId, &Outgoing),
     ) -> Result<(), CallGone> {
         if let Some(packet) = self.capture(frame, now)? {
-            send(own, packet);
+            send(own, &packet);
         }
         Ok(())
     }
@@ -133,6 +140,43 @@ impl CallAudio for SessionShare {
         Ok(captured)
     }
 
+    /// The packet copied out of the session's lock into one the pump's
+    /// thread keeps from frame to frame, and handed over by reference: once
+    /// it has grown to a packet's size, carrying a call's microphone to the
+    /// far end allocates nothing.
+    fn capture_each(
+        &mut self,
+        own: CallId,
+        frame: &[i16],
+        now: Instant,
+        send: &mut dyn FnMut(CallId, &Outgoing),
+    ) -> Result<(), CallGone> {
+        PACKET.with_borrow_mut(|kept| {
+            let captured = self
+                .with(|session| {
+                    let Some(datagram) = session.capture(frame, now).ok().flatten() else {
+                        return false;
+                    };
+                    let packet = kept.get_or_insert_with(|| Outgoing {
+                        destination: datagram.destination,
+                        payload: Vec::with_capacity(PACKET_ROOM),
+                        transport: Transport::Udp,
+                    });
+                    packet.destination = datagram.destination;
+                    packet.transport = transport_of(&datagram);
+                    packet.payload.clear();
+                    packet.payload.extend_from_slice(datagram.payload);
+                    true
+                })
+                .map_err(gone)?;
+            // handed over outside the session's lock, as every packet is
+            if captured && let Some(packet) = kept.as_ref() {
+                send(own, packet);
+            }
+            Ok(())
+        })
+    }
+
     fn playback(&mut self, out: &mut [i16]) -> Result<(), CallGone> {
         self.with(|session| {
             session.playback(out);
@@ -146,6 +190,15 @@ impl CallAudio for SessionShare {
         // attached later; neither is anything the pump can act on
         let _ = self.with(|session| session.set_render_delay(delay));
     }
+}
+
+/// Room for one packet: what a datagram on a path of the usual size holds.
+const PACKET_ROOM: usize = 1_500;
+
+thread_local! {
+    /// The packet a call's capture is copied into, on the thread that
+    /// carries the call: the pump's.
+    static PACKET: RefCell<Option<Outgoing>> = const { RefCell::new(None) };
 }
 
 fn gone(_: SessionUnavailable) -> CallGone {

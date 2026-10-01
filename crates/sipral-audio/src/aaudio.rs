@@ -31,7 +31,8 @@ use sipral_io_aaudio::route::{self, Routes};
 use sipral_io_aaudio::{Controls, JniPlatform, Stream, StreamConfig, Usage};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, Promote, Promoted,
+    RawDevice, StreamCommon,
 };
 use crate::device::Direction;
 
@@ -178,6 +179,14 @@ impl Backend for AAudioBackend {
 
     fn set_system_echo_cancellation(&mut self, on: bool) {
         self.echo_cancellation = on;
+    }
+
+    fn pump_scheduling(&self) -> Option<Promote> {
+        // SCHED_FIFO is for AAudio's own callback threads; the most an
+        // application's thread may ask for is the urgent-audio priority
+        Some(Arc::new(|| {
+            sipral_io_aaudio::urgent_audio_thread().then(|| Box::new(()) as Promoted)
+        }))
     }
 
     fn poll_notice(&mut self) -> Option<Notice> {

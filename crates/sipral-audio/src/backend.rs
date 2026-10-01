@@ -266,4 +266,10 @@ pub trait PlaybackStream: StreamCommon {
     fn burst(&self) -> usize {
         0
     }
+    /// Samples the device asked for and found nothing queued for, and so
+    /// played silence in place of, since the stream opened: an underrun,
+    /// counted where the platform counts them, and zero where it does not.
+    fn starved(&self) -> u64 {
+        0
+    }
 }
