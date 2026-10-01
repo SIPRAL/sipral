@@ -113,6 +113,28 @@ and `client.audio.deactivate()`, which is what CallKit's audio session
 callbacks and Android's audio focus are for. `client.audio.setMuted(true)`
 sends silence in place of the microphone, on every call.
 
+### Where the phone is reached, and where its server is
+
+`bindHost` left out of `Sipral.open` has the stack listen on every interface
+and advertise the address of the route toward the server of its first
+account -- the address a PBX on the network reaches the phone at -- and
+each call's audio go from the route toward the far end. The library refuses
+to advertise a loopback address to a server elsewhere (`unreachableAddress`,
+and a registration failing `unreachableContact`).
+
+An account names its server by `registrarAddress` or by `serverUri`, a URI
+whose host RFC 3263 locates: the native halves ask the platform's resolver
+(iOS: the system's DNS service, SRV included; Android: addresses only, SRV
+and NAPTR answered "nothing" and the host's own addresses tried), and the
+client and the account raise `located` with every address found, the one in
+use first, or `locateFailed` with why. `keepaliveMs` keeps the account's flow
+open. `tlsPin` with `signalling: 'tls'` trusts the one certificate with that
+SHA-256 fingerprint, whoever signed it. `srtp: 'bestEffort'` offers SDES on
+plain RTP/AVP; `srtpSuites`, `pathMtu`, `datagramWithoutStreamBytes` (a
+request over UDP anyway once no stream to a UDP-only server can be had),
+`pseudonymSalt` (hexadecimal) and `diagnosticTrace`
+(`client.setDiagnosticTrace`) reach the library as given.
+
 ### Accounts
 
 `client.addAccount(options)` resolves with a `SipralAccount`: `register()`,

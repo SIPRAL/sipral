@@ -26,21 +26,27 @@ import org.sipral.SipralCallState
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralLocateFailure
+import org.sipral.SipralRegistrationFailure
 import org.sipral.SipralRegistrationState
+import org.sipral.SipralSrtp
 import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
+import org.sipral.idiomatic.locateOf
 import org.sipral.idiomatic.transferOf
 
 /** A refusal JavaScript receives as `SipralError.code`: a status's name, or one of this layer's. */
 class SipralRefusal(val code: String, message: String) : Exception(message)
 
-/** What `open` takes, the fields of the spec's NativeOpenOptions. */
+/** What `open` takes, the fields of the spec's NativeOpenOptions. [bindHost]
+ * null is the route toward the server, the Kotlin layer's default. */
 data class SipralOpenOptions(
-    val bindHost: String,
+    val bindHost: String? = null,
     val bindPort: Int = 0,
     val userAgent: String? = null,
     val codecs: String? = null,
@@ -48,12 +54,27 @@ data class SipralOpenOptions(
     val signallingServer: String? = null,
     val stunServer: String? = null,
     val manualAudio: Boolean = false,
+    /** A `SipralSrtp` constant in lower camel case: "offered", "bestEffort"... */
+    val srtp: String? = null,
+    /** Suite names, comma-separated. */
+    val srtpSuites: String? = null,
+    val pathMtu: Long = 0,
+    val datagramWithoutStreamBytes: Long = 0,
+    /** The pseudonym salt, as hexadecimal. */
+    val pseudonymSalt: String? = null,
+    val diagnosticTrace: Boolean? = null,
+    /** The fingerprint of the one certificate a TLS connection trusts. */
+    val tlsPin: String? = null,
 )
 
 /** What `addAccount` takes, the fields of NativeAccountOptions. */
 data class SipralAccountOptions(
     val aor: String,
-    val registrarAddress: String,
+    /** Null for an account whose server is [serverUri]. */
+    val registrarAddress: String? = null,
+    val serverUri: String? = null,
+    val serverNaptr: Boolean = false,
+    val keepaliveMs: Long = 0,
     val registrar: String? = null,
     val contact: String? = null,
     val displayName: String? = null,
@@ -75,7 +96,9 @@ class SipralReactCore(
 ) {
     private var client: SipralClient? = null
     private var scope: CoroutineScope? = null
-    private var mediaHost = "127.0.0.1"
+    /** Where every call's media is bound: what JavaScript named, or null for
+     * the route toward the far end the Kotlin layer picks. */
+    private var mediaHost: String? = null
     private val accounts = ConcurrentHashMap<String, SipralAccount>()
     private val calls = ConcurrentHashMap<String, SipralCall>()
     private val arrived = ConcurrentHashMap<String, SipralEvent>()
@@ -93,15 +116,26 @@ class SipralReactCore(
             "tls" -> SipralTransport.TLS
             else -> throw SipralRefusal("invalidArgument", "signalling is udp, tcp or tls, not ${options.signalling}")
         }
+        val srtp = options.srtp?.let { named ->
+            SipralSrtp.entries.firstOrNull { camel(it.name) == named }
+                ?: throw SipralRefusal("invalidArgument", "srtp is no SRTP policy: $named")
+        }
         val opened = SipralClient.open(
-            bindHost = options.bindHost,
+            bindHost = options.bindHost?.takeIf { it.isNotEmpty() },
             bindPort = options.bindPort,
             userAgent = options.userAgent,
             codecs = options.codecs,
             stunServer = options.stunServer,
             audio = audio(options.manualAudio),
+            srtp = srtp,
             signalling = signalling,
             signallingServer = options.signallingServer,
+            tlsTrust = options.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: SipralTlsTrust.Platform,
+            srtpSuites = options.srtpSuites?.split(',') ?: emptyList(),
+            pathMtu = options.pathMtu,
+            datagramWithoutStreamBytes = options.datagramWithoutStreamBytes,
+            pseudonymSalt = options.pseudonymSalt?.let(::bytes),
+            diagnosticTrace = options.diagnosticTrace,
         )
         val collecting = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         collecting.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -109,7 +143,7 @@ class SipralReactCore(
         }
         client = opened
         scope = collecting
-        mediaHost = options.bindHost
+        mediaHost = options.bindHost?.takeIf { it.isNotEmpty() }
         opened.bindAddress
     }
 
@@ -131,6 +165,9 @@ class SipralReactCore(
         val account = open().addAccount(
             aor = options.aor,
             registrarAddress = options.registrarAddress,
+            serverUri = options.serverUri,
+            serverNaptr = options.serverNaptr,
+            keepaliveMs = options.keepaliveMs,
             registrar = options.registrar,
             contact = options.contact,
             displayName = options.displayName,
@@ -230,6 +267,8 @@ class SipralReactCore(
 
     fun setMuted(muted: Boolean) = guarded { devices().setMuted(SipralAudioDirection.INPUT, muted) }
 
+    fun setDiagnosticTrace(on: Boolean) = guarded { open().setDiagnosticTrace(on) }
+
     private fun deliver(event: SipralEvent) {
         val id = event.call.toString()
         when (event.kind) {
@@ -273,6 +312,14 @@ class SipralReactCore(
                 throw SipralRefusal("notSupported", "the library runs a phone's audio from Android 9 (API level 28)")
             }
             return SipralAudioMode.Device(if (manual) SipralAudioActivation.MANUAL else SipralAudioActivation.AUTOMATIC)
+        }
+
+        /** The bytes [hex] writes, two digits each. */
+        fun bytes(hex: String): ByteArray {
+            if (hex.length % 2 != 0 || hex.any { it.digitToIntOrNull(16) == null }) {
+                throw SipralRefusal("invalidArgument", "pseudonymSalt is bytes as hexadecimal")
+            }
+            return ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         }
 
         /** `SIPRAL_EVENT_KIND_CALL_ENDED` as "callEnded": a constant's name in lower camel case. */
@@ -323,6 +370,9 @@ class SipralReactCore(
                     val registration = event.payload.registration
                     SipralRegistrationState.entries.firstOrNull { it.value.toLong() == registration.state }
                         ?.let { flat["registrationState"] = camel(it.name) }
+                    SipralRegistrationFailure.entries
+                        .firstOrNull { it.value.toLong() == registration.failure && it != SipralRegistrationFailure.NONE }
+                        ?.let { flat["registrationFailure"] = camel(it.name) }
                     flat["statusCode"] = registration.statusCode.toInt()
                     flat["retryInMs"] = registration.retryInMs.toDouble()
                 }
@@ -341,6 +391,15 @@ class SipralReactCore(
                     text(call.toUri)?.let { flat["toUri"] = it }
                 }
                 event.kind in digitKinds -> digitOf(event)?.let { flat["digit"] = it.toString() }
+                locateOf(event) != null -> {
+                    val locate = locateOf(event)!!
+                    locate.targets?.let { flat["targets"] = it }
+                    if (event.kind == SipralEventKind.LOCATE_FAILED.value.toLong()) {
+                        SipralLocateFailure.entries.firstOrNull { it.value.toLong() == locate.failure }
+                            ?.let { flat["locateFailure"] = camel(it.name) }
+                        flat["retryInMs"] = locate.retryInMs.toDouble()
+                    }
+                }
                 else -> transferOf(event)?.let { transfer ->
                     flat["statusCode"] = transfer.statusCode.toInt()
                     flat["attended"] = transfer.attended != 0L

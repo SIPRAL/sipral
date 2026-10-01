@@ -35,15 +35,21 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         SipralAndroidAudio.attach(reactApplicationContext)
         core.open(
             SipralOpenOptions(
-                bindHost = options.getString("bindHost") ?: "",
+                bindHost = options.text("bindHost"),
                 bindPort = options.number("bindPort")?.toInt() ?: 0,
                 userAgent = options.text("userAgent"),
                 codecs = options.text("codecs"),
                 signalling = options.text("signalling") ?: "udp",
                 signallingServer = options.text("signallingServer"),
                 stunServer = options.text("stunServer"),
-                manualAudio = options.hasKey("manualAudio") && !options.isNull("manualAudio") &&
-                    options.getBoolean("manualAudio"),
+                manualAudio = options.flag("manualAudio") ?: false,
+                srtp = options.text("srtp"),
+                srtpSuites = options.text("srtpSuites"),
+                pathMtu = options.number("pathMtu")?.toLong() ?: 0,
+                datagramWithoutStreamBytes = options.number("datagramWithoutStreamBytes")?.toLong() ?: 0,
+                pseudonymSalt = options.text("pseudonymSalt"),
+                diagnosticTrace = options.flag("diagnosticTrace"),
+                tlsPin = options.text("tlsPin"),
             ),
         )
     }
@@ -54,7 +60,10 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         core.addAccount(
             SipralAccountOptions(
                 aor = options.getString("aor") ?: "",
-                registrarAddress = options.getString("registrarAddress") ?: "",
+                registrarAddress = options.text("registrarAddress"),
+                serverUri = options.text("serverUri"),
+                serverNaptr = options.flag("serverNaptr") ?: false,
+                keepaliveMs = options.number("keepaliveMs")?.toLong() ?: 0,
                 registrar = options.text("registrar"),
                 contact = options.text("contact"),
                 displayName = options.text("displayName"),
@@ -100,6 +109,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     override fun setMuted(muted: Boolean, promise: Promise) = settle(promise) { core.setMuted(muted) }
 
+    override fun setDiagnosticTrace(on: Boolean, promise: Promise) = settle(promise) { core.setDiagnosticTrace(on) }
+
     override fun invalidate() {
         worker.execute { core.close() }
         worker.shutdown()
@@ -139,6 +150,9 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     private fun ReadableMap.number(key: String): Double? =
         if (hasKey(key) && !isNull(key)) getDouble(key) else null
+
+    private fun ReadableMap.flag(key: String): Boolean? =
+        if (hasKey(key) && !isNull(key)) getBoolean(key) else null
 
     companion object {
         const val NAME = NativeSipralSpec.NAME

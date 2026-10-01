@@ -64,6 +64,13 @@ describe('opening', () => {
           signallingServer: undefined,
           stunServer: undefined,
           manualAudio: false,
+          srtp: undefined,
+          srtpSuites: undefined,
+          pathMtu: undefined,
+          datagramWithoutStreamBytes: undefined,
+          pseudonymSalt: undefined,
+          diagnosticTrace: undefined,
+          tlsPin: undefined,
         },
       ],
     });
@@ -105,6 +112,47 @@ describe('opening', () => {
     await opened();
   });
 
+  it('leaves the address to the route toward the server, and passes the 0.34 options through', async () => {
+    const native = new FakeNative();
+    const client = await Sipral.open(
+      {
+        srtp: 'bestEffort',
+        srtpSuites: ['AES_CM_128_HMAC_SHA1_80', 'AEAD_AES_256_GCM'],
+        pathMtu: 1500,
+        datagramWithoutStreamBytes: 4000,
+        pseudonymSalt: '00112233445566778899aabbccddeeff',
+        diagnosticTrace: true,
+        signalling: 'tls',
+        signallingServer: '203.0.113.5:5061',
+        tlsPin: 'SHA256=AB',
+      },
+      native,
+    );
+    open.push(client);
+    expect(native.calls[0].args[0]).toMatchObject({
+      bindHost: undefined,
+      srtp: 'bestEffort',
+      srtpSuites: 'AES_CM_128_HMAC_SHA1_80,AEAD_AES_256_GCM',
+      pathMtu: 1500,
+      datagramWithoutStreamBytes: 4000,
+      pseudonymSalt: '00112233445566778899aabbccddeeff',
+      diagnosticTrace: true,
+      tlsPin: 'SHA256=AB',
+    });
+    await client.setDiagnosticTrace(false);
+    expect(native.calls[1]).toEqual({method: 'setDiagnosticTrace', args: [false]});
+  });
+
+  it('refuses a pin without TLS and a salt that is not 16 bytes of hexadecimal, before crossing', async () => {
+    const native = new FakeNative();
+    expect((await refusal(Sipral.open({tlsPin: 'SHA256=AB'}, native))).code).toBe('invalidArgument');
+    expect((await refusal(Sipral.open({pseudonymSalt: '0011'}, native))).code).toBe('invalidArgument');
+    expect((await refusal(Sipral.open({pseudonymSalt: 'not hexadecimal at all, really'}, native))).code).toBe(
+      'invalidArgument',
+    );
+    expect(native.calls).toEqual([]);
+  });
+
   it('looks the native module up as Sipral', () => {
     expect(asked).toEqual(['Sipral']);
   });
@@ -135,7 +183,7 @@ describe('accounts', () => {
     expect(account.registrationState).toBe('registered');
     expect(onAccount.map((event) => event.state)).toEqual(['registering', 'registered']);
     expect(onClient).toEqual(onAccount);
-    expect(onClient[1]).toEqual({account, state: 'registered', statusCode: 200, retryInMs: 0});
+    expect(onClient[1]).toEqual({account, state: 'registered', statusCode: 200, retryInMs: 0, failure: 'none'});
     expect(native.methods()).toEqual(['open', 'addAccount', 'register']);
 
     await account.unregister();
@@ -424,5 +472,52 @@ describe('closing', () => {
     expect((await refusal(client.audio.activate())).code).toBe('closed');
     await client.close();
     expect(native.methods().filter((method) => method === 'close')).toHaveLength(1);
+  });
+});
+
+describe('a server named by a URI', () => {
+  it('crosses as serverUri, and exactly one of the two names the server', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({aor: 'sip:alice@example.com', serverUri: 'sip:pbx.example.com', keepaliveMs: 15000});
+    expect(native.calls[1]).toEqual({
+      method: 'addAccount',
+      args: [{aor: 'sip:alice@example.com', serverUri: 'sip:pbx.example.com', keepaliveMs: 15000}],
+    });
+    expect((await refusal(client.addAccount({aor: 'sip:bob@example.com'}))).code).toBe('invalidArgument');
+    expect(
+      (
+        await refusal(
+          client.addAccount({aor: 'sip:bob@example.com', registrarAddress: '203.0.113.5:5060', serverUri: 'sip:a.test'}),
+        )
+      ).code,
+    ).toBe('invalidArgument');
+    expect(native.calls).toHaveLength(2);
+  });
+
+  it('says where it was located, and why not, on the client and on the account', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({aor: 'sip:alice@example.com', serverUri: 'sip:pbx.example.com'});
+    const located: string[][] = [];
+    const failed: string[] = [];
+    account.on('located', (event) => located.push(event.targets));
+    client.on('locateFailed', (event) => failed.push(`${event.failure} ${event.retryInMs}`));
+    native.emit({kind: 'located', account: account.id, targets: '192.0.2.40:5060,192.0.2.41:5060'});
+    native.emit({kind: 'locateFailed', account: account.id, locateFailure: 'notFound', retryInMs: 30000});
+    expect(located).toEqual([['192.0.2.40:5060', '192.0.2.41:5060']]);
+    expect(failed).toEqual(['notFound 30000']);
+  });
+
+  it('names why a registration failed', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({aor: 'sip:alice@example.com', registrarAddress: '203.0.113.5:5060'});
+    const seen: string[] = [];
+    client.on('registrationChanged', (event) => seen.push(`${event.state} ${event.failure}`));
+    native.emit({
+      kind: 'registrationChanged',
+      account: account.id,
+      registrationState: 'failed',
+      registrationFailure: 'unreachableContact',
+    });
+    expect(seen).toEqual(['failed unreachableContact']);
   });
 });

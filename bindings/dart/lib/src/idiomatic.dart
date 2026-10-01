@@ -30,6 +30,7 @@ import 'sipral_abi.dart';
 part 'account.dart';
 part 'call.dart';
 part 'events.dart';
+part 'locate.dart';
 part 'media.dart';
 part 'stack.dart';
 

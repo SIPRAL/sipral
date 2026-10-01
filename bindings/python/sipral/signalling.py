@@ -16,13 +16,15 @@ as `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
 from __future__ import annotations
 
 import errno
+import hashlib
+import hmac
 import socket
 import ssl
 from typing import Callable
 
 from ._sipral_cffi import lib
 
-__all__ = ["InviteLimit", "TlsTrust", "classify"]
+__all__ = ["InviteLimit", "PinRefused", "TlsTrust", "classify", "parse_pin"]
 
 #: What OpenSSL calls the verification failures that are an expired or a
 #: not-yet-valid certificate, and one that names another host
@@ -50,14 +52,45 @@ class TlsTrust:
     :meth:`platform` (the machine's own store, what a public server's
     certificate is checked against), :meth:`private_authority` (a private
     CA beside the platform's), and :meth:`only_authority` (that one
-    authority and nothing else: pinning it). :meth:`from_context` takes a
-    context the application built itself, for anything the three do not
-    say. None of them turns the check off.
+    authority and nothing else: pinning it). :meth:`pinned` trusts one
+    certificate by its SHA-256 fingerprint, for a PBX that signed its own.
+    :meth:`from_context` takes a context the application built itself, for
+    anything the others do not say. None of them turns the check off.
     """
 
-    def __init__(self, build: Callable[[], ssl.SSLContext], description: str) -> None:
+    def __init__(
+        self, build: Callable[[], ssl.SSLContext], description: str, pin: bytes | None = None
+    ) -> None:
         self._build = build
         self.description = description
+        #: The SHA-256 digest of the one certificate :meth:`pinned` trusts,
+        #: or ``None``.
+        self.pin = pin
+
+    @classmethod
+    def pinned(cls, fingerprint: str) -> "TlsTrust":
+        """The one certificate whose SHA-256 fingerprint is ``fingerprint``,
+        and nothing else: for a PBX serving a certificate it signed itself.
+
+        ``fingerprint`` is written the way ``openssl x509 -fingerprint
+        -sha256`` or RFC 8122 prints it: 64 hexadecimal digits, either case,
+        a colon between each byte or none, optionally after ``sha-256 `` or
+        ``SHA256=``; anything else raises ``ValueError``. The fingerprint is
+        the whole verdict: no authority, host name or date is consulted, and
+        a certificate with any other fingerprint is refused as untrusted
+        (`docs/22-tls.md`). It is compared in constant time, over the DER
+        bytes of the certificate the server presented first."""
+        digest = parse_pin(fingerprint)
+
+        def build() -> ssl.SSLContext:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            # the pin replaces the chain and the name: both are checked
+            # below, against the digest, once the handshake is done
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            return context
+
+        return cls(build, "the pinned certificate", digest)
 
     @classmethod
     def platform(cls) -> "TlsTrust":
@@ -96,6 +129,34 @@ class TlsTrust:
         if context.minimum_version < ssl.TLSVersion.TLSv1_2:
             context.minimum_version = ssl.TLSVersion.TLSv1_2
         return context
+
+
+def parse_pin(fingerprint: str) -> bytes:
+    """The 32 bytes a SHA-256 fingerprint names, in any of the forms
+    :meth:`TlsTrust.pinned` takes; ``ValueError`` for anything else."""
+    text = fingerprint.strip()
+    split = min((at for at in (text.find(" "), text.find("=")) if at >= 0), default=-1)
+    if split >= 0:
+        named, text = text[:split], text[split + 1 :].strip()
+        if named.strip().lower().replace("-", "").replace("_", "") != "sha256":
+            raise ValueError("a certificate pin is a SHA-256 fingerprint")
+    digits = text.replace(":", "")
+    placed = ":" not in text or (
+        len(text) == 95 and all((at % 3 == 2) == (ch == ":") for at, ch in enumerate(text))
+    )
+    if len(digits) != 64 or not placed or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+        raise ValueError("a certificate pin is 32 bytes of hexadecimal, colons between them or not")
+    return bytes.fromhex(digits)
+
+
+class PinRefused(ssl.SSLCertVerificationError):
+    """The server presented a certificate other than the pinned one."""
+
+    def __init__(self) -> None:
+        super().__init__("the server's certificate is not the pinned one")
+        self.reason = "CERTIFICATE_REFUSED"
+        self.verify_code = 0
+        self.verify_message = "the server's certificate is not the pinned one"
 
 
 class InviteLimit(tuple):
@@ -177,23 +238,33 @@ def classify(error: BaseException) -> tuple[int, int, str]:
 def connect(
     server: tuple[str, int],
     *,
-    bind_host: str,
+    bind_host: str | None,
     context: ssl.SSLContext | None,
     server_name: str | None,
     timeout: float,
+    pin: bytes | None = None,
 ) -> socket.socket:
-    """One connection to ``server`` from ``bind_host``, over TLS when
-    ``context`` is given with the certificate checked against
-    ``server_name``; raises what refused it, for :func:`classify`."""
+    """One connection to ``server`` from ``bind_host`` (from the address of
+    the route toward it when ``None``), over TLS when ``context`` is given
+    with the certificate checked against ``server_name`` -- or, with
+    ``pin``, against that SHA-256 digest alone; raises what refused it, for
+    :func:`classify`."""
     raw = socket.socket(socket.AF_INET6 if ":" in server[0] else socket.AF_INET, socket.SOCK_STREAM)
     try:
         raw.settimeout(timeout)
-        raw.bind((bind_host, 0))
+        if bind_host is not None:
+            raw.bind((bind_host, 0))
         raw.connect(server)
         raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         if context is None:
             return raw
-        return context.wrap_socket(raw, server_hostname=server_name)
+        wrapped = context.wrap_socket(raw, server_hostname=server_name)
     except BaseException:
         raw.close()
         raise
+    if pin is not None:
+        leaf = wrapped.getpeercert(binary_form=True) or b""
+        if not hmac.compare_digest(hashlib.sha256(leaf).digest(), pin):
+            wrapped.close()
+            raise PinRefused()
+    return wrapped

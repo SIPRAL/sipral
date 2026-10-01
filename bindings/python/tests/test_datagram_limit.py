@@ -27,10 +27,10 @@ import threading
 import time
 import unittest
 
-from sipral import Stack
+from sipral import SipralError, Stack
 from sipral._sipral_cffi import lib
 from sipral.events import Event
-from sipral.enums import AudioMode, CallEndReason, EventKind, TransportError
+from sipral.enums import AudioMode, CallEndReason, EventKind, Status, TransportError
 
 #: How long the nonce is: enough that the retry is over the line even with
 #: one suite fewer, so no trimmed offer fits a datagram either.
@@ -78,6 +78,9 @@ class _Pbx:
             f"127.0.0.1:{self._listener.getsockname()[1]}" if self._listener is not None else None
         )
         self.over_tcp: list[str] = []
+        #: Every INVITE carrying credentials that arrived over UDP, and its
+        #: size in bytes.
+        self.answered_over_udp: list[tuple[str, int]] = []
         self.connections = 0
         #: How many of those connections the stack closed.
         self.closed_by_the_stack = 0
@@ -97,6 +100,9 @@ class _Pbx:
             if message.startswith("INVITE ") and _header("Authorization", message) is None:
                 challenge = f'WWW-Authenticate: Digest realm="asterisk", nonce="{nonce}", qop="auth"\r\n'
                 self._udp.sendto(_response(message, "401 Unauthorized", challenge), peer)
+            elif message.startswith("INVITE "):
+                self.answered_over_udp.append((message, len(data)))
+                self._udp.sendto(_response(message, "486 Busy Here"), peer)
 
     def _accept(self) -> None:
         assert self._listener is not None
@@ -233,6 +239,27 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         invites = [message for message in pbx.over_tcp if message.startswith("INVITE ")]
         self.assertEqual(len(invites), 1, pbx.over_tcp)
         self.assertIsNotNone(_header("Authorization", invites[0]))
+
+    async def test_a_pbx_on_udp_alone_takes_the_request_over_udp_up_to_the_stacks_limit(self) -> None:
+        # a deliberate deviation from Section 18.1.1: no stream is coming, and
+        # the stack was told the server takes a large request over UDP
+        pbx = self.pbx(tcp=False)
+        stack = self.stack(datagram_without_stream_bytes=4000, path_mtu=1500)
+        self.call(stack, pbx)
+        seen = await self.events_until_the_end(stack, seconds=4.0)
+        self.assertEqual(seen[-1].fields["status_code"], 486, "the PBX's own answer, over UDP")
+        [(invite, size)] = pbx.answered_over_udp
+        self.assertIsNotNone(_header("Authorization", invite))
+        self.assertGreater(size, 1300)
+        self.assertIn("transport.kept.datagram", stack.diagnostics_json())
+
+    def test_a_limit_past_one_datagram_and_a_path_under_the_ipv4_floor_are_refused(self) -> None:
+        with self.assertRaises(SipralError) as past:
+            Stack(audio=AudioMode.APPLICATION, datagram_without_stream_bytes=65508)
+        self.assertEqual(past.exception.status, Status.INVALID_ARGUMENT)
+        with self.assertRaises(SipralError) as under:
+            Stack(audio=AudioMode.APPLICATION, path_mtu=575)
+        self.assertEqual(under.exception.status, Status.INVALID_ARGUMENT)
 
     async def test_a_stack_told_to_open_no_stream_ends_the_call_without_trying(self) -> None:
         pbx = self.pbx(tcp=True)

@@ -133,7 +133,9 @@ public sealed partial class SipralStack : IDisposable
     private int _disposed;
 
     /// <summary>The address this stack listens on, <c>host:port</c> — a new
-    /// one after <see cref="MoveTo"/>.</summary>
+    /// one after <see cref="MoveTo"/>. A stack created with no
+    /// <c>bindHost</c> listens on every interface, and this is the address it
+    /// advertises: the route toward its first account's server.</summary>
     public string BindAddress { get; private set; }
 
     /// <summary>Who pumps this stack's calls' audio: the library, from the
@@ -338,7 +340,7 @@ public sealed partial class SipralStack : IDisposable
     /// (<c>sipral_stack_transport_bind</c>): the request the stack was holding
     /// goes on it, and the call or registration carries on over it. When that
     /// connection is refused or times out, or with <see langword="false"/>,
-    /// the stack is told at once (<c>sipral_stack_transport_failure</c>, whose
+    /// the stack is told at once (<c>sipral_stack_transport_failed_with</c>, whose
     /// detail names where the connection was going and whether it was
     /// refused, timed out or not tried), and
     /// what was waiting ends rather than hanging: a call as unreachable, its
@@ -348,9 +350,51 @@ public sealed partial class SipralStack : IDisposable
     /// where that connection goes instead, for a server that takes TCP on
     /// another port than UDP — a PBX on 5060 for one and 5160 for the other:
     /// the connection stands for the address the event named, and everything
-    /// the stack sends there goes on it.</summary>
+    /// the stack sends there goes on it.
+    ///
+    /// <paramref name="bindHost"/> is the address the signalling socket is
+    /// bound at and advertises. Left <see langword="null"/>, the socket
+    /// listens on every interface and the stack advertises the address of the
+    /// operating system's route toward the server of its first account
+    /// (<c>sipral_advertised_address</c>): the address a PBX on the network
+    /// reaches this machine at, and <c>127.0.0.1</c> for one on this machine.
+    /// Each account is reached at the route toward its own server, and a
+    /// call's media socket, when <c>mediaHost</c> is <see langword="null"/>,
+    /// at the route toward the far end or the account's server. A loopback
+    /// address is never advertised to a peer elsewhere: the library refuses
+    /// that with <see cref="SipralStatus.UnreachableAddress"/>.
+    ///
+    /// <paramref name="srtp"/> may be <see cref="SipralSrtp.BestEffort"/>:
+    /// SDES offered on plain <c>RTP/AVP</c>, the call encrypted when the
+    /// answer takes a key and plain when it takes none, for a PBX that
+    /// answers an <c>RTP/SAVP</c> offer with 488.
+    /// <paramref name="srtpSuites"/> are the SRTP suites every call offers and
+    /// accepts unless its account names its own, most preferred first, by
+    /// their RFC 4568 and RFC 7714 names.
+    ///
+    /// <paramref name="pathMtu"/> is the MTU of the path toward the server
+    /// when the deployment knows it (<c>0</c> for unknown, else 576 or more):
+    /// RFC 3261 §18.1.1 moves a request to a stream within 200 bytes of it.
+    /// <paramref name="datagramWithoutStreamBytes"/> is a deliberate deviation
+    /// from that section, for a server that takes SIP over UDP alone: once no
+    /// stream to it can be had, a request up to this many bytes goes over UDP
+    /// anyway (<c>0</c> for never, at most 65 507), and
+    /// <see cref="DiagnosticsJson"/> says so as <c>transport.kept.datagram</c>.
+    ///
+    /// <paramref name="pseudonymSalt"/> (16 bytes or more, kept by the
+    /// installation) keys the pseudonyms the log and <see cref="State"/>
+    /// write, so that two runs' traces compare line by line; it is a secret,
+    /// like a key. <paramref name="diagnosticTrace"/> writes whole SIP
+    /// messages at the trace level, peers included and credentials and keys
+    /// taken out, for a diagnosis; <see cref="SetDiagnosticTrace"/> turns it
+    /// on and off later.
+    ///
+    /// <paramref name="resolver"/> answers
+    /// <see cref="SipralEventKind.LookupWanted"/> for the accounts added with
+    /// <c>serverUri</c>, on a thread of its own per lookup;
+    /// <see cref="SipralDns.Platform"/> when <see langword="null"/>.</summary>
     public SipralStack(
-        string bindHost = "127.0.0.1",
+        string? bindHost = null,
         int bindPort = 0,
         string? userAgent = null,
         string? codecs = null,
@@ -388,7 +432,13 @@ public sealed partial class SipralStack : IDisposable
         SipralTlsTrust? tlsTrust = null,
         SipralInviteLimit? inviteLimit = null,
         bool streamFallback = true,
-        string? streamServer = null)
+        string? streamServer = null,
+        IReadOnlyList<string>? srtpSuites = null,
+        uint pathMtu = 0,
+        uint datagramWithoutStreamBytes = 0,
+        byte[]? pseudonymSalt = null,
+        bool? diagnosticTrace = null,
+        SipralResolver? resolver = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _streamFallback = streamFallback;
@@ -400,17 +450,21 @@ public sealed partial class SipralStack : IDisposable
         _turnTrustedCertificates = turnTrustedCertificates;
         NativeLibraryLoader.EnsureRegistered();
 
+        _resolver = resolver ?? SipralDns.Platform;
         var (firstLink, firstRefusal) = PrepareSignalling(signalling, bindHost, signallingServer, tlsServerName, tlsTrust);
+        _routes = bindHost is null;
+        _routeChosen = bindHost is not null || Streamed || streamServer is not null;
         if (Streamed)
         {
-            BindAddress = firstLink?.Local ?? $"{bindHost}:{bindPort}";
+            BindAddress = firstLink?.Local ?? $"{bindHost ?? RouteHost(signallingServer)}:{bindPort}";
         }
         else
         {
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _socket.Bind(new IPEndPoint(IPAddress.Parse(bindHost), bindPort));
+            _socket.Bind(new IPEndPoint(bindHost is null ? IPAddress.Any : IPAddress.Parse(bindHost), bindPort));
             _socket.Blocking = false;
-            BindAddress = FormatAddress((IPEndPoint)_socket.LocalEndPoint!);
+            var bound = (IPEndPoint)_socket.LocalEndPoint!;
+            BindAddress = bindHost is null ? $"{RouteHost(streamServer)}:{bound.Port}" : FormatAddress(bound);
         }
 
         // Kept alive on this instance for as long as the stack lives: the
@@ -445,6 +499,9 @@ public sealed partial class SipralStack : IDisposable
         var turnServerBytes = turnServer is null ? null : Encoding.UTF8.GetBytes(turnServer);
         var turnUsernameBytes = turnUsername is null ? null : Encoding.UTF8.GetBytes(turnUsername);
         var turnPasswordBytes = turnPassword is null ? null : Encoding.UTF8.GetBytes(turnPassword);
+        var srtpSuitesBytes = srtpSuites is null || srtpSuites.Count == 0
+            ? null
+            : Encoding.UTF8.GetBytes(string.Join(",", srtpSuites));
 
         var stackHandle = 0ul;
         SipralStatus status;
@@ -458,6 +515,8 @@ public sealed partial class SipralStack : IDisposable
         using (var turnServerPin = Pin(turnServerBytes))
         using (var turnUsernamePin = Pin(turnUsernameBytes))
         using (var turnPasswordPin = Pin(turnPasswordBytes))
+        using (var srtpSuitesPin = Pin(srtpSuitesBytes))
+        using (var saltPin = Pin(pseudonymSalt))
         {
             var config = SipralStackConfig.Sized();
             config.EventCallback = Marshal.GetFunctionPointerForDelegate(_callback);
@@ -509,6 +568,13 @@ public sealed partial class SipralStack : IDisposable
             config.RtpPortMin = rtpPortMin;
             config.RtpPortMax = rtpPortMax;
             config.DtmfDetection = (uint)dtmfDetection;
+            config.SrtpSuites = srtpSuitesPin.Pointer;
+            config.SrtpSuitesLen = (nuint)(srtpSuitesBytes?.Length ?? 0);
+            config.PathMtu = pathMtu;
+            config.DatagramWithoutStreamBytes = datagramWithoutStreamBytes;
+            config.PseudonymSalt = saltPin.Pointer;
+            config.PseudonymSaltLen = (nuint)(pseudonymSalt?.Length ?? 0);
+            config.DiagnosticTrace = ToggleOf(diagnosticTrace);
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -842,10 +908,27 @@ public sealed partial class SipralStack : IDisposable
     /// no asserted identity, and <see cref="SipralCallerIdentity.Trusted"/>
     /// says which it was. <paramref name="security"/> is the account's own
     /// SRTP policy and suites, and its STIR/SHAKEN verification and signing
-    /// (<see cref="AccountSecurity"/>).</summary>
+    /// (<see cref="AccountSecurity"/>).
+    ///
+    /// <paramref name="serverUri"/> names the server by a URI whose host RFC
+    /// 3263 locates — <c>sip:pbx.example.com</c>, <c>sips:example.com:5061</c>
+    /// — in place of <paramref name="registrarAddress"/>: exactly one of the
+    /// two is given. The lookups are the stack's <c>resolver</c>'s;
+    /// <see cref="SipralEventKind.Located"/> says where the server was found
+    /// and <see cref="SipralEventKind.LocateFailed"/> why not. A REGISTER
+    /// waits for the first answer, and a call placed before it with no
+    /// <c>destination</c> throws with <see cref="SipralStatus.WrongState"/>.
+    /// <paramref name="serverNaptr"/> asks the domain for NAPTR records before
+    /// SRV (RFC 3263 §4.1). <paramref name="keepaliveMs"/> keeps the
+    /// account's flow to its server open at that interval whatever STUN found
+    /// — a double CRLF on UDP, a ping on a stream — 1 000 to 120 000,
+    /// <c>0</c> for never. <paramref name="tlsPin"/> is the SHA-256
+    /// fingerprint of the one TLS certificate the account trusts, for an
+    /// application that runs the account's TLS itself:
+    /// <see cref="Account.CheckCertificate"/> is its verdict.</summary>
     public Account AddAccount(
         string aor,
-        string registrarAddress,
+        string? registrarAddress = null,
         string? registrar = null,
         string? contact = null,
         string? displayName = null,
@@ -856,11 +939,23 @@ public sealed partial class SipralStack : IDisposable
         ulong sessionIntervalSeconds = 0,
         uint privacy = 0,
         IEnumerable<string>? trustedPeers = null,
-        AccountSecurity? security = null)
+        AccountSecurity? security = null,
+        string? serverUri = null,
+        bool serverNaptr = false,
+        ulong keepaliveMs = 0,
+        string? tlsPin = null)
     {
+        if ((registrarAddress is null) == (serverUri is null))
+        {
+            throw new ArgumentException("an account names its server by registrarAddress or by serverUri, one of the two");
+        }
+        var advertised = contact is null && registrarAddress is not null && PicksAddress
+            ? AdvertiseToward(registrarAddress)
+            : null;
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
-            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security);
+            sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
+            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised));
         lock (_accounts)
         {
             _accounts.Add(account);
@@ -884,8 +979,9 @@ public sealed partial class SipralStack : IDisposable
     /// its own, RTCP feedback, or this end as a conference's focus
     /// (<see cref="SipralCallOptions"/>).
     /// </summary>
-    public Call PlaceCall(Account account, string target, string mediaHost = "127.0.0.1", int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
+    public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
     {
+        mediaHost = MediaHostFor(mediaHost, account, destination);
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
@@ -949,8 +1045,9 @@ public sealed partial class SipralStack : IDisposable
     /// socket opened for a real-time text stream the offer carried, RTCP
     /// feedback, or this end named the focus of a conference.
     /// </summary>
-    public Call AnswerCall(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0, SipralCallOptions? options = null)
+    public Call AnswerCall(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralCallOptions? options = null)
     {
+        mediaHost = MediaHostFor(mediaHost, AccountFor(args.Account), null);
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
@@ -1023,8 +1120,9 @@ public sealed partial class SipralStack : IDisposable
     /// line dial anything, so this is never done on the application's
     /// behalf.
     /// </summary>
-    public Call AcceptReferral(SipralEventArgs args, string mediaHost = "127.0.0.1", int mediaPort = 0, SipralSrtp srtp = 0, SipralIce ice = 0)
+    public Call AcceptReferral(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralSrtp srtp = 0, SipralIce ice = 0)
     {
+        mediaHost = MediaHostFor(mediaHost, AccountFor(args.Account), null);
         var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
         var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
         MapMediaSocket(mediaSocket, mediaAddress);
@@ -1127,6 +1225,11 @@ public sealed partial class SipralStack : IDisposable
     public SipralRecovery MoveTo(string host, SipralLink link = SipralLink.Wired)
     {
         var previous = ParseAddress(BindAddress).Host;
+        lock (_routeLock)
+        {
+            // the application names the address from here on
+            _routes = false;
+        }
         if (Streamed)
         {
             MoveLink(host);
@@ -1236,6 +1339,7 @@ public sealed partial class SipralStack : IDisposable
             _turnAsked.Enqueue(asked);
         }
         NoteStreamWanted(args);
+        NoteLocate(args);
         if (args.Kind is SipralEventKind.NatMapping or SipralEventKind.NatRelay)
         {
             var local = args.Nat?.Local ?? args.Relay?.Local;
@@ -1736,6 +1840,7 @@ public sealed partial class SipralStack : IDisposable
             ActOnTurnStreams();
             ActOnStreamsWanted();
             ActOnMainLetGo();
+            ActOnLookups();
             while (_turnLost.TryDequeue(out var lost))
             {
                 LoseTurnStream(lost, tell: true);

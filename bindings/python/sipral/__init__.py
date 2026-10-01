@@ -37,7 +37,7 @@ to the application instead: see ``examples/agent.py`` for a voice agent.
 
 from __future__ import annotations
 
-from .account import Account
+from .account import Account, PinnedCertificate
 from .audio import Audio, AudioDevice, AudioInfo
 from .call import Call
 from .conference import LocalConference
@@ -56,6 +56,7 @@ from .events import (
     TypedText,
     Verification,
 )
+from .locate import advertised_address, lookup
 from .media import Media
 from .signalling import InviteLimit, TlsTrust
 from .stack import TRACE, Stack, features
@@ -82,6 +83,7 @@ __all__ = [
     "LocalConferenceNotice",
     "Media",
     "Participant",
+    "PinnedCertificate",
     "Presence",
     "Protection",
     "SipralError",
@@ -92,5 +94,7 @@ __all__ = [
     "TypedText",
     "Verification",
     "__version__",
+    "advertised_address",
     "features",
+    "lookup",
 ]

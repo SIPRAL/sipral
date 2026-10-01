@@ -1007,17 +1007,28 @@ it to `sipral_stack_receive_stream`. Every account and every call on the
 stack share it, whatever address they name: the server it reaches is the
 outbound proxy. A `Contact` the layer writes carries `;transport=tls` or
 `;transport=tcp`, so that the server's INVITE comes back on the same
-connection. The trust is one of three, the same three this document gives
-for every platform:
+connection. The trust is one of the three this document gives for every
+platform, or a pinned certificate:
 
 | | Python | .NET | Kotlin | Swift |
 |---|---|---|---|---|
 | The platform's authorities | `TlsTrust.platform()` (the default) | `SipralTlsTrust.Platform` (the default) | `SipralTlsTrust.Platform` (the default) | `.platform` (the default) |
 | A private CA beside them | `TlsTrust.private_authority(cafile)` | `SipralTlsTrust.PrivateAuthority(cert)` | `SipralTlsTrust.PrivateAuthority(cert)` | `.privateAuthority(der)` |
 | One authority and no other | `TlsTrust.only_authority(cafile)` | `SipralTlsTrust.OnlyAuthority(cert)` | `SipralTlsTrust.OnlyAuthority(cert)` | `.onlyAuthority(der)` |
+| One certificate, by its fingerprint | `TlsTrust.pinned(fingerprint)` | `SipralTlsTrust.Pinned(fingerprint)` | `SipralTlsTrust.Pinned(fingerprint)` | `try .pinned(fingerprint)` |
 
 None of them turns the check off, and Python's `TlsTrust.from_context`
-refuses a context that does not verify the server. The name checked is
+refuses a context that does not verify the server. A pinned trust reads the
+fingerprint in the forms "A PBX's own certificate, pinned" lists and
+compares the SHA-256 of the leaf the server presented in constant time,
+inside the platform's own certificate check, with the rules of that section:
+no chain, name or date is consulted, and another certificate is refused as
+untrusted, `the server's certificate is not the pinned one`. The layer runs
+the comparison itself, with the platform's SHA-256, because the first
+connection is made before the stack, and so before any account, exists;
+an account's own `tls_pin` and `sipral_account_check_certificate` remain
+the verdict for an application that runs the account's TLS itself. The
+React Native client takes it as `tlsPin` beside `signalling: 'tls'`. The name checked is
 `tls_server_name` (`tlsServerName`), the host part of the server's address
 when it is left out.
 

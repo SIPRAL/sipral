@@ -53,6 +53,11 @@ __all__ = [
     "TurnStream",
     "StunServerState",
     "SrtpSuite",
+    "Srtp",
+    "RegistrationFailure",
+    "DnsRecordType",
+    "DnsAnswer",
+    "LocateFailure",
     "Feature",
     "AudioMode",
     "AudioActivation",
@@ -252,6 +257,27 @@ StunServerState = _enum("StunServerState", "SIPRAL_STUN_SERVER_STATE_")
 #: `SIPRAL_EVENT_KIND_MEDIA_SECURED`: the transform a call is running, from
 #: `AES_CM80` to RFC 7714's `AEAD_AES256_GCM`.
 SrtpSuite = _enum("SrtpSuite", "SIPRAL_SRTP_SUITE_")
+
+#: A `sipral_srtp_t`: what a stack, an account or a call asks of SRTP, the
+#: ``srtp`` argument -- ``BEST_EFFORT`` offers SDES on plain ``RTP/AVP``.
+Srtp = _enum("Srtp", "SIPRAL_SRTP_", exclude=("SIPRAL_SRTP_SUITE_",))
+
+#: A `sipral_registration_failure_t`: why a registration failed,
+#: ``fields["failure"]`` on `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` --
+#: ``UNREACHABLE_CONTACT`` for a `Contact` the registrar cannot reach.
+RegistrationFailure = _enum("RegistrationFailure", "SIPRAL_REGISTRATION_FAILURE_")
+
+#: A `sipral_dns_record_type_t`: what a lookup asks a name for,
+#: ``fields["record"]`` on `SIPRAL_EVENT_KIND_LOOKUP_WANTED`.
+DnsRecordType = _enum("DnsRecordType", "SIPRAL_DNS_RECORD_TYPE_")
+
+#: A `sipral_dns_answer_t`: what a resolver said, as a
+#: :data:`sipral.locate.Resolver` returns it.
+DnsAnswer = _enum("DnsAnswer", "SIPRAL_DNS_ANSWER_")
+
+#: A `sipral_locate_failure_t`: why a server was not located,
+#: ``fields["failure"]`` on `SIPRAL_EVENT_KIND_LOCATE_FAILED`.
+LocateFailure = _enum("LocateFailure", "SIPRAL_LOCATE_FAILURE_")
 
 #: The `SIPRAL_FEATURE_*` bits of `sipral_capabilities_t::features`: what
 #: this build of the library has compiled in, read with

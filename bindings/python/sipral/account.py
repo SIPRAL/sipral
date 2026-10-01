@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+import time
+from typing import TYPE_CHECKING, NamedTuple, Sequence
 
 from ._sipral_cffi import ffi, lib
 from .enums import Activity, RegistrationState
@@ -16,7 +17,19 @@ from .subscription import Subscription
 if TYPE_CHECKING:
     from .stack import Stack
 
-__all__ = ["Account"]
+__all__ = ["Account", "PinnedCertificate"]
+
+
+class PinnedCertificate(NamedTuple):
+    """What `sipral_account_check_certificate` found in a certificate the
+    account pins: its dates, in seconds since 1970 (zero when its DER could
+    not be read that far), and whether the clock is past or before them.
+    Accepted either way; an expired one is worth a warning."""
+
+    not_before: int
+    not_after: int
+    expired: bool
+    not_yet_valid: bool
 
 
 def _optional(text: str | None) -> bytes | None:
@@ -63,13 +76,21 @@ class Account:
         *,
         registrar_address: str = "",
         contact_given: bool = False,
+        server_uri: str | None = None,
+        advertised: str | None = None,
     ) -> None:
         self.stack = stack
         self.handle = handle
         self.aor = aor
         #: Where this account's requests go, ``host:port``: the registrar or
-        #: the outbound proxy it was added with.
+        #: the outbound proxy it was added with, or -- for one added with
+        #: ``server_uri`` -- the address it was last located at, empty until
+        #: then.
         self.registrar_address = registrar_address
+        #: The server named by a URI RFC 3263 locates, or ``None``.
+        self.server_uri = server_uri
+        #: The ``host:port`` its `Contact` names, when the stack chose it.
+        self.advertised = advertised
         #: Whether it was added with a `Contact` of its own, which
         #: :meth:`sipral.stack.Stack.move_to` then leaves to the application.
         self.contact_given = contact_given
@@ -84,9 +105,14 @@ class Account:
         stack: "Stack",
         aor: str,
         *,
-        registrar_address: str,
+        registrar_address: str | None,
         registrar: str | None,
         contact: str | None,
+        server_uri: str | None = None,
+        server_naptr: bool = False,
+        keepalive_ms: int = 0,
+        tls_pin: str | None = None,
+        advertised: str | None = None,
         display_name: str | None,
         auth_user: str | None,
         auth_password: str | None,
@@ -106,10 +132,11 @@ class Account:
         recording_in_clear: bool = False,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
-        registrar_address_bytes = registrar_address.encode("utf-8")
+        registrar_address_bytes = (registrar_address or "").encode("utf-8")
         registrar_bytes = _optional(registrar)
         contact_bytes = (
-            contact or _default_contact(aor, stack.bind_address, stack.contact_parameters)
+            contact
+            or _default_contact(aor, advertised or stack.bind_address, stack.contact_parameters)
         ).encode("utf-8")
         display_name_bytes = _optional(display_name)
         auth_user_bytes = _optional(auth_user)
@@ -136,8 +163,22 @@ class Account:
         if registrar_buf is not None:
             config.registrar = registrar_buf
             config.registrar_len = len(registrar_bytes)
-        config.registrar_address = registrar_address_buf
-        config.registrar_address_len = len(registrar_address_bytes)
+        if registrar_address_bytes:
+            config.registrar_address = registrar_address_buf
+            config.registrar_address_len = len(registrar_address_bytes)
+        server_uri_bytes = _optional(server_uri)
+        server_uri_buf = ffi.new("char[]", server_uri_bytes) if server_uri_bytes else None
+        if server_uri_buf is not None:
+            config.server_uri = server_uri_buf
+            config.server_uri_len = len(server_uri_bytes)
+        if server_naptr:
+            config.server_naptr = lib.SIPRAL_TOGGLE_ON
+        config.keepalive_ms = keepalive_ms
+        pin_bytes = _optional(tls_pin)
+        pin_buf = ffi.new("char[]", pin_bytes) if pin_bytes else None
+        if pin_buf is not None:
+            config.tls_pin_sha256 = pin_buf
+            config.tls_pin_sha256_len = len(pin_bytes)
         config.contact = contact_buf
         config.contact_len = len(contact_bytes)
         if display_name_buf is not None:
@@ -199,8 +240,38 @@ class Account:
             stack,
             int(out_account[0]),
             aor,
-            registrar_address=registrar_address,
+            registrar_address=registrar_address or "",
             contact_given=bool(contact),
+            server_uri=server_uri,
+            advertised=advertised,
+        )
+
+    def check_certificate(self, certificate: bytes, unix_seconds: int | None = None) -> PinnedCertificate | None:
+        """`sipral_account_check_certificate`: the verdict of this account's
+        ``tls_pin`` on ``certificate``, the DER bytes of the leaf a TLS
+        server presented, from inside the application's certificate check.
+
+        A :class:`PinnedCertificate` when it is the pinned one -- accept the
+        handshake whoever signed it, its dates reported, an expired one
+        included; ``None`` when the account pins nothing and the platform's
+        own checks decide; ``SipralError`` with
+        ``SIPRAL_STATUS_CERTIFICATE_REFUSED`` when it pins another."""
+        out = ffi.new("sipral_pinned_certificate_t *")
+        out.size = ffi.sizeof("sipral_pinned_certificate_t")
+        now = int(time.time()) if unix_seconds is None else unix_seconds
+        _call(
+            lambda: lib.sipral_account_check_certificate(
+                self.stack.handle, self.handle, certificate, len(certificate), now, out
+            ),
+            "sipral_account_check_certificate",
+        )
+        if not out.pinned:
+            return None
+        return PinnedCertificate(
+            not_before=int(out.not_before),
+            not_after=int(out.not_after),
+            expired=bool(out.expired),
+            not_yet_valid=bool(out.not_yet_valid),
         )
 
     def rebind(self, *, remote: str | None = None, contact: str | None = None) -> None:

@@ -10,6 +10,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
@@ -26,17 +27,59 @@ namespace Sipral;
 /// private CA beside the platform's) and <see cref="OnlyAuthority"/> (that
 /// authority and no other: pinning it). None of them turns the check off;
 /// the name is checked by <see cref="SslStream"/> against the server name
-/// the stack was given.
+/// the stack was given. <see cref="Pinned"/> trusts one certificate by its
+/// SHA-256 fingerprint instead, for a PBX that signed its own.
 /// </summary>
 public sealed class SipralTlsTrust
 {
     private readonly X509Certificate2Collection _authorities;
     private readonly bool _only;
+    private readonly byte[]? _pin;
 
-    private SipralTlsTrust(X509Certificate2Collection authorities, bool only)
+    private SipralTlsTrust(X509Certificate2Collection authorities, bool only, byte[]? pin = null)
     {
         _authorities = authorities;
         _only = only;
+        _pin = pin;
+    }
+
+    /// <summary>The one certificate whose SHA-256 fingerprint is
+    /// <paramref name="fingerprint"/>, and nothing else, written as
+    /// <c>openssl x509 -fingerprint -sha256</c> or RFC 8122 prints it: 64
+    /// hexadecimal digits, either case, a colon between each byte or none,
+    /// optionally after <c>sha-256 </c> or <c>SHA256=</c>; anything else
+    /// throws <see cref="ArgumentException"/>. The fingerprint is the whole
+    /// verdict: no authority, host name or date is consulted, and a
+    /// certificate with any other fingerprint is refused as untrusted
+    /// (<c>docs/22-tls.md</c>). It is compared in constant time, over the DER
+    /// bytes of the certificate the server presented first.</summary>
+    public static SipralTlsTrust Pinned(string fingerprint) =>
+        new(new X509Certificate2Collection(), only: false, PinDigest(fingerprint));
+
+    /// <summary>The 32 bytes a fingerprint names, in any form
+    /// <see cref="Pinned"/> takes.</summary>
+    public static byte[] PinDigest(string fingerprint)
+    {
+        var text = fingerprint.Trim();
+        var split = text.IndexOfAny(new[] { ' ', '=' });
+        if (split >= 0)
+        {
+            var named = text[..split].Trim().ToLowerInvariant().Replace("-", "").Replace("_", "");
+            if (named != "sha256")
+            {
+                throw new ArgumentException("a certificate pin is a SHA-256 fingerprint", nameof(fingerprint));
+            }
+            text = text[(split + 1)..].Trim();
+        }
+        var placed = !text.Contains(':')
+            || (text.Length == 95 && text.Select((ch, at) => (at % 3 == 2) == (ch == ':')).All(ok => ok));
+        var digits = text.Replace(":", "");
+        if (!placed || digits.Length != 64 || !digits.All(Uri.IsHexDigit))
+        {
+            throw new ArgumentException(
+                "a certificate pin is 32 bytes of hexadecimal, colons between them or not", nameof(fingerprint));
+        }
+        return Convert.FromHexString(digits);
     }
 
     /// <summary>The platform's own trust anchors.</summary>
@@ -57,6 +100,21 @@ public sealed class SipralTlsTrust
     /// kept.</summary>
     internal void Apply(SslClientAuthenticationOptions options, Verdict verdict)
     {
+        if (_pin is { } pin)
+        {
+            // the pin replaces the chain, the name and the dates
+            options.RemoteCertificateValidationCallback = (_, certificate, _, _) =>
+            {
+                var leaf = certificate?.GetRawCertData() ?? Array.Empty<byte>();
+                var matches = CryptographicOperations.FixedTimeEquals(SHA256.HashData(leaf), pin);
+                if (!matches)
+                {
+                    verdict.RecordPinMismatch();
+                }
+                return matches;
+            };
+            return;
+        }
         if (_only)
         {
             // revocation as SslStream's own default leaves it, unchecked: a
@@ -106,6 +164,14 @@ public sealed class SipralTlsTrust
         internal SslPolicyErrors? Errors { get; private set; }
         internal X509ChainStatusFlags Chain { get; private set; }
         internal string Detail { get; private set; } = string.Empty;
+
+        /// <summary>The certificate is not the pinned one: untrusted.</summary>
+        internal void RecordPinMismatch()
+        {
+            Errors = SslPolicyErrors.RemoteCertificateChainErrors;
+            Chain = X509ChainStatusFlags.UntrustedRoot;
+            Detail = "the server's certificate is not the pinned one";
+        }
 
         internal void Record(SslPolicyErrors errors, X509Chain? chain)
         {
@@ -179,7 +245,7 @@ public sealed partial class SipralStack
     private (string Host, int Port)? _server;
     private string? _serverName;
     private SipralTlsTrust _tlsTrust = SipralTlsTrust.Platform;
-    private string _bindHost = "127.0.0.1";
+    private string? _bindHost;
     private Link? _link;
     private int _reconnecting;
 
@@ -220,7 +286,7 @@ public sealed partial class SipralStack
     /// first connection when they name one: the connection, or why there is
     /// none.</summary>
     private (Link? Link, SignallingRefusedException? Refused) PrepareSignalling(
-        SipralTransport signalling, string bindHost, string? signallingServer, string? tlsServerName,
+        SipralTransport signalling, string? bindHost, string? signallingServer, string? tlsServerName,
         SipralTlsTrust? tlsTrust)
     {
         _signalling = signalling == 0 ? SipralTransport.Udp : signalling;
@@ -268,7 +334,7 @@ public sealed partial class SipralStack
     /// <summary>One connection to the signalling server; throws
     /// <see cref="SignallingRefusedException"/> saying what refused
     /// it.</summary>
-    private Link Connect(string bindHost)
+    private Link Connect(string? bindHost)
     {
         var (host, port) = _server!.Value;
         TcpClient? client = null;
@@ -276,7 +342,10 @@ public sealed partial class SipralStack
         {
             var address = IPAddress.Parse(host);
             client = new TcpClient(address.AddressFamily) { NoDelay = true };
-            client.Client.Bind(new IPEndPoint(IPAddress.Parse(bindHost), 0));
+            if (bindHost is not null)
+            {
+                client.Client.Bind(new IPEndPoint(IPAddress.Parse(bindHost), 0));
+            }
             try
             {
                 if (!client.ConnectAsync(address, port).Wait(SignallingPatience))

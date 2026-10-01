@@ -59,6 +59,7 @@ public sealed class DatagramLimitTests
         private readonly TcpListener? _listener;
         private readonly object _lock = new();
         private readonly List<string> _overTcp = new();
+        private readonly List<(string Message, int Bytes)> _answeredOverUdp = new();
         private readonly Thread _udpThread;
         private volatile bool _stopped;
         private int _connections;
@@ -95,6 +96,16 @@ public sealed class DatagramLimitTests
         /// <summary>How many of those connections the stack closed.</summary>
         public int ClosedByTheStack => Volatile.Read(ref _closedByTheStack);
 
+        /// <summary>Every INVITE carrying credentials that arrived over UDP,
+        /// and its size.</summary>
+        public List<(string Message, int Bytes)> AnsweredOverUdp()
+        {
+            lock (_lock)
+            {
+                return new List<(string Message, int Bytes)>(_answeredOverUdp);
+            }
+        }
+
         public List<string> OverTcp()
         {
             lock (_lock)
@@ -127,6 +138,14 @@ public sealed class DatagramLimitTests
                 {
                     var challenge = $"WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"{nonce}\", qop=\"auth\"\r\n";
                     _udp.Send(Response(message, "401 Unauthorized", challenge), from!);
+                }
+                else if (message.StartsWith("INVITE ", StringComparison.Ordinal))
+                {
+                    lock (_lock)
+                    {
+                        _answeredOverUdp.Add((message, data.Length));
+                    }
+                    _udp.Send(Response(message, "486 Busy Here"), from!);
                 }
             }
         }
@@ -262,6 +281,32 @@ public sealed class DatagramLimitTests
             await Task.Delay(20);
         }
         Assert.Contains(pbx.OverTcp(), m => m.StartsWith("ACK ", StringComparison.Ordinal));
+    }
+
+    /// <summary>A deliberate deviation from §18.1.1: no stream is coming, and
+    /// the stack was told the server takes a large request over UDP.</summary>
+    [Fact]
+    public async Task APbxOnUdpAloneTakesTheRequestOverUdpUpToTheStacksLimit()
+    {
+        using var pbx = new Pbx(tcp: false);
+        using var stack = new SipralStack(audio: SipralAudio.Application, pathMtu: 1500, datagramWithoutStreamBytes: 4000);
+        Place(stack, pbx);
+        var seen = await UntilTheEnd(stack);
+        Assert.Equal(486u, seen[^1].CallInfo!.StatusCode);
+        var (invite, bytes) = Assert.Single(pbx.AnsweredOverUdp());
+        Assert.NotNull(Header("Authorization", invite));
+        Assert.True(bytes > 1300, $"{bytes}");
+        Assert.Contains("transport.kept.datagram", stack.DiagnosticsJson());
+    }
+
+    [Fact]
+    public void ALimitPastOneDatagramAndAPathUnderTheIpv4FloorAreRefused()
+    {
+        var past = Assert.Throws<SipralException>(
+            () => new SipralStack(audio: SipralAudio.Application, datagramWithoutStreamBytes: 65508));
+        Assert.Equal(SipralStatus.InvalidArgument, past.Status);
+        var under = Assert.Throws<SipralException>(() => new SipralStack(audio: SipralAudio.Application, pathMtu: 575));
+        Assert.Equal(SipralStatus.InvalidArgument, under.Status);
     }
 
     [Fact]

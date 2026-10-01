@@ -190,6 +190,42 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1", "expiresSeconds": NSNumber(value: 300)]).expiresSeconds, 300)
     }
 
+    /// What ABI 0.34 brought to the module: a core opened with no address
+    /// advertises the route toward its server -- loopback here -- an account
+    /// named by a URI is located and the event flattened with where, the
+    /// options reach the library, and the diagnostic trace is turned on.
+    func testAnAccountNamedByAUriIsLocatedAndTheOptionsReachTheLibrary() async throws {
+        let seen = NSLock()
+        nonisolated(unsafe) var events: [[String: Any]] = []
+        let core = SipralReactCore(emit: { event in seen.withLock { events.append(event) } }, audio: { _ in .application })
+        defer { core.close() }
+        refusal("invalidArgument") { _ = try core.open(SipralOpenOptions(["srtp": "sometimes"])) }
+        refusal("invalidArgument") { _ = try core.open(SipralOpenOptions(["pseudonymSalt": "0g"])) }
+        refusal("invalidArgument") { _ = try core.open(SipralOpenOptions(["pseudonymSalt": "0011"])) }
+        let address = try core.open(SipralOpenOptions([
+            "srtp": "bestEffort", "srtpSuites": "AES_CM_128_HMAC_SHA1_80", "pathMtu": NSNumber(value: 1500),
+            "datagramWithoutStreamBytes": NSNumber(value: 4000), "pseudonymSalt": "00112233445566778899aabbccddeeff",
+            "diagnosticTrace": NSNumber(value: false),
+        ]))
+        XCTAssertTrue(address.hasPrefix("127.0.0.1:"), address)
+        try core.setDiagnosticTrace(true)
+        refusal("invalidArgument") { _ = try core.addAccount(SipralAccountOptions(aor: "sip:alice@sipral.invalid")) }
+        let line = try core.addAccount(SipralAccountOptions([
+            "aor": "sip:alice@sipral.invalid", "registrar": "sip:sipral.invalid", "serverUri": "sip:localhost:5999",
+            "keepaliveMs": NSNumber(value: 15000),
+        ]))
+        try core.register(line)
+        var located: [String: Any]?
+        let deadline = Date().addingTimeInterval(10)
+        while located == nil, Date() < deadline {
+            located = seen.withLock { events.first { $0["kind"] as? String == "located" } }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let targets = try XCTUnwrap(located?["targets"] as? String)
+        XCTAssertTrue(targets.split(separator: ",").contains("127.0.0.1:5999"), targets)
+        XCTAssertEqual(located?["account"] as? String, line)
+    }
+
     /// A status reaches JavaScript by its name, and one this build has no
     /// name for as the platform's, as the Android half says it.
     func testALibraryRefusalIsNamedByItsStatus() {

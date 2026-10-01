@@ -15,6 +15,7 @@ package is written by hand against (`docs/08-ffi.md`, "Swift").
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import selectors
@@ -26,16 +27,17 @@ from typing import Sequence
 
 from . import events as _events
 from ._sipral_cffi import ffi, lib
-from .account import Account
+from .account import Account, _default_contact
 from .audio import Audio
 from .call import Call
 from .counters import Counters
 from .enums import AudioMode, Feature, Link, LogLevel, Recovery
 from .errors import call as _retry
-from .errors import check
+from .errors import SipralError, check
+from .locate import Resolver, advertised_address, lookup
 from .signalling import InviteLimit, TlsTrust, classify, connect
 
-__all__ = ["TRACE", "Stack", "features"]
+__all__ = ["TRACE", "Stack", "features", "route_host"]
 
 #: The :mod:`logging` level a ``LogLevel.TRACE`` line is logged at: below
 #: ``logging.DEBUG``, which ``LogLevel.DEBUG`` takes, since a trace line holds
@@ -122,6 +124,33 @@ def parse_address(text: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def _is_address(text: str) -> bool:
+    """Whether ``text`` is ``host:port`` with an IP address for its host,
+    rather than a name."""
+    try:
+        host, _port = parse_address(text)
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def route_host(peer: str | None) -> str:
+    """The address of this machine's route toward ``peer`` (``host:port``),
+    the one a socket bound on every interface is reached at from there:
+    `sipral_advertised_address` for a wildcard bind. ``127.0.0.1`` when
+    there is no peer yet, it is a name rather than an address, or no route
+    reaches it -- the address that works for a peer on this machine and
+    that the library refuses to advertise to any other."""
+    if not peer or not _is_address(peer):
+        return "127.0.0.1"
+    wildcard = "[::]:0" if peer.startswith("[") else "0.0.0.0:0"
+    try:
+        return parse_address(advertised_address(wildcard, peer))[0]
+    except (SipralError, ValueError):
+        return "127.0.0.1"
+
+
 def _verdict(error: int) -> str:
     """What became of a connection, in the words a log line reads."""
     return {
@@ -177,7 +206,7 @@ class Stack:
 
     def __init__(
         self,
-        bind_host: str = "127.0.0.1",
+        bind_host: str | None = None,
         bind_port: int = 0,
         *,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -218,8 +247,27 @@ class Stack:
         invite_limit: InviteLimit | tuple[int, int] | None = None,
         stream_fallback: bool = True,
         stream_server: str | None = None,
+        srtp_suites: Sequence[str] | str | None = None,
+        path_mtu: int = 0,
+        datagram_without_stream_bytes: int = 0,
+        pseudonym_salt: bytes | None = None,
+        diagnostic_trace: bool | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
+
+        ``bind_host`` is the address the signalling socket is bound at, and
+        the one this stack advertises. Left out, the socket listens on every
+        interface and the stack advertises the address of the operating
+        system's route toward the server of its first account
+        (`sipral_advertised_address`): the address a PBX on the network
+        reaches this machine at, and ``127.0.0.1`` for a server on this
+        machine. Each account the stack adds is reached at the route toward
+        its own server, and a call's media socket, when ``media_host`` is
+        left out, at the route toward the far end or the account's server.
+        A loopback address is never advertised to a peer that is not on this
+        machine: the library refuses that with
+        ``SIPRAL_STATUS_UNREACHABLE_ADDRESS``.
 
         ``signalling`` is what SIP travels over, a
         :class:`sipral.enums.Transport`: ``UDP`` (``0``, the default) on a
@@ -376,6 +424,40 @@ class Stack:
         (``0``) on the calls that negotiated no telephone event, ``ALWAYS``
         or ``OFF``; :meth:`sipral.call.Call.set_dtmf_detection` changes it
         for one call.
+
+        ``srtp`` may be ``SIPRAL_SRTP_BEST_EFFORT`` (:class:`sipral.enums.Srtp`):
+        SDES offered on plain ``RTP/AVP``, the call encrypted when the answer
+        takes a key and plain when it takes none, for a PBX that answers an
+        ``RTP/SAVP`` offer with 488. ``srtp_suites`` are the SRTP suites
+        every call offers and accepts unless its account names its own, most
+        preferred first, by their RFC 4568 and RFC 7714 names.
+
+        ``path_mtu`` is the MTU of the path toward the server when the
+        deployment knows it (``0`` for unknown, else 576 or more): RFC 3261
+        Section 18.1.1 moves a request to a stream within 200 bytes of it.
+        ``datagram_without_stream_bytes`` is a deliberate deviation from
+        that section, for a server that takes SIP over UDP alone: once no
+        stream to it can be had -- ``stream_fallback`` off, or the
+        connection refused -- a request up to this many bytes goes over UDP
+        anyway (``0`` for never, at most 65 507), and the call's diagnostic
+        record says so as ``transport.kept.datagram``.
+
+        ``pseudonym_salt`` (16 bytes or more, kept by the installation) keys
+        the pseudonyms the log and :meth:`state` write, so that two runs'
+        traces compare line by line; a secret, like a key. ``diagnostic_trace``
+        writes whole SIP messages at the trace level, peers included and
+        credentials and keys taken out, for a diagnosis;
+        :meth:`set_diagnostic_trace` turns it on and off later.
+
+        ``resolver`` answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
+        accounts added with ``server_uri``, on a thread of its own, one per
+        lookup: a callable taking the name and the record type
+        (:class:`sipral.enums.DnsRecordType`) and returning a
+        :class:`sipral.enums.DnsAnswer` and the records
+        (:data:`sipral.locate.Resolver`). Left out, it is
+        :func:`sipral.locate.lookup`, the platform's own address lookup,
+        which has no SRV or NAPTR: an application whose server publishes SRV
+        records passes a resolver that reads them (dnspython's, say).
         """
         self._loop = loop
         self.events: asyncio.Queue[_events.Event] = asyncio.Queue()
@@ -453,6 +535,17 @@ class Stack:
         self.signalling = signalling
         self._streamed = signalling != lib.SIPRAL_TRANSPORT_UDP
         self._bind_host = bind_host
+        #: Whether this class picks the address peers reach this stack at --
+        #: no ``bind_host`` was given -- and whether it has picked it yet:
+        #: the route toward the first server an account names.
+        self._routes = bind_host is None
+        self._route_chosen = not self._routes or self._streamed or stream_server is not None
+        self._resolver = resolver or lookup
+        #: What `SIPRAL_EVENT_KIND_LOOKUP_WANTED` asked during the poll that
+        #: raised it, and what `SIPRAL_EVENT_KIND_LOCATED` found, acted on
+        #: right after that poll.
+        self._lookups_asked: list[tuple[int, str, int]] = []
+        self._located: list[tuple[int, str]] = []
         #: The signalling connection, when there is one, and the lock every
         #: read and write on it holds: one TLS session read and written from
         #: two threads at once is a session whose records interleave.
@@ -466,6 +559,7 @@ class Stack:
             if signalling == lib.SIPRAL_TRANSPORT_TLS
             else None
         )
+        self._tls_pin = tls_trust.pin if tls_trust is not None else None
         self._first_failure: tuple[int, int, str] | None = None
         remote = ""
         if self._streamed:
@@ -477,12 +571,16 @@ class Stack:
             except (OSError, ssl.SSLError, ValueError) as refused:
                 # told to the stack as soon as there is one, and tried again
                 self._first_failure = classify(refused)
-                self.bind_address = format_address(bind_host, bind_port)
+                host = bind_host if bind_host is not None else route_host(signalling_server)
+                self.bind_address = format_address(host, bind_port)
         else:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._socket.bind((bind_host, bind_port))
+            self._socket.bind((bind_host if bind_host is not None else "0.0.0.0", bind_port))
             self._socket.setblocking(False)
-            self.bind_address = format_address(*self._socket.getsockname())
+            bound_host, bound_port = self._socket.getsockname()
+            if bind_host is None:
+                bound_host = route_host(stream_server)
+            self.bind_address = format_address(bound_host, bound_port)
 
         self._origin = time.monotonic()
 
@@ -591,6 +689,19 @@ class Stack:
         config.rtp_port_min = rtp_port_min
         config.rtp_port_max = rtp_port_max
         config.dtmf_detection = int(dtmf_detection)
+        suites = srtp_suites if isinstance(srtp_suites, str) else ",".join(srtp_suites or ())
+        suites_bytes = suites.encode("utf-8")
+        suites_buf = ffi.new("char[]", suites_bytes) if suites_bytes else None
+        if suites_buf is not None:
+            config.srtp_suites = suites_buf
+            config.srtp_suites_len = len(suites_bytes)
+        config.path_mtu = path_mtu
+        config.datagram_without_stream_bytes = datagram_without_stream_bytes
+        salt_buf = ffi.new("uint8_t[]", pseudonym_salt) if pseudonym_salt else None
+        if salt_buf is not None:
+            config.pseudonym_salt = salt_buf
+            config.pseudonym_salt_len = len(pseudonym_salt)
+        config.diagnostic_trace = _toggle(diagnostic_trace)
         #: The RTP port range media sockets are bound in, or ``None``.
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
         #: Every callback `sipral_stack_log` was given, kept alive here for
@@ -666,13 +777,56 @@ class Stack:
         """
         return int((time.monotonic() - self._origin) * 1000)
 
+    def set_diagnostic_trace(self, on: bool) -> None:
+        """`sipral_stack_diagnostic_trace`: whether the trace level writes
+        every SIP message whole, with its peer, from now on -- credentials
+        and keys taken out either way -- or pseudonymised, as it does by
+        default. Nothing is written unless the log is at
+        ``LogLevel.TRACE``."""
+        _retry(
+            lambda: lib.sipral_stack_diagnostic_trace(self.handle, _toggle(on)),
+            "sipral_stack_diagnostic_trace",
+        )
+
+    def _advertise_toward(self, peer: str) -> str:
+        """The ``host:port`` an account whose server is ``peer`` is reached
+        at, on a stack that picks its own address: the route toward the
+        server, on this stack's port. The first server named also becomes
+        the address the stack's `Via` carries."""
+        port = parse_address(self.bind_address)[1]
+        address = format_address(route_host(peer), port)
+        if not self._route_chosen:
+            self._route_chosen = True
+            if address != self.bind_address:
+                local = address.encode("utf-8")
+                _retry(
+                    lambda: lib.sipral_stack_transport_bind(
+                        self.handle,
+                        lib.SIPRAL_TRANSPORT_MAIN,
+                        lib.SIPRAL_TRANSPORT_UDP,
+                        local,
+                        len(local),
+                        ffi.NULL,
+                        0,
+                        self.now_ms(),
+                        ffi.NULL,
+                    ),
+                    "sipral_stack_transport_bind",
+                )
+                self.bind_address = address
+        return address
+
     # -- accounts and calls --------------------------------------------
 
     def add_account(
         self,
         aor: str,
         *,
-        registrar_address: str,
+        registrar_address: str | None = None,
+        server_uri: str | None = None,
+        server_naptr: bool = False,
+        keepalive_ms: int = 0,
+        tls_pin: str | None = None,
         registrar: str | None = None,
         contact: str | None = None,
         display_name: str | None = None,
@@ -730,11 +884,42 @@ class Stack:
         each other directly, with no registrar between them at all, each
         add one account this way, pointed at the other's own
         :attr:`bind_address`.
+
+        ``server_uri`` names the server by a URI whose host RFC 3263 locates
+        -- ``sip:pbx.example.com``, ``sips:example.com:5061`` -- in place of
+        ``registrar_address``: exactly one of the two is given. The lookups
+        are answered with this stack's ``resolver``;
+        `SIPRAL_EVENT_KIND_LOCATED` says where the server was found, and
+        `SIPRAL_EVENT_KIND_LOCATE_FAILED` why not. A REGISTER waits for the
+        first answer, and a call placed before it with no ``destination``
+        raises ``SIPRAL_STATUS_WRONG_STATE``. ``server_naptr`` asks the
+        domain for NAPTR records before SRV (RFC 3263 Section 4.1).
+
+        ``keepalive_ms`` keeps the account's flow to its server open at that
+        interval whatever STUN found -- a double CRLF on UDP, a ping on a
+        stream -- for a NAT that forgets a flow sooner than the REGISTER
+        refresh comes round: 1 000 to 120 000, ``0`` for never.
+
+        ``tls_pin`` is the SHA-256 fingerprint of the one TLS certificate
+        the account trusts, in the forms :meth:`TlsTrust.pinned` takes, for
+        an application that runs the account's TLS itself:
+        :meth:`sipral.account.Account.check_certificate` is its verdict on a
+        certificate a server presented.
         """
+        if (registrar_address is None) == (server_uri is None):
+            raise ValueError("an account names its server by registrar_address or by server_uri, one of the two")
+        advertised = None
+        if self._routes and contact is None and registrar_address is not None and not self._streamed:
+            advertised = self._advertise_toward(registrar_address)
         account = Account.add(
             self,
             aor,
             registrar_address=registrar_address,
+            server_uri=server_uri,
+            server_naptr=server_naptr,
+            keepalive_ms=keepalive_ms,
+            tls_pin=tls_pin,
+            advertised=advertised,
             registrar=registrar,
             contact=contact,
             display_name=display_name,
@@ -821,7 +1006,7 @@ class Stack:
         account: Account,
         target: str,
         *,
-        media_host: str = "127.0.0.1",
+        media_host: str | None = None,
         media_port: int = 0,
         destination: str | None = None,
         srtp: int = 0,
@@ -855,7 +1040,11 @@ class Stack:
         reduced-size RTCP (RFC 5506), off by default since a far end that
         knows only RTP/AVP refuses the profile. ``focus`` says this end is
         the focus of a conference (RFC 4579): `isfocus` on its `Contact`.
+
+        ``media_host`` left out binds the media socket at the address of the
+        route toward ``destination``, or toward the account's server.
         """
+        media_host = self._media_host(media_host, account, destination)
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
@@ -909,7 +1098,7 @@ class Stack:
         self,
         event: _events.Event,
         *,
-        media_host: str = "127.0.0.1",
+        media_host: str | None = None,
         media_port: int = 0,
         text: bool = False,
         feedback: bool = False,
@@ -932,7 +1121,11 @@ class Stack:
         With ``text``, ``feedback`` or ``focus`` -- as :meth:`place_call`
         takes them -- the call is answered through `sipral_call_answer_with`,
         a text socket opened for the real-time text stream the offer carried.
+
+        ``media_host`` left out binds the media socket at the address of the
+        route toward the server of the account the call came to.
         """
+        media_host = self._media_host(media_host, self._account_for(event.account), None)
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
@@ -1062,6 +1255,26 @@ class Stack:
         )
         return ffi.string(buffer, int(length[0]) - 1).decode("utf-8")
 
+    def diagnostics_json(self) -> str:
+        """`sipral_stack_diagnostics_json`: the diagnostic record of every
+        call the stack keeps, as JSON -- each decision the stack made and
+        why, ``transport.kept.datagram`` among them for a request that went
+        over UDP past RFC 3261 Section 18.1.1's line because
+        ``datagram_without_stream_bytes`` let it."""
+        needed = ffi.new("size_t *")
+        capacity = 4096
+        while True:
+            buffer = ffi.new(f"char[{capacity}]")
+            status = lib.sipral_stack_diagnostics_json(self.handle, buffer, capacity, needed)
+            if status == lib.SIPRAL_STATUS_BUFFER_TOO_SMALL:
+                capacity = int(needed[0])
+                continue
+            if status == lib.SIPRAL_STATUS_BUSY:
+                time.sleep(0.001)
+                continue
+            check(status, "sipral_stack_diagnostics_json")
+            return ffi.string(buffer).decode("utf-8")
+
     def log_to(self, logger: logging.Logger | None = None, level: int | None = None) -> None:
         """Send this stack's log to the standard :mod:`logging` module.
 
@@ -1142,7 +1355,7 @@ class Stack:
         self,
         event: _events.Event,
         *,
-        media_host: str = "127.0.0.1",
+        media_host: str | None = None,
         media_port: int = 0,
         srtp: int = 0,
         ice: int = 0,
@@ -1160,6 +1373,7 @@ class Stack:
         with a bill attached -- whoever sent it can make this line dial
         anything -- so it is never made on the application's behalf.
         """
+        media_host = self._media_host(media_host, self._account_for(event.account), None)
         media_socket = self.open_media_socket(media_host, media_port)
         media_address = format_address(*media_socket.getsockname())
         self._map_media_socket(media_socket, media_address)
@@ -1279,6 +1493,8 @@ class Stack:
         :meth:`sipral.account.Account.rebind`.
         """
         previous = parse_address(self.bind_address)[0]
+        # the application names the address from here on
+        self._routes = False
         if self._streamed:
             self._move_link(host)
         else:
@@ -1435,6 +1651,10 @@ class Stack:
                 self._streams_let_go.append(event.fields["transport"])
             elif event.fields["transport"] == lib.SIPRAL_TRANSPORT_MAIN:
                 self._main_let_go = True
+        if event.kind == lib.SIPRAL_EVENT_KIND_LOOKUP_WANTED:
+            self._lookups_asked.append((event.account, event.fields["name"], event.fields["record"]))
+        if event.kind == lib.SIPRAL_EVENT_KIND_LOCATED and event.fields["targets"]:
+            self._located.append((event.account, event.fields["targets"].split(",")[0]))
         if event.kind == lib.SIPRAL_EVENT_KIND_TURN_STREAM:
             fields = event.fields
             self._turn_asked.append(
@@ -1874,6 +2094,89 @@ class Stack:
 
     # -- RFC 3261 Section 18.1.1: a request too large for a datagram -------
 
+    def _account_for(self, handle: int) -> Account | None:
+        with self._lock:
+            return next((account for account in self._accounts if account.handle == handle), None)
+
+    def _act_on_lookups(self) -> None:
+        """Answer what `SIPRAL_EVENT_KIND_LOOKUP_WANTED` asked in the poll
+        that just ran, each lookup on a thread of its own -- a resolver may
+        take seconds, and the poll thread may not wait for it -- and act on
+        what `SIPRAL_EVENT_KIND_LOCATED` found: an account whose server was
+        located at an address it has not been told of is pointed at it, and,
+        on a stack that picks its own address, reached at the route toward
+        it."""
+        asked, self._lookups_asked = self._lookups_asked, []
+        for account, name, record in asked:
+            threading.Thread(
+                target=self._look_up, args=(account, name, record), name="sipral-lookup", daemon=True
+            ).start()
+        located, self._located = self._located, []
+        for handle, target in located:
+            account = self._account_for(handle)
+            if account is None:
+                continue
+            account.registrar_address = target
+            if not self._routes or self._streamed or account.contact_given:
+                continue
+            advertised = self._advertise_toward(target)
+            if advertised == (account.advertised or self.bind_address):
+                continue
+            account.advertised = advertised
+            try:
+                account.rebind(
+                    remote=target,
+                    contact=_default_contact(account.aor, advertised, self.contact_parameters),
+                )
+            except SipralError:
+                # the account was removed meanwhile, or the stack is busy
+                # past patience: the next location says it again
+                pass
+
+    def _look_up(self, account: int, name: str, record: int) -> None:
+        """One lookup through the resolver, and its answer handed back
+        (`sipral_account_looked_up`); a resolver that raised is an answer
+        that failed, since the procedure waits for every one."""
+        try:
+            answer, records = self._resolver(name, record)
+        except Exception:  # noqa: BLE001 -- the resolver's failure is an answer
+            answer, records = lib.SIPRAL_DNS_ANSWER_FAILED, []
+        name_bytes = name.encode("utf-8")
+        records_bytes = ",".join(records).encode("utf-8")
+        records_buf = ffi.new("char[]", records_bytes) if records_bytes else ffi.NULL
+        if self._closed.is_set():
+            return
+        try:
+            _retry(
+                lambda: lib.sipral_account_looked_up(
+                    self.handle,
+                    account,
+                    name_bytes,
+                    len(name_bytes),
+                    record,
+                    answer,
+                    records_buf,
+                    len(records_bytes),
+                    self.now_ms(),
+                ),
+                "sipral_account_looked_up",
+            )
+        except SipralError:
+            # the account was removed while the resolver ran
+            pass
+
+    def _media_host(self, media_host: str | None, account: Account | None, destination: str | None) -> str:
+        """The address a call's media socket is bound at: ``media_host``
+        when one was given, else the route toward where the media will come
+        from -- ``destination``, the account's server, or the address this
+        stack is reached at."""
+        if media_host is not None:
+            return media_host
+        for peer in (destination, account.registrar_address if account else None):
+            if peer and _is_address(peer):
+                return route_host(peer)
+        return parse_address(self.bind_address)[0]
+
     def _act_on_streams_wanted(self) -> None:
         """Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the
         poll that just ran: a connection to each destination not already
@@ -2085,7 +2388,7 @@ class Stack:
         while the connection to the server stands."""
         return not self._streamed or self._link is not None
 
-    def _connect(self, bind_host: str) -> socket.socket:
+    def _connect(self, bind_host: str | None) -> socket.socket:
         """One connection to the signalling server; raises what refused it."""
         assert self._server is not None
         return connect(
@@ -2094,6 +2397,7 @@ class Stack:
             context=self._tls_context,
             server_name=self._server_name,
             timeout=_SIGNALLING_PATIENCE,
+            pin=self._tls_pin,
         )
 
     def _install_link(self, sock: socket.socket, remote: str) -> None:
@@ -2353,6 +2657,7 @@ class Stack:
             self._drain_farewells()
             self._act_on_turn_streams()
             self._act_on_streams_wanted()
+            self._act_on_lookups()
             if self._main_let_go:
                 self._main_let_go = False
                 self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)

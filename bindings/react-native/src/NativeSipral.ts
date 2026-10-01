@@ -14,8 +14,9 @@ import type {CodegenTypes, TurboModule} from 'react-native';
 import {TurboModuleRegistry} from 'react-native';
 
 export type NativeOpenOptions = {
-  /** The address the stack and every call's media bind to. */
-  bindHost: string;
+  /** The address the stack and every call's media bind to; left out, the
+   * route toward the server. */
+  bindHost?: string;
   bindPort?: CodegenTypes.Int32;
   userAgent?: string;
   /** Codec names in order of preference, comma-separated. */
@@ -27,11 +28,26 @@ export type NativeOpenOptions = {
   stunServer?: string;
   /** Open the audio devices only between activateAudio and deactivateAudio. */
   manualAudio?: boolean;
+  /** A SIPRAL_SRTP value in lower camel case: "offered", "bestEffort"... */
+  srtp?: string;
+  /** SRTP suite names, comma-separated, most preferred first. */
+  srtpSuites?: string;
+  pathMtu?: CodegenTypes.Int32;
+  datagramWithoutStreamBytes?: CodegenTypes.Int32;
+  /** The pseudonym salt, as hexadecimal. */
+  pseudonymSalt?: string;
+  diagnosticTrace?: boolean;
+  /** The SHA-256 fingerprint of the one certificate a TLS connection trusts. */
+  tlsPin?: string;
 };
 
 export type NativeAccountOptions = {
   aor: string;
-  registrarAddress: string;
+  registrarAddress?: string;
+  /** A server named by a URI RFC 3263 locates, in place of registrarAddress. */
+  serverUri?: string;
+  serverNaptr?: boolean;
+  keepaliveMs?: CodegenTypes.Double;
   registrar?: string;
   contact?: string;
   displayName?: string;
@@ -68,6 +84,12 @@ export type NativeEvent = {
   digit?: string;
   target?: string;
   attended?: boolean;
+  /** A registration's failure in lower camel case: "unreachableContact". */
+  registrationFailure?: string;
+  /** Where an account's server was located: host:port, comma-separated, the one in use first. */
+  targets?: string;
+  /** Why it was not, in lower camel case: "notFound", "unanswered", "unsupported". */
+  locateFailure?: string;
 };
 
 export interface Spec extends TurboModule {
@@ -97,6 +119,7 @@ export interface Spec extends TurboModule {
   activateAudio(): Promise<void>;
   deactivateAudio(): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
+  setDiagnosticTrace(on: boolean): Promise<void>;
 
   readonly onEvent: CodegenTypes.EventEmitter<NativeEvent>;
 }

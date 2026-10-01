@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Sipral;
+
+/// <summary>What <see cref="Account.CheckCertificate"/> found in the
+/// certificate the account pins: its dates, in seconds since 1970 (zero when
+/// its DER could not be read that far), and whether the clock is past or
+/// before them. Accepted either way; an expired one is worth a
+/// warning.</summary>
+public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter, bool Expired, bool NotYetValid);
+
+/// <summary>How an account names and keeps its server, beside the
+/// registrar's address: the ABI 0.34 members of
+/// <c>sipral_account_config_t</c>, and the address this layer chose for its
+/// <c>Contact</c>.</summary>
+internal sealed record AccountLocation(
+    string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle, and the entry points that take
@@ -26,8 +41,18 @@ public sealed class Account
     public string Aor { get; }
 
     /// <summary>Where this account's requests go, <c>host:port</c>: the
-    /// registrar or the outbound proxy it was added with.</summary>
-    public string RegistrarAddress { get; }
+    /// registrar or the outbound proxy it was added with, or — for one added
+    /// with a <c>serverUri</c> — the address it was last located at, empty
+    /// until then.</summary>
+    public string RegistrarAddress { get; private set; }
+
+    /// <summary>The server named by a URI RFC 3263 locates, or
+    /// <see langword="null"/>.</summary>
+    public string? ServerUri { get; }
+
+    /// <summary>The <c>host:port</c> its <c>Contact</c> names, when this layer
+    /// chose it.</summary>
+    public string? Advertised { get; private set; }
 
     /// <summary>Whether it was added with a <c>Contact</c> of its own, which
     /// <see cref="SipralStack.MoveTo"/> then leaves to the application.</summary>
@@ -35,7 +60,9 @@ public sealed class Account
 
     internal ulong Handle => _handle.Value;
 
-    private Account(SipralStack stack, ulong handle, string aor, string registrarAddress, bool contactGiven)
+    private Account(
+        SipralStack stack, ulong handle, string aor, string registrarAddress, bool contactGiven, string? serverUri,
+        string? advertised)
     {
         _stack = stack;
         _handle = new AccountSafeHandle();
@@ -43,12 +70,53 @@ public sealed class Account
         Aor = aor;
         RegistrarAddress = registrarAddress;
         ContactGiven = contactGiven;
+        ServerUri = serverUri;
+        Advertised = advertised;
+    }
+
+    /// <summary>The account's server was located at
+    /// <paramref name="target"/>.</summary>
+    internal void Located(string target) => RegistrarAddress = target;
+
+    /// <summary><c>sipral_account_rebind</c> toward <paramref name="remote"/>,
+    /// reached at <paramref name="advertised"/>, unless it is reached there
+    /// already.</summary>
+    internal void Reach(string advertised, string remote)
+    {
+        if (advertised == (Advertised ?? _stack.BindAddress))
+        {
+            return;
+        }
+        Rebind(remote, DefaultContact(Aor, advertised, _stack.ContactParameters));
+        Advertised = advertised;
+    }
+
+    /// <summary><c>sipral_account_check_certificate</c>: the verdict of this
+    /// account's <c>tlsPin</c> on <paramref name="certificate"/>, the DER bytes
+    /// of the leaf a TLS server presented, from inside the application's own
+    /// certificate check. The certificate's dates when it is the pinned one —
+    /// accept the handshake whoever signed it, an expired one included;
+    /// <see langword="null"/> when the account pins nothing and the
+    /// platform's own checks decide; <see cref="SipralException"/> with
+    /// <see cref="SipralStatus.CertificateRefused"/> when it pins
+    /// another.</summary>
+    public SipralPinnedCertificateInfo? CheckCertificate(byte[] certificate, ulong? unixSeconds = null)
+    {
+        var now = unixSeconds ?? (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var found = SipralPinnedCertificate.Sized();
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_check_certificate(
+                _stack.Handle, Handle, certificate, (nuint)certificate.Length, now, ref found),
+            "sipral_account_check_certificate");
+        return found.Pinned == 0
+            ? null
+            : new SipralPinnedCertificateInfo(found.NotBefore, found.NotAfter, found.Expired != 0, found.NotYetValid != 0);
     }
 
     internal static Account Add(
         SipralStack stack,
         string aor,
-        string registrarAddress,
+        string? registrarAddress,
         string? registrar,
         string? contact,
         string? displayName,
@@ -59,7 +127,8 @@ public sealed class Account
         ulong sessionIntervalSeconds,
         uint privacy,
         IEnumerable<string>? trustedPeers,
-        AccountSecurity? security)
+        AccountSecurity? security,
+        AccountLocation location)
     {
         security ??= new AccountSecurity();
         var peersBytes = trustedPeers is null ? null : Encoding.UTF8.GetBytes(string.Join(", ", trustedPeers));
@@ -68,9 +137,12 @@ public sealed class Account
         var stirOrigBytes = security.StirOrig is null ? null : Encoding.UTF8.GetBytes(security.StirOrig);
         var stirOrigidBytes = security.StirOrigid is null ? null : Encoding.UTF8.GetBytes(security.StirOrigid);
         var aorBytes = Encoding.UTF8.GetBytes(aor);
-        var registrarAddressBytes = Encoding.UTF8.GetBytes(registrarAddress);
+        var registrarAddressBytes = registrarAddress is null ? null : Encoding.UTF8.GetBytes(registrarAddress);
         var registrarBytes = registrar is null ? null : Encoding.UTF8.GetBytes(registrar);
-        var contactBytes = Encoding.UTF8.GetBytes(contact ?? DefaultContact(aor, stack.BindAddress, stack.ContactParameters));
+        var contactBytes = Encoding.UTF8.GetBytes(
+            contact ?? DefaultContact(aor, location.Advertised ?? stack.BindAddress, stack.ContactParameters));
+        var serverUriBytes = location.ServerUri is null ? null : Encoding.UTF8.GetBytes(location.ServerUri);
+        var pinBytes = location.TlsPin is null ? null : Encoding.UTF8.GetBytes(location.TlsPin);
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
@@ -89,6 +161,8 @@ public sealed class Account
         using (var stirUrlPin = Pin(stirUrlBytes))
         using (var stirOrigPin = Pin(stirOrigBytes))
         using (var stirOrigidPin = Pin(stirOrigidBytes))
+        using (var serverUriPin = Pin(serverUriBytes))
+        using (var pinPin = Pin(pinBytes))
         {
             var config = SipralAccountConfig.Sized();
             config.Aor = aorPin.Pointer;
@@ -99,7 +173,13 @@ public sealed class Account
                 config.RegistrarLen = (nuint)registrarBytes.Length;
             }
             config.RegistrarAddress = registrarAddressPin.Pointer;
-            config.RegistrarAddressLen = (nuint)registrarAddressBytes.Length;
+            config.RegistrarAddressLen = (nuint)(registrarAddressBytes?.Length ?? 0);
+            config.ServerUri = serverUriPin.Pointer;
+            config.ServerUriLen = (nuint)(serverUriBytes?.Length ?? 0);
+            config.ServerNaptr = location.ServerNaptr ? (uint)SipralToggle.On : 0;
+            config.KeepaliveMs = location.KeepaliveMs;
+            config.TlsPinSha256 = pinPin.Pointer;
+            config.TlsPinSha256Len = (nuint)(pinBytes?.Length ?? 0);
             config.Contact = contactPin.Pointer;
             config.ContactLen = (nuint)contactBytes.Length;
             if (displayNameBytes is not null)
@@ -159,7 +239,9 @@ public sealed class Account
             SipralErrors.Call(() => NativeMethods.sipral_account_add(stack.Handle, config, out accountHandle), "sipral_account_add");
         }
 
-        return new Account(stack, accountHandle, aor, registrarAddress, contact is not null);
+        return new Account(
+            stack, accountHandle, aor, registrarAddress ?? string.Empty, contact is not null, location.ServerUri,
+            location.Advertised);
     }
 
     /// <summary><c>sipral_account_rebind</c>: points this account at

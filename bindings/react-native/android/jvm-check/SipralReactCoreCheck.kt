@@ -129,9 +129,56 @@ private fun everything(): String {
     }
 }
 
+/**
+ * What ABI 0.34 brought to the module: a client opened with no address
+ * advertises the route toward its server -- loopback here -- an account named
+ * by a URI is located and the event flattened with where, the options reach
+ * the library (an SRTP policy and a salt it refuses are refused), and the
+ * diagnostic trace is turned on.
+ */
+private fun reachability(): String {
+    val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
+    val core = SipralReactCore(emit = { events += it }, audio = { SipralAudioMode.Application })
+    try {
+        refusal("invalidArgument") { core.open(SipralOpenOptions(srtp = "sometimes")) }
+        refusal("invalidArgument") { core.open(SipralOpenOptions(pseudonymSalt = "0g")) }
+        refusal("invalidArgument") { core.open(SipralOpenOptions(pseudonymSalt = "0011")) }
+        val address = core.open(
+            SipralOpenOptions(
+                srtp = "bestEffort", srtpSuites = "AES_CM_128_HMAC_SHA1_80", pathMtu = 1500,
+                datagramWithoutStreamBytes = 4000, pseudonymSalt = "00112233445566778899aabbccddeeff",
+                diagnosticTrace = false,
+            ),
+        )
+        assertTrue(address.startsWith("127.0.0.1:"), address)
+        core.setDiagnosticTrace(true)
+        refusal("invalidArgument") { core.addAccount(SipralAccountOptions(aor = "sip:alice@sipral.invalid")) }
+        val line = core.addAccount(
+            SipralAccountOptions(
+                aor = "sip:alice@sipral.invalid", registrar = "sip:sipral.invalid", serverUri = "sip:localhost:5999",
+                keepaliveMs = 15_000,
+            ),
+        )
+        core.register(line)
+        val deadline = System.currentTimeMillis() + 10_000
+        var located: Map<String, Any>? = null
+        while (located == null && System.currentTimeMillis() < deadline) {
+            located = synchronized(events) { events.firstOrNull { it["kind"] == "located" } }
+            Thread.sleep(10)
+        }
+        val targets = (located ?: throw AssertionError("never located; saw ${events.map { it["kind"] }}"))["targets"] as String
+        assertTrue("127.0.0.1:5999" in targets.split(','), targets)
+        assertEquals(line, located["account"])
+    } finally {
+        core.close()
+    }
+    return "a core opened with no address advertises the route, an account named by a URI is located, " +
+        "and the 0.34 options and the diagnostic trace reach the library"
+}
+
 fun main() {
     val said = try {
-        everything()
+        everything() + "; " + reachability()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

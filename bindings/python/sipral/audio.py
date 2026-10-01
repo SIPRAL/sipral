@@ -172,8 +172,10 @@ class Audio:
         an id the list never held, ``SIPRAL_STATUS_DEVICE_UNUSABLE`` for a
         device with no channels in the role's direction or one not plugged
         in, ``SIPRAL_STATUS_NOT_SUPPORTED`` where the platform cannot put the
-        role on a device of its own (macOS runs the microphone and the
-        loudspeaker as one unit, so there only the speaker is chosen). While
+        role on a device of its own (iOS, for the microphone and the ringer:
+        the route is the audio session's). On macOS the microphone is chosen
+        apart from the speaker without moving the system's default input, and
+        a ringer on another device plays through an output of its own. While
         the devices are open the role moves at once, keeping its direction's
         gain and mute. A chosen device that is later unplugged stays the
         choice: the role runs on the system's route meanwhile and goes back

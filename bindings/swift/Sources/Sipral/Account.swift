@@ -1,8 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Tiberiu Balasea
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 import CSipral
 import Dispatch
+
+/// What `Account.checkCertificate(_:unixSeconds:)` found in the certificate
+/// the account pins: its dates, in seconds since 1970 (zero when its DER
+/// could not be read that far), and whether the clock is past or before
+/// them. Accepted either way; an expired one is worth a warning.
+public struct PinnedCertificate: Sendable, Equatable {
+    public let notBefore: UInt64
+    public let notAfter: UInt64
+    public let expired: Bool
+    public let notYetValid: Bool
+}
 
 /// `sipral_account_add`, and the entry points that take its handle.
 ///
@@ -15,8 +31,13 @@ public final class Account: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
     public let aor: String
-    /// Where the account's requests go, `host:port`.
-    public let registrarAddress: String
+    /// Where the account's requests go, `host:port`: the address it was
+    /// added with, or -- for one added with `serverUri` -- the address it was
+    /// last located at, empty until then.
+    public var registrarAddress: String { stateQueue.sync { _registrarAddress } }
+    private var _registrarAddress: String
+    /// The server named by a URI RFC 3263 locates, or `nil`.
+    public let serverUri: String?
 
     private let stateQueue = DispatchQueue(label: "org.sipral.account.state")
     /// The `Contact` the application wrote, or `nil` when the account's is
@@ -28,13 +49,59 @@ public final class Account: @unchecked Sendable {
     /// it now: after `SipralStack.networkChanged(to:)`, the new address.
     public var contact: String { stateQueue.sync { _contact } }
 
-    init(stack: SipralStack, handle: SipralHandle, aor: String, registrarAddress: String, contact: String, given: String?) {
+    init(
+        stack: SipralStack, handle: SipralHandle, aor: String, registrarAddress: String, serverUri: String?,
+        contact: String, given: String?
+    ) {
         self.stack = stack
         self.handle = handle
         self.aor = aor
-        self.registrarAddress = registrarAddress
+        self._registrarAddress = registrarAddress
+        self.serverUri = serverUri
         self._contact = contact
         self.givenContact = given
+    }
+
+    /// Whether its `Contact` is the one this layer derives, rather than one
+    /// the application wrote.
+    var derivesContact: Bool { givenContact == nil }
+
+    /// The account's server was located at `target`.
+    func located(at target: String) {
+        stateQueue.sync { _registrarAddress = target }
+    }
+
+    /// `sipral_account_rebind` toward `remote`, reached at `advertised`
+    /// (`host:port`), unless its `Contact` names that already.
+    func reach(at advertised: String, remote: String) throws {
+        let next = Self.defaultContact(aor: aor, bindAddress: advertised, parameters: stack.contactParameters)
+        guard next != contact else { return }
+        try retryingBusy {
+            try Sipral.accountRebind(
+                stack: stack.handle, account: handle, transport: Sipral.transportMain,
+                remote: remote, contact: next, nowMs: stack.nowMs()
+            )
+        }
+        stateQueue.sync { _contact = next }
+    }
+
+    /// `sipral_account_check_certificate`: the verdict of this account's
+    /// `tlsPin` on `certificate`, the DER bytes of the leaf a TLS server
+    /// presented, from inside the application's own certificate check. A
+    /// `PinnedCertificate` when it is the pinned one -- accept the handshake
+    /// whoever signed it, its dates reported, an expired one included; `nil`
+    /// when the account pins nothing and the platform's own checks decide;
+    /// `.certificateRefused` thrown when it pins another.
+    public func checkCertificate(_ certificate: [UInt8], unixSeconds: UInt64? = nil) throws -> PinnedCertificate? {
+        let now = unixSeconds ?? UInt64(time(nil))
+        let found = try retryingBusy {
+            try Sipral.accountCheckCertificate(stack: stack.handle, account: handle, certificate: certificate, unixSeconds: now)
+        }
+        guard found.pinned != 0 else { return nil }
+        return PinnedCertificate(
+            notBefore: found.not_before, notAfter: found.not_after,
+            expired: found.expired != 0, notYetValid: found.not_yet_valid != 0
+        )
     }
 
     /// `sipral_account_rebind` onto the signalling socket the stack bound
@@ -53,7 +120,7 @@ public final class Account: @unchecked Sendable {
         try retryingBusy {
             try Sipral.accountRebind(
                 stack: stack.handle, account: handle, transport: Sipral.transportMain,
-                remote: registrarAddress, contact: next, nowMs: stack.nowMs()
+                remote: self.registrarAddress, contact: next, nowMs: stack.nowMs()
             )
         }
         stateQueue.sync { _contact = next }
@@ -94,7 +161,12 @@ public final class Account: @unchecked Sendable {
     static func add(
         stack: SipralStack,
         aor: String,
-        registrarAddress: String,
+        registrarAddress: String?,
+        serverUri: String?,
+        serverNaptr: Bool,
+        keepaliveMs: UInt64,
+        tlsPin: String?,
+        advertised: String?,
         registrar: String?,
         contact: String?,
         displayName: String?,
@@ -108,14 +180,14 @@ public final class Account: @unchecked Sendable {
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(
-            aor: aor, bindAddress: stack.bindAddress, parameters: stack.contactParameters
+            aor: aor, bindAddress: advertised ?? stack.bindAddress, parameters: stack.contactParameters
         )
         let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
         let suites = security.srtpSuites.isEmpty ? nil : security.srtpSuites.joined(separator: ",")
         let key = security.stirKey ?? []
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
-             suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid]
+             suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -126,8 +198,20 @@ public final class Account: @unchecked Sendable {
             }
             config.contact = parts[2].pointer
             config.contact_len = parts[2].count
-            config.registrar_address = parts[3].pointer
-            config.registrar_address_len = parts[3].count
+            if let registrarAddressPointer = parts[3].pointer {
+                config.registrar_address = registrarAddressPointer
+                config.registrar_address_len = parts[3].count
+            }
+            if let serverUriPointer = parts[12].pointer {
+                config.server_uri = serverUriPointer
+                config.server_uri_len = parts[12].count
+            }
+            if let pinPointer = parts[13].pointer {
+                config.tls_pin_sha256 = pinPointer
+                config.tls_pin_sha256_len = parts[13].count
+            }
+            config.server_naptr = serverNaptr ? SipralToggle.on.rawValue : 0
+            config.keepalive_ms = keepaliveMs
             if let displayNamePointer = parts[4].pointer {
                 config.display_name = displayNamePointer
                 config.display_name_len = parts[4].count
@@ -180,7 +264,8 @@ public final class Account: @unchecked Sendable {
             }
         }
         return Account(
-            stack: stack, handle: handle, aor: aor, registrarAddress: registrarAddress, contact: contact, given: given
+            stack: stack, handle: handle, aor: aor, registrarAddress: registrarAddress ?? "", serverUri: serverUri,
+            contact: contact, given: given
         )
     }
 

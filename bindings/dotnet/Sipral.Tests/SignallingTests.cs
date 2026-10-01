@@ -284,6 +284,48 @@ public sealed class SignallingTests
         await Registered(stack);
     }
 
+    [Fact]
+    public async Task ThePinnedCertificateIsTrustedWhateverItsNameAndSigner()
+    {
+        using var certificate = Good();
+        using var registrar = new Registrar(certificate);
+        var fingerprint = "SHA256=" + string.Join(":", SHA256.HashData(certificate.RawData).Select(b => b.ToString("X2")));
+        using var stack = Over(registrar.Address, name: "a-name-the-certificate-does-not-carry.test",
+            trust: SipralTlsTrust.Pinned(fingerprint));
+        Assert.True(stack.Connected);
+        var account = stack.AddAccount($"sip:alice@{ServerName}", registrar.Address, registrar: $"sip:{ServerName}");
+        account.Register();
+        await Registered(stack);
+    }
+
+    [Fact]
+    public async Task AnyOtherCertificateIsRefusedAsUntrusted()
+    {
+        using var certificate = Good();
+        using var registrar = new Registrar(certificate);
+        var other = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("another certificate")));
+        using var stack = Over(registrar.Address, trust: SipralTlsTrust.Pinned(other));
+        var failed = await Refused(stack);
+        Assert.Equal(SipralTlsFailure.Untrusted, failed.Tls);
+        Assert.Contains("pinned", failed.Detail);
+    }
+
+    [Fact]
+    public void EveryFormAnAdministratorCopiesIsRead()
+    {
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes("a certificate"));
+        var plain = Convert.ToHexString(digest).ToLowerInvariant();
+        var colons = string.Join(":", digest.Select(b => b.ToString("X2")));
+        foreach (var text in new[] { plain, plain.ToUpperInvariant(), colons, $"sha-256 {colons}", $"SHA256={colons}", $"  {plain}  " })
+        {
+            Assert.Equal(digest, SipralTlsTrust.PinDigest(text));
+        }
+        foreach (var text in new[] { plain[..^2], $"sha-1 {colons}", colons[..2] + colons[3..], plain + "00" })
+        {
+            Assert.Throws<ArgumentException>(() => SipralTlsTrust.PinDigest(text));
+        }
+    }
+
     private static async Task<SipralTransportFailedEventInfo> Refused(SipralStack stack)
     {
         var args = await NextEvent(stack, SipralEventKind.TransportFailed);

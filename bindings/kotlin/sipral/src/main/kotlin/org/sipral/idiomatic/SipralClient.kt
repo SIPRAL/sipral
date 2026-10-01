@@ -40,6 +40,7 @@ import org.sipral.SipralAudioTransmitListener
 import org.sipral.SipralCallConfig
 import org.sipral.SipralCallEvent
 import org.sipral.SipralCounters
+import org.sipral.SipralDnsRecordType
 import org.sipral.SipralDtmfDetection
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
@@ -135,7 +136,9 @@ class SipralClient private constructor(
     /** The signalling socket's address, `host:port`: where it was bound, and
      * after [networkChanged] where it is bound now. Over TCP or TLS, the
      * address the connection to the server was made from, which moves with
-     * every connection made again. */
+     * every connection made again. A client opened with no `bindHost`
+     * listens on every interface, and this is the address it advertises:
+     * the route toward its first account's server. */
     @Volatile
     var bindAddress: String = bindAddress
         private set
@@ -345,9 +348,47 @@ class SipralClient private constructor(
          * that takes TCP on another port than UDP -- a PBX on 5060 for one
          * and 5160 for the other: the connection stands for the address the
          * event named, and everything the stack sends there goes on it.
+         *
+         * [bindHost] is the address the signalling socket is bound at and
+         * advertises. Left null, the socket listens on every interface and
+         * the client advertises the address of the operating system's route
+         * toward the server of its first account (`sipral_advertised_address`):
+         * the address a PBX on the network reaches this device at, and
+         * `127.0.0.1` for one on this machine. Each account is reached at the
+         * route toward its own server, and a call's media socket, when
+         * `mediaHost` is null, at the route toward the far end or the
+         * account's server. A loopback address is never advertised to a peer
+         * elsewhere: the library refuses that with `UNREACHABLE_ADDRESS`.
+         *
+         * [srtp] may be `SipralSrtp.BEST_EFFORT`: SDES offered on plain
+         * `RTP/AVP`, the call encrypted when the answer takes a key and plain
+         * when it takes none, for a PBX that answers an `RTP/SAVP` offer with
+         * 488. [srtpSuites] are the SRTP suites every call offers and accepts
+         * unless its account names its own, most preferred first, by their
+         * RFC 4568 and RFC 7714 names.
+         *
+         * [pathMtu] is the MTU of the path toward the server when the
+         * deployment knows it (`0` for unknown, else 576 or more): RFC 3261
+         * §18.1.1 moves a request to a stream within 200 bytes of it.
+         * [datagramWithoutStreamBytes] is a deliberate deviation from that
+         * section, for a server that takes SIP over UDP alone: once no stream
+         * to it can be had, a request up to this many bytes goes over UDP
+         * anyway (`0` for never, at most 65 507), and [diagnosticsJson] says
+         * so as `transport.kept.datagram`.
+         *
+         * [pseudonymSalt] (16 bytes or more, kept by the installation) keys
+         * the pseudonyms the log and [state] write, so that two runs' traces
+         * compare line by line; it is a secret, like a key.
+         * [diagnosticTrace] writes whole SIP messages at the trace level,
+         * peers included and credentials and keys taken out, for a diagnosis;
+         * [setDiagnosticTrace] turns it on and off later.
+         *
+         * [resolver] answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
+         * accounts added with a `serverUri`, on a thread of its own per
+         * lookup; [SipralDns.platform] when null.
          */
         fun open(
-            bindHost: String = "127.0.0.1",
+            bindHost: String? = null,
             bindPort: Int = 0,
             userAgent: String? = null,
             codecs: String? = null,
@@ -378,6 +419,12 @@ class SipralClient private constructor(
             inviteLimit: SipralInviteLimit? = null,
             streamFallback: Boolean = true,
             streamServer: String? = null,
+            srtpSuites: List<String> = emptyList(),
+            pathMtu: Long = 0,
+            datagramWithoutStreamBytes: Long = 0,
+            pseudonymSalt: ByteArray? = null,
+            diagnosticTrace: Boolean? = null,
+            resolver: SipralResolver? = null,
         ): SipralClient {
             require(signalling == SipralTransport.UDP || signalling == SipralTransport.TCP || signalling == SipralTransport.TLS) {
                 "signalling is UDP, TCP or TLS"
@@ -386,12 +433,16 @@ class SipralClient private constructor(
             require(!streamed || signallingServer != null) { "SIP over TCP or TLS needs signallingServer, host:port" }
             var first: Pair<java.net.Socket, Pair<String, String>>? = null
             var refused: SignallingRefused? = null
-            val socket = if (streamed) null else DatagramSocket(bindPort, InetAddress.getByName(bindHost))
+            val socket = when {
+                streamed -> null
+                bindHost == null -> DatagramSocket(bindPort)
+                else -> DatagramSocket(bindPort, InetAddress.getByName(bindHost))
+            }
             val bindAddress = if (socket != null) {
                 socket.soTimeout = 20
-                formatAddress(socket.localAddress.hostAddress, socket.localPort)
+                formatAddress(bindHost?.let { socket.localAddress.hostAddress } ?: routeHost(streamServer), socket.localPort)
             } else {
-                "$bindHost:$bindPort"
+                "${bindHost ?: routeHost(signallingServer)}:$bindPort"
             }
             val link = if (streamed) {
                 val server = signallingServer!!
@@ -411,18 +462,22 @@ class SipralClient private constructor(
             }
             val client = SipralClient(
                 socket, link, first?.second?.first ?: bindAddress, stunServer, turn?.address, turn, audio,
-                network ?: SipralNetwork(SipralLink.WIRED, address = bindHost),
+                network ?: SipralNetwork(SipralLink.WIRED, address = bindHost ?: bindAddress.substringBeforeLast(':')),
                 if (rtpPortMin == 0 && rtpPortMax == 0) null else rtpPortMin to rtpPortMax,
             )
             link?.owner = client
             client.streamFallback = streamFallback
             client.streamServer = streamServer
+            client.routes = bindHost == null
+            client.routeChosen = bindHost != null || streamed || streamServer != null
+            client.resolver = resolver ?: SipralDns.platform
             try {
                 client.start(
                     userAgent, codecs, ice, turn, g729AnnexB, referrals,
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                     maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
                     stunFallbacks, dtmfDetection, signalling, inviteLimit,
+                    Tail(srtpSuites, pathMtu, datagramWithoutStreamBytes, pseudonymSalt, diagnosticTrace),
                 )
             } catch (refusal: Exception) {
                 socket?.close()
@@ -441,7 +496,7 @@ class SipralClient private constructor(
             return client
         }
 
-        private fun toggle(value: Boolean?): Long = when (value) {
+        internal fun toggle(value: Boolean?): Long = when (value) {
             null -> SipralToggle.DEFAULT.value.toLong()
             true -> SipralToggle.ON.value.toLong()
             false -> SipralToggle.OFF.value.toLong()
@@ -468,6 +523,7 @@ class SipralClient private constructor(
         dtmfDetection: SipralDtmfDetection,
         signalling: SipralTransport,
         inviteLimit: SipralInviteLimit?,
+        tail: Tail,
     ) {
         val random = SecureRandom()
         val entropy = ByteArray(32).also { random.nextBytes(it) }
@@ -510,6 +566,11 @@ class SipralClient private constructor(
             rtpPortMin = (rtpPorts?.first ?: 0).toLong(),
             rtpPortMax = (rtpPorts?.second ?: 0).toLong(),
             dtmfDetection = dtmfDetection.value.toLong(),
+            srtpSuites = tail.srtpSuites.takeIf { it.isNotEmpty() }?.joinToString(","),
+            pathMtu = tail.pathMtu,
+            datagramWithoutStreamBytes = tail.datagramWithoutStreamBytes,
+            pseudonymSalt = tail.pseudonymSalt?.takeIf { it.isNotEmpty() },
+            diagnosticTrace = toggle(tail.diagnosticTrace),
         )
         handle = Sipral.stackCreate(config)
         if (inviteLimit != null) {
@@ -524,9 +585,175 @@ class SipralClient private constructor(
         }
     }
 
+    /** The ABI 0.34 members of the stack's configuration, as [open] took
+     * them. */
+    private class Tail(
+        val srtpSuites: List<String>,
+        val pathMtu: Long,
+        val datagramWithoutStreamBytes: Long,
+        val pseudonymSalt: ByteArray?,
+        val diagnosticTrace: Boolean?,
+    )
+
     /** Elapsed milliseconds since this stack was created -- what every
      * `now_ms` parameter below expects. */
     fun nowMs(): Long = (System.nanoTime() - origin) / 1_000_000
+
+    /** Whether this client picks the address peers reach it at -- it was
+     * opened with no `bindHost` -- and whether it has picked it yet: the
+     * route toward the first server an account names. Under [movingLock]. */
+    private var routes = false
+    private var routeChosen = true
+
+    /** Answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED`. */
+    private var resolver: SipralResolver = SipralDns.platform
+
+    /** What `LOOKUP_WANTED` asked, and what `LOCATED` found, during the
+     * poll that raised them, acted on right after it. */
+    private val lookupsAsked = java.util.concurrent.ConcurrentLinkedQueue<Triple<Long, String, SipralDnsRecordType>>()
+    private val located = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, String>>()
+
+    /** Whether an account added now, with no `Contact` of its own, is
+     * reached at the route toward its server. */
+    private val picksAddress: Boolean
+        get() = synchronized(movingLock) { routes } && link == null
+
+    /** The `host:port` an account whose server is [peer] is reached at, on a
+     * client that picks its own address: the route toward the server, on
+     * this client's port. The first server named also becomes the address
+     * the stack's `Via` carries. */
+    private fun advertiseToward(peer: String): String {
+        val address = formatAddress(routeHost(peer), bindAddress.substringAfterLast(':').toInt())
+        val first = synchronized(movingLock) { (!routeChosen).also { routeChosen = true } }
+        if (first && address != bindAddress) {
+            val status = retryBusy {
+                SipralSignalNative.stackTransportRebind(handle, address.toByteArray(Charsets.UTF_8), nowMs()).also {
+                    if (it == SipralStatus.BUSY.value) throw SipralException(SipralStatus.BUSY, "")
+                }
+            }
+            if (status != SipralStatus.OK.value) {
+                throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+            }
+            bindAddress = address
+        }
+        return address
+    }
+
+    /** Where a call's media socket is bound: [mediaHost] when one was given,
+     * else the route toward where the media will come from -- [destination],
+     * the account's server, or the address this client is reached at. */
+    private fun mediaHostFor(mediaHost: String?, account: SipralAccount?, destination: String?): String {
+        if (mediaHost != null) {
+            return mediaHost
+        }
+        for (peer in listOf(destination, account?.registrarAddress)) {
+            if (peer != null && isAddress(peer)) {
+                return routeHost(peer)
+            }
+        }
+        return bindAddress.substringBeforeLast(':')
+    }
+
+    private fun accountFor(handle: Long): SipralAccount? = synchronized(movingLock) { accounts[handle] }
+
+    /** The poll thread's half: what the events asked, kept for right after
+     * the poll. */
+    private fun noteLocate(event: SipralEvent) {
+        val locate = locateOf(event) ?: return
+        val name = locate.name
+        if (event.kind == SipralEventKind.LOOKUP_WANTED.value.toLong() && name != null) {
+            val record = SipralDnsRecordType.of(locate.record.toInt()) ?: return
+            lookupsAsked.add(Triple(event.account, name, record))
+        } else if (event.kind == SipralEventKind.LOCATED.value.toLong()) {
+            locate.targets?.split(',')?.firstOrNull()?.takeIf { it.isNotEmpty() }?.let { located.add(event.account to it) }
+        }
+    }
+
+    /** Answer what `LOOKUP_WANTED` asked in the poll that just ran, each
+     * lookup on a thread of its own -- a resolver may take seconds, and the
+     * poll thread may not wait for it -- and act on what `LOCATED` found: an
+     * account located at an address it has not been told of is pointed at
+     * it and, on a client that picks its own address, reached at the route
+     * toward it. */
+    private fun actOnLookups() {
+        while (true) {
+            val (account, name, record) = lookupsAsked.poll() ?: break
+            val resolver = resolver
+            Thread({ lookedUp(account, name, record, resolve(resolver, name, record)) }, "sipral-lookup").apply {
+                isDaemon = true
+                start()
+            }
+        }
+        while (true) {
+            val (handle, target) = located.poll() ?: break
+            val account = accountFor(handle) ?: continue
+            account.located(target)
+            if (!picksAddress || !account.derivesContact) {
+                continue
+            }
+            try {
+                account.reach(advertiseToward(target), target)
+            } catch (_: SipralException) {
+                // the account was removed meanwhile: the next location says
+                // it again, or nothing needs it
+            }
+        }
+    }
+
+    private fun resolve(resolver: SipralResolver, name: String, record: SipralDnsRecordType): SipralLookup =
+        try {
+            resolver(name, record)
+        } catch (_: Exception) {
+            // the resolver's failure is an answer: the procedure waits for
+            // every one
+            SipralLookup.FAILED
+        }
+
+    /** `sipral_account_looked_up`, for one answer; an account removed while
+     * the resolver ran is let go of quietly. */
+    private fun lookedUp(account: Long, name: String, record: SipralDnsRecordType, answer: SipralLookup) {
+        if (closed.get()) {
+            return
+        }
+        try {
+            retryBusy {
+                Sipral.accountLookedUp(
+                    handle, account, name, record.value.toLong(), answer.answer.value.toLong(),
+                    answer.records.joinToString(","), nowMs(),
+                )
+            }
+        } catch (_: SipralException) {
+            // the account, or the client, went away while the resolver ran
+        }
+    }
+
+    /** Turn the diagnostic trace on or off while the client runs
+     * (`sipral_stack_diagnostic_trace`): whether the trace level writes every
+     * SIP message whole, with its peer, from now on -- credentials and keys
+     * taken out either way -- or pseudonymised, as by default. Nothing is
+     * written unless the log is at `TRACE`. */
+    fun setDiagnosticTrace(on: Boolean) {
+        retryBusy { Sipral.stackDiagnosticTrace(handle, toggle(on)) }
+    }
+
+    /** The diagnostic record of every call the client keeps, as JSON
+     * (`sipral_stack_diagnostics_json`): each decision the stack made and
+     * why -- `transport.kept.datagram` among them for a request that went
+     * over UDP past RFC 3261 §18.1.1's line because
+     * `datagramWithoutStreamBytes` let it. */
+    fun diagnosticsJson(): String {
+        var capacity = 4096
+        while (true) {
+            val buffer = ByteArray(capacity)
+            try {
+                val needed = retryBusy { Sipral.stackDiagnosticsJson(handle, buffer) }.toInt()
+                return String(buffer, 0, maxOf(0, needed - 1), Charsets.UTF_8)
+            } catch (small: SipralException) {
+                if (small.status != SipralStatus.BUFFER_TOO_SMALL) throw small
+                capacity *= 4
+            }
+        }
+    }
 
     // -- media ports, the log and the state snapshot ---------------------------
 
@@ -729,10 +956,24 @@ class SipralClient private constructor(
      * are named no identity field leaves toward any other peer. [security]
      * is the account's own SRTP policy and suites, and its STIR/SHAKEN
      * verification and signing ([SipralAccountSecurity]).
+     *
+     * [serverUri] names the server by a URI whose host RFC 3263 locates --
+     * `sip:pbx.example.com`, `sips:example.com:5061` -- in place of
+     * [registrarAddress]: exactly one of the two is given. The lookups are
+     * the client's `resolver`'s; `SIPRAL_EVENT_KIND_LOCATED` ([locateOf])
+     * says where the server was found and `LOCATE_FAILED` why not. A
+     * REGISTER waits for the first answer, and a call placed before it with
+     * no `destination` throws with `WRONG_STATE`. [serverNaptr] asks the
+     * domain for NAPTR records before SRV (RFC 3263 §4.1). [keepaliveMs]
+     * keeps the account's flow to its server open at that interval whatever
+     * STUN found -- a double CRLF on UDP, a ping on a stream -- 1 000 to
+     * 120 000, `0` for never. [tlsPin] is the SHA-256 fingerprint of the one
+     * TLS certificate the account trusts, for an application that runs the
+     * account's TLS itself: [SipralAccount.checkCertificate] is its verdict.
      */
     fun addAccount(
         aor: String,
-        registrarAddress: String,
+        registrarAddress: String? = null,
         registrar: String? = null,
         contact: String? = null,
         displayName: String? = null,
@@ -744,11 +985,24 @@ class SipralClient private constructor(
         privacy: Set<SipralPrivacy> = emptySet(),
         trustedPeers: List<String> = emptyList(),
         security: SipralAccountSecurity = SipralAccountSecurity(),
+        serverUri: String? = null,
+        serverNaptr: Boolean = false,
+        keepaliveMs: Long = 0,
+        tlsPin: String? = null,
     ): SipralAccount {
+        require((registrarAddress == null) != (serverUri == null)) {
+            "an account names its server by registrarAddress or by serverUri, one of the two"
+        }
+        val advertised = if (contact == null && registrarAddress != null && picksAddress) {
+            advertiseToward(registrarAddress)
+        } else {
+            null
+        }
         val account = SipralAccount.add(
             this,
             aor,
             registrarAddress = registrarAddress,
+            location = SipralAccount.Location(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised),
             registrar = registrar,
             contact = contact,
             displayName = displayName,
@@ -827,7 +1081,7 @@ class SipralClient private constructor(
     fun placeCall(
         account: SipralAccount,
         target: String,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = null,
         mediaPort: Int = 0,
         destination: String? = null,
         srtp: Long = 0,
@@ -838,6 +1092,7 @@ class SipralClient private constructor(
         feedback: Boolean = false,
         focus: Boolean = false,
     ): SipralCall {
+        val mediaHost = mediaHostFor(mediaHost, account, destination)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val textSocket = try {
@@ -886,13 +1141,16 @@ class SipralClient private constructor(
      */
     fun answerCall(
         event: SipralEvent,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = null,
         mediaPort: Int = 0,
         text: Boolean = false,
         codecs: String? = null,
         focus: Boolean = false,
         feedback: Boolean = false,
-    ): SipralCall = answerCall(event.call, mediaHost, mediaPort, event.payload.call, Answered(text, codecs, focus, feedback))
+    ): SipralCall = answerCall(
+        event.call, mediaHostFor(mediaHost, accountFor(event.account), null), mediaPort, event.payload.call,
+        Answered(text, codecs, focus, feedback),
+    )
 
     /**
      * [answerCall] by call handle, for a caller that has the handle and not
@@ -902,8 +1160,8 @@ class SipralClient private constructor(
      * not the facts the event carried: whether the peer was trusted, and
      * what it asserted.
      */
-    fun answerCall(callHandle: Long, mediaHost: String = "127.0.0.1", mediaPort: Int = 0): SipralCall =
-        answerCall(callHandle, mediaHost, mediaPort, null, Answered())
+    fun answerCall(callHandle: Long, mediaHost: String? = null, mediaPort: Int = 0): SipralCall =
+        answerCall(callHandle, mediaHostFor(mediaHost, null, null), mediaPort, null, Answered())
 
     /** How [answerCall] answers: what `sipral_call_answer_with` takes beyond
      * the media socket, none of it asked for by default. */
@@ -1005,11 +1263,12 @@ class SipralClient private constructor(
      */
     fun acceptReferral(
         event: SipralEvent,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = null,
         mediaPort: Int = 0,
         srtp: Long = 0,
         ice: SipralIce? = null,
     ): SipralCall {
+        val mediaHost = mediaHostFor(mediaHost, accountFor(event.account), null)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
         val mediaAddress = formatAddress(mediaSocket.localAddress.hostAddress, mediaSocket.localPort)
         val config = SipralCallConfig(
@@ -1757,6 +2016,8 @@ class SipralClient private constructor(
         } else if (moves) {
             val host = next.address ?: bindAddress.substringBeforeLast(':')
             val fresh = DatagramSocket(0, InetAddress.getByName(host))
+            // the application names the address from here on
+            routes = false
             fresh.soTimeout = 20
             val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
             val status = retryBusy {
@@ -1850,6 +2111,7 @@ class SipralClient private constructor(
             mainLetGo = true
         }
         noteNat(event)
+        noteLocate(event)
         calls[event.call]?.deliver(event)
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
             recordingEnded(event.call)
@@ -1979,6 +2241,7 @@ class SipralClient private constructor(
             drainFarewells()
             actOnTurnStreams()
             actOnStreamsWanted()
+            actOnLookups()
             if (mainLetGo) {
                 mainLetGo = false
                 link?.letGo()

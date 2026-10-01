@@ -92,9 +92,9 @@ var account = stack.AddAccount(
 account.Register();
 
 // Without `registrar` the account never registers: registering throws,
-// and the registrar address is only the outbound proxy. The stack and
-// media sockets default to 127.0.0.1, so name an address the registrar
-// can reach.
+// and the registrar address is only the outbound proxy. Left out,
+// `bindHost` and `mediaHost` are the address of the route toward the
+// registrar.
 
 var call = stack.PlaceCall(account, "sip:bob@example.invalid", mediaHost: "192.0.2.10");
 await call.WaitForMediaAsync();
@@ -136,9 +136,10 @@ and is never reused, so a device unplugged keeps its row.
 on a device and `Select(role, (uint?)null)` back on the system's route;
 `Selection(role)` reads back what was chosen and what the role is running on,
 which differ while a chosen device is unplugged — the choice is kept and
-comes back with the device. Windows takes all three roles; macOS runs the
-microphone and the loudspeaker as one unit, so there only the speaker is
-chosen. `SetGain(direction, ratio)` (`MicrophoneGain` and `Volume` as
+comes back with the device. Windows and macOS take all three roles: on macOS
+the microphone is chosen apart from the speaker without moving the system's
+default input, and a ringer on another device plays through an output of
+its own. `SetGain(direction, ratio)` (`MicrophoneGain` and `Volume` as
 properties; 1 is unity, 4 the most) and `SetMuted(direction, muted)` belong
 to the direction and survive every device change; `Level(direction)` and
 `LevelDbfs(direction)` are the meter, cheap enough for a window's timer.
@@ -273,6 +274,47 @@ it an incoming call is answered 503 and `PlaceCall` throws with
 `diagnosticDecisions` (64) and `diagnosticRecords` (32) are the other
 ceilings, zero for the default each (`docs/08-ffi.md`, "Limits, and what
 went out twice").
+
+### Where a stack is reached, and where its server is
+
+`new SipralStack()` with no `bindHost` listens on every interface and
+advertises the address of the operating system's route toward the server of
+its first account (`SipralStack.AdvertisedAddress`,
+`sipral_advertised_address`): the address a PBX on the network reaches the
+machine at, and `127.0.0.1` for a server on this machine. Each account is
+reached at the route toward its own server, and a call's media socket,
+without `mediaHost`, at the route toward the far end or the account's
+server. The library refuses to advertise a loopback address to a peer
+elsewhere: `SipralStatus.UnreachableAddress`, and
+`SipralRegistrationFailure.UnreachableContact` for a REGISTER it sends on its
+own.
+
+`AddAccount(aor, serverUri: "sip:pbx.example.com")` names the server by a URI
+whose host RFC 3263 locates, in place of `registrarAddress`. The stack's
+`resolver` answers each `LookupWanted`: `SipralDns.Platform` by default.
+.NET has no SRV API, so addresses come from `Dns.GetHostAddresses` and SRV
+and NAPTR from this package's own small query, one UDP question to each of
+the machine's DNS servers in turn (`SipralDns.Servers`: the interfaces', or
+`/etc/resolv.conf`'s), a truncated answer read as far as it goes. `Located`
+says where the server was found (`account.RegistrarAddress` follows it) and
+`LocateFailed` why not.
+
+`keepaliveMs` keeps an account's flow to its server open whatever STUN found.
+`SipralTlsTrust.Pinned("SHA256=AB:CD:...")` trusts the one certificate with
+that fingerprint on a TLS signalling connection, whoever signed it and
+whatever name it carries; an account's `tlsPin` and
+`Account.CheckCertificate(der)` are the same verdict for an application that
+runs the account's TLS itself.
+
+`srtp: SipralSrtp.BestEffort` offers SDES on plain RTP/AVP, for a PBX that
+answers an RTP/SAVP offer with 488; `srtpSuites` names the suites every call
+offers. `pathMtu` tells RFC 3261 §18.1.1 the path's MTU, and
+`datagramWithoutStreamBytes` sends a request over UDP anyway once no stream
+to a UDP-only server can be had — a deliberate deviation, written to
+`DiagnosticsJson()` as `transport.kept.datagram`. `pseudonymSalt` keys the
+log's pseudonyms so that two runs compare, and `diagnosticTrace` (or
+`SetDiagnosticTrace(true)`) writes whole SIP messages at the trace level,
+credentials and keys taken out.
 
 ### The log, the state and the counters
 

@@ -5,6 +5,7 @@
 import Dispatch
 import Foundation
 import Network
+import CryptoKit
 import Security
 import XCTest
 @testable import Sipral
@@ -188,6 +189,48 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(FakeRegistrar.header("Via", register.message)?.hasPrefix("SIP/2.0/TLS ") == true)
         XCTAssertTrue(FakeRegistrar.header("Contact", register.message)?.contains(";transport=tls") == true)
         XCTAssertTrue(FakeRegistrar.header("Contact", register.message)?.contains(stack.bindAddress) == true)
+    }
+
+    func testThePinnedCertificateIsTrustedWhateverItsNameAndSigner() async throws {
+        let (identity, der) = try Self.certificate("good")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        let fingerprint = "SHA256=" + SHA256.hash(data: Data(der)).map { String(format: "%02X", $0) }.joined(separator: ":")
+        let stack = try stack(
+            registrar.address, name: "a-name-the-certificate-does-not-carry.test", trust: try .pinned(fingerprint)
+        )
+        defer { stack.close() }
+        XCTAssertTrue(stack.connected)
+        let account = try stack.addAccount(
+            aor: "sip:alice@\(Self.serverName)", registrarAddress: registrar.address,
+            registrar: "sip:\(Self.serverName)"
+        )
+        try account.register()
+        try await registered(account)
+    }
+
+    func testAnyOtherCertificateIsRefusedAsUntrusted() async throws {
+        let (identity, _) = try Self.certificate("good")
+        let registrar = try FakeRegistrar(identity: identity)
+        defer { registrar.stop() }
+        let other = SHA256.hash(data: Data("another certificate".utf8)).map { String(format: "%02x", $0) }.joined()
+        let stack = try stack(registrar.address, trust: try .pinned(other))
+        defer { stack.close() }
+        let failed = try await refusal(stack)
+        XCTAssertEqual(failed.tls, .untrusted)
+        XCTAssertTrue(failed.detail?.contains("pinned") == true, failed.detail ?? "")
+    }
+
+    func testEveryFormAnAdministratorCopiesIsRead() throws {
+        let digest = Array(SHA256.hash(data: Data("a certificate".utf8)))
+        let plain = digest.map { String(format: "%02x", $0) }.joined()
+        let colons = digest.map { String(format: "%02X", $0) }.joined(separator: ":")
+        for text in [plain, plain.uppercased(), colons, "sha-256 \(colons)", "SHA256=\(colons)", "  \(plain)  "] {
+            XCTAssertEqual(try TLSTrust.pinDigest(text), digest, text)
+        }
+        for text in [String(plain.dropLast(2)), "sha-1 \(colons)", String(colons.prefix(2)) + String(colons.dropFirst(3)), plain + "00"] {
+            XCTAssertThrowsError(try TLSTrust.pinDigest(text), text)
+        }
     }
 
     func testACertificateNoTrustedAuthoritySignedIsUntrusted() async throws {

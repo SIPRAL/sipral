@@ -121,4 +121,7 @@ export class FakeNative implements Spec {
   setMuted(...args: Parameters<Spec['setMuted']>) {
     return this.settle('setMuted', args, undefined);
   }
+  setDiagnosticTrace(...args: Parameters<Spec['setDiagnosticTrace']>) {
+    return this.settle('setDiagnosticTrace', args, undefined);
+  }
 }

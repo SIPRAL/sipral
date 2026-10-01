@@ -21,6 +21,7 @@ voice-agent preset lets through a burst the default answers 480.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import socket
@@ -261,6 +262,40 @@ class RegisteringOverTls(_OverAConnection):
         )
         account.register()
         await self.registered(stack)
+
+
+class ACertificateIsPinnedByItsFingerprint(_OverAConnection):
+    def fingerprint(self, certificate: tuple[str, str]) -> str:
+        with open(certificate[0], encoding="ascii") as pem:
+            der = ssl.PEM_cert_to_DER_cert(pem.read())
+        return "SHA256=" + ":".join(f"{byte:02X}" for byte in hashlib.sha256(der).digest())
+
+    async def test_the_pinned_certificate_is_trusted_whatever_its_name_and_signer(self) -> None:
+        certificate = self.good()
+        registrar = self.registrar(certificate)
+        stack = self.stack(
+            registrar.address,
+            tls_server_name="a-name-the-certificate-does-not-carry.test",
+            tls_trust=TlsTrust.pinned(self.fingerprint(certificate)),
+        )
+        self.assertTrue(stack.connected)
+        account = stack.add_account(
+            f"sip:alice@{_SERVER_NAME}", registrar=f"sip:{_SERVER_NAME}", registrar_address=registrar.address
+        )
+        account.register()
+        await self.registered(stack)
+
+    async def test_any_other_certificate_is_refused_as_untrusted(self) -> None:
+        registrar = self.registrar(self.good())
+        stack = self.stack(
+            registrar.address,
+            tls_server_name=_SERVER_NAME,
+            tls_trust=TlsTrust.pinned(hashlib.sha256(b"another certificate").hexdigest()),
+        )
+        event = await self.next_event(stack, EventKind.TRANSPORT_FAILED)
+        self.assertFalse(stack.connected)
+        self.assertEqual(event.fields["tls"], TlsFailure.UNTRUSTED, event.fields)
+        self.assertIn("pinned", event.fields["detail"])
 
 
 class ATlsRefusalSaysWhy(_OverAConnection):

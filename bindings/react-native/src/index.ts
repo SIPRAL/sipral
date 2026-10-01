@@ -19,6 +19,8 @@ export type {
   DigitEvent,
   HoldChangedEvent,
   IncomingCallEvent,
+  LocatedEvent,
+  LocateFailedEvent,
   RegistrationChangedEvent,
   TransferReportEvent,
   TransferRequestedEvent,
@@ -33,10 +35,13 @@ export type {
   CallDirection,
   CallState,
   EndReason,
+  LocateFailure,
   OpenOptions,
   PlaceCallOptions,
+  RegistrationFailure,
   RegistrationState,
   Signalling,
+  Srtp,
 } from './types';
 
 export const Sipral = {

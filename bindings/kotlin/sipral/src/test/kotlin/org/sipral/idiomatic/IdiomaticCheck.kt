@@ -40,7 +40,8 @@ fun main() {
             everything() + "; " + natChecks() + "; " + referralChecks() + "; " + signallingChecks() + "; " +
                 audioChecks() + "; " + loggingChecks() + "; " + securityChecks() + "; " + inBandChecks() + "; " +
                 tlsSignallingChecks() + "; " + protocolsChecks() + "; " + localConferenceChecks() + "; " +
-                datagramLimitChecks() + "; " + mediaMixChecks() + "; " + transferChecks()
+                datagramLimitChecks() + "; " + mediaMixChecks() + "; " + transferChecks() + "; " +
+                reachabilityChecks()
         }
     } catch (failure: Throwable) {
         failure.printStackTrace()

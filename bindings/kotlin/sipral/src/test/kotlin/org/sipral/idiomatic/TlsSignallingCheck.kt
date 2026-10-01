@@ -238,6 +238,47 @@ private suspend fun aRegistrarWhoseAuthorityIsPinnedRegistersOverTls(good: Crede
     return "a pinned authority registers over TLS"
 }
 
+private suspend fun thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good: Credential): String {
+    val fingerprint = "SHA256=" + java.security.MessageDigest.getInstance("SHA-256").digest(good.certificate.encoded)
+        .joinToString(":") { "%02X".format(it) }
+    Registrar(good).use { registrar ->
+        over(
+            registrar.address, name = "a-name-the-certificate-does-not-carry.test",
+            trust = SipralTlsTrust.Pinned(fingerprint),
+        ).use { client ->
+            assertTrue(client.connected)
+            val account = client.addAccount(
+                aor = "sip:alice@$SERVER_NAME", registrarAddress = registrar.address, registrar = "sip:$SERVER_NAME",
+            )
+            account.register()
+            registered(client, account)
+        }
+    }
+    val other = java.security.MessageDigest.getInstance("SHA-256").digest("another certificate".toByteArray())
+        .joinToString("") { "%02x".format(it) }
+    Registrar(good).use { registrar ->
+        over(registrar.address, trust = SipralTlsTrust.Pinned(other)).use { client ->
+            val failed = refusal(client)
+            assertEquals(SipralTlsFailure.UNTRUSTED.value.toLong(), failed.tls)
+            assertTrue(failed.detail?.contains("pinned") == true, failed.detail ?: "")
+        }
+    }
+    return "a pinned certificate is trusted whatever its name and signer, and any other refused"
+}
+
+private fun everyFormAnAdministratorCopiesIsRead(): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest("a certificate".toByteArray())
+    val plain = digest.joinToString("") { "%02x".format(it) }
+    val colons = digest.joinToString(":") { "%02X".format(it) }
+    for (text in listOf(plain, plain.uppercase(), colons, "sha-256 $colons", "SHA256=$colons", "  $plain  ")) {
+        assertTrue(SipralTlsTrust.pinDigest(text).contentEquals(digest), text)
+    }
+    for (text in listOf(plain.dropLast(2), "sha-1 $colons", colons.take(2) + colons.drop(3), plain + "00")) {
+        assertTrue(runCatching { SipralTlsTrust.pinDigest(text) }.isFailure, text)
+    }
+    return "every form of a fingerprint is read"
+}
+
 private suspend fun aPrivateAuthorityIsTrustedBesideThePlatforms(good: Credential): String {
     Registrar(good).use { registrar ->
         over(registrar.address, trust = SipralTlsTrust.PrivateAuthority(good.certificate)).use { client ->
@@ -413,6 +454,8 @@ internal suspend fun tlsSignallingChecks(): String {
         return listOf(
             aRegistrarWhoseAuthorityIsPinnedRegistersOverTls(good),
             aPrivateAuthorityIsTrustedBesideThePlatforms(good),
+            thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good),
+            everyFormAnAdministratorCopiesIsRead(),
             eachRefusalSaysWhy(good, expired),
             aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(),
             aConnectionTheStackLetGoOfIsMadeAgain(),

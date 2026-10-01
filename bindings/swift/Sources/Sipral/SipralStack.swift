@@ -39,9 +39,11 @@ public final class SipralStack: @unchecked Sendable {
     /// The signalling socket's address, `host:port`: where it was bound, and
     /// after `networkChanged(to:)` where it is bound now. Over TCP or TLS,
     /// the address the connection to the server was made from, which moves
-    /// with every connection made again.
+    /// with every connection made again. A stack created with no `bindHost`
+    /// listens on every interface, and this is the address it advertises:
+    /// the route toward its first account's server.
     public var bindAddress: String {
-        signallingQueue.sync { socket?.localAddress ?? linkLocal }
+        signallingQueue.sync { advertisedLocal ?? socket?.localAddress ?? linkLocal }
     }
 
     /// What SIP travels over: UDP, or one TCP or TLS connection to the
@@ -99,7 +101,21 @@ public final class SipralStack: @unchecked Sendable {
     private let signallingServer: String?
     private let tlsServerName: String
     private let tlsTrust: TLSTrust
-    private var linkHost: String
+    private var linkHost: String?
+    /// What a socket bound on every interface advertises, `host:port`:
+    /// `nil` for a stack whose socket is bound at one address. Guarded by
+    /// `signallingQueue`, like whether this stack picks its own address --
+    /// it was given no `bindHost` -- and has picked it yet.
+    private var advertisedLocal: String?
+    private var routes: Bool
+    private var routeChosen: Bool
+    /// Answers `SipralEventKind.lookupWanted`.
+    private let resolver: SipralResolver
+    /// What `.lookupWanted` asked, and what `.located` found, during the poll
+    /// that raised them, acted on right after it; guarded by
+    /// `signallingQueue`.
+    private var lookupsAsked: [(account: SipralHandle, name: String, record: UInt32)] = []
+    private var locatedAsked: [(account: SipralHandle, target: String)] = []
     private var reconnecting = false
     private let origin: DispatchTime
     /// The TCP connections to recording servers, by the transport id each
@@ -356,9 +372,47 @@ public final class SipralStack: @unchecked Sendable {
     /// than UDP -- a PBX on 5060 for one and 5160 for the other: the
     /// connection stands for the address the event named, and everything the
     /// stack sends there goes on it.
+    ///
+    /// `bindHost` is the address the signalling socket is bound at and
+    /// advertises. Left `nil`, the socket listens on every interface and the
+    /// stack advertises the address of the operating system's route toward
+    /// the server of its first account (`sipral_advertised_address`): the
+    /// address a PBX on the network reaches this device at, and `127.0.0.1`
+    /// for one on this machine. Each account is reached at the route toward
+    /// its own server, and a call's media socket, when `mediaHost` is `nil`,
+    /// at the route toward the far end or the account's server. A loopback
+    /// address is never advertised to a peer elsewhere: the library refuses
+    /// that with `.unreachableAddress`.
+    ///
+    /// `srtp: .bestEffort` offers SDES on plain `RTP/AVP`: the call is
+    /// encrypted when the answer takes a key and plain when it takes none,
+    /// for a PBX that answers an `RTP/SAVP` offer with 488. `srtpSuites` are
+    /// the SRTP suites every call offers and accepts unless its account names
+    /// its own, most preferred first, by their RFC 4568 and RFC 7714 names.
+    ///
+    /// `pathMtu` is the MTU of the path toward the server when the deployment
+    /// knows it (zero for unknown, else 576 or more): RFC 3261 §18.1.1 moves
+    /// a request to a stream within 200 bytes of it.
+    /// `datagramWithoutStreamBytes` is a deliberate deviation from that
+    /// section, for a server that takes SIP over UDP alone: once no stream to
+    /// it can be had, a request up to this many bytes goes over UDP anyway
+    /// (zero for never, at most 65 507), and `diagnosticsJson()` says so as
+    /// `transport.kept.datagram`.
+    ///
+    /// `pseudonymSalt` (16 bytes or more, kept by the installation) keys the
+    /// pseudonyms the log and `state()` write, so that two runs' traces
+    /// compare line by line; it is a secret, like a key. `diagnosticTrace`
+    /// writes whole SIP messages at the trace level, peers included and
+    /// credentials and keys taken out, for a diagnosis;
+    /// `setDiagnosticTrace(_:)` turns it on and off later.
+    ///
+    /// `resolver` answers `SipralEventKind.lookupWanted` for the accounts
+    /// added with `serverUri`, on a thread of its own per lookup;
+    /// `SipralDns.platform` -- the system's DNS service for SRV and NAPTR,
+    /// `getaddrinfo` for addresses -- when `nil`.
     public init(
         audio: AudioMode = .platformDefault,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = nil,
         bindPort: UInt16 = 0,
         userAgent: String? = nil,
         codecs: String? = nil,
@@ -389,7 +443,13 @@ public final class SipralStack: @unchecked Sendable {
         tlsTrust: TLSTrust = .platform,
         inviteLimit: InviteLimit? = nil,
         streamFallback: Bool = true,
-        streamServer: String? = nil
+        streamServer: String? = nil,
+        srtpSuites: [String] = [],
+        pathMtu: UInt32 = 0,
+        datagramWithoutStreamBytes: UInt32 = 0,
+        pseudonymSalt: [UInt8]? = nil,
+        diagnosticTrace: Bool? = nil,
+        resolver: SipralResolver? = nil
     ) throws {
         self.streamFallback = streamFallback
         self.streamServer = streamServer
@@ -403,9 +463,12 @@ public final class SipralStack: @unchecked Sendable {
         }
         self.signalling = signalling
         self.signallingServer = signallingServer
-        self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost
+        self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost ?? ""
         self.tlsTrust = tlsTrust
         self.linkHost = bindHost
+        self.routes = bindHost == nil
+        self.routeChosen = bindHost != nil || streamed || streamServer != nil
+        self.resolver = resolver ?? SipralDns.platform
         var firstLink: SignallingConnection?
         var firstRefusal: SignallingRefusal?
         let socket: UDPSocket?
@@ -421,17 +484,22 @@ public final class SipralStack: @unchecked Sendable {
                 bound = made.local
             } catch let refusal as SignallingRefusal {
                 firstRefusal = refusal
-                bound = "\(bindHost):\(bindPort)"
+                bound = "\(bindHost ?? Self.routeHost(toward: signallingServer)):\(bindPort)"
             }
         } else {
-            let made = try UDPSocket(host: bindHost, port: bindPort)
+            let made = try UDPSocket(host: bindHost ?? "0.0.0.0", port: bindPort)
             socket = made
-            bound = made.localAddress
+            bound = bindHost != nil
+                ? made.localAddress
+                : "\(Self.routeHost(toward: streamServer)):\(UDPSocket.parse(made.localAddress).port)"
+            if bindHost == nil {
+                advertisedLocal = bound
+            }
         }
         self.socket = socket
         self.linkLocal = bound
         self.audioMode = audio
-        self.network = network ?? Network(link: .wired, address: bindHost)
+        self.network = network ?? Network(link: .wired, address: bindHost ?? UDPSocket.parse(bound).host)
         self.currentStunServer = stunServer
         self.turnServer = turn?.address
         self.turn = turn
@@ -452,6 +520,7 @@ public final class SipralStack: @unchecked Sendable {
                     [
                         bound, userAgent, codecs, stunServer, turn?.address, turn?.username,
                         turn?.password, stunFallbacks.isEmpty ? nil : stunFallbacks.joined(separator: ","),
+                        srtpSuites.isEmpty ? nil : srtpSuites.joined(separator: ","),
                     ]
                 ) { parts in
                     var config = sipral_stack_config_t.sized()
@@ -511,7 +580,21 @@ public final class SipralStack: @unchecked Sendable {
                         config.turn_password_len = parts[6].count
                         config.turn_transport = turn?.transport.rawValue ?? 0
                     }
-                    return try Sipral.stackCreate(config: config)
+                    if let suitesPointer = parts[8].pointer {
+                        config.srtp_suites = suitesPointer
+                        config.srtp_suites_len = parts[8].count
+                    }
+                    config.path_mtu = pathMtu
+                    config.datagram_without_stream_bytes = datagramWithoutStreamBytes
+                    config.diagnostic_trace = SipralStack.toggle(diagnosticTrace)
+                    let salt = pseudonymSalt ?? []
+                    return try salt.withUnsafeBufferPointer { saltBytes in
+                        if !saltBytes.isEmpty {
+                            config.pseudonym_salt = saltBytes.baseAddress
+                            config.pseudonym_salt_len = saltBytes.count
+                        }
+                        return try Sipral.stackCreate(config: config)
+                    }
                 }
             }
         }
@@ -1182,9 +1265,28 @@ public final class SipralStack: @unchecked Sendable {
     /// toward any other peer. `security` is the account's own SRTP policy
     /// and suites, and its STIR/SHAKEN verification and signing
     /// (`AccountSecurity`).
+    ///
+    /// `serverUri` names the server by a URI whose host RFC 3263 locates --
+    /// `sip:pbx.example.com`, `sips:example.com:5061` -- in place of
+    /// `registrarAddress`: exactly one of the two is given, and anything else
+    /// throws `.invalidArgument`. The lookups are the stack's `resolver`'s;
+    /// `SipralEventKind.located` says where the server was found and
+    /// `.locateFailed` why not. A REGISTER waits for the first answer, and a
+    /// call placed before it with no `destination` throws `.wrongState`.
+    /// `serverNaptr` asks the domain for NAPTR records before SRV (RFC 3263
+    /// §4.1). `keepaliveMs` keeps the account's flow to its server open at
+    /// that interval whatever STUN found -- a double CRLF on UDP, a ping on a
+    /// stream -- 1 000 to 120 000, zero for never. `tlsPin` is the SHA-256
+    /// fingerprint of the one TLS certificate the account trusts, for an
+    /// application that runs the account's TLS itself:
+    /// `Account.checkCertificate(_:unixSeconds:)` is its verdict.
     public func addAccount(
         aor: String,
-        registrarAddress: String,
+        registrarAddress: String? = nil,
+        serverUri: String? = nil,
+        serverNaptr: Bool = false,
+        keepaliveMs: UInt64 = 0,
+        tlsPin: String? = nil,
         registrar: String? = nil,
         contact: String? = nil,
         displayName: String? = nil,
@@ -1196,10 +1298,25 @@ public final class SipralStack: @unchecked Sendable {
         trustedPeers: [String] = [],
         security: AccountSecurity = AccountSecurity()
     ) throws -> Account {
+        guard (registrarAddress == nil) != (serverUri == nil) else {
+            throw SipralError(
+                status: .invalidArgument,
+                message: "an account names its server by registrarAddress or by serverUri, one of the two"
+            )
+        }
+        var advertised: String?
+        if contact == nil, signalling == .udp, let registrarAddress, signallingQueue.sync(execute: { routes }) {
+            advertised = try advertise(toward: registrarAddress)
+        }
         let account = try Account.add(
             stack: self,
             aor: aor,
             registrarAddress: registrarAddress,
+            serverUri: serverUri,
+            serverNaptr: serverNaptr,
+            keepaliveMs: keepaliveMs,
+            tlsPin: tlsPin,
+            advertised: advertised,
             registrar: registrar,
             contact: contact,
             displayName: displayName,
@@ -1213,6 +1330,122 @@ public final class SipralStack: @unchecked Sendable {
         )
         movingQueue.sync { accounts[account.handle] = account }
         return account
+    }
+
+    /// The `host:port` an account whose server is `peer` is reached at, on a
+    /// stack that picks its own address: the route toward the server, on
+    /// this stack's port. The first server named also becomes the address
+    /// the stack's `Via` carries.
+    private func advertise(toward peer: String) throws -> String {
+        let port = UDPSocket.parse(bindAddress).port
+        let address = "\(Self.routeHost(toward: peer)):\(port)"
+        let first = signallingQueue.sync { () -> Bool in
+            defer { routeChosen = true }
+            return !routeChosen
+        }
+        if first, address != bindAddress {
+            try retryingBusy {
+                var bound: UInt32 = 0
+                let status = address.withCString {
+                    sipral_stack_transport_bind(
+                        handle, Sipral.transportMain, SipralTransport.udp.rawValue, $0, address.utf8.count, nil, 0,
+                        nowMs(), &bound
+                    )
+                }
+                try Sipral.check(status)
+            }
+            signallingQueue.sync { advertisedLocal = address }
+        }
+        return address
+    }
+
+    /// Answer what `.lookupWanted` asked in the poll that just ran, each
+    /// lookup on a thread of its own -- a resolver may take seconds, and the
+    /// poll thread may not wait for it -- and act on what `.located` found:
+    /// an account located at an address it has not been told of is pointed
+    /// at it and, on a stack that picks its own address, reached at the
+    /// route toward it.
+    private func actOnLookups() {
+        let (asked, located) = signallingQueue.sync { () -> ([(account: SipralHandle, name: String, record: UInt32)], [(account: SipralHandle, target: String)]) in
+            defer {
+                lookupsAsked = []
+                locatedAsked = []
+            }
+            return (lookupsAsked, locatedAsked)
+        }
+        for lookup in asked {
+            let resolver = self.resolver
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let answer = SipralDnsRecordType(rawValue: lookup.record).map { resolver(lookup.name, $0) } ?? .nothing
+                self?.lookedUp(account: lookup.account, name: lookup.name, record: lookup.record, answer)
+            }
+        }
+        for (handle, target) in located {
+            guard let account = movingQueue.sync(execute: { accounts[handle] }) else { continue }
+            account.located(at: target)
+            let picks = signallingQueue.sync { routes } && signalling == .udp
+            guard picks, account.derivesContact, let advertised = try? advertise(toward: target) else { continue }
+            try? account.reach(at: advertised, remote: target)
+        }
+    }
+
+    /// `sipral_account_looked_up`, for one answer; an account removed while
+    /// the resolver ran is let go of quietly.
+    private func lookedUp(account: SipralHandle, name: String, record: UInt32, _ answer: DnsLookupAnswer) {
+        guard !isClosed else { return }
+        try? retryingBusy {
+            try Sipral.accountLookedUp(
+                stack: handle, account: account, name: name, record: record, answer: answer.answer.rawValue,
+                records: answer.records.joined(separator: ","), nowMs: nowMs()
+            )
+        }
+    }
+
+    /// Where a call's media socket is bound: `mediaHost` when one was given,
+    /// else the route toward where the media will come from --
+    /// `destination`, the account's server, or the address this stack is
+    /// reached at.
+    func mediaHost(_ mediaHost: String?, account: Account?, destination: String?) -> String {
+        if let mediaHost { return mediaHost }
+        for peer in [destination, account?.registrarAddress] {
+            if let peer, Self.isAddress(peer) {
+                return Self.routeHost(toward: peer)
+            }
+        }
+        return UDPSocket.parse(bindAddress).host
+    }
+
+    /// The account the stack added under `handle`, if it has not been removed.
+    func account(_ handle: SipralHandle) -> Account? {
+        movingQueue.sync { accounts[handle] }
+    }
+
+    /// Turn the diagnostic trace on or off while the stack runs
+    /// (`sipral_stack_diagnostic_trace`): whether the trace level writes
+    /// every SIP message whole, with its peer, from now on -- credentials and
+    /// keys taken out either way -- or pseudonymised, as by default. Nothing
+    /// is written unless the log is at `.trace`.
+    public func setDiagnosticTrace(_ on: Bool) throws {
+        try retryingBusy { try Sipral.stackDiagnosticTrace(stack: handle, on: SipralStack.toggle(on)) }
+    }
+
+    /// The diagnostic record of every call the stack keeps, as JSON
+    /// (`sipral_stack_diagnostics_json`): each decision the stack made and
+    /// why -- `transport.kept.datagram` among them for a request that went
+    /// over UDP past RFC 3261 §18.1.1's line because
+    /// `datagramWithoutStreamBytes` let it.
+    public func diagnosticsJson() throws -> String {
+        var capacity = 4096
+        while true {
+            var buffer = [CChar](repeating: 0, count: capacity)
+            do {
+                let needed = try retryingBusy { try Sipral.stackDiagnosticsJson(stack: handle, buffer: &buffer) }
+                let bytes = buffer.prefix(max(0, needed - 1)).map { UInt8(bitPattern: $0) }
+                return String(decoding: bytes, as: UTF8.self)
+            } catch let error as SipralError where error.status == .bufferTooSmall {
+                capacity *= 4
+            }
+        }
     }
 
     func forgetAccount(_ account: SipralHandle) {
@@ -1252,7 +1485,7 @@ public final class SipralStack: @unchecked Sendable {
     public func placeCall(
         account: Account,
         target: String,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = nil,
         mediaPort: UInt16 = 0,
         destination: String? = nil,
         srtp: SipralSrtp? = nil,
@@ -1263,6 +1496,7 @@ public final class SipralStack: @unchecked Sendable {
         feedback: Bool = false,
         focus: Bool = false
     ) throws -> Call {
+        let mediaHost = self.mediaHost(mediaHost, account: account, destination: destination)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let textSocket: UDPSocket?
         do {
@@ -1326,7 +1560,7 @@ public final class SipralStack: @unchecked Sendable {
     /// `Call.answer(codecs:focus:feedback:)`'s.
     public func answerCall(
         _ event: SipralEvent,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = nil,
         mediaPort: UInt16 = 0,
         text: Bool = false,
         codecs: String? = nil,
@@ -1352,10 +1586,11 @@ public final class SipralStack: @unchecked Sendable {
     /// the offer carries, which `Call.answer()` then takes.
     public func takeIncomingCall(
         _ event: SipralEvent,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = nil,
         mediaPort: UInt16 = 0,
         text: Bool = false
     ) throws -> Call {
+        let mediaHost = self.mediaHost(mediaHost, account: account(event.account), destination: nil)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let textSocket: UDPSocket?
         do {
@@ -1438,11 +1673,12 @@ public final class SipralStack: @unchecked Sendable {
     /// this is never done on the application's behalf.
     public func acceptReferral(
         _ event: SipralEvent,
-        mediaHost: String = "127.0.0.1",
+        mediaHost: String? = nil,
         mediaPort: UInt16 = 0,
         srtp: SipralSrtp? = nil,
         ice: SipralIce? = nil
     ) throws -> Call {
+        let mediaHost = self.mediaHost(mediaHost, account: account(event.account), destination: nil)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
         let stackHandle = handle
         let placed: SipralHandle
@@ -1822,6 +2058,11 @@ public final class SipralStack: @unchecked Sendable {
             } else if moves {
                 let host = next.address ?? UDPSocket.parse(bindAddress).host
                 let fresh = try UDPSocket(host: host, port: 0)
+                // the application names the address from here on
+                signallingQueue.sync {
+                    advertisedLocal = nil
+                    routes = false
+                }
                 do {
                     // called directly: a datagram transport has no remote,
                     // which only a null pointer says, and the generated
@@ -1915,6 +2156,14 @@ public final class SipralStack: @unchecked Sendable {
         }
         if signalling == .udp, let wanted = event.transportWantedData {
             signallingQueue.sync { streamsAsked.append(wanted.destination) }
+        }
+        if let locate = event.locateData {
+            if event.kindRaw == SipralEventKind.lookupWanted.rawValue, let name = locate.name {
+                signallingQueue.sync { lookupsAsked.append((event.account, name, locate.recordRaw)) }
+            } else if event.kindRaw == SipralEventKind.located.rawValue,
+                      let first = locate.targets?.split(separator: ",").first {
+                signallingQueue.sync { locatedAsked.append((event.account, String(first))) }
+            }
         }
         if let lost = event.transportFailedData {
             if signalling == .udp {
@@ -2023,7 +2272,7 @@ public final class SipralStack: @unchecked Sendable {
                 receiveStun()
             }
             if let signalling, pfds[0].revents & Int16(POLLIN) != 0 {
-                let local = signalling.localAddress
+                let local = bindAddress
                 while let (data, from) = signallingQueue.sync(execute: {
                     socket === signalling ? signalling.receive() : nil
                 }) {
@@ -2055,6 +2304,7 @@ public final class SipralStack: @unchecked Sendable {
             actOnTurnStreams()
             actOnStreamsWanted()
             actOnMainLetGo()
+            actOnLookups()
         }
         closedSemaphore.signal()
     }

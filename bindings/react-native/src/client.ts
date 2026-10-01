@@ -19,8 +19,10 @@ import type {
   CallDirection,
   CallState,
   EndReason,
+  LocateFailure,
   OpenOptions,
   PlaceCallOptions,
+  RegistrationFailure,
   RegistrationState,
 } from './types';
 
@@ -30,6 +32,21 @@ export interface RegistrationChangedEvent {
   /** The registrar's final answer, or zero. */
   statusCode: number;
   /** When the next attempt goes, for "retrying"; zero otherwise. */
+  retryInMs: number;
+  /** Why it failed -- "unreachableContact" for a Contact the registrar cannot reach -- or "none". */
+  failure: RegistrationFailure;
+}
+
+export interface LocatedEvent {
+  account: SipralAccount;
+  /** Every address the server was located at, the one in use first. */
+  targets: string[];
+}
+
+export interface LocateFailedEvent {
+  account: SipralAccount;
+  failure: LocateFailure;
+  /** When the name is looked up again. */
   retryInMs: number;
 }
 
@@ -92,6 +109,8 @@ export interface ClientEvents {
   transferProgress: TransferReportEvent;
   transferDone: TransferReportEvent;
   digitReceived: DigitEvent;
+  located: LocatedEvent;
+  locateFailed: LocateFailedEvent;
   /** Every event, typed or not, as the native half handed it over. */
   event: NativeEvent;
 }
@@ -111,6 +130,8 @@ export interface CallEvents {
 /** What one account's own emitter carries. */
 export interface AccountEvents {
   registrationChanged: RegistrationChangedEvent;
+  located: LocatedEvent;
+  locateFailed: LocateFailedEvent;
 }
 
 const DTMF = /^[0-9A-Da-d*#]+$/;
@@ -193,6 +214,16 @@ export class SipralAccount {
   deliver(event: RegistrationChangedEvent): void {
     this.state = event.state;
     this.emitter.emit('registrationChanged', event);
+  }
+
+  /** @internal */
+  located(event: LocatedEvent): void {
+    this.emitter.emit('located', event);
+  }
+
+  /** @internal */
+  locateFailed(event: LocateFailedEvent): void {
+    this.emitter.emit('locateFailed', event);
   }
 
   private usable(): void {
@@ -445,12 +476,18 @@ export class SipralClient {
     if (SipralClient.opened !== undefined) {
       throw new SipralError('wrongState', 'a client is already open; close it first');
     }
-    if (typeof options.bindHost !== 'string' || options.bindHost.trim() === '') {
-      throw new SipralError('invalidArgument', 'bindHost is the address of this phone the server can reach');
+    if (options.bindHost !== undefined && (typeof options.bindHost !== 'string' || options.bindHost.trim() === '')) {
+      throw new SipralError('invalidArgument', 'bindHost is the address of this phone the server can reach, or left out');
     }
     const signalling = options.signalling ?? 'udp';
     if (signalling !== 'udp' && options.signallingServer === undefined) {
       throw new SipralError('invalidArgument', `SIP over ${signalling} needs signallingServer, host:port`);
+    }
+    if (options.tlsPin !== undefined && signalling !== 'tls') {
+      throw new SipralError('invalidArgument', 'tlsPin is the certificate a TLS connection trusts: it needs signalling "tls"');
+    }
+    if (options.pseudonymSalt !== undefined && !/^([0-9a-fA-F]{2}){16,}$/.test(options.pseudonymSalt)) {
+      throw new SipralError('invalidArgument', 'pseudonymSalt is at least 16 bytes, as hexadecimal');
     }
     const client = new SipralClient(native);
     SipralClient.opened = client;
@@ -465,6 +502,13 @@ export class SipralClient {
         signallingServer: options.signallingServer,
         stunServer: options.stunServer,
         manualAudio: options.audioActivation === 'manual',
+        srtp: options.srtp,
+        srtpSuites: options.srtpSuites === undefined ? undefined : options.srtpSuites.join(','),
+        pathMtu: options.pathMtu,
+        datagramWithoutStreamBytes: options.datagramWithoutStreamBytes,
+        pseudonymSalt: options.pseudonymSalt,
+        diagnosticTrace: options.diagnosticTrace,
+        tlsPin: options.tlsPin,
       });
     } catch (failure) {
       client.release();
@@ -493,8 +537,12 @@ export class SipralClient {
   async addAccount(options: AccountOptions): Promise<SipralAccount> {
     const id = await this.run(
       () => {
-        if (options.aor.trim() === '' || options.registrarAddress.trim() === '') {
-          throw new SipralError('invalidArgument', 'an account needs its aor and its registrarAddress');
+        if (options.aor.trim() === '') {
+          throw new SipralError('invalidArgument', 'an account needs its aor');
+        }
+        const named = [options.registrarAddress, options.serverUri].filter((one) => one !== undefined && one.trim() !== '');
+        if (named.length !== 1) {
+          throw new SipralError('invalidArgument', 'an account names its server by registrarAddress or by serverUri, one of the two');
         }
       },
       (native) => native.addAccount({...options}),
@@ -527,6 +575,15 @@ export class SipralClient {
       (native) => native.placeCall(account.id, target, {...options}),
     );
     return this.callFor(id, 'outgoing', target);
+  }
+
+  /**
+   * Whether the trace writes every SIP message whole, with its peer, from now
+   * on -- credentials and keys taken out either way -- or pseudonymised, as
+   * by default. For a diagnosis.
+   */
+  setDiagnosticTrace(on: boolean): Promise<void> {
+    return this.run(() => undefined, (native) => native.setDiagnosticTrace(on));
   }
 
   /** The audio devices: the library runs them, this only says when and whether the microphone is heard. */
@@ -594,9 +651,30 @@ export class SipralClient {
           state: (event.registrationState as RegistrationState | undefined) ?? 'unknown',
           statusCode: event.statusCode ?? 0,
           retryInMs: event.retryInMs ?? 0,
+          failure: (event.registrationFailure as RegistrationFailure | undefined) ?? 'none',
         };
         account.deliver(payload);
         this.emitter.emit('registrationChanged', payload);
+      }
+      return;
+    }
+    if (event.kind === 'located' || event.kind === 'locateFailed') {
+      const account = this.accounts.get(event.account);
+      if (account === undefined) {
+        return;
+      }
+      if (event.kind === 'located') {
+        const payload = {account, targets: (event.targets ?? '').split(',').filter((one) => one !== '')};
+        account.located(payload);
+        this.emitter.emit('located', payload);
+      } else {
+        const payload = {
+          account,
+          failure: (event.locateFailure as LocateFailure | undefined) ?? 'none',
+          retryInMs: event.retryInMs ?? 0,
+        };
+        account.locateFailed(payload);
+        this.emitter.emit('locateFailed', payload);
       }
       return;
     }

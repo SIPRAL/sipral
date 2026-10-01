@@ -54,6 +54,8 @@ import org.sipral.SipralTransportWantedEvent
  * platform's) and [OnlyAuthority] (that authority and no other: pinning
  * it). The name is checked against the server name the client was given,
  * by the HTTPS rules `SSLSocket` applies; none of them turns a check off.
+ * [Pinned] trusts one certificate by its SHA-256 fingerprint instead, for a
+ * PBX that signed its own.
  */
 sealed class SipralTlsTrust {
     /** The platform's own trust anchors. */
@@ -65,6 +67,42 @@ sealed class SipralTlsTrust {
     /** [authority] and nothing else: a certificate any other authority
      * signed is refused, the platform's included. */
     class OnlyAuthority(val authority: X509Certificate) : SipralTlsTrust()
+
+    /**
+     * The one certificate whose SHA-256 fingerprint is [fingerprint], and
+     * nothing else, written as `openssl x509 -fingerprint -sha256` or RFC
+     * 8122 prints it: 64 hexadecimal digits, either case, a colon between
+     * each byte or none, optionally after `sha-256 ` or `SHA256=`; anything
+     * else throws [IllegalArgumentException]. The fingerprint is the whole
+     * verdict: no authority, host name or date is consulted, and a
+     * certificate with any other fingerprint is refused as untrusted
+     * (`docs/22-tls.md`). Compared in constant time, over the DER bytes of
+     * the certificate the server presented first.
+     */
+    class Pinned(fingerprint: String) : SipralTlsTrust() {
+        /** The 32 bytes the fingerprint names. */
+        val digest: ByteArray = pinDigest(fingerprint)
+    }
+
+    companion object {
+        /** The 32 bytes a fingerprint names, in any form [Pinned] takes. */
+        fun pinDigest(fingerprint: String): ByteArray {
+            var text = fingerprint.trim()
+            val split = text.indexOfFirst { it == ' ' || it == '=' }
+            if (split >= 0) {
+                val named = text.substring(0, split).trim().lowercase().replace("-", "").replace("_", "")
+                require(named == "sha256") { "a certificate pin is a SHA-256 fingerprint" }
+                text = text.substring(split + 1).trim()
+            }
+            val placed = !text.contains(':') ||
+                (text.length == 95 && text.withIndex().all { (at, ch) -> (at % 3 == 2) == (ch == ':') })
+            val digits = text.replace(":", "")
+            require(placed && digits.length == 64 && digits.all { it in '0'..'9' || it.lowercaseChar() in 'a'..'f' }) {
+                "a certificate pin is 32 bytes of hexadecimal, colons between them or not"
+            }
+            return ByteArray(32) { digits.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+        }
+    }
 
     /** The trust managers a handshake is checked with, the platform's
      * first where it counts at all. */
@@ -83,6 +121,7 @@ sealed class SipralTlsTrust {
             Platform -> listOf(of(null))
             is PrivateAuthority -> listOf(of(null), of(holding(authority)))
             is OnlyAuthority -> listOf(of(holding(authority)))
+            is Pinned -> emptyList()
         }
     }
 }
@@ -167,6 +206,40 @@ internal fun sentence(text: String): String {
         line = line.dropLast(1)
     }
     return line
+}
+
+/** The certificate presented is not the pinned one: untrusted. */
+private class PinMismatch : CertificateException("the server's certificate is not the pinned one")
+
+/**
+ * The pin as the whole verdict: SHA-256 over the DER bytes of the
+ * certificate the server presented first against [digest], compared in
+ * constant time, and nothing else -- no chain, name or date.
+ */
+private class PinChecking(private val digest: ByteArray) : X509ExtendedTrustManager() {
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) {
+        val leaf = chain.firstOrNull()?.encoded ?: ByteArray(0)
+        if (!java.security.MessageDigest.isEqual(java.security.MessageDigest.getInstance("SHA-256").digest(leaf), digest)) {
+            throw PinMismatch()
+        }
+    }
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine?) =
+        checkServerTrusted(chain, authType, null as Socket?)
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) =
+        checkServerTrusted(chain, authType, null as Socket?)
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) =
+        throw CertificateException("a SIP client does not accept connections")
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine?) =
+        throw CertificateException("a SIP client does not accept connections")
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
+        throw CertificateException("a SIP client does not accept connections")
+
+    override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 }
 
 /** A certificate trusted and naming another server, told apart from one
@@ -270,7 +343,8 @@ internal class SignallingLink(
     trust: SipralTlsTrust,
 ) {
     private val context: SSLContext? = if (protocol == SipralTransport.TLS) {
-        SSLContext.getInstance("TLS").apply { init(null, arrayOf(Checking(trust.trustManagers(), serverName)), null) }
+        val checking = if (trust is SipralTlsTrust.Pinned) PinChecking(trust.digest) else Checking(trust.trustManagers(), serverName)
+        SSLContext.getInstance("TLS").apply { init(null, arrayOf(checking), null) }
     } else {
         null
     }
@@ -291,8 +365,10 @@ internal class SignallingLink(
     private val current = AtomicReference<Open?>(null)
     private val reconnecting = AtomicBoolean(false)
 
+    /** Where the connection is made from; null for the address of the
+     * route toward the server. */
     @Volatile
-    var bindHost: String = "127.0.0.1"
+    var bindHost: String? = null
 
     /** Whether the connection stands. */
     val connected: Boolean
@@ -304,11 +380,13 @@ internal class SignallingLink(
 
     /** One connection from [host]; `local` and `remote` beside it, or the
      * refusal. */
-    fun connect(host: String): Pair<Socket, Pair<String, String>> {
+    fun connect(host: String?): Pair<Socket, Pair<String, String>> {
         val raw = Socket()
         var handshaking = false
         try {
-            raw.bind(InetSocketAddress(InetAddress.getByName(host), 0))
+            if (host != null) {
+                raw.bind(InetSocketAddress(InetAddress.getByName(host), 0))
+            }
             raw.connect(server, PATIENCE_MS)
             raw.tcpNoDelay = true
             val socket = if (context != null) {

@@ -8,6 +8,7 @@ import org.sipral.SipralAccountConfig
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
+import org.sipral.SipralPinnedCertificate
 import org.sipral.SipralPresence
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
@@ -26,13 +27,67 @@ class SipralAccount internal constructor(
     val client: SipralClient,
     val handle: Long,
     val aor: String,
-    /** Where the account's requests go, `host:port`. */
-    val registrarAddress: String,
+    registrarAddress: String,
     contact: String,
     /** The `Contact` the application wrote, or null when the account's is
      * the one this layer derives from the signalling socket. */
     private val givenContact: String?,
+    /** The server named by a URI RFC 3263 locates, or null. */
+    val serverUri: String? = null,
 ) {
+    /** Where the account's requests go, `host:port`: the address it was
+     * added with, or -- for one added with a [serverUri] -- the address it
+     * was last located at, empty until then. */
+    @Volatile
+    var registrarAddress: String = registrarAddress
+        private set
+
+    /** Whether its `Contact` is the one this layer derives. */
+    internal val derivesContact: Boolean
+        get() = givenContact == null
+
+    /** The account's server was located at [target]. */
+    internal fun located(target: String) {
+        registrarAddress = target
+    }
+
+    /** `sipral_account_rebind` toward [remote], reached at [advertised]
+     * (`host:port`), unless its `Contact` names that already. */
+    internal fun reach(advertised: String, remote: String) {
+        val next = client.defaultContact(aor, advertised)
+        if (next == contact) {
+            return
+        }
+        retryBusy {
+            Sipral.accountRebind(client.handle, handle, /* SIPRAL_TRANSPORT_MAIN */ 0, remote, next, client.nowMs())
+        }
+        contact = next
+    }
+
+    /**
+     * `sipral_account_check_certificate`: the verdict of this account's
+     * `tlsPin` on [certificate], the DER bytes of the leaf a TLS server
+     * presented, from inside the application's own certificate check. The
+     * certificate's dates when it is the pinned one -- accept the handshake
+     * whoever signed it, an expired one included; null when the account pins
+     * nothing and the platform's own checks decide; a [SipralException] with
+     * `CERTIFICATE_REFUSED` when it pins another.
+     */
+    fun checkCertificate(certificate: ByteArray, unixSeconds: Long = System.currentTimeMillis() / 1000): SipralPinnedCertificate? {
+        val found = retryBusy { Sipral.accountCheckCertificate(client.handle, handle, certificate, unixSeconds) }
+        return if (found.pinned == 0L) null else found
+    }
+
+    /** How an account names and keeps its server, beside the registrar's
+     * address: the ABI 0.34 members of `sipral_account_config_t`, and the
+     * address this layer chose for its `Contact`. */
+    internal class Location(
+        val serverUri: String?,
+        val serverNaptr: Boolean,
+        val keepaliveMs: Long,
+        val tlsPin: String?,
+        val advertised: String?,
+    )
     /** Where this account says it can be reached, as its `Contact` carries
      * it now: after [SipralClient.networkChanged], the new address. */
     @Volatile
@@ -43,7 +98,8 @@ class SipralAccount internal constructor(
         fun add(
             client: SipralClient,
             aor: String,
-            registrarAddress: String,
+            registrarAddress: String?,
+            location: Location,
             registrar: String?,
             contact: String?,
             displayName: String?,
@@ -56,7 +112,11 @@ class SipralAccount internal constructor(
             trustedPeers: List<String>,
             security: SipralAccountSecurity,
         ): SipralAccount {
-            val written = contact ?: client.defaultContact(aor)
+            val written = contact ?: if (location.advertised != null) {
+                client.defaultContact(aor, location.advertised)
+            } else {
+                client.defaultContact(aor)
+            }
             val (timer, seconds) = sessionTimer.raw
             val config = SipralAccountConfig(
                 aor = aor,
@@ -84,9 +144,13 @@ class SipralAccount internal constructor(
                 stirOrigid = security.stirOrigid,
                 stirAttestation = (security.stirAttestation?.value ?: 0).toLong(),
                 recordingInClear = if (security.recordingInClear) SipralToggle.ON.value.toLong() else 0,
+                keepaliveMs = location.keepaliveMs,
+                serverUri = location.serverUri,
+                tlsPinSha256 = location.tlsPin,
+                serverNaptr = if (location.serverNaptr) SipralToggle.ON.value.toLong() else 0,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
-            return SipralAccount(client, accountHandle, aor, registrarAddress, written, contact)
+            return SipralAccount(client, accountHandle, aor, registrarAddress ?: "", written, contact, location.serverUri)
         }
     }
 

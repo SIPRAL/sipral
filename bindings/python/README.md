@@ -59,8 +59,8 @@ async def main():
 
         # Without `registrar` the account never registers: registering
         # throws, and the registrar address is only the outbound proxy.
-        # The stack and media sockets default to 127.0.0.1, so name an
-        # address the registrar can reach.
+        # Left out, `bind_host` and `media_host` are the address of the
+        # route toward the registrar (see "Where a stack is reached").
 
         call = stack.place_call(account, "sip:bob@example.invalid", media_host="192.0.2.10")
         while not call.ended:
@@ -105,9 +105,11 @@ unplugged keeps its row. `select(AudioRole.MICROPHONE | SPEAKER | RINGER,
 device)` puts one role on a device and `select(role, None)` back on the
 system's route; `selection(role)` reads back what was chosen and what the
 role is running on, which differ while a chosen device is unplugged — the
-choice is kept and comes back with the device. macOS runs the microphone
-and the loudspeaker as one unit, so there only the speaker is chosen and
-the others raise `SIPRAL_STATUS_NOT_SUPPORTED`; Windows takes all three.
+choice is kept and comes back with the device. macOS and Windows take all
+three: on macOS the microphone is chosen apart from the speaker without
+moving the system's default input, and a ringer on another device plays
+through an output of its own. iOS raises `SIPRAL_STATUS_NOT_SUPPORTED` for
+the microphone and the ringer, whose route is the audio session's.
 `set_gain(direction, ratio)` (`microphone_gain` and `volume` as
 properties; 1.0 is unity, 4.0 the most) and `set_muted(direction, muted)`
 belong to the direction and survive every device change; `level(direction)`
@@ -255,6 +257,50 @@ it an incoming call is answered 503 and `place_call` raises with
 `diagnostic_decisions` (64) and `diagnostic_records` (32) are the other
 ceilings, zero for the default each (`docs/08-ffi.md`, "Limits, and what
 went out twice").
+
+## Where a stack is reached, and where its server is
+
+`Stack()` with no `bind_host` listens on every interface and advertises the
+address of the operating system's route toward the server of its first
+account (`sipral.advertised_address`, `sipral_advertised_address`): the
+address a PBX on the network reaches this machine at, and `127.0.0.1` for a
+server on this machine. Each account is reached at the route toward its own
+server, and a call's media socket, without `media_host`, at the route toward
+the far end or the account's server. The library refuses to advertise a
+loopback address to a peer elsewhere: `SIPRAL_STATUS_UNREACHABLE_ADDRESS`
+from the call that would have, and `RegistrationFailure.UNREACHABLE_CONTACT`
+for a REGISTER it sends on its own.
+
+`add_account(aor, server_uri="sip:pbx.example.com")` names the server by a
+URI whose host RFC 3263 locates, in place of `registrar_address`; exactly
+one of the two is given. The stack's `resolver` answers each
+`SIPRAL_EVENT_KIND_LOOKUP_WANTED` on a thread of its own:
+`sipral.locate.lookup` by default, which asks `socket.getaddrinfo` for A and
+AAAA records and answers SRV and NAPTR "nothing" — this package depends on
+no DNS library, and the procedure then goes on to the host's own addresses.
+An application whose server publishes SRV records passes a resolver that
+reads them (dnspython's, say): a callable `(name, record) -> (answer,
+records)`, each record its time-to-live and its data as a zone file writes
+it. `LOCATED` says where the server was found (`account.registrar_address`
+follows it) and `LOCATE_FAILED` why not (`LocateFailure`).
+
+`keepalive_ms` keeps an account's flow to its server open whatever STUN
+found, for a NAT that forgets a flow sooner than the REGISTER refresh comes
+round. `TlsTrust.pinned("SHA256=AB:CD:...")` trusts the one certificate with
+that fingerprint on a TLS signalling connection, whoever signed it and
+whatever name it carries; an account's `tls_pin` and
+`Account.check_certificate(der)` are the same verdict for an application
+that runs the account's TLS itself.
+
+`Stack(srtp=Srtp.BEST_EFFORT)` offers SDES on plain RTP/AVP, for a PBX that
+answers an RTP/SAVP offer with 488; `srtp_suites` names the suites every
+call offers. `path_mtu` tells RFC 3261 §18.1.1 the path's MTU, and
+`datagram_without_stream_bytes` sends a request over UDP anyway once no
+stream to a UDP-only server can be had — a deliberate deviation, written to
+`stack.diagnostics_json()` as `transport.kept.datagram`.
+`pseudonym_salt` keys the log's pseudonyms so that two runs compare, and
+`diagnostic_trace` (or `stack.set_diagnostic_trace(True)`) writes whole SIP
+messages at the trace level, credentials and keys taken out.
 
 ## The log, the state and the counters
 

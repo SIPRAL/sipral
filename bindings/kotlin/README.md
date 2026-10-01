@@ -100,8 +100,8 @@ client.close()
 ```
 
 Without `registrar` the account never registers: registering throws, and
-the registrar address is only the outbound proxy. The stack and media
-sockets default to 127.0.0.1, so name an address the registrar can reach.
+the registrar address is only the outbound proxy. Left out, `bindHost` and
+`mediaHost` are the address of the route toward the registrar.
 
 ### The library runs the audio
 
@@ -354,6 +354,48 @@ it an incoming call is answered 503 and `placeCall` throws with
 `LIMIT_REACHED`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
 and `diagnosticRecords` (32) are the other ceilings, zero for the default
 each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
+### Where a client is reached, and where its server is
+
+`SipralClient.open()` with no `bindHost` listens on every interface and
+advertises the address of the operating system's route toward the server of
+its first account (`advertisedAddress`, `sipral_advertised_address`): the
+address a PBX on the network reaches the device at, and `127.0.0.1` for a
+server on this machine. Each account is reached at the route toward its own
+server, and a call's media socket, without `mediaHost`, at the route toward
+the far end or the account's server. The library refuses to advertise a
+loopback address to a peer elsewhere: `UNREACHABLE_ADDRESS`, and
+`SipralRegistrationFailure.UNREACHABLE_CONTACT` for a REGISTER it sends on
+its own.
+
+`addAccount(aor, serverUri = "sip:pbx.example.com")` names the server by a
+URI whose host RFC 3263 locates, in place of `registrarAddress`. The client's
+`resolver` answers each `LOOKUP_WANTED` (read with `locateOf`):
+`SipralDns.platform` by default, which asks `InetAddress` for addresses and,
+on a JVM, JNDI's DNS provider for SRV and NAPTR. Android has no JNDI: there
+SRV and NAPTR are answered `NOTHING` and the procedure goes on to the host's
+own addresses, and an application whose server publishes SRV records passes
+a resolver built on `android.net.DnsResolver` (API 29). Neither platform
+lookup reports a time-to-live, so a minute is given. `LOCATED` says where
+the server was found (`account.registrarAddress` follows it) and
+`LOCATE_FAILED` why not.
+
+`keepaliveMs` keeps an account's flow to its server open whatever STUN found.
+`SipralTlsTrust.Pinned("SHA256=AB:CD:...")` trusts the one certificate with
+that fingerprint on a TLS signalling connection, whoever signed it and
+whatever name it carries; an account's `tlsPin` and
+`SipralAccount.checkCertificate(der)` are the same verdict for an application
+that runs the account's TLS itself.
+
+`srtp = SipralSrtp.BEST_EFFORT` offers SDES on plain RTP/AVP, for a PBX that
+answers an RTP/SAVP offer with 488; `srtpSuites` names the suites every call
+offers. `pathMtu` tells RFC 3261 §18.1.1 the path's MTU, and
+`datagramWithoutStreamBytes` sends a request over UDP anyway once no stream
+to a UDP-only server can be had -- a deliberate deviation, written to
+`diagnosticsJson()` as `transport.kept.datagram`. `pseudonymSalt` keys the
+log's pseudonyms so that two runs compare, and `diagnosticTrace` (or
+`setDiagnosticTrace(true)`) writes whole SIP messages at the trace level,
+credentials and keys taken out.
 
 ### The log, the state and the counters
 

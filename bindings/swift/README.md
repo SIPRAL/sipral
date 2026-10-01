@@ -162,8 +162,8 @@ let account = try stack.addAccount(
 try account.register()
 
 // Without `registrar` the account never registers: registering throws, and
-// the registrar address is only the outbound proxy. The stack and media
-// sockets default to 127.0.0.1, so name an address the registrar can reach.
+// the registrar address is only the outbound proxy. Left out, `bindHost` and
+// `mediaHost` are the address of the route toward the registrar.
 
 let call = try stack.placeCall(account: account, target: "sip:bob@example.invalid", mediaHost: "192.0.2.10")
 let events = call.events()                 // take it at once: nothing earlier is replayed
@@ -213,9 +213,10 @@ with their channel counts under ids that survive a refresh and an unplug,
 `select(_:for:)` puts the `.microphone`, the `.speaker` or the `.ringer` on
 one (or back on the system's route with `nil`), refused by status before
 anything opens (`.noSuchDevice`, `.deviceUnusable`, and `.notSupported`
-where the platform cannot: on macOS and iOS the microphone and the
-loudspeaker are one unit, so the microphone follows the system's input and
-the ring plays on the loudspeaker), `selection(for:)` says what was asked and
+where the platform cannot: on iOS, whose route is the audio session's, the
+microphone and the ringer; on macOS the microphone is chosen apart from the
+speaker without moving the system's default input, and a ringer on another
+device plays through an output of its own), `selection(for:)` says what was asked and
 what runs while a chosen device is unplugged, `setGain(_:for:)` (1 is unity,
 the input direction is the microphone's gain) and `setMuted(_:for:)` belong
 to the direction and survive a change of device, `level(for:)` is the meter,
@@ -404,6 +405,45 @@ it an incoming call is answered 503 and `placeCall` throws
 `.limitReached`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
 and `diagnosticRecords` (32) are the other ceilings, zero for the default
 each (`docs/08-ffi.md`, "Limits, and what went out twice").
+
+### Where a stack is reached, and where its server is
+
+`SipralStack()` with no `bindHost` listens on every interface and advertises
+the address of the operating system's route toward the server of its first
+account (`SipralStack.advertisedAddress(bound:peer:)`,
+`sipral_advertised_address`): the address a PBX on the network reaches the
+device at, and `127.0.0.1` for a server on this machine. Each account is
+reached at the route toward its own server, and a call's media socket,
+without `mediaHost`, at the route toward the far end or the account's
+server. The library refuses to advertise a loopback address to a peer
+elsewhere: `.unreachableAddress`, and
+`SipralRegistrationFailure.unreachableContact` for a REGISTER it sends on
+its own.
+
+`addAccount(aor:serverUri:)` names the server by a URI whose host RFC 3263
+locates, in place of `registrarAddress`. The stack's `resolver` answers each
+`.lookupWanted`: `SipralDns.platform` by default, which asks the system's DNS
+service (`DNSServiceQueryRecord`, VPN and per-interface resolvers included)
+for SRV and NAPTR and `getaddrinfo` for addresses; on Linux SRV and NAPTR
+are answered `.nothing` and the procedure goes on to the host's own
+addresses. `.located` says where the server was found (`account.registrarAddress`
+follows it) and `.locateFailed` why not.
+
+`keepaliveMs` keeps an account's flow to its server open whatever STUN found.
+`TLSTrust.pinned("SHA256=AB:CD:...")` trusts the one certificate with that
+fingerprint on a TLS signalling connection, whoever signed it and whatever
+name it carries; an account's `tlsPin` and `Account.checkCertificate(_:)` are
+the same verdict for an application that runs the account's TLS itself.
+
+`srtp: .bestEffort` offers SDES on plain RTP/AVP, for a PBX that answers an
+RTP/SAVP offer with 488; `srtpSuites` names the suites every call offers.
+`pathMtu` tells RFC 3261 §18.1.1 the path's MTU, and
+`datagramWithoutStreamBytes` sends a request over UDP anyway once no stream
+to a UDP-only server can be had -- a deliberate deviation, written to
+`diagnosticsJson()` as `transport.kept.datagram`. `pseudonymSalt` keys the
+log's pseudonyms so that two runs compare, and `diagnosticTrace` (or
+`setDiagnosticTrace(true)`) writes whole SIP messages at the trace level,
+credentials and keys taken out.
 
 ### The log, the state and the counters
 

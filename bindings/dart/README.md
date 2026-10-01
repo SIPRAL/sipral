@@ -61,6 +61,35 @@ often the answer to a challenge on a call offering two SRTP suites) waits
 the stack's ten seconds for a stream and is then sent trimmed or ended with
 a 513, as `docs/08-ffi.md` describes for an application that says nothing.
 
+## Where a stack is reached, and where its server is
+
+`SipralStack.open()` with no `bindHost` listens on every interface and
+advertises the address of the operating system's route toward the server of
+its first account (`advertisedAddress`, `sipral_advertised_address`): the
+address a PBX on the network reaches the machine at, and `127.0.0.1` for a
+server on this machine. A call's media socket, without `mediaHost`, is bound
+at the route toward the far end or the account's server. The library refuses
+to advertise a loopback address to a peer elsewhere
+(`SipralStatus.unreachableAddress`).
+
+`addAccount(aor, serverUri: 'sip:pbx.example.com')` names the server by a URI
+whose host RFC 3263 locates, in place of `registrarAddress`. The stack's
+`resolver` answers each `lookupWanted`: `SipralDns.platform` by default.
+`dart:io` asks the platform for addresses only, so SRV and NAPTR are
+answered `nothing` there and the procedure goes on to the host's own
+addresses; an application whose server publishes SRV records passes a
+resolver that reads them. `located` (`event.locatedTargets`) says where the
+server was found and `locateFailed` (`event.locateFailure`) why not.
+
+`keepaliveMs` keeps an account's flow to its server open; this layer has no
+TLS, and an account's `tlsPin` with `SipralAccount.checkCertificate` is the
+verdict for an application that runs the account's TLS itself. `srtp`
+(`SipralSrtp.bestEffort` offers SDES on plain RTP/AVP), `srtpSuites`,
+`pathMtu`, `datagramWithoutStreamBytes` (UDP anyway up to that size: this
+layer opens no stream, and `diagnosticsJson()` says `transport.kept.datagram`),
+`pseudonymSalt` and `diagnosticTrace` (`setDiagnosticTrace`) reach the
+library as `sipral_stack_config_t` takes them.
+
 ## The library
 
 `Sipral.open()` takes a path to `libsipral_ffi` or the directory holding it;

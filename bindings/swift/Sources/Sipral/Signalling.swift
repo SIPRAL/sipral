@@ -9,6 +9,7 @@ import Glibc
 import CSipral
 import Dispatch
 #if canImport(Network)
+import CryptoKit
 import Foundation
 import Network
 import Security
@@ -20,12 +21,64 @@ import Security
 /// against), `.privateAuthority` (a private CA, DER-encoded, beside the
 /// system's) and `.onlyAuthority` (that authority and no other: pinning it).
 /// The name is checked by the SSL policy against the server name the stack
-/// was given; none of them turns a check off. TLS is Network.framework's,
-/// on Apple platforms only.
+/// was given; none of them turns a check off. `.pinnedCertificate` trusts one
+/// certificate by the SHA-256 digest of its DER bytes, for a PBX that signed
+/// its own: the digest is the whole verdict, and no authority, name or date
+/// is consulted (`docs/22-tls.md`); `pinned(_:)` reads it from the text an
+/// administrator copies. TLS is Network.framework's, on Apple platforms
+/// only.
 public enum TLSTrust: Sendable {
     case platform
     case privateAuthority([UInt8])
     case onlyAuthority([UInt8])
+    case pinnedCertificate([UInt8])
+
+    /// The one certificate whose SHA-256 fingerprint is `fingerprint`,
+    /// written as `openssl x509 -fingerprint -sha256` or RFC 8122 prints it:
+    /// 64 hexadecimal digits, either case, a colon between each byte or
+    /// none, optionally after `sha-256 ` or `SHA256=`. Anything else throws
+    /// `.invalidArgument`.
+    public static func pinned(_ fingerprint: String) throws -> TLSTrust {
+        .pinnedCertificate(try pinDigest(fingerprint))
+    }
+
+    /// The 32 bytes a fingerprint names, in any form `pinned(_:)` takes.
+    public static func pinDigest(_ fingerprint: String) throws -> [UInt8] {
+        let refused = SipralError(
+            status: .invalidArgument, message: "a certificate pin is 32 bytes of hexadecimal, colons between them or not"
+        )
+        var text = Substring(fingerprint.trimmingWhitespace())
+        if let split = text.firstIndex(where: { $0 == " " || $0 == "=" }) {
+            let named = text[text.startIndex..<split].lowercased().filter { $0 != "-" && $0 != "_" }
+            guard named == "sha256" else {
+                throw SipralError(status: .invalidArgument, message: "a certificate pin is a SHA-256 fingerprint")
+            }
+            text = Substring(String(text[text.index(after: split)...]).trimmingWhitespace())
+        }
+        let characters = Array(text)
+        let colons = characters.contains(":")
+        if colons {
+            guard characters.count == 95,
+                  characters.indices.allSatisfy({ ($0 % 3 == 2) == (characters[$0] == ":") }) else { throw refused }
+        }
+        let digits = characters.filter { $0 != ":" }
+        guard digits.count == 64 else { throw refused }
+        var digest: [UInt8] = []
+        for at in stride(from: 0, to: 64, by: 2) {
+            guard let byte = UInt8(String(digits[at...at + 1]), radix: 16) else { throw refused }
+            digest.append(byte)
+        }
+        return digest
+    }
+}
+
+extension String {
+    fileprivate func trimmingWhitespace() -> String {
+        var view = Substring(self)
+        while let first = view.first, first.isWhitespace { view.removeFirst() }
+        while let last = view.last, last.isWhitespace { view.removeLast() }
+        return String(view)
+    }
 }
 
 /// How fast one address may ring a stack: `burst` INVITEs at once, then one
@@ -122,10 +175,11 @@ final class SignallingConnection: @unchecked Sendable {
     private var fd: Int32 = -1
     #endif
 
-    /// Connect from `bindHost` to `server`, over TLS when `transport` says
+    /// Connect from `bindHost` -- from the address of the route toward
+    /// `server` when `nil` -- to `server`, over TLS when `transport` says
     /// so; throws the refusal.
     init(
-        server: String, bindHost: String, transport: SipralTransport, serverName: String, trust: TLSTrust,
+        server: String, bindHost: String?, transport: SipralTransport, serverName: String, trust: TLSTrust,
         patienceMs: Int
     ) throws {
         let (host, port) = UDPSocket.parse(server)
@@ -141,10 +195,15 @@ final class SignallingConnection: @unchecked Sendable {
             sec_protocol_options_set_tls_server_name(security, serverName)
             let anchors: [SecCertificate]
             let only: Bool
+            var pin: [UInt8]?
             switch trust {
             case .platform:
                 anchors = []
                 only = false
+            case .pinnedCertificate(let digest):
+                anchors = []
+                only = false
+                pin = digest
             case .privateAuthority(let der):
                 anchors = [SecCertificateCreateWithData(nil, Data(der) as CFData)].compactMap { $0 }
                 only = false
@@ -153,8 +212,22 @@ final class SignallingConnection: @unchecked Sendable {
                 only = true
             }
             let verdict = self.verdict
-            sec_protocol_options_set_verify_block(security, { _, trust, complete in
+            sec_protocol_options_set_verify_block(security, { [pin] _, trust, complete in
                 let evaluated = sec_trust_copy_ref(trust).takeRetainedValue()
+                if let pin {
+                    // the pin replaces the chain, the name and the dates
+                    let chain = SecTrustCopyCertificateChain(evaluated) as? [SecCertificate] ?? []
+                    let leaf = chain.first.map { [UInt8](SecCertificateCopyData($0) as Data) } ?? []
+                    let matches = Self.digestMatches(pin, of: leaf)
+                    if !matches {
+                        verdict.keep(SignallingRefusal(
+                            error: .connectionReset, tls: .untrusted,
+                            detail: "the server's certificate is not the pinned one"
+                        ))
+                    }
+                    complete(matches)
+                    return
+                }
                 SecTrustSetPolicies(evaluated, SecPolicyCreateSSL(true, serverName as CFString))
                 if !anchors.isEmpty {
                     SecTrustSetAnchorCertificates(evaluated, anchors as CFArray)
@@ -179,7 +252,9 @@ final class SignallingConnection: @unchecked Sendable {
             )
             parameters = connection.parameters
         }
-        parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(bindHost), port: 0)
+        if let bindHost {
+            parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(bindHost), port: 0)
+        }
         let settled = DispatchSemaphore(value: 0)
         let outcome = SignallingOutcome()
         connection.stateUpdateHandler = { [weak self] state in
@@ -247,7 +322,9 @@ final class SignallingConnection: @unchecked Sendable {
         }
         var source = sockaddr_in()
         source.sin_family = sa_family_t(AF_INET)
-        inet_pton(AF_INET, bindHost, &source.sin_addr)
+        if let bindHost {
+            inet_pton(AF_INET, bindHost, &source.sin_addr)
+        }
         var address = sockaddr_in()
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = port.bigEndian
@@ -411,6 +488,19 @@ final class SignallingConnection: @unchecked Sendable {
     }
 
     private static func sentence(_ text: String) -> String { SignallingRefusal.sentence(text) }
+
+    /// Whether SHA-256 over `leaf` is `pin`, every byte compared whatever
+    /// the first difference, so that how long this takes says nothing about
+    /// how close a certificate came.
+    static func digestMatches(_ pin: [UInt8], of leaf: [UInt8]) -> Bool {
+        let digest = Array(SHA256.hash(data: leaf))
+        guard digest.count == pin.count else { return false }
+        var difference: UInt8 = 0
+        for (one, other) in zip(digest, pin) {
+            difference |= one ^ other
+        }
+        return difference == 0
+    }
 
     /// The local end of a connection that is ready, as `host:port`, or
     /// `nil` when `read` never named one within `patienceMs`. A connection

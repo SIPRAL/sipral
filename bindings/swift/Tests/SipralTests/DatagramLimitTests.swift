@@ -19,6 +19,7 @@ final class ChallengingPbx: @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.sipral.test.pbx")
     private let lock = NSLock()
     private var _overTcp: [String] = []
+    private var _answeredOverUdp: [(message: String, bytes: Int)] = []
     private var _connections = 0
     private var _closedByTheStack = 0
     private var stopped = false
@@ -53,6 +54,8 @@ final class ChallengingPbx: @unchecked Sendable {
     /// Where TCP is taken, `nil` without it.
     var tcpAddress: String? { listener?.port.map { "127.0.0.1:\($0.rawValue)" } }
     var overTcp: [String] { lock.withLock { _overTcp } }
+    /// Every INVITE carrying credentials that arrived over UDP, and its size.
+    var answeredOverUdp: [(message: String, bytes: Int)] { lock.withLock { _answeredOverUdp } }
     var connections: Int { lock.withLock { _connections } }
     /// How many of those connections the stack closed.
     var closedByTheStack: Int { lock.withLock { _closedByTheStack } }
@@ -73,6 +76,9 @@ final class ChallengingPbx: @unchecked Sendable {
             if message.hasPrefix("INVITE "), FakeRegistrar.header("Authorization", message) == nil {
                 let challenge = "WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"\(nonce)\", qop=\"auth\"\r\n"
                 udp.send(Array(Self.response(message, "401 Unauthorized", challenge).utf8), to: from)
+            } else if message.hasPrefix("INVITE ") {
+                lock.withLock { _answeredOverUdp.append((message, data.count)) }
+                udp.send(Array(Self.response(message, "486 Busy Here").utf8), to: from)
             }
         }
         udp.close()
@@ -215,6 +221,33 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(ended.endCause?.sip, 513)
         XCTAssertTrue(ended.endCause?.text?.contains("1300-byte") == true, ended.endCause?.text ?? "")
         XCTAssertTrue(ended.endCause?.text?.contains("18.1.1") == true)
+    }
+
+    /// A deliberate deviation from §18.1.1: no stream is coming, and the
+    /// stack was told the server takes a large request over UDP.
+    func testAPbxOnUdpAloneTakesTheRequestOverUdpUpToTheStacksLimit() async throws {
+        let pbx = try ChallengingPbx(tcp: false)
+        defer { pbx.stop() }
+        let stack = try SipralStack(audio: .application, pathMtu: 1500, datagramWithoutStreamBytes: 4000)
+        defer { stack.close() }
+        let ending = Task { try await untilTheEnd(stack) }
+        try place(stack, pbx)
+        let seen = try await ending.value
+        XCTAssertEqual(seen.last?.callData?.statusCode, 486, "the PBX's own answer, over UDP")
+        let answered = pbx.answeredOverUdp
+        XCTAssertEqual(answered.count, 1)
+        XCTAssertNotNil(FakeRegistrar.header("Authorization", answered.first?.message ?? ""))
+        XCTAssertGreaterThan(answered.first?.bytes ?? 0, 1300)
+        XCTAssertTrue(try stack.diagnosticsJson().contains("transport.kept.datagram"))
+    }
+
+    func testALimitPastOneDatagramAndAPathUnderTheIpv4FloorAreRefused() {
+        XCTAssertThrowsError(try SipralStack(audio: .application, datagramWithoutStreamBytes: 65508)) {
+            XCTAssertEqual(($0 as? SipralError)?.status, .invalidArgument)
+        }
+        XCTAssertThrowsError(try SipralStack(audio: .application, pathMtu: 575)) {
+            XCTAssertEqual(($0 as? SipralError)?.status, .invalidArgument)
+        }
     }
 
     func testAPbxTakingTcpOnAnotherPortIsReachedAtTheStreamServer() async throws {

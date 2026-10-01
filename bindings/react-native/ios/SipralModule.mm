@@ -74,6 +74,19 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   if (options.manualAudio().has_value()) {
     put(given, @"manualAudio", @(options.manualAudio().value()));
   }
+  put(given, @"srtp", options.srtp());
+  put(given, @"srtpSuites", options.srtpSuites());
+  if (options.pathMtu().has_value()) {
+    put(given, @"pathMtu", @(options.pathMtu().value()));
+  }
+  if (options.datagramWithoutStreamBytes().has_value()) {
+    put(given, @"datagramWithoutStreamBytes", @(options.datagramWithoutStreamBytes().value()));
+  }
+  put(given, @"pseudonymSalt", options.pseudonymSalt());
+  if (options.diagnosticTrace().has_value()) {
+    put(given, @"diagnosticTrace", @(options.diagnosticTrace().value()));
+  }
+  put(given, @"tlsPin", options.tlsPin());
   [_bridge open:given resolve:resolve reject:reject];
 }
 
@@ -89,6 +102,13 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   NSMutableDictionary *given = [NSMutableDictionary dictionary];
   put(given, @"aor", options.aor());
   put(given, @"registrarAddress", options.registrarAddress());
+  put(given, @"serverUri", options.serverUri());
+  if (options.serverNaptr().has_value()) {
+    put(given, @"serverNaptr", @(options.serverNaptr().value()));
+  }
+  if (options.keepaliveMs().has_value()) {
+    put(given, @"keepaliveMs", @(options.keepaliveMs().value()));
+  }
   put(given, @"registrar", options.registrar());
   put(given, @"contact", options.contact());
   put(given, @"displayName", options.displayName());
@@ -201,6 +221,11 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
 - (void)setMuted:(BOOL)muted resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
 {
   [_bridge setMuted:muted resolve:resolve reject:reject];
+}
+
+- (void)setDiagnosticTrace:(BOOL)on resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setDiagnosticTrace:on resolve:resolve reject:reject];
 }
 
 @end

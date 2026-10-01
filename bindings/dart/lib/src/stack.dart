@@ -11,24 +11,85 @@ part of 'idiomatic.dart';
 /// still up, destroys the stack exactly once and closes every socket this
 /// layer opened. Everything happens on the isolate that opened it.
 final class SipralStack {
-  SipralStack._(this._sipral, this._socket)
-    : bindAddress = _formatAddress(_socket.address, _socket.port);
+  SipralStack._(
+    this._sipral,
+    this._socket,
+    this._bindAddress,
+    this._resolver,
+    this._routes,
+  );
 
   /// Bind a socket on [bindHost]:[bindPort] (0 for any port) and create a
   /// stack on it, in application mode: this layer carries each call's PCM.
   /// [userAgent] names the stack in `User-Agent` and `Server`. [library] is
   /// the library to use, [Sipral.open]'s by default.
+  ///
+  /// [bindHost] left out listens on every interface, and the stack
+  /// advertises the address of the operating system's route toward the
+  /// server of its first account (`sipral_advertised_address`): the address
+  /// a PBX on the network reaches this machine at, and `127.0.0.1` for one on
+  /// this machine. Each account is reached at the route toward its own
+  /// server, and a call's media socket, when `mediaHost` is left out, at the
+  /// route toward the far end or the account's server. A loopback address is
+  /// never advertised to a peer elsewhere: the library refuses that with
+  /// `SipralStatus.unreachableAddress`.
+  ///
+  /// [srtp] is a `SipralSrtp` value -- `SipralSrtp.bestEffort` offers SDES on
+  /// plain `RTP/AVP`, the call encrypted when the answer takes a key and
+  /// plain when it takes none -- and [srtpSuites] the SRTP suites every call
+  /// offers and accepts, most preferred first, by their RFC 4568 and RFC 7714
+  /// names. [pathMtu] is the MTU of the path toward the server when the
+  /// deployment knows it (0 for unknown, else 576 or more).
+  /// [datagramWithoutStreamBytes] is a deliberate deviation from RFC 3261
+  /// §18.1.1 for a server that takes SIP over UDP alone: this layer opens no
+  /// stream, and a request up to this many bytes goes over UDP anyway (0 for
+  /// never, at most 65 507), [diagnosticsJson] saying so as
+  /// `transport.kept.datagram`. [pseudonymSalt] (16 bytes or more, kept by
+  /// the installation) keys the pseudonyms the log writes, so that two runs
+  /// compare line by line; it is a secret, like a key. [diagnosticTrace]
+  /// writes whole SIP messages at the trace level, credentials and keys
+  /// taken out; [setDiagnosticTrace] turns it on and off later. [resolver]
+  /// answers `SipralEventKind.lookupWanted` for the accounts added with a
+  /// `serverUri`; [SipralDns.platform] by default.
   static Future<SipralStack> open({
-    String bindHost = '127.0.0.1',
+    String? bindHost,
     int bindPort = 0,
     String? userAgent,
     Sipral? library,
+    int srtp = 0,
+    List<String> srtpSuites = const [],
+    int pathMtu = 0,
+    int datagramWithoutStreamBytes = 0,
+    List<int>? pseudonymSalt,
+    bool? diagnosticTrace,
+    SipralResolver? resolver,
   }) async {
     final sipral = library ?? _library();
-    final socket = await RawDatagramSocket.bind(bindHost, bindPort);
-    final stack = SipralStack._(sipral, socket);
+    final socket = await RawDatagramSocket.bind(
+      bindHost ?? InternetAddress.anyIPv4,
+      bindPort,
+    );
+    final bound =
+        bindHost == null
+            ? '127.0.0.1:${socket.port}'
+            : _formatAddress(socket.address, socket.port);
+    final stack = SipralStack._(
+      sipral,
+      socket,
+      bound,
+      resolver ?? SipralDns.platform,
+      bindHost == null,
+    );
     try {
-      stack._create(userAgent);
+      stack._create(
+        userAgent,
+        srtp: srtp,
+        srtpSuites: srtpSuites,
+        pathMtu: pathMtu,
+        datagramWithoutStreamBytes: datagramWithoutStreamBytes,
+        pseudonymSalt: pseudonymSalt,
+        diagnosticTrace: diagnosticTrace,
+      );
     } catch (_) {
       stack._release();
       socket.close();
@@ -41,9 +102,20 @@ final class SipralStack {
   final Sipral _sipral;
   final RawDatagramSocket _socket;
 
-  /// Where the signalling socket is bound, `host:port`: what every `Via`
-  /// this stack writes carries, and where another stack reaches it.
-  final String bindAddress;
+  /// Where the signalling socket is reached, `host:port`: what every `Via`
+  /// this stack writes carries, and where another stack reaches it. A stack
+  /// opened with no `bindHost` listens on every interface, and this is the
+  /// route toward its first account's server.
+  String get bindAddress => _bindAddress;
+  String _bindAddress;
+
+  /// Whether this stack picks the address peers reach it at -- it was opened
+  /// with no `bindHost` -- and whether it has picked it yet.
+  final bool _routes;
+  bool _routeChosen = false;
+
+  /// Answers `SipralEventKind.lookupWanted`.
+  final SipralResolver _resolver;
 
   /// The stack's handle.
   int get handle => _handle;
@@ -86,7 +158,15 @@ final class SipralStack {
   /// library takes is measured in.
   int nowMs() => _clock.elapsedMilliseconds;
 
-  void _create(String? userAgent) {
+  void _create(
+    String? userAgent, {
+    required int srtp,
+    required List<String> srtpSuites,
+    required int pathMtu,
+    required int datagramWithoutStreamBytes,
+    required List<int>? pseudonymSalt,
+    required bool? diagnosticTrace,
+  }) {
     _callback = ffi.NativeCallable<SipralEventCallback>.isolateLocal(_onEvent);
     using((arena) {
       final random = Random.secure();
@@ -101,6 +181,13 @@ final class SipralStack {
       final config = arena<SipralStackConfig>();
       final bind = _text(arena, bindAddress);
       final agent = _text(arena, userAgent);
+      final suites = _text(
+        arena,
+        srtpSuites.isEmpty ? null : srtpSuites.join(','),
+      );
+      final salt = pseudonymSalt ?? const <int>[];
+      final saltBytes = arena<ffi.Uint8>(max(1, salt.length));
+      saltBytes.asTypedList(salt.length).setAll(0, salt);
       config.ref
         ..size = ffi.sizeOf<SipralStackConfig>()
         ..eventCallback = _callback.nativeFunction
@@ -115,7 +202,15 @@ final class SipralStack {
         ..mediaSeedLen = 32
         // the wall clock the RTCP sender reports carry (RFC 3550 §6.4.1)
         ..mediaClockUnixSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000
-        ..audio = SipralAudio.application;
+        ..audio = SipralAudio.application
+        ..srtp = srtp
+        ..srtpSuites = suites.$1
+        ..srtpSuitesLen = suites.$2
+        ..pathMtu = pathMtu
+        ..datagramWithoutStreamBytes = datagramWithoutStreamBytes
+        ..pseudonymSalt = salt.isEmpty ? ffi.nullptr : saltBytes
+        ..pseudonymSaltLen = salt.length
+        ..diagnosticTrace = _toggle(diagnosticTrace);
       final out = arena<SipralHandle>();
       _clock.start();
       _check(_sipral, 'sipral_stack_create', _sipral.stackCreate(config, out));
@@ -137,23 +232,54 @@ final class SipralStack {
   /// [authUser] with [authPassword] when challenged; without one it never
   /// registers, and [registrarAddress] is only its outbound proxy.
   /// [contact] is where the account is reached; by default the user part of
-  /// [aor] at this stack's [bindAddress].
+  /// [aor] at the route toward its server, or at this stack's [bindAddress].
+  ///
+  /// [serverUri] names the server by a URI whose host RFC 3263 locates --
+  /// `sip:pbx.example.com`, `sips:example.com:5061` -- in place of
+  /// [registrarAddress]: exactly one of the two is given. The lookups are
+  /// the stack's resolver's; `SipralEventKind.located` says where the server
+  /// was found and `SipralEventKind.locateFailed` why not. [serverNaptr] asks
+  /// the domain for NAPTR records before SRV (RFC 3263 §4.1). [keepaliveMs]
+  /// keeps the account's flow to its server open at that interval -- a
+  /// double CRLF -- 1 000 to 120 000, 0 for never. [tlsPin] is the SHA-256
+  /// fingerprint of the one TLS certificate the account trusts, for an
+  /// application that runs the account's TLS itself:
+  /// [SipralAccount.checkCertificate] is its verdict.
   SipralAccount addAccount(
     String aor, {
-    required String registrarAddress,
+    String? registrarAddress,
     String? registrar,
     String? contact,
     String? authUser,
     String? authPassword,
     String? displayName,
+    String? serverUri,
+    bool serverNaptr = false,
+    int keepaliveMs = 0,
+    String? tlsPin,
   }) {
     _ensureOpen();
+    if ((registrarAddress == null) == (serverUri == null)) {
+      throw ArgumentError(
+        'an account names its server by registrarAddress or by serverUri, '
+        'one of the two',
+      );
+    }
+    final advertised =
+        contact == null && registrarAddress != null && _routes
+            ? _advertiseToward(registrarAddress)
+            : null;
     final handle = using((arena) {
       final config = arena<SipralAccountConfig>();
       final aorText = _text(arena, aor);
       final proxy = _text(arena, registrarAddress);
       final registrarText = _text(arena, registrar);
-      final contactText = _text(arena, contact ?? _defaultContact(aor));
+      final contactText = _text(
+        arena,
+        contact ?? _defaultContact(aor, advertised ?? bindAddress),
+      );
+      final serverText = _text(arena, serverUri);
+      final pinText = _text(arena, tlsPin);
       final user = _text(arena, authUser);
       final password = _text(arena, authPassword);
       final display = _text(arena, displayName);
@@ -172,7 +298,13 @@ final class SipralStack {
         ..authPassword = password.$1
         ..authPasswordLen = password.$2
         ..displayName = display.$1
-        ..displayNameLen = display.$2;
+        ..displayNameLen = display.$2
+        ..serverUri = serverText.$1
+        ..serverUriLen = serverText.$2
+        ..serverNaptr = serverNaptr ? SipralToggle.on : 0
+        ..keepaliveMs = keepaliveMs
+        ..tlsPinSha256 = pinText.$1
+        ..tlsPinSha256Len = pinText.$2;
       final out = arena<SipralHandle>();
       _check(
         _sipral,
@@ -181,35 +313,222 @@ final class SipralStack {
       );
       return out.value;
     });
-    final account = SipralAccount._(this, handle, aor);
+    final account = SipralAccount._(
+      this,
+      handle,
+      aor,
+      registrarAddress ?? '',
+      serverUri,
+      contact == null,
+      advertised,
+    );
     _accounts[handle] = account;
     return account;
   }
 
-  /// `scheme:user@host:port` for [aor] at [bindAddress], or
-  /// `scheme:host:port` for an address of record with no user part.
-  String _defaultContact(String aor) {
+  /// The `host:port` an account whose server is [peer] is reached at, on a
+  /// stack that picks its own address: the route toward the server, on this
+  /// stack's port. The first server named also becomes the address the
+  /// stack's `Via` carries.
+  String _advertiseToward(String peer) {
+    final port = bindAddress.substring(bindAddress.lastIndexOf(':') + 1);
+    final address = '${routeHost(peer, library: _sipral)}:$port';
+    if (!_routeChosen) {
+      _routeChosen = true;
+      if (address != bindAddress) {
+        using((arena) {
+          final local = _text(arena, address);
+          _check(
+            _sipral,
+            'sipral_stack_transport_bind',
+            _sipral.stackTransportBind(
+              _handle,
+              Sipral.transportMain,
+              SipralTransport.udp,
+              local.$1,
+              local.$2,
+              ffi.nullptr,
+              0,
+              nowMs(),
+              ffi.nullptr,
+            ),
+          );
+        });
+        _bindAddress = address;
+      }
+    }
+    return address;
+  }
+
+  /// Where a call's media socket is bound: [mediaHost] when one was given,
+  /// else the route toward where the media will come from --
+  /// [destination], the account's server, or the address this stack is
+  /// reached at.
+  String _mediaHost(
+    String? mediaHost,
+    SipralAccount? account,
+    String? destination,
+  ) {
+    if (mediaHost != null) {
+      return mediaHost;
+    }
+    for (final peer in [destination, account?.registrarAddress]) {
+      if (peer != null && _parseAddress(peer) != null) {
+        return routeHost(peer, library: _sipral);
+      }
+    }
+    return bindAddress.substring(0, bindAddress.lastIndexOf(':'));
+  }
+
+  /// Ask the resolver what `SipralEventKind.lookupWanted` asked, after the
+  /// poll that raised it, and hand the answer back
+  /// (`sipral_account_looked_up`); a resolver that threw is an answer that
+  /// failed, since the procedure waits for every one.
+  Future<void> _lookUp(int account, String name, int record) async {
+    SipralLookup answer;
+    try {
+      answer = await _resolver(name, record);
+    } catch (_) {
+      answer = SipralLookup.failed;
+    }
+    if (_closed) {
+      return;
+    }
+    using((arena) {
+      final nameText = _text(arena, name);
+      final records = _text(
+        arena,
+        answer.records.isEmpty ? null : answer.records.join(','),
+      );
+      // an account removed while the resolver ran is let go of quietly
+      _sipral.accountLookedUp(
+        _handle,
+        account,
+        nameText.$1,
+        nameText.$2,
+        record,
+        answer.answer,
+        records.$1,
+        records.$2,
+        nowMs(),
+      );
+    });
+    _poll();
+  }
+
+  /// An account located at [target]: pointed at it, and -- on a stack that
+  /// picks its own address -- reached at the route toward it.
+  void _located(int handle, String target) {
+    final account = _accounts[handle];
+    if (account == null || _closed) {
+      return;
+    }
+    account.registrarAddress = target;
+    if (!_routes || !account._derivesContact) {
+      return;
+    }
+    final advertised = _advertiseToward(target);
+    if (advertised == (account._advertised ?? bindAddress)) {
+      return;
+    }
+    using((arena) {
+      final remote = _text(arena, target);
+      final contact = _text(arena, _defaultContact(account.aor, advertised));
+      _check(
+        _sipral,
+        'sipral_account_rebind',
+        _sipral.accountRebind(
+          _handle,
+          handle,
+          Sipral.transportMain,
+          remote.$1,
+          remote.$2,
+          contact.$1,
+          contact.$2,
+          nowMs(),
+        ),
+      );
+    });
+    account._advertised = advertised;
+    _poll();
+  }
+
+  /// Turn the diagnostic trace on or off while the stack runs
+  /// (`sipral_stack_diagnostic_trace`): whether the trace level writes every
+  /// SIP message whole, with its peer, from now on -- credentials and keys
+  /// taken out either way -- or pseudonymised, as by default.
+  void setDiagnosticTrace(bool on) {
+    _ensureOpen();
+    _check(
+      _sipral,
+      'sipral_stack_diagnostic_trace',
+      _sipral.stackDiagnosticTrace(_handle, _toggle(on)),
+    );
+  }
+
+  /// The diagnostic record of every call the stack keeps, as JSON
+  /// (`sipral_stack_diagnostics_json`): each decision the stack made and why
+  /// -- `transport.kept.datagram` among them for a request that went over
+  /// UDP past RFC 3261 §18.1.1's line because `datagramWithoutStreamBytes`
+  /// let it.
+  String diagnosticsJson() {
+    _ensureOpen();
+    var capacity = 4096;
+    while (true) {
+      final text = using((arena) {
+        final buffer = arena<ffi.Char>(capacity);
+        final needed = arena<ffi.Size>();
+        final status = _sipral.stackDiagnosticsJson(
+          _handle,
+          buffer,
+          capacity,
+          needed,
+        );
+        if (status == SipralStatus.bufferTooSmall) {
+          capacity = needed.value;
+          return null;
+        }
+        _check(_sipral, 'sipral_stack_diagnostics_json', status);
+        return _decode(buffer.cast(), max(0, needed.value - 1));
+      });
+      if (text != null) {
+        return text;
+      }
+    }
+  }
+
+  static int _toggle(bool? value) => switch (value) {
+    null => SipralToggle.default$,
+    true => SipralToggle.on,
+    false => SipralToggle.off,
+  };
+
+  /// `scheme:user@host:port` for [aor] at [at], or `scheme:host:port` for an
+  /// address of record with no user part.
+  String _defaultContact(String aor, String at) {
     final colon = aor.indexOf(':');
     final scheme = colon < 0 ? 'sip' : aor.substring(0, colon);
     final rest = colon < 0 ? aor : aor.substring(colon + 1);
-    final at = rest.indexOf('@');
-    return at < 0
-        ? '$scheme:$bindAddress'
-        : '$scheme:${rest.substring(0, at)}@$bindAddress';
+    final user = rest.indexOf('@');
+    return user < 0 ? '$scheme:$at' : '$scheme:${rest.substring(0, user)}@$at';
   }
 
   /// Place a call from [account] to [target], its media socket bound on
-  /// [mediaHost]: the socket is open, and its address offered, before the
-  /// INVITE goes out. [destination] sends the INVITE somewhere other than
+  /// [mediaHost] -- by default the route toward [destination] or the
+  /// account's server: the socket is open, and its address offered, before
+  /// the INVITE goes out. [destination] sends the INVITE somewhere other than
   /// the account's registrar address.
   Future<SipralCall> placeCall(
     SipralAccount account,
     String target, {
-    String mediaHost = '127.0.0.1',
+    String? mediaHost,
     String? destination,
   }) async {
     _ensureOpen();
-    final media = await RawDatagramSocket.bind(mediaHost, 0);
+    final media = await RawDatagramSocket.bind(
+      _mediaHost(mediaHost, account, destination),
+      0,
+    );
     final mediaAddress = _formatAddress(media.address, media.port);
     final int handle;
     try {
@@ -251,10 +570,11 @@ final class SipralStack {
   }
 
   /// Answer the `SipralEventKind.incomingCall` [incoming], with a media
-  /// socket bound on [mediaHost].
+  /// socket bound on [mediaHost] -- by default the route toward the server
+  /// of the account the call came to.
   Future<SipralCall> answerCall(
     SipralStackEvent incoming, {
-    String mediaHost = '127.0.0.1',
+    String? mediaHost,
   }) async {
     _ensureOpen();
     if (incoming.kind != SipralEventKind.incomingCall) {
@@ -264,7 +584,10 @@ final class SipralStack {
         'is not an incoming call',
       );
     }
-    final media = await RawDatagramSocket.bind(mediaHost, 0);
+    final media = await RawDatagramSocket.bind(
+      _mediaHost(mediaHost, _accounts[incoming.account], null),
+      0,
+    );
     final mediaAddress = _formatAddress(media.address, media.port);
     final call = SipralCall._(
       this,
@@ -454,6 +777,22 @@ final class SipralStack {
       }
       call?._deliver(event);
       _accounts[event.account]?._deliver(event);
+      final name = event.lookupName;
+      if (event.kind == SipralEventKind.lookupWanted && name != null) {
+        // nothing may call back into the stack from inside its callback
+        unawaited(_lookUp(event.account, name, event.lookupRecord ?? 0));
+      }
+      final targets = event.locatedTargets;
+      if (event.kind == SipralEventKind.located && targets != null) {
+        final first = targets.split(',').first;
+        Timer.run(() {
+          try {
+            _located(event.account, first);
+          } catch (error, trace) {
+            _report(error, trace);
+          }
+        });
+      }
       if (!_events.isClosed) {
         _events.add(event);
       }

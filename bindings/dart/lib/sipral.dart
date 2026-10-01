@@ -13,15 +13,26 @@ export 'src/idiomatic.dart'
         SipralAccount,
         SipralCall,
         SipralException,
+        SipralDns,
+        SipralLookup,
         SipralMedia,
         SipralMediaStatistics,
+        SipralPinnedCertificateInfo,
+        SipralResolver,
         SipralStack,
-        SipralStackEvent;
+        SipralStackEvent,
+        advertisedAddress,
+        routeHost;
 export 'src/sipral_abi.dart'
     show
         Sipral,
         SipralCallState,
+        SipralDnsAnswer,
+        SipralDnsRecordType,
         SipralEventKind,
         SipralLoadError,
+        SipralLocateFailure,
+        SipralRegistrationFailure,
         SipralRegistrationState,
+        SipralSrtp,
         SipralStatus;

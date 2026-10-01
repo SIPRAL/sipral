@@ -33,7 +33,9 @@ import kotlin.test.assertTrue
 import org.sipral.SipralCallEndReason
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
 import org.sipral.SipralSrtp
+import org.sipral.SipralStatus
 import org.sipral.SipralTransportError
 
 private fun header(name: String, message: String): String? =
@@ -67,6 +69,8 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
     val address = "127.0.0.1:${udp.localPort}"
     val tcpAddress: String? = listener?.let { "127.0.0.1:${it.localPort}" }
     val overTcp: MutableList<String> = Collections.synchronizedList(ArrayList())
+    /** Every INVITE carrying credentials that arrived over UDP, and its size. */
+    val answeredOverUdp: MutableList<Pair<String, Int>> = Collections.synchronizedList(ArrayList())
     @Volatile var connections = 0
     /** How many of those connections the client closed. */
     @Volatile var closedByTheClient = 0
@@ -94,6 +98,10 @@ private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseab
             if (message.startsWith("INVITE ") && header("Authorization", message) == null) {
                 val challenge = "WWW-Authenticate: Digest realm=\"asterisk\", nonce=\"$nonce\", qop=\"auth\"\r\n"
                 val out = response(message, "401 Unauthorized", challenge)
+                udp.send(DatagramPacket(out, out.size, packet.socketAddress))
+            } else if (message.startsWith("INVITE ")) {
+                answeredOverUdp += message to packet.length
+                val out = response(message, "486 Busy Here")
                 udp.send(DatagramPacket(out, out.size, packet.socketAddress))
             }
         }
@@ -233,6 +241,31 @@ private suspend fun aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(): String {
     return "one with no stream to go on ends at once with the limit named"
 }
 
+/** A deliberate deviation from §18.1.1: no stream is coming, and the
+ * client was told the server takes a large request over UDP. */
+private suspend fun aPbxOnUdpAloneTakesTheRequestOverUdpUpToTheClientsLimit(): String {
+    ChallengingPbx(tcp = false).use { pbx ->
+        SipralClient.open(
+            audio = SipralAudioMode.Application, bindHost = "127.0.0.1", pathMtu = 1500, datagramWithoutStreamBytes = 4000,
+        ).use { client ->
+            val seen = untilTheEnd(client) { place(client, pbx) }
+            assertEquals(486L, seen.last().payload.call.statusCode, "the PBX's own answer, over UDP")
+            val (invite, bytes) = pbx.answeredOverUdp.single()
+            assertNotNull(header("Authorization", invite))
+            assertTrue(bytes > 1300, "$bytes")
+            assertTrue(client.diagnosticsJson().contains("transport.kept.datagram"))
+        }
+    }
+    for ((options, what) in listOf(
+        { SipralClient.open(audio = SipralAudioMode.Application, datagramWithoutStreamBytes = 65508) } to "past one datagram",
+        { SipralClient.open(audio = SipralAudioMode.Application, pathMtu = 575) } to "under the IPv4 floor",
+    )) {
+        val refused = runCatching { options().close() }.exceptionOrNull()
+        assertEquals(SipralStatus.INVALID_ARGUMENT, (refused as? SipralException)?.status, what)
+    }
+    return "one whose PBX takes UDP alone goes over UDP up to the client's limit"
+}
+
 private suspend fun aPbxTakingTcpOnAnotherPortIsReachedAtTheStreamServer(): String {
     ChallengingPbx(tcp = true, apart = true).use { pbx ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", streamServer = pbx.tcpAddress)
@@ -288,6 +321,7 @@ private suspend fun aConnectionTheStackLetGoOfIsClosedHereToo(): String {
 internal suspend fun datagramLimitChecks(): String = listOf(
     aPbxListeningOnTcpGetsTheAnswerOverAConnectionTheClientOpened(),
     aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(),
+    aPbxOnUdpAloneTakesTheRequestOverUdpUpToTheClientsLimit(),
     aPbxTakingTcpOnAnotherPortIsReachedAtTheStreamServer(),
     aClientToldToOpenNoStreamEndsTheCallWithoutTrying(),
     aConnectionTheStackLetGoOfIsClosedHereToo(),
