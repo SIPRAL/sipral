@@ -571,6 +571,8 @@ entry! {
             if let Some(audio) = state.audio.clone() {
                 let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
                 engine.detach(conference);
+                // the controls its first attach made go with it
+                engine.forget_call(conference);
                 let held = lock(&entry.shared);
                 for (call, handle) in &held.names {
                     if held.inner.contains(*call)
@@ -1790,6 +1792,20 @@ mod tests {
         .expect("the stack")
     }
 
+    /// Whether the engine holds a call's own controls under `handle`.
+    fn has_controls(stack: SipralHandle, handle: SipralHandle) -> bool {
+        with_stack(stack, |state| {
+            Ok(state.audio.as_ref().is_some_and(|audio| {
+                audio
+                    .lock()
+                    .unwrap()
+                    .call_gain(handle, sipral_audio::Direction::Output)
+                    .is_some()
+            }))
+        })
+        .expect("the stack")
+    }
+
     /// In device mode the audio engine carries the conference in place of
     /// its members, every packet reaches the transmit callback under its
     /// own call's handle, and a member taken out — or the conference
@@ -1871,6 +1887,7 @@ mod tests {
             carried.contains(&call_a) && carried.contains(&conference),
             "{carried:?}"
         );
+        assert!(has_controls(stack, conference));
         assert_eq!(
             unsafe { sipral_local_conference_destroy(conference) },
             SipralStatus::Ok
@@ -1881,6 +1898,10 @@ mod tests {
                 && carried.contains(&call_b)
                 && !carried.contains(&conference),
             "{carried:?}"
+        );
+        assert!(
+            !has_controls(stack, conference),
+            "a destroyed conference leaves no controls behind in the engine"
         );
         assert_eq!(
             unsafe { crate::stack::sipral_stack_destroy(stack) },
