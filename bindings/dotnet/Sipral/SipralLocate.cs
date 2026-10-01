@@ -159,9 +159,10 @@ public static class SipralDns
                     return Answer(reply, type, record);
                 }
             }
-            catch (Exception ex) when (ex is SocketException or IOException)
+            catch (Exception ex) when (ex is SocketException or IOException or AggregateException)
             {
-                // silent, or unreachable: the next server
+                // silent, unreachable, or refusing the TCP a truncated reply
+                // asks for: the next server
             }
         }
         return SipralLookup.Failed;
@@ -252,8 +253,9 @@ public static class SipralDns
             return askedType == type && askedClass == 1
                 && string.Equals(asked, name.TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
         }
-        catch (IndexOutOfRangeException)
+        catch (Exception ex) when (ex is IndexOutOfRangeException or ArgumentException)
         {
+            // a question that runs past the end of the reply answers nothing
             return false;
         }
     }

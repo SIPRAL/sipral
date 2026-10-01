@@ -40,17 +40,25 @@ public sealed class DnsClientTests
         private volatile bool _stopped;
         private int _tcpQueries;
 
-        public ScriptedDns(Script script)
+        /// <param name="tcp">Whether it takes TCP at all: one that does not
+        /// refuses the connection a truncated reply leads to.</param>
+        public ScriptedDns(Script script, bool tcp = true)
         {
             _script = script;
             _udp.Client.ReceiveTimeout = 50;
             EndPoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
             _tcp = new TcpListener(IPAddress.Loopback, EndPoint.Port);
-            _tcp.Start();
+            if (tcp)
+            {
+                _tcp.Start();
+            }
             _udpThread = new Thread(ServeUdp) { IsBackground = true };
             _tcpThread = new Thread(ServeTcp) { IsBackground = true };
             _udpThread.Start();
-            _tcpThread.Start();
+            if (tcp)
+            {
+                _tcpThread.Start();
+            }
         }
 
         public IPEndPoint EndPoint { get; }
@@ -118,7 +126,10 @@ public sealed class DnsClientTests
             _stopped = true;
             _tcp.Stop();
             _udpThread.Join();
-            _tcpThread.Join();
+            if (_tcpThread.IsAlive)
+            {
+                _tcpThread.Join();
+            }
             _udp.Dispose();
             _stranger.Dispose();
         }
@@ -231,5 +242,40 @@ public sealed class DnsClientTests
         var notAResponse = (byte[])reply.Clone();
         notAResponse[2] &= 0x7F;
         Assert.False(SipralDns.Answers(notAResponse, 0x1234, Asked, 33), "a query, not a response");
+    }
+    [Fact]
+    public void AReplyWhoseQuestionRunsPastItsEndIsIgnored()
+    {
+        // the id, the response bit and one question, then a label longer
+        // than the bytes left: not an answer, and not a reason to stop
+        // waiting for the real one
+        static byte[] Cut(byte[] query)
+        {
+            var cut = query[..14];
+            cut[2] = 0x81;
+            return cut;
+        }
+        var asked = new List<byte> { 0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0 };
+        foreach (var label in Asked.Split('.'))
+        {
+            asked.Add((byte)label.Length);
+            asked.AddRange(Encoding.ASCII.GetBytes(label));
+        }
+        Assert.False(SipralDns.Answers(Cut(asked.ToArray()), 0x1234, Asked, 33));
+        using var dns = new ScriptedDns(query => new[]
+        {
+            (false, Cut(query)),
+            (false, Reply(query)),
+        });
+        Assert.Equal("300 10 60 5060 pbx.sipral.test", Assert.Single(Ask(dns).Records));
+    }
+
+    [Fact]
+    public void ATruncatedReplyFromAServerWithoutTcpMovesToTheNextServer()
+    {
+        using var first = new ScriptedDns(query => new[] { (false, Reply(query, port: 6666, truncated: true)) }, tcp: false);
+        using var second = new ScriptedDns(query => new[] { (false, Reply(query)) });
+        var found = SipralDns.Query(Asked, SipralDnsRecordType.Srv, new[] { first.EndPoint, second.EndPoint });
+        Assert.Equal("300 10 60 5060 pbx.sipral.test", Assert.Single(found.Records));
     }
 }
