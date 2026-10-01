@@ -150,7 +150,8 @@
 mod capabilities;
 mod clock;
 mod codec;
-#[cfg(test)]
+// measured on the default catalogue, whose INVITE offers Opus
+#[cfg(all(test, feature = "opus"))]
 mod compact_tests;
 mod counters;
 #[cfg(feature = "redaction")]
