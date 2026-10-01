@@ -3699,22 +3699,28 @@ impl MediaEngine {
         self.settle(call, now);
     }
 
-    /// The key the answer to a re-offer carries: `in_force` repeated where
-    /// there is one, since RFC 4568 §7.1.4 warns that changing it opens a
-    /// window where the offerer cannot process what this end sends; one drawn
-    /// fresh, at the width of whichever suite `offer` will be answered under,
-    /// only where there is none to repeat. `None` where the stream will not
-    /// be keyed at all.
+    /// The key the answer to a re-offer carries: the key of `in_force`
+    /// repeated where `offer` will be answered under the same suite, since
+    /// RFC 4568 §7.1.4 warns that changing it opens a window where the
+    /// offerer cannot process what this end sends; one drawn fresh, at the
+    /// width of the suite `offer` will be answered under, where there is
+    /// none to repeat or the suite changes — a key belongs to its suite
+    /// (§5.1.2: "the same crypto-suite MUST be used in the send and receive
+    /// direction", and §6.1 fixes its width). `None` where the stream will
+    /// not be keyed at all.
     fn reoffer_keys(
         &mut self,
         catalog: &CodecCatalog,
         offer: &SessionDescription,
-        in_force: Option<KeySalt>,
+        in_force: Option<(CryptoSuite, KeySalt)>,
     ) -> Option<KeySalt> {
-        will_key(catalog, Some(offer)).then(|| {
-            in_force.unwrap_or_else(|| {
-                draw_key_for(suite_for_own_key(Some(offer), catalog), &mut self.keys)
-            })
+        if !will_key(catalog, Some(offer)) {
+            return None;
+        }
+        let suite = suite_for_own_key(Some(offer), catalog);
+        Some(match in_force {
+            Some((running, keys)) if running == suite => keys,
+            _ => draw_key_for(suite, &mut self.keys),
         })
     }
 
@@ -3814,12 +3820,12 @@ impl MediaEngine {
         // packets secured via this master key until the answer is received".
         // A hold, a resume or a session refresh is no reason to open that
         // window, so the answer repeats the key this end already sends under,
-        // and one is drawn only where there is none to repeat
-        let in_force = managed
-            .local
-            .as_ref()
-            .and_then(live_stream)
-            .and_then(keying::key_in_force);
+        // and one is drawn only where there is none to repeat. That key is
+        // the running plan's: the description this end last wrote may be its
+        // offer, one line per suite, and the far end may have taken any line
+        let in_force = self.sessions.get(&call).and_then(|held| {
+            keying::key_in_force(share::lock(held).session.plan().keying.as_ref())
+        });
         // a live call that required SRTP and is re-offered a stream without
         // it is where a silent downgrade would happen, so it is where the
         // refusal has to be
@@ -5407,15 +5413,24 @@ fn take_stream(
     // ends believe is encrypted
     let crypto = if keying::is_secure(&offered.proto) && handshake.is_none() {
         match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
-            (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
+            (Some(line), Some(keys)) => match keying::answer_line(&line, keys.clone()) {
+                Some(answered) => Some(answered),
+                None => return StreamAnswer::Reject,
+            },
             _ => return StreamAnswer::Reject,
         }
     } else if catalog.srtp().on_plain_profile() {
         // `SrtpPolicy::BestEffort`, answering its own kind of offer: a line
         // on the plain profile this end can take keys the stream, and an
-        // offer with none is answered plainly rather than refused
+        // offer with none is answered plainly rather than refused. A line it
+        // took with a key that does not fit refuses the stream, as on the
+        // secure profile: answering it plainly would be a downgrade nobody
+        // asked for
         match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
-            (Some(line), Some(keys)) => Some(keying::answer_line(&line, keys.clone())),
+            (Some(line), Some(keys)) => match keying::answer_line(&line, keys.clone()) {
+                Some(answered) => Some(answered),
+                None => return StreamAnswer::Reject,
+            },
             _ => None,
         }
     } else {
