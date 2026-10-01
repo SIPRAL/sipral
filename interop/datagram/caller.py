@@ -50,6 +50,7 @@ Lines, one each, flushed as they happen, for the step to read:
     wanted <protocol> <destination> <request bytes> <limit bytes>
     transport failed <transport> <error>
     tls refused <failure>
+    not placed <status>
     confirmed
     sent dtmf <digits>
     dtmf <digit>
@@ -161,6 +162,28 @@ def say_protection(call: Call) -> None:
         print(f"protection {stream.key_exchange.name} {state} {suite}", flush=True)
 
 
+def say_transport_failed(fields: dict) -> None:
+    """A transport the stack lost or could not have, and, for TLS, why the
+    certificate was refused."""
+    print(f"transport failed {fields['transport']} {fields['error']}", flush=True)
+    if fields.get("tls"):
+        print(f"tls refused {TlsFailure(fields['tls']).name}", flush=True)
+
+
+async def say_transport(stack: Stack) -> None:
+    """What the stack said about its transports in the next few seconds:
+    the reason a call could not be placed is reported as an event, not in
+    the refusal itself."""
+    try:
+        async with asyncio.timeout(3):
+            while True:
+                event = await stack.events.get()
+                if event.kind == EventKind.TRANSPORT_FAILED:
+                    say_transport_failed(event.fields)
+    except TimeoutError:
+        return
+
+
 def resolver_answering_srv(record: str):
     """A resolver that answers every SRV query with ``record`` and leaves
     every other query to the platform's lookup: an application's own, the
@@ -205,8 +228,15 @@ async def main() -> None:
     tasks: list[asyncio.Task] = []
     account = None
 
-    def dial() -> Call:
-        placed = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+    async def dial() -> Call | None:
+        try:
+            placed = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+        except SipralError as error:
+            # a connection refused before the call is a call nobody can
+            # place: say so, and what the transport said about it
+            print(f"not placed {error.status_name}", flush=True)
+            await say_transport(stack)
+            return None
         tasks.append(asyncio.create_task(talk(placed)))
         tasks.append(asyncio.create_task(listen(placed)))
         return placed
@@ -228,7 +258,9 @@ async def main() -> None:
             account.register()
         call = None
         if not register and not server_uri:
-            call = dial()
+            call = await dial()
+            if call is None:
+                return
         async with asyncio.timeout(patience + digits_after + hold_after + dwell):
             while True:
                 event = await stack.events.get()
@@ -236,7 +268,9 @@ async def main() -> None:
                 if event.kind == EventKind.LOCATED:
                     print(f"located {fields['targets']}", flush=True)
                     if call is None and not register:
-                        call = dial()
+                        call = await dial()
+                        if call is None:
+                            return
                 elif event.kind == EventKind.LOCATE_FAILED:
                     print(f"locate failed {LocateFailure(fields['failure']).name}", flush=True)
                     return
@@ -244,7 +278,9 @@ async def main() -> None:
                     state = RegistrationState(fields["state"])
                     print(f"registration {state.name}", flush=True)
                     if call is None and state == RegistrationState.REGISTERED:
-                        call = dial()
+                        call = await dial()
+                        if call is None:
+                            return
                     elif call is None and state == RegistrationState.FAILED:
                         return
                 elif event.kind == EventKind.TRANSPORT_WANTED:
@@ -254,9 +290,7 @@ async def main() -> None:
                         flush=True,
                     )
                 elif event.kind == EventKind.TRANSPORT_FAILED:
-                    print(f"transport failed {fields['transport']} {fields['error']}", flush=True)
-                    if fields.get("tls"):
-                        print(f"tls refused {TlsFailure(fields['tls']).name}", flush=True)
+                    say_transport_failed(fields)
                 elif call is None:
                     continue
                 elif event.kind == EventKind.CALL_CONFIRMED and event.call == call.handle:
