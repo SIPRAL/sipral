@@ -443,6 +443,25 @@ pub(crate) fn key_in_force(keying: Option<&Keying>) -> Option<(CryptoSuite, KeyS
     Some((local.suite, inline.keys.clone()))
 }
 
+/// Whether a master key used under `was` may go on being used under `now`:
+/// only where the block cipher runs in the same mode under both — counter
+/// mode for the four `AES_CM` suites, f8 for `F8_128_HMAC_SHA1_80`, GCM for
+/// the two AEAD suites — so that a change of suite is a change of tag length
+/// and nothing else. RFC 3711 §8.1 keys a cryptographic context per
+/// transform, and one key under two modes of AES is a key two transforms
+/// share (RFC 4568 §7.1.2: keys "appropriate for the selected crypto
+/// algorithm").
+pub(crate) fn key_carries_over(was: CryptoSuite, now: CryptoSuite) -> bool {
+    fn mode(suite: CryptoSuite) -> u8 {
+        match suite {
+            CryptoSuite::AesF8 => 1,
+            CryptoSuite::AeadAes128Gcm | CryptoSuite::AeadAes256Gcm => 2,
+            _ => 0,
+        }
+    }
+    mode(was) == mode(now)
+}
+
 /// The offered line this end will answer: "the first valid supported crypto
 /// attribute in the list" (§5.1.2), which is the offerer's own order of
 /// preference.

@@ -2920,8 +2920,11 @@ impl MediaEngine {
     ///
     /// The offer is the description this end last wrote with only the
     /// address moved: `c=` wherever it appears and the port on `m=`, with
-    /// the codecs, the direction, the key or the fingerprint carried across
-    /// the way [`MediaEngine::change_codecs`] carries them. The `o=` line
+    /// the codecs, the direction and the fingerprint carried across the way
+    /// [`MediaEngine::change_codecs`] carries them. An SDES key is not: a
+    /// stream received at another address or port is offered a new master
+    /// key, one line under the tag and suite the call agreed (RFC 4568
+    /// §7.1.4), so both ends start a fresh context. The `o=` line
     /// keeps its address, since §8 wants it identical but for the version.
     /// A DTLS association outlives the move — a datagram transport lets one
     /// span several 5-tuples (RFC 8842 §3.2) — so `a=setup` is offered
@@ -2975,10 +2978,17 @@ impl MediaEngine {
         let mut offer = managed.local.clone().ok_or(MediaError::NoDescription)?;
         let version = managed.version.saturating_add(1);
         let described = public.unwrap_or(local);
+        let moved = managed.public.or(managed.address) != Some(described);
 
         #[cfg(feature = "ice")]
         if offered_ice {
             withdraw_ice(&mut offer);
+        }
+        // RFC 4568 §7.1.4: an offer that moves the address or port a stream
+        // is received at carries a new master key, and so a new context with
+        // its rollover counter at zero, on both ends
+        if moved {
+            let _ = self.fresh_key_line(call, &mut offer);
         }
         let connection = Connection::new(described.ip());
         if offer.connection.is_some() {
@@ -3617,15 +3627,6 @@ impl MediaEngine {
         if !core::mem::take(&mut managed.exposure.forked) || managed.address.is_none() {
             return;
         }
-        let agreed = self.sessions.get(&call).and_then(|held| {
-            match share::lock(held).session.plan().keying {
-                Some(Keying::Sdes { ref local, .. }) => Some((local.tag, local.suite)),
-                _ => None,
-            }
-        });
-        let Some((tag, suite)) = agreed else {
-            return;
-        };
         let Some(managed) = self.calls.get(&call) else {
             return;
         };
@@ -3633,25 +3634,9 @@ impl MediaEngine {
             return;
         };
         let version = managed.version.saturating_add(1);
-        let Some(stream) = offer
-            .media
-            .iter_mut()
-            .find(|stream| stream.media == AUDIO && !stream.is_rejected())
-        else {
+        if !self.fresh_key_line(call, &mut offer) {
             return;
-        };
-        let line = CryptoPolicy::new(tag, suite, draw_key_for(suite, &mut self.keys))
-            .to_crypto()
-            .attribute();
-        let at = stream
-            .attributes
-            .iter()
-            .position(|attribute| attribute.name == "crypto")
-            .unwrap_or(stream.attributes.len());
-        stream
-            .attributes
-            .retain(|attribute| attribute.name != "crypto");
-        stream.attributes.insert(at.min(stream.attributes.len()), line);
+        }
         for stream in &mut offer.media {
             stream.offer_roles_again();
         }
@@ -3681,6 +3666,42 @@ impl MediaEngine {
         );
         #[cfg(not(feature = "redaction"))]
         let _ = sent;
+    }
+
+    /// Replace the crypto lines of `offer`'s audio stream with one: the tag
+    /// and suite `call` runs under by SDES, with a key drawn fresh. `false`,
+    /// with `offer` untouched, for a call not keyed by SDES or with no live
+    /// audio stream.
+    fn fresh_key_line(&mut self, call: CallHandle, offer: &mut SessionDescription) -> bool {
+        let agreed = self.sessions.get(&call).and_then(|held| {
+            match share::lock(held).session.plan().keying {
+                Some(Keying::Sdes { ref local, .. }) => Some((local.tag, local.suite)),
+                _ => None,
+            }
+        });
+        let Some((tag, suite)) = agreed else {
+            return false;
+        };
+        let Some(stream) = offer
+            .media
+            .iter_mut()
+            .find(|stream| stream.media == AUDIO && !stream.is_rejected())
+        else {
+            return false;
+        };
+        let line = CryptoPolicy::new(tag, suite, draw_key_for(suite, &mut self.keys))
+            .to_crypto()
+            .attribute();
+        let at = stream
+            .attributes
+            .iter()
+            .position(|attribute| attribute.name == "crypto")
+            .unwrap_or(stream.attributes.len());
+        stream
+            .attributes
+            .retain(|attribute| attribute.name != "crypto");
+        stream.attributes.insert(at.min(stream.attributes.len()), line);
+        true
     }
 
     /// A call this end placed whose answer the call's SRTP policy refused:
@@ -3895,6 +3916,36 @@ impl MediaEngine {
         self.settle(call, now);
     }
 
+    /// Whether `offer` would have this end take the far end's running SDES
+    /// key under a suite whose cipher runs in another mode
+    /// ([`keying::key_carries_over`]).
+    fn moves_key_across_modes(
+        &self,
+        call: CallHandle,
+        catalog: &CodecCatalog,
+        offer: &SessionDescription,
+    ) -> bool {
+        let Some(running) = self.sessions.get(&call).and_then(|held| {
+            match share::lock(held).session.plan().keying {
+                Some(Keying::Sdes { ref remote, .. }) => Some(remote.clone()),
+                _ => None,
+            }
+        }) else {
+            return false;
+        };
+        let Some(taken) =
+            live_stream(offer).and_then(|stream| keying::acceptable(stream, catalog.srtp_suites()))
+        else {
+            return false;
+        };
+        let same_key = running
+            .keys
+            .iter()
+            .map(|inline| &inline.keys)
+            .eq(taken.keys.iter().map(|inline| &inline.keys));
+        same_key && !keying::key_carries_over(running.suite, taken.suite)
+    }
+
     /// The key the answer to a re-offer carries: the key of `in_force`
     /// repeated where `offer` will be answered under the same suite, since
     /// RFC 4568 §7.1.4 warns that changing it opens a window where the
@@ -4027,6 +4078,15 @@ impl MediaEngine {
         // refusal has to be
         if let Some(error) = keying_refusal(&catalog, &offer) {
             self.events.push_back((call, MediaEvent::Failed(error)));
+            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            return;
+        }
+        // the far end's own key carried into a suite that runs the cipher in
+        // another mode is one key under two transforms: refused with the
+        // session standing, as `Rekey::between` would refuse it after
+        if self.moves_key_across_modes(call, &catalog, &offer) {
+            self.events
+                .push_back((call, MediaEvent::Failed(MediaError::UnusableKeying)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }

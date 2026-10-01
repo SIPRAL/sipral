@@ -5029,6 +5029,89 @@ fn a_re_offer_that_shortens_the_tag_is_followed_without_a_new_key() {
     );
 }
 
+/// D6: the same thirty octets under `F8_128_HMAC_SHA1_80` are the same key
+/// under AES in another mode, one key under two transforms (RFC 3711 §8.1).
+/// A re-negotiation that carries a key across modes is refused, in either
+/// direction, rather than adopted as new terms, and the session stands.
+#[test]
+fn the_same_key_is_not_carried_into_a_suite_that_runs_the_cipher_in_another_mode() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut sender = session(&ours, &theirs, now);
+    let (ours_f8, theirs_f8) = savp_pair_of("F8_128_HMAC_SHA1_80", OURS, THEIRS);
+    assert_eq!(
+        sender
+            .adopt(&plan_of(&ours_f8, &theirs_f8), Vec::new(), false, now)
+            .err(),
+        Some(MediaError::UnusableKeying)
+    );
+    // and the stream goes on as it was, under the terms it had
+    let mut receiver = session(&theirs, &ours, now);
+    let mut datagram = one_packet(&mut sender);
+    assert!(!matches!(
+        receiver.receive(&mut datagram, ours_address(), now),
+        Arrival::Dropped(crate::Discard::Insecure(_))
+    ));
+}
+
+/// D6 through the engine: a far end that re-offers its running key under a
+/// suite in another mode is answered 488, told as `UnusableKeying`.
+#[test]
+fn a_far_end_re_offering_its_key_under_another_mode_is_refused() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    // the far end takes the one suite every implementation has, and this
+    // end would take F8 as readily
+    let mut pair = Pair::asymmetric(
+        catalog.clone(),
+        catalog
+            .with_srtp_suites(&[sipral_rtp::srtp::Suite::AesCm80])
+            .expect("one suite"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's call");
+    let mut answered = pair.caller.answer_received().expect("the callee's answer");
+    answered.origin.version += 1;
+    for attribute in &mut answered.media[0].attributes {
+        if attribute.name == "crypto" {
+            attribute.value = attribute
+                .value
+                .as_deref()
+                .map(|line| line.replace("AES_CM_128_HMAC_SHA1_80", "F8_128_HMAC_SHA1_80"));
+        }
+    }
+    let reoffer = String::from_utf8(answered.to_bytes()).expect("text");
+    assert!(reoffer.contains("F8_128_HMAC_SHA1_80"), "{reoffer}");
+    pair.callee
+        .agent
+        .reoffer(remote, reoffer.as_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let sent = pair.caller.outbound();
+    assert!(
+        sent.iter()
+            .any(|datagram| datagram.starts_with(b"SIP/2.0 488")),
+        "the re-offer was not refused"
+    );
+    for datagram in sent {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.settle();
+    assert!(
+        pair.caller.media_events().iter().any(|event| matches!(
+            event,
+            MediaEvent::Failed(MediaError::UnusableKeying)
+        )),
+        "{:?}",
+        pair.caller.media_events()
+    );
+    assert!(pair.caller.engine.encryption(call).is_some_and(|streams| streams[0].encrypted));
+}
+
 // -- a re-negotiation that moves the codec -----------------------------------
 
 fn re_offer_onto(pair: &mut Pair, remote: CallHandle, payload: u8, rtpmap: &str) {
@@ -12755,6 +12838,63 @@ fn a_call_whose_network_changed_offers_its_new_address_and_is_heard_both_ways_af
     let (far, near) = heard_both_ways(&mut pair, (call, remote), moved_media(), &mut phase);
     assert!(far > 10, "the far end heard {far} frames");
     assert!(near > 10, "this end heard {near} frames");
+}
+
+/// D4, RFC 4568 §7.1.4: an SDES call moved to another address offers a new
+/// master key with it, one line under the suite the call agreed, and both
+/// ends go on hearing each other under it.
+#[test]
+fn an_sdes_call_moved_to_another_address_offers_a_new_key() {
+    let mut pair = Pair::new(
+        CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_srtp(SrtpPolicy::Required),
+    );
+    let (account, call, remote) = connect_on_account(&mut pair);
+    let first = pair.callee.offer_received().expect("the first offer");
+    let _ = move_the_caller(&mut pair);
+    pair.caller
+        .agent
+        .rebind(
+            account,
+            UDP,
+            callee_sip(),
+            &uri("sip:alice@198.51.100.7"),
+            pair.now,
+        )
+        .expect("the account is repointed");
+    pair.caller
+        .engine
+        .readdress(&mut pair.caller.agent, call, moved_media(), None, pair.now)
+        .expect("the re-offer goes");
+    let written = pair.caller.outbound();
+    let reinvite = written
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("a re-INVITE went out")
+        .clone();
+    let offer = parse(&wire_message_body(&reinvite)).expect("an offer that reads");
+    let lines: Vec<_> = one_stream(&offer)
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "crypto")
+        .map(|attribute| attribute.value.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("1 AEAD_AES_256_GCM "), "{lines:?}");
+    let key_of = |line: &str| line.split_whitespace().nth(2).unwrap_or_default().to_owned();
+    let before = crypto_line(&one_stream(&first)).expect("a crypto line");
+    assert_ne!(key_of(&lines[0]), before.key_params, "the same key at a new address");
+
+    for datagram in written {
+        pair.callee.deliver(&datagram, moved_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.caller.drain(pair.now, false);
+    settle_from(&mut pair, moved_sip());
+    let mut phase = 0;
+    let (far, near) = heard_both_ways(&mut pair, (call, remote), moved_media(), &mut phase);
+    assert!(far > 10 && near > 10, "heard {far} and {near} frames of 25");
 }
 
 /// Twenty-five frames of the tone each way between the caller's `call` and

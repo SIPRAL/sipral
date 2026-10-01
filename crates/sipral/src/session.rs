@@ -2477,7 +2477,9 @@ impl Rekey {
     ///
     /// # Errors
     /// As [`keying::context`], for a fresh line this build cannot open a
-    /// stream with.
+    /// stream with; and [`MediaError::UnusableKeying`] for the same key
+    /// carried into a suite that runs the cipher in another mode
+    /// ([`keying::key_carries_over`]).
     fn between(was: &CryptoPolicy, now: &CryptoPolicy) -> Result<Option<Self>, MediaError> {
         // the key and salt alone, because RFC 3711 §4.3.1 derives the session
         // keys from them and the index and from nothing else: a lifetime or an
@@ -2487,6 +2489,9 @@ impl Rekey {
             .iter()
             .map(|inline| &inline.keys)
             .eq(now.keys.iter().map(|inline| &inline.keys));
+        if same_key && !keying::key_carries_over(was.suite, now.suite) {
+            return Err(MediaError::UnusableKeying);
+        }
         let what = if same_key {
             if was == now {
                 return Ok(None);

@@ -155,11 +155,32 @@ impl CryptoSuite {
 /// needs to store both lengths. Grown rather than fixed, because RFC 6188 and
 /// RFC 7714 add suites whose key and salt are not RFC 4568's original
 /// sixteen and fourteen octets.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct KeySalt {
     bytes: Vec<u8>,
     key_len: usize,
 }
+
+/// Every octet compared, whatever the first difference: two keys are
+/// compared where one of them came from the far end (an answer's key held to
+/// the offer's, a re-offer's to the key in force), and a comparison that
+/// stopped at the first difference would time how much of a guess was
+/// right. The widths are not secret, and differing widths answer at once.
+impl PartialEq for KeySalt {
+    fn eq(&self, other: &Self) -> bool {
+        if self.key_len != other.key_len || self.bytes.len() != other.bytes.len() {
+            return false;
+        }
+        let differ = self
+            .bytes
+            .iter()
+            .zip(&other.bytes)
+            .fold(0_u8, |seen, (one, two)| seen | (one ^ two));
+        core::hint::black_box(differ) == 0
+    }
+}
+
+impl Eq for KeySalt {}
 
 impl KeySalt {
     /// The concatenation a key management protocol produced.
@@ -270,13 +291,15 @@ impl Inline {
         let rest = strip_prefix_ignore_case(text, "inline:")?;
         let mut fields = rest.split('|');
 
+        // dropped, it is wiped: a key of the wrong width is as secret as one
+        // of the right width
         let decoded = base64_decode(fields.next()?)?;
         if decoded.len() != suite.key_salt_len() {
             return None;
         }
         let keys = KeySalt {
             key_len: suite.key_len(),
-            bytes: decoded,
+            bytes: decoded.take(),
         };
 
         // §6.1: "the lifetime field never includes a colon, whereas the third
@@ -581,12 +604,14 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// The inverse. §6.1: "padding characters ... at the end of the base64-encoded
 /// data are discarded", so trailing `=` is accepted and so is its absence;
 /// anything else outside the alphabet is not.
-fn base64_decode(text: &str) -> Option<Vec<u8>> {
+fn base64_decode(text: &str) -> Option<Decoded> {
     let body = text.trim_end_matches('=');
     if body.len() % 4 == 1 {
         return None;
     }
-    let mut out = Vec::with_capacity(body.len() / 4 * 3);
+    // every character carries six bits, so this is the exact count of whole
+    // octets: the buffer never grows, and never leaves a copy behind growing
+    let mut out = Decoded(Vec::with_capacity(body.len() * 3 / 4));
     let mut word = 0_u32;
     let mut bits = 0_u32;
     for byte in body.bytes() {
@@ -595,12 +620,39 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
         bits += 6;
         if bits >= 8 {
             bits -= 8;
-            out.push(u8::try_from((word >> bits) & 0xff).unwrap_or(0));
+            out.0.push(u8::try_from((word >> bits) & 0xff).unwrap_or(0));
         }
     }
     // whatever is left over has to be zero, or the encoding named bits that
     // no octet carries
     (word & ((1 << bits) - 1) == 0).then_some(out)
+}
+
+/// Decoded key material on its way into a [`KeySalt`]: overwritten when it
+/// is dropped, so a decode that fails part way, or a key of the wrong width,
+/// leaves nothing of itself behind. Best effort, as [`KeySalt`] is.
+struct Decoded(Vec<u8>);
+
+impl Decoded {
+    /// The bytes, handed on to whatever wipes them next.
+    fn take(mut self) -> Vec<u8> {
+        core::mem::take(&mut self.0)
+    }
+}
+
+impl core::ops::Deref for Decoded {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for Decoded {
+    fn drop(&mut self) {
+        self.0.fill(0);
+        compiler_fence(Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -638,8 +690,38 @@ mod tests {
 
     #[test]
     fn base64_without_padding_reads_the_same() {
-        assert_eq!(base64_decode("Zm8"), base64_decode("Zm8="));
-        assert_eq!(base64_decode("Zg"), base64_decode("Zg=="));
+        assert_eq!(
+            base64_decode("Zm8").as_deref(),
+            base64_decode("Zm8=").as_deref()
+        );
+        assert_eq!(
+            base64_decode("Zg").as_deref(),
+            base64_decode("Zg==").as_deref()
+        );
+    }
+
+    /// D7: equality reads every octet and still answers right: equal keys,
+    /// a first octet that differs, a last one that differs, and two keys of
+    /// different widths. The decode of a key is held in a buffer sized once,
+    /// so it never grows and leaves a copy of itself behind.
+    #[test]
+    fn keys_are_equal_by_every_octet_and_decoded_without_growing() {
+        let key = KeySalt::new(&[7; 16], &[9; 14]);
+        assert_eq!(key, KeySalt::new(&[7; 16], &[9; 14]));
+        let mut first = [7; 16];
+        first[0] = 8;
+        assert_ne!(key, KeySalt::new(&first, &[9; 14]));
+        let mut last = [9; 14];
+        last[13] = 8;
+        assert_ne!(key, KeySalt::new(&[7; 16], &last));
+        assert_ne!(key, KeySalt::new(&[7; 16], &[9; 12]));
+        assert_ne!(key, KeySalt::new(&[7; 14], &[9; 16]));
+        for len in [30_usize, 44, 46] {
+            let encoded = base64_encode(&vec![0x5a; len]);
+            let decoded = base64_decode(&encoded).expect("a key");
+            assert_eq!(decoded.len(), len);
+            assert_eq!(decoded.0.capacity(), len, "the buffer grew: {len}");
+        }
     }
 
     #[test]
