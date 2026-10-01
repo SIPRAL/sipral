@@ -103,12 +103,13 @@ fn advertised_with(
     peer: SocketAddr,
     route: impl FnOnce(SocketAddr) -> io::Result<IpAddr>,
 ) -> Result<SocketAddr, AdvertiseError> {
-    let local = if bound.ip().is_unspecified() {
+    // an IPv4-mapped IPv6 address is read as the IPv4 address it carries
+    let local = if bound.ip().to_canonical().is_unspecified() {
         route(peer).map_err(|error| AdvertiseError::NoRoute(error.kind()))?
     } else {
         bound.ip()
     };
-    if local.is_loopback() && !peer.ip().is_loopback() {
+    if local.to_canonical().is_loopback() && !peer.ip().to_canonical().is_loopback() {
         return Err(AdvertiseError::Loopback {
             local,
             peer: peer.ip(),
@@ -189,6 +190,23 @@ mod tests {
                 io::ErrorKind::NetworkUnreachable.into()
             )),
             Err(AdvertiseError::NoRoute(io::ErrorKind::NetworkUnreachable))
+        );
+    }
+
+    /// A dual-stack socket writes an IPv4 address mapped into IPv6:
+    /// `::ffff:127.0.0.1` is loopback, whichever side it is on.
+    #[test]
+    fn an_ipv4_mapped_loopback_is_loopback_on_either_side() {
+        assert_eq!(
+            advertised_address(at("[::ffff:127.0.0.1]:5060"), at("192.0.2.9:5060")),
+            Err(AdvertiseError::Loopback {
+                local: ip("::ffff:127.0.0.1"),
+                peer: ip("192.0.2.9"),
+            })
+        );
+        assert_eq!(
+            advertised_address(at("127.0.0.1:5060"), at("[::ffff:127.0.0.1]:5060")),
+            Ok(at("127.0.0.1:5060"))
         );
     }
 

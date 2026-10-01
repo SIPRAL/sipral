@@ -35,9 +35,11 @@ use sipral_core::sdp::SessionDescription;
 use crate::error::UaError;
 
 /// Whether `advertised` reaches this end from `peer`: not when it is loopback
-/// and the peer is not.
+/// and the peer is not. An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`, how
+/// a dual-stack socket writes an IPv4 one) is read as the IPv4 address it
+/// carries, on either side.
 fn loopback_to_elsewhere(advertised: IpAddr, peer: IpAddr) -> bool {
-    advertised.is_loopback() && !peer.is_loopback()
+    advertised.to_canonical().is_loopback() && !peer.to_canonical().is_loopback()
 }
 
 /// The address a URI names, when its host is a literal one.
@@ -57,7 +59,8 @@ fn literal(uri: &Uri) -> Option<IpAddr> {
 pub(crate) fn check_contact(contact: &Uri, peer: SocketAddr) -> Result<(), UaError> {
     match literal(contact) {
         Some(advertised)
-            if advertised.is_unspecified() || loopback_to_elsewhere(advertised, peer.ip()) =>
+            if advertised.to_canonical().is_unspecified()
+                || loopback_to_elsewhere(advertised, peer.ip()) =>
         {
             Err(UaError::UnreachableAddress {
                 advertised,
@@ -167,6 +170,25 @@ mod tests {
         assert!(check_description(&described("127.0.0.1"), at("127.0.0.1:5060")).is_ok());
         assert!(check_description(&described("0.0.0.0"), pbx).is_ok());
         assert!(check_description(&described("192.0.2.1"), pbx).is_ok());
+    }
+
+    /// An IPv4-mapped IPv6 address is the IPv4 address as a dual-stack socket
+    /// writes it: `::ffff:127.0.0.1` is loopback, on either side.
+    #[test]
+    fn an_ipv4_mapped_loopback_is_loopback_on_either_side() {
+        let pbx = at("192.0.2.9:5060");
+        assert!(check_contact(&uri("sip:alice@[::ffff:127.0.0.1]:5060"), pbx).is_err());
+        assert!(check_contact(&uri("sip:alice@[::ffff:0.0.0.0]"), pbx).is_err());
+        assert!(
+            check_contact(
+                &uri("sip:alice@127.0.0.1:5060"),
+                at("[::ffff:127.0.0.1]:5060")
+            )
+            .is_ok(),
+            "a peer on this machine, reported by a dual-stack socket"
+        );
+        assert!(check_description(&described("127.0.0.1"), at("[::ffff:127.0.0.1]:5060")).is_ok());
+        assert!(check_contact(&uri("sip:alice@[::ffff:192.0.2.1]"), pbx).is_ok());
     }
 
     // -- where the user agent writes the address ------------------------------
