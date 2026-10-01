@@ -22,8 +22,9 @@
 //! lookup; [`crate::oversize::STREAM_WAIT`] after the question it is given up
 //! as unreachable and retried after the back-off any registration that found
 //! nobody gets (RFC 5626 §4.5), and the retry asks again. A connection that
-//! closes or fails is asked for again by the next REGISTER, and at once for
-//! an account that never registers.
+//! closes or fails is asked for again at once: by a REGISTER for an account
+//! that was registered over it, which nothing can reach until it registers
+//! again (RFC 5626 §4.4.1), and directly for one that never registers.
 //!
 //! **What it adopts.** A transport of the account's protocol bound to the
 //! account's server — connected to that address, or an unconnected one of
@@ -182,10 +183,39 @@ impl UserAgent {
             })
             .map(|(id, _)| *id)
             .collect();
+        // a registered account whose connection went is reachable through
+        // nothing until it registers again (RFC 5626 §4.4.1): at once, which
+        // asks for a new connection and waits for it, rather than at the
+        // next refresh, up to an hour later
+        let unreachable: Vec<AccountId> = self
+            .flows_lost
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.accounts
+                    .get(id)
+                    .is_some_and(|config| config.registrar.is_some())
+                    && self.registrations.get(id).is_some_and(|reg| {
+                        reg.transaction.is_none()
+                            && !reg.unregistering
+                            && matches!(
+                                reg.state,
+                                RegistrationState::Registered
+                                    | RegistrationState::Refreshing
+                                    | RegistrationState::Restored
+                            )
+                    })
+            })
+            .collect();
         self.flows_lost.clear();
         for account in fresh {
             self.flows_asked.insert(account);
             let _ = self.account_flow(account, now);
+        }
+        for account in unreachable {
+            if let Err(error) = self.send_register(account, false, now) {
+                self.register_unsent(account, &error, now);
+            }
         }
     }
 }
@@ -527,6 +557,31 @@ mod tests {
         assert_eq!(
             incoming_account(&over_tls(&mut agent, &rewritten, t0)),
             Some(on_tls)
+        );
+    }
+
+    #[test]
+    fn a_registered_line_that_loses_its_connection_asks_for_another_at_once() {
+        let t0 = Instant::now();
+        let (mut agent, _, _) = registered_lines(t0);
+        agent
+            .receive(
+                Input::TransportFailed {
+                    transport: TLS,
+                    error: TransportErrorKind::ConnectionReset,
+                },
+                t0,
+            )
+            .unwrap();
+        let (sent, events) = drain(&mut agent);
+        assert_eq!(wanted(&events), [(TransportProtocol::Tls, second())]);
+        assert!(sent.is_empty(), "the REGISTER waits for the connection");
+        bind_stream(&mut agent, TransportProtocol::Tls, t0);
+        let (sent, _) = drain(&mut agent);
+        assert!(
+            sent.iter()
+                .any(|one| one.bytes.starts_with(b"REGISTER ") && one.transport == TLS),
+            "registered again over the new connection"
         );
     }
 

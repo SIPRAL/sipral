@@ -306,6 +306,8 @@ impl UserAgent {
             return Some(event);
         };
         if unreached.register {
+            // a registration fails over by a REGISTER of its own
+            self.endpoint.forget_unreached(failed);
             return Some(event);
         }
         let next = self.accounts.iter().find_map(|(account, config)| {
