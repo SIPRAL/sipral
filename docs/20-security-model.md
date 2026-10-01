@@ -345,6 +345,26 @@ master key is still one key management event per master key (`Master::new`
 under one salt, never reused across a re-key), which is what keeps a fresh
 nonce space on every re-key rather than continuing an old one.
 
+**What an SRTP context refuses rather than trust its caller with.** The
+index and the key are the two things a nonce or a keystream is made of, and
+`crates/sipral-rtp/src/srtp/session.rs` holds both itself. A `Protector`
+refuses a sequence number that does not move the packet index forward — the
+one sent last again, or one behind it — with `SrtpError::IndexNotAdvancing`
+rather than count it as a rollover or encrypt under an index already spent
+(RFC 3711 §9.1); a refused packet moves nothing. A context made from a master
+key or salt that is not the width its suite calls for derives nothing and
+refuses every packet with `SrtpError::KeyLength`, where a short key used to
+become an AES key that was mostly zeros (`Master::fits` says so up front).
+`Security::rekey_local` and `rekey_remote` handed the key already in use as a
+new one keep every index and every replay list, as new terms do (§3.4 never
+resets the SRTCP index under one key). A source that gives way in the
+eight-source table leaves its highest index behind, so a recording of it is
+still refused when it is heard from again, and with a key derivation rate a
+packet's derivation replaces the cached session keys only once its tag has
+verified. The session keys, the authentication key and the HMAC pads are held
+in buffers that wipe themselves, and the GCM key is wiped from the buffer it
+is staged in.
+
 **The push token stays off every request but `REGISTER`.** RFC 8599 §4.1's own
 requirement. `Account::contact_value` (`crates/sipral-ua/src/account.rs`)
 builds a `Contact` with no push parameters at all and is what every in-dialog

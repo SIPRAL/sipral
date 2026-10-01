@@ -19,27 +19,49 @@ pub const WINDOW: u64 = 128;
 
 /// The sender's side of the index: it owns its sequence numbers, so it only
 /// has to notice them wrapping.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Sending {
     roc: u32,
     last: Option<u16>,
 }
 
 impl Sending {
-    /// The index of a packet about to be sent with sequence number `seq`.
-    pub(crate) fn next(&mut self, seq: u16) -> u64 {
-        if let Some(last) = self.last
-            && seq < last
-        {
-            self.roc = self.roc.wrapping_add(1);
-        }
-        self.last = Some(seq);
-        u64::from(self.roc) << 16 | u64::from(seq)
+    /// The index a packet with sequence number `seq` would be sent under, and
+    /// the state sending it leaves behind; `None` when `seq` does not move the
+    /// index forward.
+    ///
+    /// Forward is less than half the sequence space ahead of the last number
+    /// sent, which is where a receiver's estimate (Appendix A) puts it too: a
+    /// number behind that one wraps, and the rollover counter moves with it.
+    /// The same number again, or one behind the last, is refused rather than
+    /// sent under the index it repeats — §9.1: "the same key stream ... MUST
+    /// NOT be used" twice — or under a rollover the receiver would never
+    /// guess. So is a wrap past the last rollover counter there is.
+    pub(crate) fn next(self, seq: u16) -> Option<(u64, Self)> {
+        let roc = match self.last {
+            None => self.roc,
+            Some(last) => {
+                let ahead = seq.wrapping_sub(last);
+                if ahead == 0 || ahead >= 0x8000 {
+                    return None;
+                }
+                if seq < last {
+                    self.roc.checked_add(1)?
+                } else {
+                    self.roc
+                }
+            }
+        };
+        let sent = Self {
+            roc,
+            last: Some(seq),
+        };
+        Some((u64::from(roc) << 16 | u64::from(seq), sent))
     }
 
     /// The rollover counter, which the authentication tag covers and which a
     /// receiver joining late has to be told out of band (§3.3.1).
-    pub(crate) const fn rollover(&self) -> u32 {
+    pub(crate) const fn rollover(self) -> u32 {
         self.roc
     }
 }
@@ -73,6 +95,14 @@ impl Receiving {
     /// a receiver joining an ongoing session must be given.
     pub(crate) const fn joining(roc: u32) -> Self {
         Self { roc, highest: None }
+    }
+
+    /// Start again where a stream had got to: its highest index accepted.
+    pub(crate) fn resumed(index: u64) -> Self {
+        Self {
+            roc: u32::try_from(index >> 16).unwrap_or(u32::MAX),
+            highest: Some(u16::try_from(index & 0xffff).unwrap_or_default()),
+        }
     }
 
     /// Appendix A, with its signed arithmetic: pick `v` from
@@ -134,6 +164,25 @@ pub(crate) struct Replay {
 }
 
 impl Replay {
+    /// A list that has seen everything up to and including `highest`: what a
+    /// source that was forgotten is held to when it is heard from again.
+    pub(crate) const fn resumed(highest: u64) -> Self {
+        Self {
+            highest,
+            seen: u128::MAX,
+            started: true,
+        }
+    }
+
+    /// The highest index recorded, once one has been.
+    pub(crate) const fn highest(&self) -> Option<u64> {
+        if self.started {
+            Some(self.highest)
+        } else {
+            None
+        }
+    }
+
     /// Whether a packet at `index` may be processed: ahead of the window, or
     /// inside it and not yet seen. Nothing is recorded here — §3.3.2 updates
     /// the list only after authentication, and a forged packet must not be
@@ -176,14 +225,59 @@ impl Replay {
 mod tests {
     use super::{Receiving, Replay, Sending, WINDOW};
 
+    /// Send `seq` from `sending`, keeping what it leaves behind.
+    fn send(sending: &mut Sending, seq: u16) -> Option<u64> {
+        let (index, sent) = sending.next(seq)?;
+        *sending = sent;
+        Some(index)
+    }
+
     #[test]
     fn the_sender_counts_its_own_wraps() {
         let mut sending = Sending::default();
-        assert_eq!(sending.next(65_534), 65_534);
-        assert_eq!(sending.next(65_535), 65_535);
-        assert_eq!(sending.next(0), 65_536);
-        assert_eq!(sending.next(1), 65_537);
+        assert_eq!(send(&mut sending, 65_534), Some(65_534));
+        assert_eq!(send(&mut sending, 65_535), Some(65_535));
+        assert_eq!(send(&mut sending, 0), Some(65_536));
+        assert_eq!(send(&mut sending, 1), Some(65_537));
         assert_eq!(sending.rollover(), 1);
+    }
+
+    #[test]
+    fn the_sender_never_sends_an_index_that_does_not_move_forward() {
+        let mut sending = Sending::default();
+        assert_eq!(send(&mut sending, 1000), Some(1000));
+        // the same number again would repeat the index; one behind it would
+        // have been counted a wrap, ahead of anything a receiver expects
+        for refused in [1000, 999, 1, 1000_u16.wrapping_add(0x8000)] {
+            assert_eq!(send(&mut sending, refused), None, "{refused}");
+        }
+        assert_eq!(sending.rollover(), 0, "nothing refused moved the counter");
+        assert_eq!(send(&mut sending, 1001), Some(1001));
+        assert_eq!(
+            send(&mut sending, 1001_u16.wrapping_add(0x7fff)),
+            Some(1001 + 0x7fff),
+            "anything less than half the space ahead is forward"
+        );
+        // and past the last rollover counter there is nothing left to wrap to
+        let mut last = Sending {
+            roc: u32::MAX,
+            last: Some(65_535),
+        };
+        assert_eq!(send(&mut last, 0), None);
+    }
+
+    #[test]
+    fn a_resumed_stream_carries_on_from_its_highest_index() {
+        let receiving = Receiving::resumed(3 * 65_536 + 40_000);
+        assert_eq!(receiving.rollover(), 3);
+        assert_eq!(receiving.estimate(40_001).index, 3 * 65_536 + 40_001);
+        let replay = Replay::resumed(3 * 65_536 + 40_000);
+        assert!(!replay.accepts(3 * 65_536 + 40_000));
+        assert!(!replay.accepts(3 * 65_536 + 39_990));
+        assert!(!replay.accepts(5));
+        assert!(replay.accepts(3 * 65_536 + 40_001));
+        assert_eq!(replay.highest(), Some(3 * 65_536 + 40_000));
+        assert_eq!(Replay::default().highest(), None);
     }
 
     #[test]
@@ -249,9 +343,9 @@ mod tests {
         let mut receiving = Receiving::default();
         let mut seq = 65_000_u16;
         for _ in 0..2000 {
-            let sent = sending.next(seq);
+            let sent = send(&mut sending, seq);
             let estimate = receiving.estimate(seq);
-            assert_eq!(estimate.index, sent, "sequence {seq}");
+            assert_eq!(Some(estimate.index), sent, "sequence {seq}");
             receiving.accept(estimate);
             seq = seq.wrapping_add(1);
         }
