@@ -17,6 +17,7 @@ final class SipralStack {
     this._bindAddress,
     this._resolver,
     this._routes,
+    this._tlsServerName,
   );
 
   /// Bind a socket on [bindHost]:[bindPort] (0 for any port) and create a
@@ -50,7 +51,10 @@ final class SipralStack {
   /// writes whole SIP messages at the trace level, credentials and keys
   /// taken out; [setDiagnosticTrace] turns it on and off later. [resolver]
   /// answers `SipralEventKind.lookupWanted` for the accounts added with a
-  /// `serverUri`; [SipralDns.platform] by default.
+  /// `serverUri`; [SipralDns.platform] by default. [tlsServerName] is the
+  /// name a TLS connection of an account's own is checked against (the
+  /// server's host by default), for an account added with
+  /// `streamProtocol: SipralTransport.tls` and no `tlsPin`.
   static Future<SipralStack> open({
     String? bindHost,
     int bindPort = 0,
@@ -63,6 +67,7 @@ final class SipralStack {
     List<int>? pseudonymSalt,
     bool? diagnosticTrace,
     SipralResolver? resolver,
+    String? tlsServerName,
   }) async {
     final sipral = library ?? _library();
     final socket = await RawDatagramSocket.bind(
@@ -79,6 +84,7 @@ final class SipralStack {
       bound,
       resolver ?? SipralDns.platform,
       bindHost == null,
+      tlsServerName,
     );
     try {
       stack._create(
@@ -116,6 +122,18 @@ final class SipralStack {
 
   /// Answers `SipralEventKind.lookupWanted`.
   final SipralResolver _resolver;
+
+  /// The name a TLS connection of an account's own is checked against;
+  /// null for the server's host.
+  final String? _tlsServerName;
+
+  /// The connections opened for accounts on a connection of their own, by
+  /// the transport number each is bound at, the server each goes to, and
+  /// the servers one is being opened to.
+  final Map<int, Socket> _streams = {};
+  final Map<int, String> _streamDestinations = {};
+  final Set<String> _streamsOpening = {};
+  int _nextStream = _firstStream;
 
   /// The stack's handle.
   int get handle => _handle;
@@ -246,6 +264,19 @@ final class SipralStack {
   /// [sipralPinDigest] reads and an [ArgumentError] for any other, for an
   /// application that runs the account's TLS itself:
   /// [SipralAccount.checkCertificate] is its verdict.
+  ///
+  /// [streamProtocol] (`SipralTransport.tcp` or `SipralTransport.tls`) puts
+  /// the account on a connection of its own to its server, beside accounts
+  /// on this stack's UDP socket to other servers: the stack asks for it
+  /// (`SipralEventKind.transportWanted`, nothing outgrown), this layer opens
+  /// it to the account's server and binds it, and the REGISTER and every
+  /// call of the account go over it. A TLS one with a [tlsPin] trusts the
+  /// pinned certificate alone, by the library's own verdict
+  /// ([SipralAccount.checkCertificate]); without one, the platform's
+  /// authorities under the stack's `tlsServerName` or the server's host. One
+  /// that closes is opened again. Until it is open a call the account
+  /// places throws with `SipralStatus.transportDown`. Anything else is an
+  /// [ArgumentError].
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -258,12 +289,22 @@ final class SipralStack {
     bool serverNaptr = false,
     int keepaliveMs = 0,
     String? tlsPin,
+    int? streamProtocol,
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
       throw ArgumentError(
         'an account names its server by registrarAddress or by serverUri, '
         'one of the two',
+      );
+    }
+    if (streamProtocol != null &&
+        streamProtocol != SipralTransport.tcp &&
+        streamProtocol != SipralTransport.tls) {
+      throw ArgumentError.value(
+        streamProtocol,
+        'streamProtocol',
+        'is SipralTransport.tcp or SipralTransport.tls',
       );
     }
     final advertised =
@@ -277,7 +318,12 @@ final class SipralStack {
       final registrarText = _text(arena, registrar);
       final contactText = _text(
         arena,
-        contact ?? _defaultContact(aor, advertised ?? bindAddress),
+        contact ??
+            _defaultContact(
+              aor,
+              advertised ?? bindAddress,
+              _contactParameters(streamProtocol),
+            ),
       );
       final serverText = _text(arena, serverUri);
       // read here, in every form [sipralPinDigest] takes, and handed over
@@ -314,7 +360,8 @@ final class SipralStack {
         ..serverNaptr = serverNaptr ? SipralToggle.on : 0
         ..keepaliveMs = keepaliveMs
         ..tlsPinSha256 = pinText.$1
-        ..tlsPinSha256Len = pinText.$2;
+        ..tlsPinSha256Len = pinText.$2
+        ..streamProtocol = streamProtocol ?? 0;
       final out = arena<SipralHandle>();
       _check(
         _sipral,
@@ -331,6 +378,8 @@ final class SipralStack {
       serverUri,
       contact == null,
       advertised,
+      streamProtocol,
+      tlsPin,
     );
     _accounts[handle] = account;
     return account;
@@ -445,7 +494,14 @@ final class SipralStack {
     }
     using((arena) {
       final remote = _text(arena, target);
-      final contact = _text(arena, _defaultContact(account.aor, advertised));
+      final contact = _text(
+        arena,
+        _defaultContact(
+          account.aor,
+          advertised,
+          _contactParameters(account.streamProtocol),
+        ),
+      );
       _checkNow(
         _sipral,
         'sipral_account_rebind',
@@ -476,6 +532,31 @@ final class SipralStack {
       'sipral_stack_diagnostic_trace',
       _sipral.stackDiagnosticTrace(_handle, _toggle(on)),
     );
+  }
+
+  /// What the stack runs with, every default filled in
+  /// (`sipral_stack_settings`), with the SRTP suites its calls offer in
+  /// order (`sipral_stack_srtp_suite_order`).
+  SipralSettings settings() {
+    _ensureOpen();
+    return using((arena) {
+      final raw = arena<SipralStackSettings>();
+      raw.ref.size = ffi.sizeOf<SipralStackSettings>();
+      _check(
+        _sipral,
+        'sipral_stack_settings',
+        _sipral.stackSettings(_handle, raw),
+      );
+      final count = raw.ref.srtpSuiteCount;
+      final suites = arena<ffi.Uint32>(max(1, count));
+      final written = arena<ffi.Size>();
+      _check(
+        _sipral,
+        'sipral_stack_srtp_suite_order',
+        _sipral.stackSrtpSuiteOrder(_handle, suites, count, written),
+      );
+      return SipralSettings._(raw.ref, List.of(suites.asTypedList(count)));
+    });
   }
 
   /// The diagnostic record of every call the stack keeps, as JSON
@@ -516,13 +597,196 @@ final class SipralStack {
   };
 
   /// `scheme:user@host:port` for [aor] at [at], or `scheme:host:port` for an
-  /// address of record with no user part.
-  String _defaultContact(String aor, String at) {
+  /// address of record with no user part, [parameters] after it.
+  String _defaultContact(String aor, String at, [String parameters = '']) {
     final colon = aor.indexOf(':');
     final scheme = colon < 0 ? 'sip' : aor.substring(0, colon);
     final rest = colon < 0 ? aor : aor.substring(colon + 1);
     final user = rest.indexOf('@');
-    return user < 0 ? '$scheme:$at' : '$scheme:${rest.substring(0, user)}@$at';
+    return user < 0
+        ? '$scheme:$at$parameters'
+        : '$scheme:${rest.substring(0, user)}@$at$parameters';
+  }
+
+  /// The transport an account on a connection of its own names in its
+  /// `Contact` (RFC 3261 §19.1.1); nothing for one on the UDP socket.
+  static String _contactParameters(int? streamProtocol) =>
+      switch (streamProtocol) {
+        SipralTransport.tcp => ';transport=tcp',
+        SipralTransport.tls => ';transport=tls',
+        _ => '',
+      };
+
+  /// Open the connection an account on a connection of its own asked for
+  /// (`SipralEventKind.transportWanted` with nothing outgrown) to
+  /// [destination], over [protocol], and bind it; a connection that cannot
+  /// be made is told to the stack, which asks again with the account's next
+  /// REGISTER.
+  Future<void> _openStream(String destination, int protocol) async {
+    if (_closed ||
+        _streamsOpening.contains(destination) ||
+        _streamDestinations.containsValue(destination)) {
+      return;
+    }
+    final address = _parseAddress(destination);
+    if (address == null) {
+      return;
+    }
+    _streamsOpening.add(destination);
+    final id = _nextStream++;
+    final tls = protocol == SipralTransport.tls;
+    Socket socket;
+    try {
+      final plain = await Socket.connect(
+        address.$1,
+        address.$2,
+        timeout: const Duration(seconds: 5),
+      );
+      plain.setOption(SocketOption.tcpNoDelay, true);
+      if (tls) {
+        final account =
+            _accounts.values
+                .where(
+                  (one) =>
+                      one.streamProtocol == SipralTransport.tls &&
+                      one.registrarAddress == destination,
+                )
+                .firstOrNull;
+        final pinned = account?._tlsPin != null;
+        socket = await SecureSocket.secure(
+          plain,
+          host: _tlsServerName ?? address.$1.address,
+          // a pin is the whole verdict: no authority is trusted beside it,
+          // so every certificate reaches the account's own check
+          context: pinned ? SecurityContext(withTrustedRoots: false) : null,
+          onBadCertificate:
+              pinned ? (certificate) => _pinned(account!, certificate) : null,
+        );
+      } else {
+        socket = plain;
+      }
+    } catch (refused) {
+      _streamsOpening.remove(destination);
+      _sayNoStream(id, destination, tls, refused);
+      _poll();
+      return;
+    }
+    _streamsOpening.remove(destination);
+    if (_closed) {
+      socket.destroy();
+      return;
+    }
+    _streams[id] = socket;
+    _streamDestinations[id] = destination;
+    using((arena) {
+      final local = _text(arena, _formatAddress(socket.address, socket.port));
+      final remote = _text(arena, destination);
+      _checkNow(
+        _sipral,
+        'sipral_stack_transport_bind',
+        () => _sipral.stackTransportBind(
+          _handle,
+          id,
+          protocol,
+          local.$1,
+          local.$2,
+          remote.$1,
+          remote.$2,
+          nowMs(),
+          ffi.nullptr,
+        ),
+      );
+    });
+    socket.listen(
+      (bytes) => _streamReceived(id, bytes),
+      onDone: () => _loseStream(id),
+      onError: (Object _) => _loseStream(id),
+      cancelOnError: true,
+    );
+    _poll();
+  }
+
+  /// Whether [certificate] is the one [account] pins, by the library's own
+  /// verdict.
+  static bool _pinned(SipralAccount account, X509Certificate certificate) {
+    try {
+      return account.checkCertificate(certificate.der) != null;
+    } on SipralException {
+      return false;
+    }
+  }
+
+  /// `sipral_stack_transport_failed_with` for a connection that was not made.
+  void _sayNoStream(int id, String destination, bool tls, Object refused) {
+    final error = switch (refused) {
+      SocketException(osError: OSError(errorCode: 61 || 111)) =>
+        SipralTransportError.connectionRefused,
+      SocketException(message: final said) when said.contains('timed out') =>
+        SipralTransportError.timedOut,
+      HandshakeException() => SipralTransportError.connectionReset,
+      _ => SipralTransportError.other,
+    };
+    using((arena) {
+      final said = refused.toString().replaceAll(RegExp(r'[\x00-\x1f]'), ' ');
+      final detail = _text(
+        arena,
+        '${tls ? 'TLS' : 'TCP'} to $destination failed: $said',
+      );
+      final failure = arena<SipralTransportFailure>();
+      failure.ref
+        ..size = ffi.sizeOf<SipralTransportFailure>()
+        ..transport = id
+        ..error = error
+        ..tls =
+            refused is HandshakeException
+                ? SipralTlsFailure.untrusted
+                : SipralTlsFailure.none
+        ..detail = detail.$1
+        ..detailLen = min(detail.$2, Sipral.transportDetailBytes);
+      retryingClockBehind(
+        () => _sipral.stackTransportFailedWith(_handle, failure, nowMs()),
+      );
+    });
+  }
+
+  /// What a connection of an account's own carried, to
+  /// `sipral_stack_receive_stream`, every byte and in order.
+  void _streamReceived(int id, Uint8List bytes) {
+    if (_closed) {
+      return;
+    }
+    using((arena) {
+      final data = arena<ffi.Uint8>(max(1, bytes.length));
+      data.asTypedList(bytes.length).setAll(0, bytes);
+      final status = retryingClockBehind(
+        () => _sipral.stackReceiveStream(
+          _handle,
+          id,
+          data,
+          bytes.length,
+          nowMs(),
+        ),
+      );
+      if (status != SipralStatus.ok) {
+        // the framing is lost: the stack retired the transport itself
+        _streams.remove(id)?.destroy();
+        _streamDestinations.remove(id);
+      }
+    });
+    _poll();
+  }
+
+  /// A connection of an account's own closed or failed: told to the stack
+  /// (`sipral_stack_stream_closed`), which asks for another.
+  void _loseStream(int id) {
+    final socket = _streams.remove(id);
+    _streamDestinations.remove(id);
+    if (socket == null || _closed) {
+      return;
+    }
+    socket.destroy();
+    retryingClockBehind(() => _sipral.stackStreamClosed(_handle, id, nowMs()));
+    _poll();
   }
 
   /// Place a call from [account] to [target], its media socket bound on
@@ -673,6 +937,11 @@ final class SipralStack {
     _closed = true;
     _ticker?.cancel();
     await _reading?.cancel();
+    for (final socket in _streams.values) {
+      socket.destroy();
+    }
+    _streams.clear();
+    _streamDestinations.clear();
     _sipral.stackDestroy(_handle);
     _socket.close();
     _callback.close();
@@ -751,6 +1020,13 @@ final class SipralStack {
           _transmit.ref.len == 0) {
         return;
       }
+      final stream = _streams[_transmit.ref.transport];
+      if (stream != null) {
+        stream.add(
+          Uint8List.fromList(_transmitData.asTypedList(_transmit.ref.len)),
+        );
+        continue;
+      }
       final to = _parseAddress(
         _decode(_transmitTo, _transmit.ref.destinationLen),
       );
@@ -796,6 +1072,22 @@ final class SipralStack {
       if (event.kind == SipralEventKind.lookupWanted && name != null) {
         // nothing may call back into the stack from inside its callback
         unawaited(_lookUp(event.account, name, event.lookupRecord ?? 0));
+      }
+      if (event.kind == SipralEventKind.transportWanted) {
+        final wanted = raw.ref.payload.transportWanted;
+        final destination =
+            wanted.destination == ffi.nullptr
+                ? null
+                : _decode(wanted.destination.cast(), wanted.destinationLen);
+        // an account on a connection of its own asks with nothing
+        // outgrown; a request that outgrew a datagram is left to the
+        // stack's own wait, as this layer opens no stream for one
+        if (destination != null &&
+            wanted.requestBytes == 0 &&
+            wanted.limitBytes == 0) {
+          final protocol = wanted.protocol;
+          Timer.run(() => unawaited(_openStream(destination, protocol)));
+        }
       }
       final targets = event.locatedTargets;
       if (event.kind == SipralEventKind.located && targets != null) {

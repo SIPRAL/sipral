@@ -19,6 +19,7 @@ export 'src/idiomatic.dart'
         SipralMediaStatistics,
         SipralPinnedCertificateInfo,
         SipralResolver,
+        SipralSettings,
         SipralStack,
         SipralStackEvent,
         advertisedAddress,
@@ -36,4 +37,6 @@ export 'src/sipral_abi.dart'
         SipralRegistrationFailure,
         SipralRegistrationState,
         SipralSrtp,
-        SipralStatus;
+        SipralSrtpSuite,
+        SipralStatus,
+        SipralTransport;

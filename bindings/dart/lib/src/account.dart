@@ -16,7 +16,17 @@ final class SipralAccount {
     this.serverUri,
     this._derivesContact,
     this._advertised,
+    this.streamProtocol,
+    this._tlsPin,
   );
+
+  /// The `SipralTransport` value of the connection of its own the account's
+  /// requests go over, `tcp` or `tls`, or null for the stack's UDP socket.
+  final int? streamProtocol;
+
+  /// The certificate pin it was added with, which a TLS connection of its
+  /// own is held to.
+  final String? _tlsPin;
 
   /// Where the account's requests go, `host:port`: the address it was added
   /// with, or -- for one added with a [serverUri] -- the address it was last

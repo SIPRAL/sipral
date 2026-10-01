@@ -32,6 +32,7 @@ part 'call.dart';
 part 'events.dart';
 part 'locate.dart';
 part 'media.dart';
+part 'settings.dart';
 part 'stack.dart';
 
 /// The largest datagram a socket here reads or a packet here is written into.
@@ -39,6 +40,11 @@ const int _packetBytes = 65536;
 
 /// Room for one `host:port`, as the library writes it.
 const int _addressBytes = 128;
+
+/// The first transport number a connection this layer opens is bound at,
+/// one more for each after it: clear of `Sipral.transportMain` and of the
+/// small numbers an application driving the library itself would pick.
+const int _firstStream = 64;
 
 Sipral? _shared;
 

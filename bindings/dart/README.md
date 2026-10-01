@@ -54,12 +54,42 @@ each call's audio: `SipralMedia.frames` is the far end's PCM,
 `SipralMedia.sendAudio` queues this end's, and silence goes out when nothing
 is queued.
 
-Signalling is UDP only. The other idiomatic layers answer
-`SIPRAL_EVENT_KIND_TRANSPORT_WANTED` by opening a TCP connection for a
-request that outgrew a datagram; this one does not, so such a request (most
-often the answer to a challenge on a call offering two SRTP suites) waits
-the stack's ten seconds for a stream and is then sent trimmed or ended with
-a 513, as `docs/08-ffi.md` describes for an application that says nothing.
+The stack signals over its UDP socket. An account can have a connection of
+its own beside it, to its own server, so that one stack holds an account on
+UDP with one PBX and another on TCP or TLS with a second:
+
+```dart
+final carrier = stack.addAccount(
+  'sip:+15550100@carrier.example',
+  registrarAddress: '198.51.100.20:5061',
+  registrar: 'sip:carrier.example',
+  tlsPin: 'sha256 Fingerprint=AB:CD:...',
+  streamProtocol: SipralTransport.tls,
+);
+```
+
+The stack asks for the connection with `SipralEventKind.transportWanted`,
+nothing outgrown, and this layer opens it (`Socket`, or `SecureSocket`
+over it) to the account's server and binds it: the account's REGISTER and
+every request of its calls go over it, its `Contact` names the protocol,
+and a connection that closes is opened again and the account registered
+again. A TLS one with a `tlsPin` trusts that certificate alone, by the
+library's own verdict (`checkCertificate`); without one, the platform's
+authorities under `SipralStack.open(tlsServerName:)` or the server's host.
+A request on the UDP socket that outgrows a datagram is another matter: the
+other idiomatic layers open a TCP connection for it, and this one does not,
+so such a request (most often the answer to a challenge on a call offering
+two SRTP suites) waits the stack's ten seconds for a stream and is then sent
+trimmed or ended with a 513, as `docs/08-ffi.md` describes for an
+application that says nothing.
+
+`stack.settings()` reads back what the stack runs with, every default
+filled in (`SipralSettings`): the timers, the codecs' count, the SRTP suites
+its calls offer in order, whether a pseudonym salt was given, and whether
+the diagnostic trace is whole now. The application runs every call's audio
+here, so the library opens no device: a call's own gain and mute and the
+platform's echo cancellation are the device engine's, and the application
+scales or mutes the PCM it hands `SipralMedia.sendAudio` itself.
 
 ## Where a stack is reached, and where its server is
 
@@ -112,3 +142,7 @@ SIPRAL_LIBRARY=../../target/release dart test
 `test/loopback_test.dart` places a call between two stacks on 127.0.0.1:
 answered, confirmed, RTP both ways, audio heard as frames, three digits, a
 hang-up ended on both ends; a refused call; and a failing call's error text.
+`test/account_stream_test.dart` registers an account over TLS and one over
+UDP with two loopback registrars and places a call through each, opens an
+account's TCP connection again when its registrar drops it, and reads the
+settings back.
