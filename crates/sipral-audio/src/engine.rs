@@ -145,6 +145,10 @@ pub struct Engine {
     chooses: PerRole<bool>,
     config: Config,
     devices: Vec<DeviceInfo>,
+    /// Whether the platform has answered a listing yet. Until it has, the
+    /// list holds only what an activation happened to open, and a first read
+    /// asks the platform rather than handing that partial list out.
+    listed: bool,
     next_handle: u32,
     selection: PerRole<Selection>,
     running: PerRole<Option<Running>>,
@@ -239,6 +243,7 @@ impl Engine {
             chooses,
             config,
             devices: Vec::new(),
+            listed: false,
             next_handle: 1,
             selection: PerRole::default(),
             running: PerRole::default(),
@@ -286,8 +291,28 @@ impl Engine {
             backend.devices()
         })?;
         self.absorb(found);
+        self.listed = true;
         self.follow_preferences();
         Ok(&self.devices)
+    }
+
+    /// The list, asked of the platform first if it never has been.
+    ///
+    /// A new engine knows no device until something asks the platform: a
+    /// refresh, a change the platform announced, or an activation that opened
+    /// a device the list had not met. Without one of those its list is empty,
+    /// or holds what an earlier failed listing left. Every read the
+    /// application makes goes through here, so the first is complete without
+    /// a [`Engine::refresh`].
+    ///
+    /// # Errors
+    /// [`BackendError::TimedOut`] when the platform did not answer in
+    /// [`Config::probe_wait`]; the next read asks again.
+    pub fn listing(&mut self) -> Result<&[DeviceInfo], BackendError> {
+        if self.listed {
+            return Ok(&self.devices);
+        }
+        self.refresh()
     }
 
     fn absorb(&mut self, found: Vec<crate::backend::RawDevice>) {

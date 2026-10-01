@@ -632,6 +632,12 @@ entry! {
 entry! {
     /// How many devices the list holds, present or not.
     ///
+    /// The first read of a stack's list, here or through
+    /// `sipral_audio_device_at`, asks the platform when nothing has yet, so
+    /// a new stack lists every device without `sipral_audio_refresh`
+    /// (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
+    /// answer within `audio_probe_ms`, and the next read asks again.
+    ///
     /// # Safety
     ///
     /// `out_count` must point at one `size_t`.
@@ -639,7 +645,12 @@ entry! {
         if out_count.is_null() {
             return Err(fail(SipralStatus::InvalidArgument, "out_count is null"));
         }
-        let count = with_engine(stack, |engine| Ok(engine.devices().len()))?;
+        let count = with_engine(stack, |engine| {
+            engine
+                .listing()
+                .map(<[_]>::len)
+                .map_err(|error| platform_failed(&error))
+        })?;
         unsafe { out_count.write(count) };
         Ok(())
     }
@@ -672,8 +683,9 @@ entry! {
     ) {
         unsafe { crate::versioned::declared_size(out_device.cast_const()) }?;
         let (device, text) = with_engine(stack, |engine| {
-            let count = engine.devices().len();
-            let found = engine.devices().get(index).ok_or_else(|| {
+            let listed = engine.listing().map_err(|error| platform_failed(&error))?;
+            let count = listed.len();
+            let found = listed.get(index).ok_or_else(|| {
                 fail(
                     SipralStatus::InvalidArgument,
                     format!("index is {index} and the list holds {count}"),
@@ -1339,6 +1351,38 @@ pub(crate) mod tests {
         assert_eq!(short, [0; 11], "nothing of the name was written");
         assert_eq!(device.id, 0, "nothing of the struct was written");
         hangup(stack, call, 3_000);
+    }
+
+    /// A stack created after another already listed the platform, and after
+    /// a device arrived whose announcement the other took, lists every
+    /// device on its first read, by count or by index, with no refresh.
+    #[test]
+    fn a_new_stack_lists_every_device_on_its_first_read() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        let (first, _, _) = device_call(&mut observed, &fake, SipralAudioActivation::Manual);
+        assert_eq!(refresh(first), 3);
+        fake.plug("dock", "Dock Speakers", 0, 2);
+        fake.forget_notices();
+
+        let mut second_observed = Observed::default();
+        let (second, _, _) =
+            device_call(&mut second_observed, &fake, SipralAudioActivation::Manual);
+        let mut count = 0;
+        assert_eq!(
+            unsafe { sipral_audio_device_count(second, &raw mut count) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(count, 4, "the first read asks the platform");
+        assert_ne!(id_of(second, "Dock Speakers"), 0);
+
+        let mut third_observed = Observed::default();
+        let (third, _, _) = device_call(&mut third_observed, &fake, SipralAudioActivation::Manual);
+        let (dock, name) = device_at(third, 3);
+        assert_eq!(name, "Dock Speakers");
+        assert_eq!(dock.output_channels, 2);
     }
 
     /// Selection: the three refusals, each with its own status, and the
