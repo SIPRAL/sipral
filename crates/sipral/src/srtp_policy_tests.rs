@@ -12,9 +12,10 @@ use crate::capabilities::SrtpKeying;
 use crate::codec::CodecCatalog;
 use crate::error::MediaError;
 use crate::event::{Event, MediaEvent};
-use crate::keying::{AccountSrtp, SrtpPolicy};
+use crate::keying::{AccountSrtp, SdesSignalling, SrtpPolicy};
 use crate::tests::{Pair, callee_media, callee_sip, caller_media, one_stream, uri};
 use crate::{OutgoingCall, StreamEncryption, TransportId, UaEvent};
+use sipral_core::endpoint::{Input, TransportProtocol};
 
 const UDP: TransportId = TransportId(1);
 
@@ -559,6 +560,7 @@ fn each_account_holds_its_calls_to_its_own_policy() {
                 policy: Some(SrtpPolicy::Required),
                 suites: None,
                 recording_in_clear: false,
+                sdes_signalling: None,
             },
         )
         .expect("a policy");
@@ -625,6 +627,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
                 policy: Some(SrtpPolicy::Offered),
                 suites: Some(vec![Suite::AesCm80]),
                 recording_in_clear: false,
+                sdes_signalling: None,
             },
         )
         .expect("a policy");
@@ -660,6 +663,7 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
                 policy: None,
                 suites: Some(Vec::new()),
                 recording_in_clear: false,
+                sdes_signalling: None,
             }
         ),
         Err(MediaError::NoSrtpSuite)
@@ -668,4 +672,166 @@ fn a_call_an_account_places_offers_under_its_own_policy() {
 
 fn caller_sip_address() -> std::net::SocketAddr {
     crate::tests::caller_sip()
+}
+
+// -- RFC 4568 §8.3: what carries the keys -------------------------------------
+
+const TLS: TransportId = TransportId(3);
+
+fn secure_only(policy: SrtpPolicy) -> CodecCatalog {
+    pcmu()
+        .with_srtp(policy)
+        .with_sdes_signalling(SdesSignalling::SecureOnly)
+}
+
+/// Both sides of `pair` given a TLS connection to each other, and every
+/// message either writes carried over the transport it names until
+/// nothing more moves, the callee answering what arrives.
+fn over_tls(pair: &mut Pair) {
+    let now = pair.now;
+    for (stack, local, remote) in [
+        (&mut pair.caller, caller_sip_address(), callee_sip()),
+        (&mut pair.callee, callee_sip(), caller_sip_address()),
+    ] {
+        stack
+            .agent
+            .receive(
+                Input::TransportBound {
+                    transport: TLS,
+                    protocol: TransportProtocol::Tls,
+                    local,
+                    remote: Some(remote),
+                },
+                now,
+            )
+            .expect("binding TLS");
+    }
+}
+
+fn carry(pair: &mut Pair) {
+    let now = pair.now;
+    for _ in 0..12 {
+        let mut moved = false;
+        for caller_side in [true, false] {
+            let (from, to, from_address) = if caller_side {
+                (&mut pair.caller, &mut pair.callee, caller_sip_address())
+            } else {
+                (&mut pair.callee, &mut pair.caller, callee_sip())
+            };
+            let mut out = Vec::new();
+            while let Some(transmit) = from.agent.poll_transmit() {
+                out.push(transmit);
+            }
+            for transmit in out {
+                moved = true;
+                let input = if transmit.transport == TLS {
+                    Input::StreamData {
+                        transport: TLS,
+                        data: &transmit.payload,
+                    }
+                } else {
+                    Input::Datagram {
+                        transport: UDP,
+                        remote: from_address,
+                        local: transmit.destination,
+                        data: &transmit.payload,
+                    }
+                };
+                to.agent.receive(input, now).expect("a message");
+            }
+        }
+        pair.caller.drain(now, false);
+        pair.callee.drain(now, true);
+        if !moved {
+            break;
+        }
+    }
+}
+
+/// By default an SDES call over UDP is taken, and both ends say its keys
+/// went in clear; a plain call and a call keyed by nothing say they did not.
+#[test]
+fn an_sdes_call_over_udp_is_taken_and_says_its_keys_went_in_clear() {
+    let mut pair = Pair::new(pcmu().with_srtp(SrtpPolicy::Required));
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's call");
+    assert!(report(&pair, call, true).encrypted);
+    assert_eq!(pair.caller.engine.keys_in_clear(call), Some(true));
+    assert_eq!(pair.callee.engine.keys_in_clear(remote), Some(true));
+
+    let mut plain = Pair::new(pcmu());
+    let call = plain.connect();
+    let remote = plain.callee.call().expect("the callee's call");
+    assert_eq!(plain.caller.engine.keys_in_clear(call), Some(false));
+    assert_eq!(plain.callee.engine.keys_in_clear(remote), Some(false));
+}
+
+/// Under `SecureOnly` an SDES offer over UDP is refused before anything is
+/// written, and so is an answer that would carry an SDES key over UDP: the
+/// call is still ringing, with nothing sent, for the application to reject.
+#[test]
+fn sdes_over_udp_is_refused_where_the_catalogue_takes_it_over_tls_only() {
+    let mut pair = Pair::new(secure_only(SrtpPolicy::Required));
+    let account = pair.caller.account("alice", callee_sip());
+    let placed = pair.caller.engine.place(
+        &mut pair.caller.agent,
+        account,
+        OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+        caller_media(),
+        pair.now,
+    );
+    assert_eq!(placed, Err(MediaError::KeysWouldTravelInClear));
+    assert!(pair.caller.outbound().is_empty(), "an offer went in clear");
+
+    let mut pair = Pair::asymmetric(
+        pcmu().with_srtp(SrtpPolicy::Required),
+        secure_only(SrtpPolicy::Offered),
+    );
+    let ringing = pair.ring();
+    let answered = pair
+        .callee
+        .engine
+        .answer(&mut pair.callee.agent, ringing, callee_media(), pair.now);
+    assert_eq!(answered, Err(MediaError::KeysWouldTravelInClear));
+    let sent = pair.callee.outbound();
+    assert!(
+        !statuses(&sent).iter().any(|line| line.starts_with("SIP/2.0 200")),
+        "{:?}",
+        statuses(&sent)
+    );
+
+    // a plain call is no business of this switch
+    let mut plain = Pair::new(pcmu().with_sdes_signalling(SdesSignalling::SecureOnly));
+    let call = plain.connect();
+    assert_eq!(plain.caller.engine.keys_in_clear(call), Some(false));
+}
+
+/// Over TLS the same call is placed, answered and keyed under `SecureOnly`,
+/// and neither end says its keys went in clear.
+#[test]
+fn over_tls_an_sdes_call_is_taken_and_its_keys_did_not_go_in_clear() {
+    let mut pair = Pair::new(secure_only(SrtpPolicy::Required));
+    over_tls(&mut pair);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip_address());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(TLS, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes over TLS");
+    assert_eq!(pair.caller.agent.call_signalling_secure(call), Some(true));
+    pair.caller.drain(pair.now, false);
+    carry(&mut pair);
+    let remote = pair.callee.call().expect("the callee's call");
+    assert_eq!(pair.callee.agent.call_signalling_secure(remote), Some(true));
+    assert!(report(&pair, call, true).encrypted);
+    assert!(report(&pair, remote, false).encrypted);
+    assert_eq!(pair.caller.engine.keys_in_clear(call), Some(false));
+    assert_eq!(pair.callee.engine.keys_in_clear(remote), Some(false));
 }

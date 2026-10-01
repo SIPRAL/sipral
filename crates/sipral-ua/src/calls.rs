@@ -34,7 +34,7 @@ use std::time::Instant;
 use sipral_core::dialog::CallId;
 use sipral_core::endpoint::{
     DialogEndReason, Event, FailureReason, OutgoingInDialogRequest, OutgoingRequest,
-    OutgoingResponse, PrackError, TerminationReason,
+    OutgoingResponse, PrackError, TerminationReason, TransportProtocol,
 };
 use sipral_core::msg::{
     HeaderName, Method, NameAddrRef, OwnedMessage, RawMessage, StatusCode, Uri,
@@ -744,6 +744,41 @@ impl UserAgent {
     #[must_use]
     pub fn call_account(&self, call: CallHandle) -> Option<AccountId> {
         self.calls.get(&call)?.account
+    }
+
+    /// Whether this call's signalling travels where only the next hop can
+    /// read it: over TLS or secure WebSocket. What its dialog runs on once
+    /// there is one, and before that what its INVITE was sent or received
+    /// on; `None` once the call is gone or for one with neither.
+    ///
+    /// What an SDES key written into this call's descriptions is protected
+    /// by, and nothing more (RFC 4568 §8.3): a call for which this is
+    /// `false` carries its keys in clear.
+    #[must_use]
+    pub fn call_signalling_secure(&self, call: CallHandle) -> Option<bool> {
+        let held = self.calls.get(&call)?;
+        let transaction = held
+            .server
+            .map(AnyTransactionId::InviteServer)
+            .or_else(|| held.invite.map(AnyTransactionId::InviteClient));
+        self.endpoint
+            .signalling_protocol(held.dialog, transaction)
+            .map(TransportProtocol::is_secure)
+    }
+
+    /// Whether a call placed now from `account` as `outgoing` would be
+    /// signalled over TLS or secure WebSocket: the transport it would leave
+    /// on is bound, and is one of those. `None` for an account that is not
+    /// this agent's, one not yet located, or a transport not bound.
+    ///
+    /// Asked before the call is placed, because what goes in its offer —
+    /// an SDES key or not — has to be decided before the offer leaves.
+    #[must_use]
+    pub fn placing_securely(&self, account: AccountId, outgoing: &OutgoingCall) -> Option<bool> {
+        let config = self.accounts.get(&account)?;
+        let (transport, _) = outgoing.destination.or_else(|| config.destination())?;
+        let (protocol, _) = self.endpoint.bound_transport(transport)?;
+        Some(protocol.is_secure())
     }
 
     /// Whether this end placed the call or answered it, which is what

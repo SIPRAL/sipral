@@ -265,6 +265,43 @@ impl SrtpPolicy {
     }
 }
 
+/// Whether an SDES key may travel in signalling that is not encrypted.
+///
+/// RFC 4568 §8.3 requires the message carrying an `inline:` key to be
+/// encrypted on its way — TLS for SIP — and a key that crossed UDP or TCP was
+/// readable on every hop that carried the message: the stream is encrypted
+/// against a passive listener on the media path and not against one on the
+/// signalling path. Many PBXs offer SDES over UDP only, so the default takes
+/// those calls and says so; a deployment that would rather not have them
+/// says [`SdesSignalling::SecureOnly`].
+///
+/// Secure means the call's signalling runs on TLS or secure WebSocket
+/// ([`UserAgent::call_signalling_secure`](sipral_ua::UserAgent::call_signalling_secure)).
+/// A `sips:` target counts only through that: the endpoint refuses to send
+/// one any other way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SdesSignalling {
+    /// SDES is written and taken whatever carries the signalling. When the
+    /// signalling is not encrypted, the call is marked
+    /// ([`MediaEngine::keys_in_clear`](crate::MediaEngine::keys_in_clear) is
+    /// `Some(true)`) and the engine's log says so at warning level.
+    #[default]
+    AnyTransport,
+    /// SDES only over encrypted signalling. A call whose description would
+    /// carry an `a=crypto` key — this end's offer or its answer to one — over
+    /// signalling that is not encrypted is refused before anything leaves,
+    /// with [`MediaError::KeysWouldTravelInClear`]: a call placed returns it
+    /// and sends nothing, a call answered returns it and the application
+    /// rejects the call with a status of its choosing (488 is RFC 3261's for
+    /// an offer whose terms cannot be taken). DTLS-SRTP, whose key never
+    /// travels in signalling, is not affected; under
+    /// `SrtpPolicy::DtlsOrSdes` the SDES lines are what is refused, so a
+    /// deployment wanting DTLS-SRTP over plain signalling names
+    /// `DtlsOffered` or `DtlsRequired`.
+    SecureOnly,
+}
+
 /// What one account's calls do about SRTP, laid over the engine's own
 /// catalogue ([`MediaEngine::set_account_srtp`](crate::MediaEngine::set_account_srtp)):
 /// the SRTP policy per account.
@@ -288,6 +325,11 @@ pub struct AccountSrtp {
     /// nothing (RFC 7866 §12.2). On, they go as plain RTP, as an unencrypted
     /// call's always do.
     pub recording_in_clear: bool,
+    /// Whether the account's SDES keys may travel in signalling that is not
+    /// encrypted ([`SdesSignalling`]); `None` keeps the engine's catalogue's
+    /// answer. The recording sessions of the account's calls are held to it
+    /// too.
+    pub sdes_signalling: Option<SdesSignalling>,
 }
 
 impl AccountSrtp {
@@ -305,6 +347,9 @@ impl AccountSrtp {
         }
         if let Some(suites) = self.suites.as_deref() {
             catalog = catalog.with_srtp_suites(suites)?;
+        }
+        if let Some(sdes) = self.sdes_signalling {
+            catalog = catalog.with_sdes_signalling(sdes);
         }
         Ok(catalog)
     }

@@ -52,7 +52,7 @@ use sipral_rtp::srtp::Suite;
 
 use crate::error::MediaError;
 use crate::ice::IcePolicy;
-use crate::keying::{self, SrtpPolicy};
+use crate::keying::{self, SdesSignalling, SrtpPolicy};
 
 /// The packetisation this stack offers unless told otherwise. Twenty
 /// milliseconds is what every peer expects and what every codec here cuts
@@ -539,6 +539,9 @@ pub struct CodecCatalog {
     /// something named them ([`CodecCatalog::with_srtp_suites`]); `None`
     /// for this build's own choice in each place a suite is chosen.
     srtp_suites: Option<Vec<Suite>>,
+    /// Whether an SDES key may travel in signalling that is not encrypted
+    /// ([`CodecCatalog::with_sdes_signalling`]).
+    sdes_signalling: SdesSignalling,
     ice: IcePolicy,
     annex_b: bool,
     feedback: bool,
@@ -568,6 +571,7 @@ impl CodecCatalog {
             rtcp_mux: false,
             srtp: SrtpPolicy::NotOffered,
             srtp_suites: None,
+            sdes_signalling: SdesSignalling::AnyTransport,
             ice: IcePolicy::Off,
             annex_b: true,
             feedback: false,
@@ -682,6 +686,21 @@ impl CodecCatalog {
     #[must_use]
     pub const fn srtp(&self) -> SrtpPolicy {
         self.srtp
+    }
+
+    /// Say whether an SDES key may travel in signalling that is not
+    /// encrypted ([`SdesSignalling`]): by default it may, and the call says
+    /// it did.
+    #[must_use]
+    pub const fn with_sdes_signalling(mut self, sdes: SdesSignalling) -> Self {
+        self.sdes_signalling = sdes;
+        self
+    }
+
+    /// Whether an SDES key may travel in signalling that is not encrypted.
+    #[must_use]
+    pub const fn sdes_signalling(&self) -> SdesSignalling {
+        self.sdes_signalling
     }
 
     /// Run only these SRTP transforms, most preferred first, wherever a

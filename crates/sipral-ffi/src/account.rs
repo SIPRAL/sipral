@@ -779,6 +779,9 @@ entry! {
                 "recording_in_clear",
                 false,
             )?,
+            // the C ABI names no switch for it: the stack's own answer, the
+            // default, which takes SDES on any transport and says so
+            sdes_signalling: None,
         };
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;

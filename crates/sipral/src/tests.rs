@@ -7505,6 +7505,117 @@ fn from_another_branch(response: &[u8]) -> Vec<u8> {
     lines.join("\r\n").into_bytes()
 }
 
+/// RFC 4568 §7.3 and RFC 3711 §9.1: a call whose INVITE forked offers the
+/// branch that answered a key of its own as soon as it is up, so that the
+/// key every branch of the INVITE was handed protects nothing this end sends
+/// from then on. The re-offer carries one crypto line, under the tag and
+/// suite the call agreed; media goes on flowing; and what this end sends
+/// opens under the new key and not under the one in the INVITE.
+#[test]
+fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    let mut pair = Pair::new(catalog);
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let invite = pair
+        .caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE");
+    pair.callee.deliver(&invite, caller_sip(), pair.now);
+    pair.callee.drain(pair.now, false);
+    let incoming = pair.callee.call().expect("the callee heard the INVITE");
+    pair.callee
+        .agent
+        .ring(incoming, None, pair.now)
+        .expect("a 180");
+    let ringing = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 180"))
+        .expect("the 180");
+    // a second phone the proxy forked the INVITE to rings as well
+    pair.caller.deliver(&ringing, callee_sip(), pair.now);
+    pair.caller
+        .deliver(&from_another_branch(&ringing), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    assert!(
+        pair.caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallForked { .. }))),
+        "the INVITE was not seen to fork"
+    );
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, incoming, callee_media(), pair.now)
+        .expect("the 200 goes");
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let sent = pair.caller.outbound();
+    let reinvite = sent
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("a re-offer once the branch answered");
+    let offer_of = |datagram: &[u8]| {
+        let mut scratch = ParseScratch::new();
+        let message = sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient)
+            .expect("a message");
+        parse(message.body()).expect("a description")
+    };
+    let (first, again) = (offer_of(&invite), offer_of(reinvite));
+    let lines = |description: &SessionDescription| {
+        description.media[0]
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == "crypto")
+            .count()
+    };
+    assert_eq!(lines(&again), 1, "one line, the one the call agreed");
+    assert_ne!(offered_key(&invite), offered_key(reinvite), "a key of its own");
+    for datagram in sent {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+
+    let mut phase = 0_u32;
+    let (far, near) = heard_both_ways(&mut pair, (call, incoming), caller_media(), &mut phase);
+    assert!(far > 10 && near > 10, "heard {far} and {near} frames of 25");
+    let mut samples = vec![0_i16; 160];
+    tone(&mut samples, 8_000, &mut phase);
+    let (protected, _) = pair.speak(call, incoming, &samples);
+    let mut under_new = protected.clone();
+    assert!(
+        copy_opener(&again, 0).unprotect_rtp(&mut under_new).is_ok(),
+        "what this end sends is not under the key it re-offered"
+    );
+    let mut under_old = protected;
+    assert!(
+        copy_opener(&first, 0).unprotect_rtp(&mut under_old).is_err(),
+        "the key every branch of the INVITE holds still opens what this end sends"
+    );
+}
+
 /// A call placed with a relay, rung plainly by the callee (a 180 with no
 /// description, naming the first dialog), and the callee's 2xx held back.
 #[cfg(feature = "ice")]
@@ -13890,6 +14001,53 @@ fn an_encrypted_call_is_recorded_to_the_server_as_srtp() {
     copy_opener(&offer, 1)
         .unprotect_rtp(&mut copy)
         .expect("SRTP under the key offered for the stream labelled 2");
+}
+
+/// RFC 4568 §8.3 for the recording session: its SDES keys went to the
+/// server over TCP, which the recording says by its own handle; and an
+/// account that takes SDES over TLS only does not record that way at all,
+/// with nothing sent to the server.
+#[test]
+fn a_recording_whose_keys_go_in_clear_says_so_or_is_refused() {
+    let (pair, _server, _call, _, recording) =
+        recorded_call_with(encrypted_catalog(), srtp_server, |_, _| {});
+    assert_eq!(pair.caller.engine.keys_in_clear(recording), Some(true));
+
+    let mut pair = Pair::new(encrypted_catalog());
+    let call = pair.connect();
+    let account = pair.caller.agent.call_account(call).expect("the account");
+    pair.caller
+        .engine
+        .set_account_srtp(
+            account,
+            crate::AccountSrtp {
+                sdes_signalling: Some(crate::SdesSignalling::SecureOnly),
+                ..crate::AccountSrtp::default()
+            },
+        )
+        .expect("the account's policy");
+    pair.caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: caller_sip(),
+                remote: Some(server_sip()),
+            },
+            pair.now,
+        )
+        .expect("binding TCP");
+    let _ = pair.caller.outbound();
+    let refused = pair.caller.engine.record_to(
+        &mut pair.caller.agent,
+        call,
+        crate::RecordTo::new(uri("sip:srs@example.com"), this_end_copy(), far_end_copy())
+            .to_address(TCP, server_sip()),
+        pair.now,
+    );
+    assert_eq!(refused, Err(MediaError::KeysWouldTravelInClear));
+    assert!(pair.caller.outbound().is_empty(), "the recording's offer went");
 }
 
 /// A server that answers an encrypted call's recording session in the clear

@@ -331,8 +331,9 @@ pub struct StreamEncryption {
     /// DTLS-SRTP stream once its handshake finished, since the far end's
     /// certificate had to match the fingerprint its signalling carried
     /// (RFC 8122 §5.1). An SDES key is exactly as authentic as the
-    /// signalling transport that carried it, which this layer cannot see,
-    /// so it is false for one.
+    /// signalling transport that carried it, which a session does not see,
+    /// so it is false for one; whether that transport was encrypted is
+    /// [`MediaEngine::keys_in_clear`](crate::MediaEngine::keys_in_clear).
     pub authenticated: bool,
     /// Whether it agreed to be encrypted and is still waiting for its keys.
     pub awaiting_keys: bool,

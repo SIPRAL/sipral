@@ -226,7 +226,7 @@ pub use inband::{AmdConfig, AmdReason, AmdVerdict, BeepConfig, CallProgress, Con
 pub use inband::{DtmfDetection, IN_BAND_DIGIT_HOLD, ProgressConfig, ProgressDetection};
 pub use inband::{ProgressTone, ToneRegion};
 pub use join::{MixOutcome, mix_two};
-pub use keying::{AccountSrtp, SrtpPolicy};
+pub use keying::{AccountSrtp, SdesSignalling, SrtpPolicy};
 pub use local_conference::{
     ConferenceChange, ConferenceDirection, ConferencePacket, Departure, Gain, LocalConference,
     LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,

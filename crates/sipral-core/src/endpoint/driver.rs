@@ -632,6 +632,30 @@ impl Endpoint {
         self.retransmissions
     }
 
+    /// What a call's signalling travels over: the flow of `dialog` while it
+    /// lasts, and otherwise the flow of `transaction` — the INVITE that is
+    /// opening it, sent or received — while that is live. `None` when
+    /// neither is.
+    ///
+    /// For a layer above that decides what may go in a message by how it
+    /// will travel: an SDES key in a body is as well protected as the
+    /// transport under it (RFC 4568 §8.3).
+    #[must_use]
+    pub fn signalling_protocol(
+        &self,
+        dialog: Option<DialogId>,
+        transaction: Option<AnyTransactionId>,
+    ) -> Option<TransportProtocol> {
+        dialog
+            .and_then(|dialog| self.dialogs.flow(dialog))
+            .or_else(|| {
+                transaction
+                    .filter(|id| self.transactions.retransmissions(*id).is_some())
+                    .map(|id| self.flow_of(id))
+            })
+            .map(|flow| flow.protocol)
+    }
+
     /// How many times one transaction has sent its request or its response
     /// again, while it is live; `None` once it has ended or for a handle
     /// that never named one.

@@ -245,6 +245,12 @@ pub enum MediaError {
     ///
     /// [`SrtpPolicy::Required`]: crate::SrtpPolicy::Required
     SrtpRequired,
+    /// The description would carry an SDES key (`a=crypto` with `inline:`)
+    /// over signalling that is not encrypted, and this call's catalogue says
+    /// [`SdesSignalling::SecureOnly`](crate::SdesSignalling::SecureOnly)
+    /// (RFC 4568 §8.3). Nothing was sent: a call placed was not placed, and
+    /// a call being answered is still ringing for the application to reject.
+    KeysWouldTravelInClear,
     /// A list of SRTP suites that names none, or names one twice
     /// ([`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites)).
     NoSrtpSuite,
@@ -572,6 +578,10 @@ impl MediaError {
                 "this call runs ICE, which moves by a restart and not a new address"
             }
             Self::SrtpRequired => "this call requires SRTP and the far end described none",
+            Self::KeysWouldTravelInClear => {
+                "an SDES key would travel in signalling that is not encrypted, and this call \
+                 takes SDES over TLS only"
+            }
             Self::NoSrtpSuite => {
                 "a list of SRTP suites must name each suite once, and at least one"
             }
