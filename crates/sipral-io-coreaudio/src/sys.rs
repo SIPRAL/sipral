@@ -241,6 +241,44 @@ unsafe extern "C" {
     /// this side owns, so every one of them ends here.
     #[link_name = "CFRelease"]
     pub(crate) fn release(object: *const c_void);
+
+    /// `CFStringRef CFStringCreateWithBytes(CFAllocatorRef alloc, const UInt8
+    /// *bytes, CFIndex numBytes, CFStringEncoding encoding, Boolean
+    /// isExternalRepresentation)`, which the caller then owns.
+    #[link_name = "CFStringCreateWithBytes"]
+    pub(crate) fn string_from_bytes(
+        allocator: *const c_void,
+        bytes: *const u8,
+        length: isize,
+        encoding: u32,
+        external: u8,
+    ) -> StringRef;
+
+    /// `const void *CFDictionaryGetValue(CFDictionaryRef theDict, const void
+    /// *key)`: borrowed from the dictionary, not owned.
+    #[link_name = "CFDictionaryGetValue"]
+    pub(crate) fn dictionary_value(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+
+    /// `CFTypeID CFGetTypeID(CFTypeRef cf)`.
+    #[link_name = "CFGetTypeID"]
+    pub(crate) fn type_of(object: *const c_void) -> usize;
+
+    /// `CFTypeID CFNumberGetTypeID(void)`.
+    #[link_name = "CFNumberGetTypeID"]
+    pub(crate) fn number_type() -> usize;
+
+    /// `CFTypeID CFBooleanGetTypeID(void)`.
+    #[link_name = "CFBooleanGetTypeID"]
+    pub(crate) fn boolean_type() -> usize;
+
+    /// `Boolean CFNumberGetValue(CFNumberRef number, CFNumberType theType,
+    /// void *valuePtr)`.
+    #[link_name = "CFNumberGetValue"]
+    pub(crate) fn number_value(number: *const c_void, kind: isize, value: *mut c_void) -> u8;
+
+    /// `Boolean CFBooleanGetValue(CFBooleanRef boolean)`.
+    #[link_name = "CFBooleanGetValue"]
+    pub(crate) fn boolean_value(boolean: *const c_void) -> u8;
 }
 
 /// Turn what a call returned into a result that names the call.

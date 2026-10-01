@@ -23,7 +23,11 @@
 //! frame is — the detector lives with the codec, not here — and the buffer
 //! moves only in the pauses: it drops a frame to shorten the delay, or asks for
 //! one more to lengthen it. During a talk spurt it holds still and accepts
-//! being wrong until the next pause, which is the trade the ear prefers.
+//! being wrong until the next pause, which is the trade the ear prefers —
+//! up to a point. A backlog, packets that piled up while nobody was pulling,
+//! is not a frame or two to be wrong by: past a fixed allowance over the
+//! band it means to sit in, the buffer skips it at once, pause or not, so the
+//! delay a listener can be kept behind by has a bound.
 //!
 //! No signal processing happens here. When a slot comes due empty the buffer
 //! says so and the codec layer conceals; when a pause is being stretched the
@@ -85,6 +89,26 @@ const DECAY_INTERVAL: u32 = 128;
 /// immediate and shrink is this slow on purpose: being a frame too long is
 /// inaudible, being a frame too short is a gap.
 const SHRINK_HOLD: u32 = 150;
+
+/// The most delay, in milliseconds, the buffer holds above the top of its
+/// dead band waiting for a pause to give it back in: two hundred, ten frames
+/// of twenty milliseconds.
+///
+/// Giving delay back a frame at a time in the pauses is inaudible, and it is
+/// what the buffer does with the frame or two a pair of clocks slips. A
+/// backlog is another thing. Packets held up on their way in — a receive
+/// loop that waited a second and a half for a device to open, then handed
+/// over everything that had queued meanwhile — are played whole, since they
+/// are the far end talking, and leave that second and a half behind as delay
+/// for as long as nobody pauses; a far end that never stops, or a verdict
+/// that never finds the pause, keeps it for the rest of the call. So past
+/// this much over its band the buffer does not wait: it moves the playout
+/// point up to the top of the band at once, in one jump the listener hears
+/// once, and counts what it jumped as thrown out
+/// ([`Quality::discarded_overflow`]). With the ceiling a path's jitter may
+/// raise the target to ([`BufferConfig::max_delay`]), this is the bound on
+/// the delay the listener can be kept behind by.
+const EXCESS_MS: u32 = 200;
 
 /// Packets each half of the fastest-arrival window covers. The fastest recent
 /// arrival is what delay is measured from, and it has to be recent: the sender
@@ -320,7 +344,9 @@ pub struct Quality {
     /// Packets thrown out of the window before they could be played: pushed
     /// out by newer audio because the consumer stopped pulling, belonging to
     /// a stream that restarted underneath them, or left further back than the
-    /// target when playout started.
+    /// target when playout started, or skipped as a backlog: held further
+    /// behind the top of the band the delay sits in than the buffer waits for
+    /// a pause to give back.
     pub discarded_overflow: u64,
     /// Packets whose sequence number was already held.
     pub duplicates: u64,
@@ -1052,7 +1078,9 @@ impl JitterBuffer {
     /// packet, a request to conceal, a request to stretch a pause, or nothing
     /// at all while the buffer fills. In a pause the delay may move by one
     /// frame, either by dropping a packet that will not be missed or by asking
-    /// for a frame that was never sent; during speech it does not move.
+    /// for a frame that was never sent; during speech it does not move. The
+    /// one exception is a backlog more than two hundred milliseconds over the
+    /// top of the band, which is skipped on this pull whatever the frame is.
     pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
         self.pace.pulled();
         self.spurts.hear(activity);
@@ -1079,16 +1107,22 @@ impl JitterBuffer {
             return Pull::Empty;
         }
 
+        // the dead band is two packets wide above the floor, as it is above
+        // any target: an earpiece whose frames land near the edge of an
+        // arrival sees the queue go one either way from one pull to the
+        // next, and a band of one would answer each of those with a stretch
+        // or a shrink. One that takes frames two at a time sees it go two,
+        // and the band is a packet wider for each
+        let floor = self.floor();
+        let top = floor.saturating_add(1).saturating_add(self.pace.extra());
+        let backlog = self.queued().saturating_sub(top);
+        if backlog > self.excess() {
+            // more than a pause is worth waiting for, in speech or not
+            self.pass_over(backlog);
+        }
         let queued = self.queued();
         if activity == Activity::Silence {
-            // the dead band is two packets wide above the floor, as it is
-            // above any target: an earpiece whose frames land near the edge
-            // of an arrival sees the queue go one either way from one pull
-            // to the next, and a band of one would answer each of those
-            // with a stretch or a shrink. One that takes frames two at a
-            // time sees it go two, and the band is a packet wider for each
-            let floor = self.floor();
-            if queued > floor.saturating_add(1).saturating_add(self.pace.extra()) {
+            if queued > top {
                 self.shorten();
             } else if arrived > 0 && queued < floor {
                 self.counts.stretched = self.counts.stretched.saturating_add(1);
@@ -1402,7 +1436,8 @@ impl JitterBuffer {
     /// end said. Nobody has heard what is dropped. Packets that are held
     /// together, with no such gap between them, are all played, however many
     /// there are: that is the far end talking, and a delay that is longer than
-    /// it has to be is given back in its next pause.
+    /// it has to be is given back in its next pause — or, when it is more than
+    /// [`EXCESS_MS`] over, on the first pull, by [`JitterBuffer::pull`].
     ///
     /// In a pause it waits for [`IN_HAND`] as well, which is how a spurt from
     /// a far end that sends nothing in its pauses gets its frame in hand. The
@@ -1485,6 +1520,15 @@ impl JitterBuffer {
             .max(IN_HAND)
     }
 
+    /// The most packets held above the top of the dead band before the
+    /// buffer stops waiting for a pause to give them back in:
+    /// [`EXCESS_MS`] of them, and never none.
+    fn excess(&self) -> u16 {
+        let budget = u64::from(self.clock_rate) * u64::from(EXCESS_MS) / 1_000;
+        let packets = budget / u64::from(self.timing.span.max(1));
+        u16::try_from(packets).unwrap_or(u16::MAX).max(1)
+    }
+
     /// A pull with nothing to play. Once something has been played it is
     /// either an under-run or the far end's pause, and which is settled by
     /// the packet played next.
@@ -1551,10 +1595,11 @@ impl JitterBuffer {
         cut
     }
 
-    /// Move the playout point `count` frames on before playout has started.
-    /// Nobody was listening while these came due, so what was never there is
-    /// loss the counters record rather than frames anyone hears concealed, and
-    /// what was held is thrown out of the window unplayed.
+    /// Move the playout point `count` frames on without playing them: before
+    /// playout has started, or past a backlog more than [`EXCESS_MS`] over
+    /// the dead band. Nobody hears these come due, so what was never there
+    /// is loss the counters record rather than frames anyone hears
+    /// concealed, and what was held is thrown out of the window unplayed.
     fn pass_over(&mut self, count: u16) {
         for _ in 0..count {
             let index = self.index_of(self.next);
@@ -1991,8 +2036,10 @@ mod tests {
     fn what_a_restart_or_a_new_format_throws_out_is_in_the_discard_rate() {
         // RFC 3611 §4.7.1 counts every packet the buffer drops, for overflow
         // or for anything else, in the discard rate: here eight played and
-        // eight thrown out, twice, is a half of what was expected
-        let mut buffer = buffer(20, 1);
+        // eight thrown out, twice, is a half of what was expected. The
+        // target starts at eight, so sixteen held is not a backlog the
+        // buffer would give back on its own before the restart
+        let mut buffer = buffer(20, 8);
         for sequence in 0..16 {
             insert(&mut buffer, sequence);
         }
@@ -2009,7 +2056,7 @@ mod tests {
         for _ in 0..8 {
             pull(&mut buffer);
         }
-        buffer.reformat(RATE, &config(20, 1));
+        buffer.reformat(RATE, &config(20, 8));
         assert_eq!(buffer.quality().discarded_overflow, 16);
         assert_eq!(
             buffer.burst_gap_metrics().discard_rate,
@@ -3040,5 +3087,83 @@ mod tests {
         assert_eq!(quality.lost, 5);
         assert_eq!((quality.silenced, quality.underruns), (4, 2));
         assert_eq!(quality.silenced + quality.underruns, heard);
+    }
+
+    /// A minute of call on a clean path after a second and a half nobody
+    /// pulled, pulled by an earpiece whose clock runs a hundred parts per
+    /// million slow, with a verdict of speech on every frame: a far end that
+    /// never pauses, or a detector that never finds the pause. What it
+    /// returns is the buffer, how many frames it played, and the deepest it
+    /// was once a second of them had been played. `held_up` delivers that
+    /// second and a half together at its end, as a receive loop that waited
+    /// for a device to open does; otherwise each packet arrives on time and
+    /// waits, as early media nobody is playing yet does.
+    fn after_a_backlog(held_up: bool) -> (JitterBuffer, u64, Duration) {
+        const FRAME_US: u64 = 20_000;
+        const BACKLOG: u16 = 75;
+        let mut buffer = JitterBuffer::new(RATE, &BufferConfig::new(SPAN));
+        let opened = FRAME_US * u64::from(BACKLOG);
+        for sequence in 0..BACKLOG {
+            let arrival = if held_up {
+                opened
+            } else {
+                u64::from(sequence) * FRAME_US + 3_000
+            };
+            insert_at(&mut buffer, sequence, Duration::from_micros(arrival));
+        }
+        let pull_every = FRAME_US * 1_000_100 / 1_000_000;
+        let mut next_pull = opened + FRAME_US / 2;
+        let mut sequence = BACKLOG;
+        let (mut played, mut deepest) = (0_u64, Duration::ZERO);
+        // fifty-seven seconds, the length of the call this was seen on
+        let end = opened + 57_000_000;
+        while next_pull < end {
+            let next_arrival = u64::from(sequence) * FRAME_US + 3_000;
+            if next_arrival < next_pull {
+                insert_at(&mut buffer, sequence, Duration::from_micros(next_arrival));
+                sequence += 1;
+                continue;
+            }
+            if let Pull::Packet(_) = buffer.pull(Activity::Speech) {
+                played += 1;
+            }
+            if played > 50 {
+                deepest = deepest.max(buffer.quality().delay);
+            }
+            next_pull += pull_every;
+        }
+        (buffer, played, deepest)
+    }
+
+    /// The delay a backlog leaves behind is given back within the call rather
+    /// than kept for the rest of it, in speech as much as in a pause, and is
+    /// never more than [`super::EXCESS_MS`] over the top of the dead band —
+    /// which, with the longest delay a path's jitter may ask for, bounds it.
+    /// What was given back is counted as thrown out, so every packet taken
+    /// in is still accounted for.
+    #[test]
+    fn a_backlog_is_given_back_without_waiting_for_a_pause() {
+        let allowance = Duration::from_millis(u64::from(super::EXCESS_MS));
+        for held_up in [true, false] {
+            let (buffer, played, deepest) = after_a_backlog(held_up);
+            let quality = buffer.quality();
+            assert!(
+                quality.delay <= quality.target_delay + allowance + FRAME * 3,
+                "held up {held_up}: the delay is {:?} against a target of {:?}",
+                quality.delay,
+                quality.target_delay
+            );
+            assert!(
+                deepest <= Duration::from_millis(500) + allowance + FRAME * 3,
+                "held up {held_up}: a second into the call the delay was still {deepest:?}"
+            );
+            assert_eq!(quality.lost, 0);
+            assert!(quality.discarded_overflow > 0, "nothing was given back");
+            assert_eq!(
+                quality.received,
+                played + quality.discarded_overflow + quality.shrunk + u64::from(buffer.held()),
+                "held up {held_up}: a packet went unaccounted for"
+            );
+        }
     }
 }

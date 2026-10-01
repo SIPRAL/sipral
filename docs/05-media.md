@@ -469,8 +469,20 @@ someone configured once. Design targets:
   gap and keeping it as delay. A packet stranded in front of such a gap, one
   that came too early to start on and is then older than anything after it
   by more than the target, is dropped unplayed for the same reason. Packets
-  held together with no such gap are all played, however many. Seen from
+  held together with no such gap are all played, however many — up to a
+  bound. Seen from
   Asterisk on a DTLS-SRTP call, at the start and again after a resume.
+- **A backlog is skipped, not kept.** Packets that pile up while nobody pulls
+  — a receive loop that waited for a device to open, early media nobody was
+  playing yet — are the far end talking, and left to the pauses they would
+  be given back a frame at a time. A far end that never pauses, or a
+  detector that never finds the pause, would keep them as delay for the rest
+  of the call: a 57 s call on a real PBX ended 1.56 s behind a 100 ms target.
+  So more than 200 ms over the top of its dead band, the buffer moves the
+  playout point up to the top of the band on the next pull, in speech or
+  not, and counts what it skipped as discarded for overflow; with the
+  longest delay jitter may ask for, that bounds the delay a listener can be
+  kept behind by.
 - **Reordering is normal**, not an error. Late packets that still fit the window
   are inserted.
 - **Duplicates are dropped** on sequence number, cheaply.
@@ -2464,7 +2476,15 @@ old unit is closed, and the pump confirms it let go, before the new one is
 opened on a device change: two alive at once is what blocks inside the
 framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
 on a device other than the loudspeaker's plays through a plain output unit
-beside the call's, never a second voice-processing unit. The capture
+beside the call's, never a second voice-processing unit. Nor is the
+process's one unit made again for every call: a voice stream that closes
+leaves its unit stopped and uninitialised for the next one to configure
+again, because a new unit opened after an old one was taken down was seen,
+under the guard allocator, to read freed memory on the framework's own
+property-listener thread within a few rounds of activation, whatever the
+order or the spacing of stop, uninitialise and dispose. A unit whose device
+was lost, or that would not uninitialise, is disposed of, and so is the one a
+recovery replaces. The capture
 callback renders exactly the frames it is told of, into a buffer that holds
 a whole device slice converted to the stream's rate, or not at all. On iOS
 the route is the audio session's, so only the loudspeaker role is chosen.

@@ -4396,6 +4396,19 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         receiver.set_dtmf_detection(crate::DtmfDetection::Always);
         let mut sequence = 1_u16;
         let mut timestamp = 0_u32;
+        let mut played = vec![0_i16; receiver.frame_samples()];
+        let mut keys = Vec::new();
+        // a frame played for each packet sent, as an earpiece does: a stream
+        // handed over whole before anything is played is a backlog, which the
+        // buffer skips rather than plays a second late
+        let mut play = |receiver: &mut MediaSession, keys: &mut Vec<_>| {
+            let _ = receiver.playback(&mut played);
+            while let Some(event) = receiver.poll_event() {
+                if let MediaEvent::DigitReceived { digit, source, .. } = event {
+                    keys.push((digit, source));
+                }
+            }
+        };
         let mut send = |receiver: &mut MediaSession, payload_type: u8, payload: &[u8], ticks| {
             let mut datagram = packet(sequence, timestamp, payload_type, payload);
             let _ = receiver.receive(&mut datagram, from, now);
@@ -4405,9 +4418,11 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         // RFC 3550 A.1's probation, then the key in the audio
         for _ in 0..6 {
             send(&mut receiver, 0, &silence, 160);
+            play(&mut receiver, &mut keys);
         }
         for frame in tone.chunks(160) {
             send(&mut receiver, 0, &audio(frame), 160);
+            play(&mut receiver, &mut keys);
         }
         // and the event of the same press, its closing packet three times
         // (RFC 4733 §2.5.1.4): event 5, end bit, 800 ticks held
@@ -4417,16 +4432,10 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         }
         for _ in 0..30 {
             send(&mut receiver, 0, &silence, 160);
+            play(&mut receiver, &mut keys);
         }
-        let mut played = vec![0_i16; receiver.frame_samples()];
-        let mut keys = Vec::new();
-        for _ in 0..60 {
-            let _ = receiver.playback(&mut played);
-            while let Some(event) = receiver.poll_event() {
-                if let MediaEvent::DigitReceived { digit, source, .. } = event {
-                    keys.push((digit, source));
-                }
-            }
+        for _ in 0..30 {
+            play(&mut receiver, &mut keys);
         }
         keys
     };
