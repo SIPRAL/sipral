@@ -14,6 +14,7 @@ import type {NativeEvent, Spec} from './NativeSipral';
 import {SipralError, fromNative} from './errors';
 import {TypedEmitter} from './emitter';
 import type {Subscription} from './emitter';
+import {pinDigest} from './pin';
 import type {
   AccountOptions,
   CallDirection,
@@ -486,6 +487,7 @@ export class SipralClient {
     if (options.tlsPin !== undefined && signalling !== 'tls') {
       throw new SipralError('invalidArgument', 'tlsPin is the certificate a TLS connection trusts: it needs signalling "tls"');
     }
+    const tlsPin = options.tlsPin === undefined ? undefined : pinDigest(options.tlsPin);
     if (options.pseudonymSalt !== undefined && !/^([0-9a-fA-F]{2}){16,}$/.test(options.pseudonymSalt)) {
       throw new SipralError('invalidArgument', 'pseudonymSalt is at least 16 bytes, as hexadecimal');
     }
@@ -508,7 +510,7 @@ export class SipralClient {
         datagramWithoutStreamBytes: options.datagramWithoutStreamBytes,
         pseudonymSalt: options.pseudonymSalt,
         diagnosticTrace: options.diagnosticTrace,
-        tlsPin: options.tlsPin,
+        tlsPin,
       });
     } catch (failure) {
       client.release();

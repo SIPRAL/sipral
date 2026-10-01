@@ -124,7 +124,7 @@ describe('opening', () => {
         diagnosticTrace: true,
         signalling: 'tls',
         signallingServer: '203.0.113.5:5061',
-        tlsPin: 'SHA256=AB',
+        tlsPin: 'SHA256 Fingerprint=A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:01:23:45:67:89:AB:CD:EF:FE:DC:BA:98:76:54:32:10',
       },
       native,
     );
@@ -137,7 +137,8 @@ describe('opening', () => {
       datagramWithoutStreamBytes: 4000,
       pseudonymSalt: '00112233445566778899aabbccddeeff',
       diagnosticTrace: true,
-      tlsPin: 'SHA256=AB',
+      // read here, and handed over as the bare digits
+      tlsPin: 'a1b2c3d4e5f60718293a4b5c6d7e8f900123456789abcdeffedcba9876543210',
     });
     await client.setDiagnosticTrace(false);
     expect(native.calls[1]).toEqual({method: 'setDiagnosticTrace', args: [false]});

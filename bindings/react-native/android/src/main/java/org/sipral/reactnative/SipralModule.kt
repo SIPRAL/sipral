@@ -13,23 +13,16 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReadableMap
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import org.sipral.idiomatic.SipralAndroidAudio
 import org.sipral.reactnative.core.SipralAccountOptions
 import org.sipral.reactnative.core.SipralOpenOptions
 import org.sipral.reactnative.core.SipralReactCore
-import org.sipral.reactnative.core.SipralRefusal
+import org.sipral.reactnative.core.SipralWorker
 
 class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context) {
     private val core = SipralReactCore(emit = ::forward)
 
-    // One thread, so that the calls JavaScript makes reach the stack in the
-    // order it made them; and not the JavaScript one, since placing a call
-    // can wait for a STUN server.
-    private val worker: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "sipral-react-native").apply { isDaemon = true }
-    }
+    private val worker = SipralWorker()
 
     override fun open(options: ReadableMap, promise: Promise) = settle(promise) {
         SipralAndroidAudio.attach(reactApplicationContext)
@@ -112,8 +105,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
     override fun setDiagnosticTrace(on: Boolean, promise: Promise) = settle(promise) { core.setDiagnosticTrace(on) }
 
     override fun invalidate() {
-        worker.execute { core.close() }
-        worker.shutdown()
+        worker.shutdown { core.close() }
         super.invalidate()
     }
 
@@ -130,20 +122,12 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         emitOnEvent(map)
     }
 
-    private fun settle(promise: Promise, action: () -> Any) {
-        worker.execute {
-            try {
-                when (val result = action()) {
-                    is String -> promise.resolve(result)
-                    else -> promise.resolve(null)
-                }
-            } catch (refused: SipralRefusal) {
-                promise.reject(refused.code, refused.message, refused)
-            } catch (failed: Exception) {
-                promise.reject("platform", failed.message ?: failed.toString(), failed)
-            }
-        }
-    }
+    private fun settle(promise: Promise, action: () -> Any) =
+        worker.settle(
+            resolve = { result -> promise.resolve(result) },
+            reject = { code, message, cause -> promise.reject(code, message, cause) },
+            action = action,
+        )
 
     private fun ReadableMap.text(key: String): String? =
         if (hasKey(key) && !isNull(key)) getString(key) else null

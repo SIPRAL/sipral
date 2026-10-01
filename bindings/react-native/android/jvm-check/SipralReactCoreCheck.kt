@@ -15,6 +15,7 @@ import java.util.Collections
 import kotlin.system.exitProcess
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.sipral.idiomatic.SipralAudioMode
 
@@ -110,6 +111,7 @@ private fun everything(): String {
         val refused = alice.await("the refusal") { it["kind"] == "callEnded" && it["call"] == second }
         assertEquals("refused", refused["endReason"])
         assertEquals(486, refused["statusCode"])
+        assertTrue(waitUntil { alice.core.keptCalls == 0 }, "a call that ended is still kept")
 
         // Every map is the spec's shape: a camel-case kind, handles as strings.
         for (event in alice.events.toList()) {
@@ -176,9 +178,85 @@ private fun reachability(): String {
         "and the 0.34 options and the diagnostic trace reach the library"
 }
 
+private fun waitUntil(withinMs: Long = 5_000, probe: () -> Boolean): Boolean {
+    val deadline = System.currentTimeMillis() + withinMs
+    while (!probe()) {
+        if (System.currentTimeMillis() > deadline) {
+            return false
+        }
+        Thread.sleep(10)
+    }
+    return true
+}
+
+private class Closed : AutoCloseable {
+    @Volatile
+    var closed = false
+
+    override fun close() {
+        closed = true
+    }
+}
+
+/**
+ * A call whose end went by before it was kept is closed, not kept; one kept
+ * first is closed by its end; and the ends remembered for calls never kept
+ * are bounded.
+ */
+private fun aCallThatEndedBeforeItWasKeptIsClosed(): String {
+    val book = SipralCallBook<Closed>()
+    val early = Closed()
+    book.ended("1")
+    assertFalse(book.keep("1", early, ended = false), "a call kept after its end")
+    assertTrue(early.closed)
+    assertEquals(0, book.size)
+
+    val told = Closed()
+    assertFalse(book.keep("2", told, ended = true))
+    assertTrue(told.closed)
+
+    val usual = Closed()
+    assertTrue(book.keep("3", usual, ended = false))
+    assertEquals(1, book.size)
+    assertFalse(usual.closed)
+    book.ended("3")
+    assertTrue(usual.closed)
+    assertEquals(0, book.size)
+
+    for (never in 0 until SipralCallBook.REMEMBERED + 10) {
+        book.ended("never-$never")
+    }
+    val oldest = Closed()
+    assertTrue(book.keep("never-0", oldest, ended = false), "an end older than the bound was still remembered")
+    val recent = Closed()
+    assertFalse(book.keep("never-${SipralCallBook.REMEMBERED + 9}", recent, ended = false))
+    book.closeAll()
+    assertTrue(oldest.closed)
+    return "a call that ended before it was kept was closed, and remembered ends are bounded"
+}
+
+/** An action after the worker was shut down is rejected as closed rather
+ * than thrown at its caller; the close itself runs after what was queued. */
+private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
+    val worker = SipralWorker("sipral-react-native-check")
+    val outcomes = Collections.synchronizedList(ArrayList<String>())
+    worker.settle({ outcomes += "resolved $it" }, { code, _, _ -> outcomes += "rejected $code" }) { "first" }
+    worker.settle({ outcomes += "resolved $it" }, { code, _, _ -> outcomes += "rejected $code" }) {
+        throw SipralRefusal("wrongState", "no")
+    }
+    worker.shutdown { outcomes += "closed" }
+    worker.settle({ outcomes += "resolved $it" }, { code, _, _ -> outcomes += "rejected $code" }) { "late" }
+    worker.shutdown { outcomes += "closed twice" }
+    assertTrue(waitUntil { outcomes.size >= 4 }, "saw $outcomes")
+    assertEquals("rejected closed", outcomes.first { it.startsWith("rejected c") })
+    assertEquals(listOf("resolved first", "rejected wrongState", "closed"), outcomes.filter { it != "rejected closed" })
+    return "a settle after the module was invalidated was rejected as closed"
+}
+
 fun main() {
     val said = try {
-        everything() + "; " + reachability()
+        everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
+            aSettleAfterShutdownIsRejectedNotThrown()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)
