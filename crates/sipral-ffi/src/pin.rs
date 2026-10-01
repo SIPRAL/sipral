@@ -222,6 +222,37 @@ mod tests {
         assert_eq!(refused.pinned, u32::MAX, "nothing is written on a refusal");
     }
 
+    /// What `openssl x509 -fingerprint -sha256` prints, 3.x and 1.1, and
+    /// the rest of the forms every layer reads alike, each pinning the same
+    /// certificate across the boundary.
+    #[test]
+    fn every_printed_form_of_the_fingerprint_pins_the_certificate() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let colons = colon_hex(CertificatePin::of(LEAF).sha256());
+        let bare = colons.replace(':', "");
+        for written in [
+            format!("sha256 Fingerprint={colons}"),
+            format!("SHA256 Fingerprint={colons}"),
+            format!("sha-256 {colons}"),
+            format!("SHA256={bare}"),
+            colons.to_ascii_lowercase(),
+            colons.replace(':', " "),
+        ] {
+            let (status, account) = pinned_account(handle, &written);
+            assert_eq!(status, SipralStatus::Ok, "{written}: {}", last_error_text());
+            let mut matched = out();
+            assert_eq!(
+                check(handle, account, LEAF, &mut matched),
+                SipralStatus::Ok,
+                "{written}"
+            );
+            assert_eq!(matched.pinned, 1, "{written}");
+        }
+        let (status, _) = pinned_account(handle, &format!("SHA1 Fingerprint={colons}"));
+        assert_eq!(status, SipralStatus::InvalidArgument);
+    }
+
     #[test]
     fn an_account_that_pins_nothing_leaves_the_verdict_to_the_platform() {
         let mut observed = Observed::default();

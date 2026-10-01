@@ -114,46 +114,43 @@ impl CertificatePin {
     }
 
     /// A fingerprint as an administrator copies it: 64 hexadecimal digits,
-    /// upper or lower case, with a colon between each byte or none at all,
-    /// optionally after `sha-256 ` (RFC 8122 §5's form) or `SHA256=`
-    /// (OpenSSL's).
+    /// upper or lower case, colons and spaces among them ignored, either
+    /// bare or after one of the prefixes the tools that print one write,
+    /// matched without regard to case:
+    ///
+    /// - `sha256 Fingerprint=` — `openssl x509 -fingerprint -sha256`, which
+    ///   OpenSSL 3 writes `sha256 Fingerprint=` and 1.1 `SHA256 Fingerprint=`;
+    /// - `sha-256 ` — RFC 8122 §5's form, the one `a=fingerprint` carries;
+    /// - `SHA256=`.
+    ///
+    /// The same forms, by the same rule, as every binding's own reading of a
+    /// pin, so that a fingerprint one layer takes no other refuses.
     ///
     /// # Errors
     /// [`PinError::NotSha256`] for another hash named in front, and
     /// [`PinError::Malformed`] for anything else that is not 32 bytes.
     pub fn parse(text: &str) -> Result<Self, PinError> {
         let text = text.trim();
-        let digits = match text.split_once([' ', '=']) {
-            Some((hash, rest)) => {
-                let named = hash.trim().to_ascii_lowercase().replace(['-', '_'], "");
-                if named != "sha256" {
-                    return Err(PinError::NotSha256);
-                }
-                rest.trim()
-            }
-            None => text,
-        };
-        let colons = digits.contains(':');
+        let digits = PREFIXES
+            .iter()
+            .find_map(|prefix| strip_prefix_ignoring_case(text, prefix))
+            .unwrap_or(text);
         let mut out = [0_u8; 32];
         let mut bytes = digits
             .as_bytes()
             .iter()
             .copied()
-            .filter(|byte| *byte != b':');
+            .filter(|byte| !matches!(*byte, b':' | b' '));
         for slot in &mut out {
             let (Some(high), Some(low)) = (bytes.next(), bytes.next()) else {
-                return Err(PinError::Malformed);
+                return Err(other_hash(text));
             };
-            *slot = nibble(high)? << 4 | nibble(low)?;
+            *slot = match (nibble(high), nibble(low)) {
+                (Ok(high), Ok(low)) => high << 4 | low,
+                _ => return Err(other_hash(text)),
+            };
         }
-        // a colon between every two digits, or none anywhere
-        let placed = !colons
-            || (digits.len() == 32 * 3 - 1
-                && digits
-                    .bytes()
-                    .enumerate()
-                    .all(|(at, byte)| (at % 3 == 2) == (byte == b':')));
-        if bytes.next().is_some() || !placed {
+        if bytes.next().is_some() {
             return Err(PinError::Malformed);
         }
         Ok(Self(out))
@@ -212,6 +209,34 @@ impl fmt::Display for CertificatePin {
             write!(f, "{byte:02X}")?;
         }
         Ok(())
+    }
+}
+
+/// What may stand in front of the digits, lower case: OpenSSL's, RFC 8122's,
+/// and the bare `SHA256=`. None of them begins another.
+const PREFIXES: [&str; 3] = ["sha256 fingerprint=", "sha-256 ", "sha256="];
+
+/// `text` after `prefix`, the prefix matched without regard to case.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| text.get(prefix.len()..))
+        .flatten()
+}
+
+/// Why digits that did not read as 32 bytes were refused: another hash
+/// named in front of them — `sha-1 `, `SHA1 Fingerprint=`, `md5=` — or not a
+/// fingerprint at all.
+fn other_hash(text: &str) -> PinError {
+    let head = text.split([' ', '=']).next().unwrap_or_default();
+    let name = head.to_ascii_lowercase().replace(['-', '_'], "");
+    let named = head.len() < text.len()
+        && (name.starts_with("sha") || name.starts_with("md"))
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    if named && name != "sha256" {
+        PinError::NotSha256
+    } else {
+        PinError::Malformed
     }
 }
 
@@ -403,13 +428,24 @@ mod tests {
         let colons = pin.to_string();
         assert_eq!(colons.len(), 95);
         assert!(colons.starts_with("AB:AB:"));
+        let bare = colons.replace(':', "");
         for written in [
             colons.clone(),
             colons.to_ascii_lowercase(),
-            colons.replace(':', ""),
+            bare.clone(),
             format!("sha-256 {colons}"),
+            format!("SHA-256 {bare}"),
             format!("SHA256={colons}"),
-            format!("  {}  ", colons.replace(':', "")),
+            format!("sha256={bare}"),
+            // OpenSSL 3 and OpenSSL 1.1, as `x509 -fingerprint -sha256` prints
+            format!("sha256 Fingerprint={colons}"),
+            format!("SHA256 Fingerprint={colons}"),
+            format!("SHA256 FINGERPRINT={}", colons.to_ascii_lowercase()),
+            format!("  {bare}  "),
+            // colons and spaces among the digits are not counted
+            colons.replace(':', " "),
+            colons.replace("AB:AB:", "AB::AB"),
+            format!("sha-256 {}", colons.replace(':', ": ")),
         ] {
             assert_eq!(CertificatePin::parse(&written), Ok(pin), "{written}");
         }
@@ -418,8 +454,13 @@ mod tests {
             "AB:AB",
             &colons[..94],
             &format!("{colons}:AB"),
-            &colons.replace("AB:AB:", "AB::AB"),
             &colons.replacen('A', "G", 1),
+            &format!("sha-256 {}", &colons[..94]),
+            &format!("Fingerprint={colons}"),
+            &format!("sha256 fingerprint {colons}"),
+            &format!("sha256:{colons}"),
+            &colons.replace(':', "\t"),
+            &format!("{bare}x"),
         ] {
             assert_eq!(
                 CertificatePin::parse(refused),
@@ -427,10 +468,17 @@ mod tests {
                 "{refused}"
             );
         }
-        assert_eq!(
-            CertificatePin::parse(&format!("sha-1 {colons}")),
-            Err(PinError::NotSha256)
-        );
+        for other in [
+            format!("sha-1 {colons}"),
+            format!("SHA1 Fingerprint={colons}"),
+            format!("md5={colons}"),
+        ] {
+            assert_eq!(
+                CertificatePin::parse(&other),
+                Err(PinError::NotSha256),
+                "{other}"
+            );
+        }
     }
 
     #[test]

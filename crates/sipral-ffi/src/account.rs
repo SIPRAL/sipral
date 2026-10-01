@@ -296,9 +296,11 @@ record! {
         /// The SHA-256 fingerprint of the one TLS server certificate this
         /// account trusts, in place of a trust anchor, for a PBX that serves
         /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-        /// either case, with a colon between each byte or none, optionally
-        /// after `sha-256 ` or `SHA256=` — the forms `openssl x509
-        /// -fingerprint -sha256` and RFC 8122 print. Null for none.
+        /// either case, colons and spaces among them ignored, bare or after
+        /// `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
+        /// prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
+        /// prefix in any case (ABI 0.35 for the first and the spaces).
+        /// Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
         ///
         /// TLS is the application's, so this is what its certificate
         /// verifier asks, with `sipral_account_check_certificate`: with a
