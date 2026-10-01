@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from . import events as _events
 from ._sipral_cffi import ffi, lib
 from .enums import KeyExchange
+from .errors import SipralError
 from .errors import call as _call
 from .errors import check
 
@@ -62,6 +63,7 @@ class Media:
     ) -> None:
         self.stack = stack
         self.call_handle = call_handle
+        self._final_statistics: dict[str, object] | None = None
         #: Whether the library's own audio engine pumps this call (device
         #: mode): then no frame crosses here -- :attr:`frames` stays empty and
         #: :meth:`send_audio` is refused -- and this thread only reads the
@@ -190,6 +192,11 @@ class Media:
             )
         return report
 
+    def ended_with(self, record: dict[str, object]) -> None:
+        """The end-of-call record arrived: what :meth:`statistics` answers
+        from now on, when the library no longer can."""
+        self._final_statistics = record
+
     def statistics(self) -> dict[str, object]:
         """`sipral_media_statistics`, as a plain `dict`.
 
@@ -201,13 +208,25 @@ class Media:
         the Generic NACKs sent and received and the packets they asked for,
         the early and the reduced-size (RFC 5506) RTCP packets sent, and the
         feedback held back for want of RTCP bandwidth.
+
+        Once the call has ended the stream is gone and the library raises
+        ``WRONG_STATE``; from the moment the end-of-call record has arrived
+        this answers with that record instead
+        (:attr:`sipral.call.Call.final_statistics`), which counts everything
+        up to the end and has no ``feedback``.
         """
         out = ffi.new("sipral_stream_stats_t *")
         out.size = ffi.sizeof("sipral_stream_stats_t")
-        _call(
-            lambda: lib.sipral_media_statistics(self.handle, self.stack.now_ms(), out),
-            "sipral_media_statistics",
-        )
+        try:
+            _call(
+                lambda: lib.sipral_media_statistics(self.handle, self.stack.now_ms(), out),
+                "sipral_media_statistics",
+            )
+        except SipralError as refused:
+            final = self._final_statistics
+            if refused.status != lib.SIPRAL_STATUS_WRONG_STATE or final is None:
+                raise
+            return dict(final)
         return {
             "codec": int(out.codec),
             "round_trip_us": int(out.round_trip_us) if out.has_round_trip else None,

@@ -16,6 +16,7 @@ one DTMF digit, and read back what the call cost.
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 
 from sipral import SipralError, Stack
@@ -118,6 +119,36 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         read = alice_call.media.statistics()["frames_underrun"]
         self.assertLessEqual(before, read)
         self.assertLessEqual(read, raw())
+
+    async def test_the_end_of_call_record_is_kept_and_still_readable(self) -> None:
+        """The record `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries is kept on
+        the call, and is what the media answers once the library has nothing
+        left and says ``WRONG_STATE``."""
+        alice_call, bob_call = await self._place_and_answer()
+        self.addAsyncCleanup(self._close_calls, alice_call, bob_call)
+        media = alice_call.media
+        frame_bytes = media.frame_samples * 2
+        for _ in range(5):
+            media.send_audio(bytes(frame_bytes))
+        deadline = time.monotonic() + 5
+        while media.statistics()["packets_sent"] < 5 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+
+        bob_call.hangup()
+        record = None
+        async with asyncio.timeout(5):
+            while record is None:
+                event = await self.alice_stack.events.get()
+                if event.kind == EventKind.MEDIA_STATISTICS and event.call == alice_call.handle:
+                    record = event.fields["statistics"]
+        self.assertGreaterEqual(record["packets_sent"], 5)
+        self.assertEqual(alice_call.final_statistics, record)
+        out = ffi.new("sipral_stream_stats_t *")
+        out.size = ffi.sizeof("sipral_stream_stats_t")
+        self.assertEqual(
+            lib.sipral_media_statistics(media.handle, 0, out), lib.SIPRAL_STATUS_WRONG_STATE
+        )
+        self.assertEqual(media.statistics()["packets_sent"], record["packets_sent"])
 
     def test_an_under_run_count_crosses_into_the_events_record(self) -> None:
         """The end-of-call record a MEDIA_STATISTICS event carries copies
