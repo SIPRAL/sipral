@@ -405,6 +405,17 @@ crate is, not an oversight, but it has a real consequence stated in the
 tree's own words: "This stack answers challenges and issues none, so it has
 no authenticated peer to compare" (`crates/sipral-ua/src/transfer.rs`).
 
+**What it answers with.** A challenge with no `qop` gets the RFC 2069 shape,
+no client nonce and no counter, so the response varies only with the server's
+nonce. That shape is answered for plain `MD5` alone, the legacy RFC 3261
+§22.4 kept it for; a SHA-2 challenge without `qop` comes from a server that
+claims RFC 8760, which follows RFC 7616 in putting `qop` in every exchange,
+and is ignored as a challenge this stack does not understand (§2.4). The
+password, `A1`, `HA1` (which answers any challenge in its realm as well as
+the password does) and everything hashed from `HA1` are built in buffers that
+are overwritten on drop, best effort as `Secret` says, since this crate has
+neither `unsafe` nor a dependency to do better.
+
 **REFER.** `on_refer` (`crates/sipral-ua/src/transfer.rs`) requires a REFER to
 match an existing dialog and to carry exactly one `Refer-To`; it does not, and
 cannot, check who sent it. `Referred-By` (RFC 3892) is copied onto the INVITE

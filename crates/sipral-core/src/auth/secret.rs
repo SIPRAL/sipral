@@ -57,6 +57,19 @@ impl Secret {
         Self(bytes)
     }
 
+    /// `digest` in lower-case hexadecimal (RFC 8760 §2.2), in a buffer that
+    /// is wiped on drop and allocated once at its final length.
+    pub(super) fn hex(digest: &[u8]) -> Self {
+        let mut bytes = vec![0_u8; digest.len().saturating_mul(2)].into_boxed_slice();
+        for (pair, byte) in bytes.chunks_exact_mut(2).zip(digest) {
+            if let [high, low] = pair {
+                *high = super::digest::nibble(byte >> 4);
+                *low = super::digest::nibble(byte & 0x0f);
+            }
+        }
+        Self(bytes)
+    }
+
     pub(super) fn expose(&self) -> &[u8] {
         &self.0
     }
