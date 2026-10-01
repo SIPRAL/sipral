@@ -23,6 +23,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use sipral_io_common::level::{Channel, window_samples};
 use sipral_media::resample::Resampler;
 
 use crate::backend::{CaptureStream, Format, PlaybackStream};
@@ -79,10 +80,31 @@ pub(crate) type Carried = Vec<(CallId, Box<dyn CallAudio>)>;
 /// calls it was still carrying.
 pub(crate) type Finished = (Box<dyn FnMut(CallId, Outgoing) + Send>, Carried);
 
+/// One call's own gain, mute and meter, per direction, applied in the
+/// mixer: `up` to what the microphone sends the call, `down` to what the
+/// call plays into the loudspeaker's sum. Shared between the engine, where
+/// the application sets and reads them, and the pump, where the frames go
+/// past; they outlive a detach, so a call moved into a conference and back
+/// keeps them.
+#[derive(Clone, Debug)]
+pub(crate) struct CallChannels {
+    pub(crate) up: Arc<Channel>,
+    pub(crate) down: Arc<Channel>,
+}
+
+impl CallChannels {
+    pub(crate) fn new(rate_hz: u32) -> Self {
+        Self {
+            up: Arc::new(Channel::new(window_samples(rate_hz))),
+            down: Arc::new(Channel::new(window_samples(rate_hz))),
+        }
+    }
+}
+
 /// What the engine asks the pump to do.
 pub(crate) enum Command {
-    /// Carry this call's audio from here on.
-    Attach(CallId, Box<dyn CallAudio>),
+    /// Carry this call's audio from here on, through its own controls.
+    Attach(CallId, Box<dyn CallAudio>, CallChannels),
     /// Stop carrying it.
     Detach(CallId),
     /// Run this role on this stream from here on, or on nothing.
@@ -226,6 +248,7 @@ impl Lane {
 struct Call {
     id: CallId,
     audio: Box<dyn CallAudio>,
+    channels: CallChannels,
     rate_hz: u32,
     /// Microphone to call.
     up: Lane,
@@ -245,14 +268,18 @@ impl Call {
     fn new(
         id: CallId,
         audio: Box<dyn CallAudio>,
+        channels: CallChannels,
         microphone_hz: u32,
         speaker_hz: u32,
     ) -> Option<Self> {
         let rate_hz = audio.sample_rate().ok()?;
         let frame_samples = audio.frame_samples().ok()?;
+        channels.up.set_window(window_samples(rate_hz));
+        channels.down.set_window(window_samples(speaker_hz));
         Some(Self {
             id,
             audio,
+            channels,
             rate_hz,
             up: Lane::between(microphone_hz, rate_hz),
             down: Lane::between(rate_hz, speaker_hz),
@@ -270,6 +297,7 @@ impl Call {
         if speaker_hz != self.down_to_hz {
             self.down = Lane::between(self.rate_hz, speaker_hz);
             self.down_to_hz = speaker_hz;
+            self.channels.down.set_window(window_samples(speaker_hz));
         }
     }
 
@@ -282,6 +310,7 @@ impl Call {
             self.rate_hz = rate_hz;
             self.up = Lane::between(self.up_from_hz, rate_hz);
             self.down = Lane::between(rate_hz, self.down_to_hz);
+            self.channels.up.set_window(window_samples(rate_hz));
         }
         if frame_samples != self.frame.len() {
             self.frame.resize(frame_samples, 0);
@@ -431,10 +460,10 @@ impl Pump {
     fn take_commands(&mut self) {
         loop {
             match self.commands.try_recv() {
-                Ok(Command::Attach(id, audio)) => {
+                Ok(Command::Attach(id, audio, channels)) => {
                     self.calls.retain(|call| call.id != id);
                     if let Some(mut call) =
-                        Call::new(id, audio, self.microphone_hz(), self.speaker_hz())
+                        Call::new(id, audio, channels, self.microphone_hz(), self.speaker_hz())
                     {
                         call.audio.set_render_delay(self.render_delay());
                         self.calls.push(call);
@@ -566,6 +595,10 @@ impl Pump {
             for call in &mut self.calls {
                 call.up.push(&self.captured);
                 while call.up.take(&mut call.frame) {
+                    // the call's own gain and mute, after the stack's,
+                    // which the microphone stream already applied
+                    let covered = call.frame.len();
+                    call.channels.up.apply(&mut call.frame, covered);
                     let captured =
                         call.audio
                             .capture_each(call.id, &call.frame, now, &mut |id, packet| {
@@ -626,6 +659,11 @@ impl Pump {
                     }
                 }
                 if call.down.take(&mut self.out) {
+                    // this call's own volume and mute, before it joins the
+                    // others in the sum
+                    call.channels
+                        .down
+                        .apply(&mut self.out, format.frame_samples);
                     for (total, sample) in self.sum.iter_mut().zip(&self.out) {
                         *total += i32::from(*sample);
                     }

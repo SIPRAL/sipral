@@ -51,6 +51,8 @@ pub(crate) struct AAudioBackend {
     notices: Arc<Mutex<VecDeque<Notice>>>,
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
+    /// Whether the microphone opens behind the platform's echo canceller.
+    echo_cancellation: bool,
 }
 
 impl AAudioBackend {
@@ -72,6 +74,7 @@ impl AAudioBackend {
             notices,
             stop,
             watcher,
+            echo_cancellation: true,
         }
     }
 }
@@ -127,6 +130,7 @@ impl AAudioBackend {
             usage,
             device,
             sample_rate_hz: wanted.sample_rate_hz,
+            echo_cancellation: self.echo_cancellation,
         })
         .map_err(|error| refused(&error))?;
         // where it landed, by the identity the list gives it; the route's
@@ -151,6 +155,7 @@ impl AAudioBackend {
             controls: stream.controls(),
             stream,
             identity: landed,
+            echo_cancellation: self.echo_cancellation,
         })
     }
 }
@@ -169,6 +174,10 @@ impl Backend for AAudioBackend {
                 default_output: device.default_output,
             })
             .collect())
+    }
+
+    fn set_system_echo_cancellation(&mut self, on: bool) {
+        self.echo_cancellation = on;
     }
 
     fn poll_notice(&mut self) -> Option<Notice> {
@@ -249,6 +258,8 @@ struct Opened {
     identity: String,
     format: Format,
     controls: Controls,
+    /// Whether it was opened behind the platform's echo canceller.
+    echo_cancellation: bool,
 }
 
 impl StreamCommon for Opened {
@@ -280,8 +291,8 @@ impl CaptureStream for Opened {
 
     fn system_echo_cancellation(&self) -> bool {
         // the voice-communication preset is the platform's own canceller,
-        // on every phone that has one
-        true
+        // on every phone that has one; the recognition preset has none
+        self.echo_cancellation
     }
 }
 

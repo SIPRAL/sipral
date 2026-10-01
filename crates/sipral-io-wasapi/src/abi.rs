@@ -357,6 +357,18 @@ impl AudioClientProperties {
         category: AUDIO_CATEGORY_COMMUNICATIONS,
         options: STREAMOPTIONS_NONE,
     };
+
+    /// A call past the endpoint's processing: the same category, so routing
+    /// and ducking still treat it as a call, with
+    /// `AUDCLNT_STREAMOPTIONS_RAW`, which takes the echo canceller and the
+    /// rest out of its path. For an application that turned the platform's
+    /// echo cancellation off.
+    pub(crate) const COMMUNICATIONS_RAW: Self = Self {
+        size: Self::BYTES,
+        is_offload: 0,
+        category: AUDIO_CATEGORY_COMMUNICATIONS,
+        options: STREAMOPTIONS_RAW,
+    };
 }
 
 /// `AudioCategory_Communications`, from the `AUDIO_STREAM_CATEGORY`
@@ -372,6 +384,10 @@ pub(crate) const AUDIO_CATEGORY_COMMUNICATIONS: i32 = 3;
 /// `AUDCLNT_STREAMOPTIONS_NONE`, from `audiosessiontypes.h`: the default
 /// treatment, which is the one wanted.
 pub(crate) const STREAMOPTIONS_NONE: i32 = 0;
+
+/// `AUDCLNT_STREAMOPTIONS_RAW`, from `audiosessiontypes.h`: the stream
+/// bypasses the endpoint's signal processing.
+pub(crate) const STREAMOPTIONS_RAW: i32 = 1;
 
 /// `IAudioRenderClientVtbl`, from `Audioclient.h`: `GetBuffer`,
 /// `ReleaseBuffer`. Five slots.
@@ -865,6 +881,14 @@ mod tests {
             asked.options, 1,
             "AUDCLNT_STREAMOPTIONS_RAW takes the stream past the processing"
         );
+
+        // and a call with the echo canceller turned off: the same category,
+        // past the processing
+        let raw = AudioClientProperties::COMMUNICATIONS_RAW;
+        assert_eq!(raw.size, 16);
+        assert_eq!(raw.category, super::AUDIO_CATEGORY_COMMUNICATIONS);
+        assert_eq!(raw.options, super::STREAMOPTIONS_RAW);
+        assert_eq!(raw.options, 1);
     }
 
     #[test]

@@ -47,6 +47,9 @@ struct State {
     hung: bool,
     rate_hz: u32,
     system_echo_cancellation: bool,
+    /// Whether the engine asked for the platform's echo cancellation; a
+    /// stream claims it only when the platform has it and it was asked for.
+    echo_asked: bool,
     opens: usize,
     ringer_opens: usize,
     duplex_only: bool,
@@ -106,6 +109,7 @@ impl FakeControl {
                     hung: false,
                     rate_hz,
                     system_echo_cancellation: false,
+                    echo_asked: true,
                     opens: 0,
                     ringer_opens: 0,
                     duplex_only: false,
@@ -210,6 +214,12 @@ impl FakeControl {
     /// Whether the fake's microphone claims the platform cancels echo.
     pub fn set_system_echo_cancellation(&self, on: bool) {
         lock(&self.state).system_echo_cancellation = on;
+    }
+
+    /// Whether the engine asked the platform for its echo cancellation.
+    #[must_use]
+    pub fn echo_cancellation_asked(&self) -> bool {
+        lock(&self.state).echo_asked
     }
 
     /// Whether the fake behaves like a duplex-only platform: the microphone
@@ -394,7 +404,8 @@ impl FakeBackend {
                 / wanted.sample_rate_hz.max(1) as usize,
         };
         state.opens += 1;
-        Ok((identity, plugged, format, state.system_echo_cancellation))
+        let cancels = state.system_echo_cancellation && state.echo_asked;
+        Ok((identity, plugged, format, cancels))
     }
 }
 
@@ -405,6 +416,10 @@ impl Backend for FakeBackend {
 
     fn poll_notice(&mut self) -> Option<Notice> {
         lock(&self.state).notices.pop_front()
+    }
+
+    fn set_system_echo_cancellation(&mut self, on: bool) {
+        lock(&self.state).echo_asked = on;
     }
 
     fn open_capture(

@@ -209,6 +209,11 @@ pub(crate) const PROPERTY_IS_RUNNING: u32 = 2001;
 /// `kAudioOutputUnitProperty_EnableIO`.
 pub(crate) const PROPERTY_ENABLE_IO: u32 = 2003;
 
+/// `kAUVoiceIOProperty_BypassVoiceProcessing`: a `UInt32` on the global
+/// scope of the voice-processing unit, nonzero to run it with its echo
+/// canceller, gain control and noise suppression out of the path.
+pub(crate) const PROPERTY_BYPASS_VOICE_PROCESSING: u32 = 2100;
+
 /// `kAudioOutputUnitProperty_SetInputCallback`.
 pub(crate) const PROPERTY_SET_INPUT_CALLBACK: u32 = 2005;
 

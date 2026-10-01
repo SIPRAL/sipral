@@ -44,6 +44,9 @@ const ROOM_WAIT: Duration = Duration::from_secs(2);
 pub(crate) struct CoreAudioBackend {
     #[cfg(target_os = "macos")]
     monitor: Option<sipral_io_coreaudio::DeviceMonitor>,
+    /// Whether the voice unit runs its echo canceller, or is opened with
+    /// its processing bypassed.
+    voice_processing: bool,
 }
 
 /// One unit, shared by its halves: two for the voice unit, one for a unit
@@ -56,6 +59,9 @@ struct Unit {
     input: String,
     latency: Duration,
     voice: bool,
+    /// Whether the voice unit's processing runs: false for a unit opened
+    /// with it bypassed, and for one that only plays.
+    processing: bool,
 }
 
 impl Unit {
@@ -83,6 +89,7 @@ impl CoreAudioBackend {
         Self {
             #[cfg(target_os = "macos")]
             monitor: sipral_io_coreaudio::DeviceMonitor::new().ok(),
+            voice_processing: true,
         }
     }
 
@@ -93,6 +100,7 @@ impl CoreAudioBackend {
         speaker: Option<&str>,
         microphone: Option<&str>,
         wanted: Format,
+        voice_processing: bool,
     ) -> Result<Arc<Unit>, BackendError> {
         let frame = u32::try_from(wanted.frame_samples).unwrap_or(960);
         let format = StreamFormat::new(wanted.sample_rate_hz, frame).ok_or_else(|| {
@@ -103,6 +111,7 @@ impl CoreAudioBackend {
         })?;
         let mut config = StreamConfig::new(format);
         config.kind = kind;
+        config.voice_processing = voice_processing;
         #[cfg(target_os = "macos")]
         {
             use sipral_io_coreaudio::DeviceChoice;
@@ -133,6 +142,7 @@ impl CoreAudioBackend {
             input,
             latency,
             voice,
+            processing: voice && voice_processing,
         }))
     }
 }
@@ -243,7 +253,13 @@ impl Backend for CoreAudioBackend {
         speaker: Option<&str>,
         wanted: Format,
     ) -> Duplex {
-        match Self::open_unit(StreamKind::Voice, speaker, microphone, wanted) {
+        match Self::open_unit(
+            StreamKind::Voice,
+            speaker,
+            microphone,
+            wanted,
+            self.voice_processing,
+        ) {
             Ok(unit) => (
                 Ok(Box::new(Half {
                     unit: Arc::clone(&unit),
@@ -275,11 +291,15 @@ impl Backend for CoreAudioBackend {
     ) -> Result<Box<dyn PlaybackStream>, BackendError> {
         // an output on its own — the ringer's — is a unit that only plays,
         // beside the call's voice unit rather than a second one of those
-        let unit = Self::open_unit(StreamKind::Playback, identity, None, wanted)?;
+        let unit = Self::open_unit(StreamKind::Playback, identity, None, wanted, false)?;
         Ok(Box::new(Half {
             unit,
             capture: false,
         }))
+    }
+
+    fn set_system_echo_cancellation(&mut self, on: bool) {
+        self.voice_processing = on;
     }
 
     fn duplex_only(&self) -> bool {
@@ -358,7 +378,7 @@ impl CaptureStream for Half {
     }
 
     fn system_echo_cancellation(&self) -> bool {
-        true
+        self.unit.processing
     }
 }
 

@@ -42,6 +42,10 @@ pub(crate) const CONTENT_SPEECH: i32 = 1;
 pub(crate) const CONTENT_SONIFICATION: i32 = 4;
 /// `AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION`.
 pub(crate) const PRESET_VOICE_COMMUNICATION: i32 = 7;
+/// `AAUDIO_INPUT_PRESET_VOICE_RECOGNITION`: speech, tuned for a recogniser,
+/// with no echo canceller and no gain control in its path, on every device
+/// (where `UNPROCESSED` is optional).
+pub(crate) const PRESET_VOICE_RECOGNITION: i32 = 6;
 /// `AAUDIO_CALLBACK_RESULT_CONTINUE`, `AAUDIO_CALLBACK_RESULT_STOP`.
 pub(crate) const CALLBACK_CONTINUE: i32 = 0;
 pub(crate) const CALLBACK_STOP: i32 = 1;

@@ -44,6 +44,11 @@ pub enum Category {
     /// default. `IAudioClient2` arrived in Windows 8; a machine without it is
     /// older than any supported Windows.
     Unavailable,
+    /// The stream was declared `AudioCategory_Communications` with
+    /// `AUDCLNT_STREAMOPTIONS_RAW`, and Windows accepted: a call for routing
+    /// and ducking, with the endpoint's processing — its echo canceller
+    /// among it — out of the path, as the application asked.
+    Raw,
     /// `SetClientProperties` refused, carrying this.
     ///
     /// The stream still opened — the category is asked for before the client
@@ -60,15 +65,16 @@ impl Category {
     /// What is left up there is the plumbing: an identifier, a vtable slot and
     /// a structure, none of which has an opinion.
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) const fn from_status(status: HResult) -> Self {
-        if status.is_ok() {
-            Self::Communications
-        } else {
-            Self::Refused(status)
+    pub(crate) const fn from_status(status: HResult, processing: bool) -> Self {
+        match (status.is_ok(), processing) {
+            (true, true) => Self::Communications,
+            (true, false) => Self::Raw,
+            (false, _) => Self::Refused(status),
         }
     }
 
-    /// Whether the stream is a communications stream.
+    /// Whether the stream is a communications stream with the endpoint's
+    /// processing behind it; [`Category::Raw`] is a call too, but has none.
     ///
     /// `false` is the case worth acting on: the application's own processor is
     /// what stands between the far end and its own echo then, attached at the
@@ -84,6 +90,7 @@ impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::Communications => f.write_str("a communications stream"),
+            Self::Raw => f.write_str("a communications stream past the endpoint's processing"),
             Self::Unavailable => {
                 f.write_str("an ordinary stream: this client has no IAudioClient2")
             }
@@ -109,13 +116,24 @@ mod tests {
 
     #[test]
     fn only_a_call_that_returned_success_leaves_a_communications_stream() {
-        assert_eq!(Category::from_status(HResult::OK), Category::Communications);
+        assert_eq!(
+            Category::from_status(HResult::OK, true),
+            Category::Communications
+        );
+        assert_eq!(Category::from_status(HResult::OK, false), Category::Raw);
+        assert!(
+            !Category::Raw.is_communications(),
+            "raw has no processing to claim"
+        );
         // AUDCLNT_E_ALREADY_INITIALIZED, and E_INVALIDARG, which is what a
         // cbSize from the wrong version of the header would earn
         for refusal in [0x8889_0002_u32, 0x8007_0057] {
             let status = HResult::new(refusal.cast_signed());
-            assert_eq!(Category::from_status(status), Category::Refused(status));
-            assert!(!Category::from_status(status).is_communications());
+            assert_eq!(
+                Category::from_status(status, true),
+                Category::Refused(status)
+            );
+            assert!(!Category::from_status(status, true).is_communications());
         }
     }
 

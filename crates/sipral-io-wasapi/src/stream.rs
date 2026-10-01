@@ -124,6 +124,12 @@ pub struct StreamConfig {
     /// the audio engine's period, and asking for a longer one would add
     /// latency the caller cannot spend.
     pub depth_frames: usize,
+    /// Whether the stream asks for the endpoint's own voice processing — the
+    /// echo canceller, noise suppression and gain control a communications
+    /// stream gets — or is a communications stream past it
+    /// (`AUDCLNT_STREAMOPTIONS_RAW`): on by default. Raw keeps what the
+    /// category does for routing and ducking, and takes the processing out.
+    pub processing: bool,
 }
 
 impl StreamConfig {
@@ -134,6 +140,7 @@ impl StreamConfig {
             format,
             device: DeviceChoice::System,
             depth_frames: DEFAULT_DEPTH_FRAMES,
+            processing: true,
         }
     }
 
@@ -357,9 +364,14 @@ impl Session {
             let wanted = config.format;
             let choice = config.device.clone();
             let depth = config.depth_frames.max(2);
+            let processing = config.processing;
             thread::Builder::new()
                 .name("sipral-wasapi".to_string())
-                .spawn(move || run(&shared, &choice, direction, wanted, depth, &sender))
+                .spawn(move || {
+                    run(
+                        &shared, &choice, direction, wanted, depth, processing, &sender,
+                    );
+                })
                 .map_err(|_| Error::NoThread)?
         };
 
@@ -896,6 +908,7 @@ fn run(
     direction: Direction,
     wanted: StreamFormat,
     depth: usize,
+    processing: bool,
     sender: &mpsc::Sender<Result<Opened, Error>>,
 ) {
     let apartment = match Apartment::enter() {
@@ -907,7 +920,7 @@ fn run(
         }
     };
 
-    match build(shared, choice, direction, wanted, depth) {
+    match build(shared, choice, direction, wanted, depth, processing) {
         Ok((engine, opened)) => {
             let _ = sender.send(Ok(opened));
             serve(shared, engine, direction);
@@ -930,6 +943,7 @@ fn build(
     direction: Direction,
     wanted: StreamFormat,
     depth: usize,
+    processing: bool,
 ) -> Result<(Engine, Opened), Error> {
     let enumerator = endpoint::enumerator()?;
     let opened = endpoint::open_choice(&enumerator, choice, direction)?;
@@ -958,7 +972,7 @@ fn build(
     // what the rest of the answers depend on: what Windows offers a
     // communications stream and what it offers a media one are not obliged to
     // be the same format, the same period, or the same processing.
-    let category = ask_for_communications(&client);
+    let category = ask_for_communications(&client, processing);
 
     let settled = negotiate(&client, wanted.sample_rate_hz())?;
     let format = mixformat::describe(&settled)?;
@@ -1057,7 +1071,7 @@ fn build(
 /// the endpoint would have done to it; what would be wrong is opening one and
 /// letting the application believe otherwise, which is what [`Category`] is
 /// for.
-fn ask_for_communications(client: &Com<AudioClientVtable>) -> Category {
+fn ask_for_communications(client: &Com<AudioClientVtable>, processing: bool) -> Category {
     // bound to a local so that what is pointed at outlives the call
     let interface = AudioClient2Vtable::IID;
     let mut raw: *mut c_void = ptr::null_mut();
@@ -1082,12 +1096,16 @@ fn ask_for_communications(client: &Com<AudioClientVtable>) -> Category {
         return Category::Unavailable;
     };
 
-    let asked = AudioClientProperties::COMMUNICATIONS;
+    let asked = if processing {
+        AudioClientProperties::COMMUNICATIONS
+    } else {
+        AudioClientProperties::COMMUNICATIONS_RAW
+    };
     // SAFETY: a live client and a live structure that outlives the call, whose
     // own first field says how much of it Windows may read.
     let status =
         unsafe { (client.vtable().set_client_properties)(client.as_ptr(), &raw const asked) };
-    Category::from_status(HResult::new(status))
+    Category::from_status(HResult::new(status), processing)
 }
 
 /// A `REFERENCE_TIME` as a duration.

@@ -3,13 +3,13 @@
 
 //! The engine: the devices named, chosen, opened and kept open.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use sipral_io_common::level::{Controls, Gain, Level};
+use sipral_io_common::level::{Channel, Controls, Gain, Level};
 
 use crate::backend::{
     Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream,
@@ -19,7 +19,7 @@ use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };
 use crate::probe::{DEFAULT_PROBE_WAIT, probe};
-use crate::pump::{Carried, Command, Finished, Pump, Report, Ring, Stream};
+use crate::pump::{CallChannels, Carried, Command, Finished, Pump, Report, Ring, Stream};
 
 /// When the devices are opened.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,6 +47,16 @@ pub struct Config {
     /// between its own rate and this one; a platform that answers with
     /// another rate is taken at its word.
     pub device_rate_hz: u32,
+    /// Whether the platform's own echo cancellation runs behind the
+    /// microphone, where the platform lets it be turned off: on by default.
+    /// Off, the devices open without it — the voice-processing unit
+    /// bypassed on macOS and iOS, a raw stream rather than a communications
+    /// one on Windows, the plain recognition preset rather than the
+    /// voice-communication one on Android — for a headset, which has no
+    /// echo to cancel and whose speech the processing only colours, or for
+    /// an application that runs a canceller of its own on each call.
+    /// [`Info::system_echo_cancellation`] says what the platform did.
+    pub system_echo_cancellation: bool,
 }
 
 impl Default for Config {
@@ -55,6 +65,7 @@ impl Default for Config {
             activation: Activation::Automatic,
             probe_wait: DEFAULT_PROBE_WAIT,
             device_rate_hz: 48_000,
+            system_echo_cancellation: true,
         }
     }
 }
@@ -161,6 +172,9 @@ pub struct Engine {
     /// attached before a manual activation, and every call across a
     /// deactivation, handed to the next pump when it starts.
     parked: Carried,
+    /// Each call's own gain, mute and meter, from its first attach until
+    /// [`Engine::forget_call`].
+    call_channels: HashMap<CallId, CallChannels>,
     ringing: bool,
     events: VecDeque<AudioEvent>,
 }
@@ -226,11 +240,12 @@ impl Engine {
     /// on, so that what the pump tells a call about time agrees with what
     /// the stack polling it says.
     pub fn new(
-        backend: Box<dyn Backend>,
+        mut backend: Box<dyn Backend>,
         config: Config,
         transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
         now: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Self {
+        backend.set_system_echo_cancellation(config.system_echo_cancellation);
         let duplex_only = backend.duplex_only();
         let chooses = PerRole {
             microphone: backend.chooses(Role::Microphone),
@@ -253,6 +268,7 @@ impl Engine {
             now,
             attached: Vec::new(),
             parked: Vec::new(),
+            call_channels: HashMap::new(),
             ringing: false,
             events: VecDeque::new(),
         }
@@ -504,13 +520,81 @@ impl Engine {
         } else {
             Ok(())
         };
+        let channels = self.channels_of(id);
         match self.pump.as_ref() {
             Some(pump) => {
-                let _ = pump.sender.send(Command::Attach(id, audio));
+                let _ = pump.sender.send(Command::Attach(id, audio, channels));
             }
             None => self.parked.push((id, audio)),
         }
         opened
+    }
+
+    /// A call's own controls, made at its first attach.
+    fn channels_of(&mut self, id: CallId) -> CallChannels {
+        let rate = self.config.device_rate_hz;
+        self.call_channels
+            .entry(id)
+            .or_insert_with(|| CallChannels::new(rate))
+            .clone()
+    }
+
+    /// Forget a call's own controls, once its media has ended for good. A
+    /// detach keeps them, so that a call moved out of the mix and back —
+    /// into a conference, say — keeps its gain and its mute.
+    pub fn forget_call(&mut self, id: CallId) {
+        self.call_channels.remove(&id);
+    }
+
+    /// One direction of one call's own controls: `Input` is what the
+    /// microphone sends it, `Output` what it plays into the loudspeaker.
+    fn call_channel(&self, id: CallId, direction: Direction) -> Option<&Channel> {
+        self.call_channels.get(&id).map(|channels| match direction {
+            Direction::Input => &*channels.up,
+            Direction::Output => &*channels.down,
+        })
+    }
+
+    /// Set one call's own gain in one direction, on top of the stack's, from
+    /// the next frame on: what the microphone sends that call alone, or how
+    /// loud that call is in the loudspeaker beside the others. `false` for a
+    /// call this engine has never carried, or has forgotten.
+    #[must_use]
+    pub fn set_call_gain(&self, id: CallId, direction: Direction, gain: Gain) -> bool {
+        self.call_channel(id, direction)
+            .map(|channel| channel.set_gain(gain))
+            .is_some()
+    }
+
+    /// One call's own gain in one direction.
+    #[must_use]
+    pub fn call_gain(&self, id: CallId, direction: Direction) -> Option<Gain> {
+        self.call_channel(id, direction).map(Channel::gain)
+    }
+
+    /// Mute or unmute one call in one direction: the far end of that call
+    /// alone hears silence, or that call alone is silent in the
+    /// loudspeaker, while every other call goes on. The muted direction
+    /// still runs, so the far end hears a stream rather than a gap.
+    #[must_use]
+    pub fn set_call_muted(&self, id: CallId, direction: Direction, muted: bool) -> bool {
+        self.call_channel(id, direction)
+            .map(|channel| channel.set_muted(muted))
+            .is_some()
+    }
+
+    /// Whether one call is muted in one direction.
+    #[must_use]
+    pub fn call_muted(&self, id: CallId, direction: Direction) -> Option<bool> {
+        self.call_channel(id, direction).map(Channel::is_muted)
+    }
+
+    /// One call's meter in one direction: the loudest sample of the last
+    /// tenth of a second of what went to it, or of what it played, after its
+    /// own gain and mute.
+    #[must_use]
+    pub fn call_level(&self, id: CallId, direction: Direction) -> Option<Level> {
+        self.call_channel(id, direction).map(Channel::level)
     }
 
     /// Stop carrying it. Under [`Activation::Automatic`] the last one closes
@@ -653,9 +737,13 @@ impl Engine {
                 Change::Reopened(Role::Ringer),
             );
         }
-        if let Some(pump) = self.pump.as_ref() {
-            for (id, audio) in self.parked.drain(..) {
-                let _ = pump.sender.send(Command::Attach(id, audio));
+        if self.pump.is_some() {
+            let parked: Vec<_> = self.parked.drain(..).collect();
+            for (id, audio) in parked {
+                let channels = self.channels_of(id);
+                if let Some(pump) = self.pump.as_ref() {
+                    let _ = pump.sender.send(Command::Attach(id, audio, channels));
+                }
             }
         }
         microphone.and(speaker)

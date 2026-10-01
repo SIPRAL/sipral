@@ -73,6 +73,21 @@ pub struct StreamConfig {
     /// The rate asked for. AAudio may answer with another, which
     /// [`Stream::sample_rate`] says.
     pub sample_rate_hz: u32,
+    /// For a microphone, whether it opens with the voice-communication
+    /// preset, behind which the platform cancels the call's echo, or with
+    /// the voice-recognition one, which has no canceller in its path. Read
+    /// for nothing else.
+    pub echo_cancellation: bool,
+}
+
+/// The input preset a call's microphone opens with: voice communication,
+/// behind the platform's echo canceller, or voice recognition, with none.
+const fn input_preset(echo_cancellation: bool) -> i32 {
+    if echo_cancellation {
+        api::PRESET_VOICE_COMMUNICATION
+    } else {
+        api::PRESET_VOICE_RECOGNITION
+    }
 }
 
 /// Why a stream did not open.
@@ -232,7 +247,7 @@ impl Stream {
             match config.usage {
                 Usage::Microphone => {
                     (api.set_performance_mode)(builder, api::PERFORMANCE_LOW_LATENCY);
-                    (api.set_input_preset)(builder, api::PRESET_VOICE_COMMUNICATION);
+                    (api.set_input_preset)(builder, input_preset(config.echo_cancellation));
                     (api.set_content_type)(builder, api::CONTENT_SPEECH);
                 }
                 Usage::Call => {
@@ -571,6 +586,7 @@ mod tests {
             usage,
             device: None,
             sample_rate_hz,
+            echo_cancellation: true,
         })
         .unwrap_or_else(|error| panic!("{usage:?} at {sample_rate_hz} Hz: {error}"))
     }

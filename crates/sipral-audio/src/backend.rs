@@ -182,6 +182,13 @@ pub trait Backend: Send {
     fn chooses(&self, role: Role) -> bool {
         role == Role::Speaker || !self.duplex_only()
     }
+
+    /// Whether every stream opened from now on asks for the platform's own
+    /// echo cancellation behind the microphone (`on`, the default) or opens
+    /// without it ([`Config::system_echo_cancellation`](crate::Config::system_echo_cancellation)).
+    /// A platform with nothing to turn off ignores it, and a stream says
+    /// what it got ([`CaptureStream::system_echo_cancellation`]).
+    fn set_system_echo_cancellation(&mut self, _on: bool) {}
 }
 
 /// A call's two halves, as a platform answered for each.

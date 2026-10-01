@@ -39,6 +39,8 @@ pub(crate) struct WasapiBackend {
     /// Set to stop the watcher.
     stop: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
+    /// Whether streams ask for the endpoint's voice processing, or open raw.
+    processing: bool,
 }
 
 impl WasapiBackend {
@@ -62,6 +64,7 @@ impl WasapiBackend {
             notices,
             stop,
             watcher,
+            processing: true,
         }
     }
 }
@@ -109,7 +112,11 @@ fn refused(error: &sipral_io_wasapi::Error) -> BackendError {
     }
 }
 
-fn config_for(identity: Option<&str>, wanted: Format) -> Result<StreamConfig, BackendError> {
+fn config_for(
+    identity: Option<&str>,
+    wanted: Format,
+    processing: bool,
+) -> Result<StreamConfig, BackendError> {
     let frame = u32::try_from(wanted.frame_samples).unwrap_or(960);
     let format = StreamFormat::new(wanted.sample_rate_hz, frame).ok_or_else(|| {
         BackendError::Refused(format!(
@@ -117,9 +124,13 @@ fn config_for(identity: Option<&str>, wanted: Format) -> Result<StreamConfig, Ba
             wanted.sample_rate_hz, wanted.frame_samples
         ))
     })?;
-    Ok(match identity {
+    let config = match identity {
         Some(identity) => StreamConfig::on(DeviceId::new(identity), format),
         None => StreamConfig::new(format),
+    };
+    Ok(StreamConfig {
+        processing,
+        ..config
     })
 }
 
@@ -157,6 +168,10 @@ impl Backend for WasapiBackend {
         Ok(found)
     }
 
+    fn set_system_echo_cancellation(&mut self, on: bool) {
+        self.processing = on;
+    }
+
     fn poll_notice(&mut self) -> Option<Notice> {
         self.notices
             .lock()
@@ -169,7 +184,7 @@ impl Backend for WasapiBackend {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn CaptureStream>, BackendError> {
-        let config = config_for(identity, wanted)?;
+        let config = config_for(identity, wanted, self.processing)?;
         let mut stream = WasapiCapture::open(&config).map_err(|error| refused(&error))?;
         stream.start().map_err(|error| refused(&error))?;
         Ok(Box::new(Capture {
@@ -184,7 +199,7 @@ impl Backend for WasapiBackend {
         identity: Option<&str>,
         wanted: Format,
     ) -> Result<Box<dyn PlaybackStream>, BackendError> {
-        let config = config_for(identity, wanted)?;
+        let config = config_for(identity, wanted, self.processing)?;
         let mut stream = WasapiPlayback::open(&config).map_err(|error| refused(&error))?;
         stream.start().map_err(|error| refused(&error))?;
         Ok(Box::new(Playback {

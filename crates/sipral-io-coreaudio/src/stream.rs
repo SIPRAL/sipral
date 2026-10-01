@@ -126,6 +126,13 @@ pub struct StreamConfig {
     pub capture_device: DeviceChoice,
     /// Frames of buffering between the device and the caller, per direction.
     pub depth_frames: usize,
+    /// Whether the voice-processing unit runs its processing — the echo
+    /// canceller, the gain control and the noise suppression — or is
+    /// opened with it bypassed: on by default. Read only by a
+    /// [`StreamKind::Voice`] stream; the unit and its single claim on the
+    /// process are the same either way, only the processing is out of the
+    /// path.
+    pub voice_processing: bool,
 }
 
 impl StreamConfig {
@@ -140,6 +147,7 @@ impl StreamConfig {
             #[cfg(target_os = "macos")]
             capture_device: DeviceChoice::System,
             depth_frames: DEFAULT_DEPTH_FRAMES,
+            voice_processing: true,
         }
     }
 
@@ -1263,6 +1271,18 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
 
     #[cfg(target_os = "macos")]
     name_devices(unit, config, voice)?;
+
+    if voice && !config.voice_processing {
+        let bypassed: u32 = 1;
+        set(
+            unit,
+            "AudioUnitSetProperty (BypassVoiceProcessing)",
+            abi::PROPERTY_BYPASS_VOICE_PROCESSING,
+            abi::SCOPE_GLOBAL,
+            0,
+            &bypassed,
+        )?;
+    }
 
     set(
         unit,

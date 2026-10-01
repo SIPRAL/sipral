@@ -11,7 +11,7 @@ use crate::backend::BackendError;
 use crate::device::{Change, DeviceHandle, Direction, Origin, Role, SelectError, Selection};
 use crate::engine::{Activation, Config, Engine};
 use crate::fake::{FakeCallControl, FakeControl};
-use crate::{CallId, Gain, Outgoing};
+use crate::{CallId, Gain, Level, Outgoing};
 
 const RATE: u32 = 48_000;
 
@@ -31,6 +31,7 @@ fn engine_with(activation: Activation, fake: &FakeControl) -> (Engine, Sent) {
             activation,
             probe_wait: Duration::from_millis(200),
             device_rate_hz: RATE,
+            system_echo_cancellation: true,
         },
         Box::new(move |id, packet| recorded.lock().unwrap().push((id, packet))),
         Arc::new(Instant::now),
@@ -886,6 +887,106 @@ fn the_info_says_whether_the_platform_cancels_echo_and_what_the_delay_is() {
     assert_eq!(info.microphone_rate_hz, Some(RATE));
 }
 
+/// Turned off, the platform's echo cancellation is not asked for, and the
+/// streams say they run without it.
+#[test]
+fn the_platforms_echo_cancellation_can_be_turned_off() {
+    let fake = a_desk();
+    fake.set_system_echo_cancellation(true);
+    let engine = Engine::new(
+        fake.backend(),
+        Config {
+            activation: Activation::Manual,
+            probe_wait: Duration::from_millis(200),
+            device_rate_hz: RATE,
+            system_echo_cancellation: false,
+        },
+        Box::new(|_, _| {}),
+        Arc::new(Instant::now),
+    );
+    let mut engine = engine;
+    assert!(!fake.echo_cancellation_asked());
+    engine.refresh().unwrap();
+    engine.activate().unwrap();
+    assert!(!engine.info().system_echo_cancellation);
+}
+
+/// One call's own mute and gain, in each direction, leave the other call
+/// alone: the far end of the muted call hears silence while the other's
+/// hears the microphone, and the call turned down is quieter in the
+/// loudspeaker's sum; each call's meter reads its own audio.
+#[test]
+fn one_calls_mute_gain_and_meter_are_its_own() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    assert!(
+        !engine.set_call_muted(1, Direction::Input, true),
+        "not carried yet"
+    );
+    let muted = FakeCallControl::new(8_000, 1_000, destination());
+    let open = FakeCallControl::new(8_000, 2_000, destination());
+    engine.attach(1, muted.call()).unwrap();
+    engine.attach(2, open.call()).unwrap();
+    assert!(engine.set_call_muted(1, Direction::Input, true));
+    assert!(engine.set_call_gain(2, Direction::Output, Gain::from_ratio(0.5)));
+    assert_eq!(engine.call_muted(1, Direction::Input), Some(true));
+    assert_eq!(engine.call_muted(2, Direction::Input), Some(false));
+    assert_eq!(
+        engine.call_gain(2, Direction::Output),
+        Some(Gain::from_ratio(0.5))
+    );
+    wait_ticks(&engine, 8);
+    for _ in 0..10 {
+        fake.speak_into("builtin-mic", &[3_000; 960]);
+    }
+    wait_ticks(&engine, 4);
+    let silent = muted.captured();
+    let heard = open.captured();
+    assert!(
+        silent
+            .last()
+            .is_some_and(|frame| frame.iter().all(|s| *s == 0))
+    );
+    assert!(
+        heard
+            .last()
+            .is_some_and(|frame| frame.iter().all(|s| (*s - 3_000).abs() < 100))
+    );
+    assert_eq!(
+        engine.call_level(1, Direction::Input).map(Level::peak),
+        Some(0)
+    );
+    let up = i32::from(
+        engine
+            .call_level(2, Direction::Input)
+            .map_or(0, Level::peak),
+    );
+    // the resampler overshoots the step from silence to the constant, and
+    // the meter holds that peak for a window or two
+    assert!((2_900..=3_600).contains(&up), "{up}");
+    // the first call at full volume and the second at half: 1000 + 1000
+    let played = fake.played_by("builtin-out");
+    let tail = &played[played.len() - 480..];
+    assert!(
+        tail.iter().all(|s| (*s - 2_000).abs() < 100),
+        "{:?}",
+        &tail[..8]
+    );
+    let down = i32::from(
+        engine
+            .call_level(2, Direction::Output)
+            .map_or(0, Level::peak),
+    );
+    assert!((down - 1_000).abs() < 100, "{down}");
+
+    // a detach keeps them, a call forgotten has none
+    engine.detach(1);
+    assert_eq!(engine.call_muted(1, Direction::Input), Some(true));
+    engine.forget_call(1);
+    assert_eq!(engine.call_muted(1, Direction::Input), None);
+}
+
 /// On a platform that runs one duplex unit, the microphone and the ringer
 /// cannot be put on devices of their own, and say so.
 #[test]
@@ -1149,7 +1250,13 @@ fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
         ))
         .unwrap();
     let call = FakeCallControl::new(RATE, 7, destination());
-    commands.send(Command::Attach(1, call.call())).unwrap();
+    commands
+        .send(Command::Attach(
+            1,
+            call.call(),
+            crate::pump::CallChannels::new(RATE),
+        ))
+        .unwrap();
 
     let steady_from = TICKS_PER_SLICE * WARM_UP;
     let mut starved = 0;
