@@ -102,6 +102,16 @@ impl UserAgent {
         }
     }
 
+    /// Whether an account on a connection of its own has asked for one that
+    /// is not bound yet: what makes a connection that could not be opened
+    /// news to this agent, beside [`UserAgent::wants_a_stream`]. The account
+    /// goes on waiting for it as long as it would have; only the reason is
+    /// the application's to hear.
+    #[must_use]
+    pub fn wants_a_flow(&self) -> bool {
+        !self.flows_wanted.is_empty()
+    }
+
     /// A REGISTER for `account` that has to wait for its connection: held
     /// until the connection is bound or the wait runs out.
     pub(crate) fn register_waits_for_flow(

@@ -969,8 +969,10 @@ entry! {
 /// already retired — is a connection that could not be opened. While the
 /// stack is waiting for the stream a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`
 /// asked for, that is the answer to it, and everything waiting stops
-/// waiting now (`sipral_ua::UserAgent::stream_unavailable`). A number never
-/// bound is refused when nothing is waiting, as it always was.
+/// waiting now (`sipral_ua::UserAgent::stream_unavailable`). While an
+/// account on a connection of its own waits for one, the failure is raised
+/// with its reason and the account waits on, as its REGISTER would have. A
+/// number never bound is refused when nothing is waiting, as it always was.
 fn lose(
     state: &mut StackState,
     transport: u32,
@@ -979,12 +981,17 @@ fn lose(
     detail: String,
     now: std::time::Instant,
 ) -> Result<(), Fail> {
-    let waiting = state.agent.wants_a_stream();
+    let streaming = state.agent.wants_a_stream();
+    // an account's own connection that could not be opened is raised too,
+    // with its reason, while the account waits on for it as long as it would
+    let waiting = streaming || state.agent.wants_a_flow();
     let Some(id) = state.transports.resolve(transport) else {
         if !waiting {
             return named(state, transport).map(|_| ());
         }
-        state.agent.stream_unavailable(now);
+        if streaming {
+            state.agent.stream_unavailable(now);
+        }
         state.lost.push(Lost {
             transport,
             protocol: 0,
@@ -1007,7 +1014,7 @@ fn lose(
             now,
         )
         .map_err(|error| received_badly(&error))?;
-    if waiting && !was_up {
+    if streaming && !was_up {
         state.agent.stream_unavailable(now);
     }
     state.lost.push(Lost {
@@ -2249,6 +2256,53 @@ pub(crate) mod tests {
             "{}",
             last_error_text()
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The connection an account on a TLS connection of its own asked for,
+    /// told as one that could not be opened, is raised with the TLS
+    /// library's reason, as every other loss is; nothing goes out over the
+    /// stack's UDP meanwhile.
+    #[test]
+    fn an_account_connection_that_could_not_be_opened_is_raised_with_its_reason() {
+        let mut observed = Observed::default();
+        let (status, handle) = create(&config(record, &mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let on_tls = SipralAccountConfig {
+            stream_protocol: SipralTransport::Tls as u32,
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        assert_eq!(
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok
+        );
+        poll(handle, 1_000);
+
+        let said = "certificate verify failed: self-signed certificate";
+        let failure = refused(9, SipralTlsFailure::Untrusted, said);
+        assert_eq!(
+            unsafe { sipral_stack_transport_failed_with(handle, &raw const failure, 1_100) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_100);
+        assert_eq!(
+            observed
+                .transports_lost
+                .iter()
+                .map(|lost| (lost.0, lost.3, lost.4.clone()))
+                .collect::<Vec<_>>(),
+            [(9, SipralTlsFailure::Untrusted as u32, said.to_owned())]
+        );
+        assert!(drain(handle).is_empty(), "nothing over the stack's UDP");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
