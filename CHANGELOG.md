@@ -6065,6 +6065,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **A party this end holds hears silence, not the microphone.** A hold leaves this end's stream `sendonly` (RFC 3264 §8.4), and `MediaSession::capture` went on encoding the microphone into it, so whoever was put on hold heard the room. From the moment the hold is in force until the resume the frame goes out as silence, with digits and the consent beep still written into it (`MediaSession::is_holding`).
 - **The media engine's key stream is forward secure.** Every SDES key, ICE password and DTLS seed came from `SHA-256(media_seed || counter)` with the seed held unchanged, so one read of the engine's memory gave away the keys of every call it had placed (RFC 4086 §6.2). The engine now draws from `KeySource::forward_secure`, which replaces its seed with a one-way step at every block; the endpoint's stream, which replay recordings reproduce, is unchanged.
 
 - **A key's declared lifetime is held to.** An `a=crypto` line's `|2^n` lifetime was parsed and then dropped, so a peer's key opened packets past the count its owner declared (RFC 4568 §6.1). `sipral_rtp::srtp::Policy` has a `lifetime`, which the facade fills from the line, and a `Protector` or `Unprotector` under it protects or opens fewer than that many SRTP and SRTCP packets each, refusing the next with `SrtpError::KeyExhausted`.

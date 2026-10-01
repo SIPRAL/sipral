@@ -339,6 +339,15 @@ pub struct StreamEncryption {
     pub awaiting_keys: bool,
 }
 
+/// What this end's frames carry to the far end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carries {
+    /// The microphone, as the processor left it.
+    Microphone,
+    /// Silence: this end holds the far end.
+    Silence,
+}
+
 /// One call's media.
 #[derive(Debug)]
 pub struct MediaSession {
@@ -384,6 +393,13 @@ pub struct MediaSession {
     /// A captured frame as it goes out when a digit or a beep has been
     /// written into it, held rather than allocated.
     shaped: Vec<i16>,
+    /// What this end's frames carry: silence while this end holds the far
+    /// end (RFC 3264 §8.4), when the stream still sends, so the far end keeps
+    /// hearing that the call is there, but not the microphone.
+    carries: Carries,
+    /// The frame of silence that goes out in place of the microphone while
+    /// this end holds the far end, held rather than allocated.
+    hush: Vec<i16>,
     /// Echo cancellation, gain control and noise suppression, when the
     /// application attached any. `None` is the whole of the cost of not
     /// having one: no history, no copy, no call.
@@ -606,6 +622,8 @@ impl MediaSession {
                 config.consent_tone,
             ),
             shaped: Vec::new(),
+            carries: Carries::Microphone,
+            hush: Vec::new(),
             echo: None,
             render_delay: config.render_delay,
             dialling: Dialling::new(ticks_of(DIGIT_GAP, plan.codec.clock_rate())),
@@ -748,8 +766,8 @@ impl MediaSession {
         self.plan.direction
     }
 
-    /// Whether this end is meant to be sending: false while it holds the far
-    /// end, or while the far end has refused to receive.
+    /// Whether this end is meant to be sending: false while the far end
+    /// holds this one, or has refused to receive.
     #[must_use]
     pub const fn is_sending(&self) -> bool {
         matches!(self.direction(), Direction::SendRecv | Direction::SendOnly)
@@ -759,6 +777,23 @@ impl MediaSession {
     #[must_use]
     pub const fn is_receiving(&self) -> bool {
         matches!(self.direction(), Direction::SendRecv | Direction::RecvOnly)
+    }
+
+    /// Whether this end holds the far end, and so sends it silence in place
+    /// of the microphone ([`MediaSession::capture`]).
+    #[must_use]
+    pub const fn is_holding(&self) -> bool {
+        matches!(self.carries, Carries::Silence)
+    }
+
+    /// Take up the hold the signalling settled: `true` once this end's hold
+    /// is in force, `false` once it has resumed.
+    pub(crate) const fn set_holding(&mut self, holding: bool) {
+        self.carries = if holding {
+            Carries::Silence
+        } else {
+            Carries::Microphone
+        };
     }
 
     /// Where audio goes: the address packets are arriving from once any have,
@@ -1715,8 +1750,11 @@ impl MediaSession {
 impl MediaSession {
     /// Put one frame from the microphone on the wire.
     ///
-    /// `Ok(None)` for a frame that was deliberately not sent: this end is
-    /// holding the far end, or silence suppression swallowed it. The RTP
+    /// `Ok(None)` for a frame that was deliberately not sent: the call is
+    /// held so that this end does not send, or silence suppression swallowed
+    /// it. While this end holds the far end on a stream that still sends
+    /// (RFC 3264 §8.4's `sendonly`), the frame goes out as silence: the
+    /// microphone never reaches a party this end has put on hold. The RTP
     /// timestamp still moves by a frame either way, because §5.1 makes it a
     /// measure of time rather than of packets, and a far end whose timestamps
     /// stopped while the call went on would hear the resumption as a jump.
@@ -1751,11 +1789,15 @@ impl MediaSession {
         // and the buffer a digit or a beep is written into, for the same
         // reason: what goes out is borrowed from it
         let mut shaped = core::mem::take(&mut self.shaped);
+        // and the frame of silence that stands in for the microphone while
+        // this end holds the far end
+        let mut hush = core::mem::take(&mut self.hush);
         // the frame about to be stamped stands for now on the media clock,
         // which is what a sender report pairs with the wall clock (RFC 3550
         // §6.4.1)
         self.rtp.clock_at(self.elapsed(now));
-        let sent = self.encode_frame(samples, echo.as_mut(), &mut shaped);
+        let sent = self.encode_frame(samples, echo.as_mut(), &mut shaped, &mut hush);
+        self.hush = hush;
         self.shaped = shaped;
         self.echo = echo;
         let Some(length) = sent? else {
@@ -1783,6 +1825,7 @@ impl MediaSession {
         samples: &[i16],
         echo: Option<&mut Echo>,
         shaped: &mut Vec<i16>,
+        hush: &mut Vec<i16>,
     ) -> Result<Option<usize>, MediaError> {
         // everything below works on what the processor left, not on the raw
         // microphone: silence suppression measuring uncancelled echo would
@@ -1791,6 +1834,17 @@ impl MediaSession {
         let samples = match echo {
             Some(echo) => echo.process(samples),
             None => samples,
+        };
+        // a far end this end holds hears nothing of the room it was put on
+        // hold from. The processor above still ran on the microphone, so it
+        // keeps its measure of the room for the resume; what goes on is
+        // silence, which a digit or the consent beep is still written into
+        let samples = if self.is_holding() {
+            hush.clear();
+            hush.resize(samples.len(), 0);
+            hush.as_slice()
+        } else {
+            samples
         };
         // a digit being written in the audio, or the consent beep: what the
         // far end is sent, and so what the recording keeps of this side

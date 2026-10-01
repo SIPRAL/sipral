@@ -3828,6 +3828,82 @@ fn a_held_stream_is_not_a_stalled_one() {
     );
 }
 
+/// A far end this end holds hears nothing of this end's microphone: the
+/// stream goes on (RFC 3264 §8.4 leaves it `sendonly`), but what it carries
+/// is silence, however loud the room is; and the resume puts the microphone
+/// back on it.
+#[test]
+fn a_party_this_end_holds_hears_silence_and_the_resume_restores_the_microphone() {
+    const FRAMES: usize = 20;
+    // the de-jitter buffer's start-up delay and what it still holds from
+    // before a change, in frames: what plays inside it was sent earlier
+    const SETTLING: usize = 8;
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let settle = |pair: &mut Pair| {
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        pair.settle();
+    };
+    // what the far end plays of this end's microphone over a run of frames,
+    // and how many of those frames went out at all
+    let mut frames = |pair: &mut Pair| {
+        let mut sent = 0;
+        let mut played = Vec::new();
+        for _ in 0..FRAMES {
+            tone(&mut samples, 8_000, &mut phase);
+            let (datagram, _, heard) = pair.one_way(call, remote, &samples);
+            sent += usize::from(datagram.is_some());
+            played.push(loudness(&heard));
+        }
+        (sent, played)
+    };
+
+    let (_, before) = frames(&mut pair);
+    assert!(
+        before.iter().skip(SETTLING).all(|level| *level > 1_000),
+        "the call never carried the microphone: {before:?}"
+    );
+
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    settle(&mut pair);
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .is_some_and(|session| session.is_holding() && session.is_sending()),
+        "the end that pressed hold does not know it holds, or stopped sending"
+    );
+    let (sent, held) = frames(&mut pair);
+    assert_eq!(sent, FRAMES, "the held stream stopped carrying anything");
+    assert!(
+        held.iter().skip(SETTLING).all(|level| *level < 100),
+        "the party on hold heard this end's microphone: {held:?}"
+    );
+
+    pair.caller
+        .agent
+        .resume(call, pair.now)
+        .expect("the resume");
+    settle(&mut pair);
+    assert!(
+        pair.caller
+            .engine
+            .session(call)
+            .is_some_and(|session| !session.is_holding()),
+        "the resume left this end holding"
+    );
+    let (_, resumed) = frames(&mut pair);
+    assert!(
+        resumed.iter().skip(SETTLING).all(|level| *level > 1_000),
+        "the resume did not put the microphone back on the call: {resumed:?}"
+    );
+}
+
 // -- recording ---------------------------------------------------------------
 
 /// A5: both directions, one file, started and stopped in the middle of a live
@@ -10943,10 +11019,28 @@ fn a_far_end_that_took_the_second_crypto_line_holds_resumes_and_refreshes_with_m
         pair.caller.engine.session(call).expect("media").direction(),
         Direction::RecvOnly
     );
-    let loud = tone_back(&mut pair, call, remote);
+    // the holding end's stream goes on under the key in force, every packet
+    // of it taken by the caller (`tone_back` refuses one that is not), and
+    // carries silence: a party on hold hears nothing of the holding end's
+    // microphone
+    let sent = |pair: &mut Pair| {
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .statistics(pair.now)
+            .packets_sent
+    };
+    let before = sent(&mut pair);
+    let quiet = tone_back(&mut pair, call, remote);
+    assert_eq!(
+        sent(&mut pair) - before,
+        8,
+        "held: the holding end's stream stopped"
+    );
     assert!(
-        loud > 4_000,
-        "held: the holding end's audio came through at {loud}"
+        quiet < 100,
+        "held: the holding end's microphone came through at {quiet}"
     );
 
     for what in [ReOffer::Resume, ReOffer::Refresh] {
@@ -10955,6 +11049,11 @@ fn a_far_end_that_took_the_second_crypto_line_holds_resumes_and_refreshes_with_m
         assert_eq!(failures(&pair), [], "{label}");
         answered_with(&pair.callee, &in_force, &label);
         let there = tone_after(&mut pair, call, remote);
+        // the caller's earpiece did not run while `tone_after` talked the
+        // other way, and a buffer coming out of the hold's silence is in a
+        // pause, where it follows the far end's clock: its first frames are
+        // the far end's time it did not hear, played as concealment
+        let _ = tone_back(&mut pair, call, remote);
         let back = tone_back(&mut pair, call, remote);
         assert!(there > 4_000 && back > 4_000, "{label}: {there} and {back}");
         for session in [

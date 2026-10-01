@@ -1295,6 +1295,18 @@ without that second narrowing it would say this end was listening again, and
 the stream here would start sending into a call its user believed was on
 hold.
 
+What that stream sends while this end holds the far end is silence. RFC 3264
+§8.4 leaves it `sendonly`, so the far end keeps receiving a stream and its
+watchdog keeps quiet, but the party on hold hears nothing of the room it was
+put on hold from: `MediaSession::capture` encodes a frame of zeros in place
+of the microphone from the moment the user agent reports the hold in force
+(`SessionChanged` with `hold.local`) until it reports the resume
+(`MediaSession::is_holding`). The application's processor still runs on the
+microphone, so its measure of the room is current at the resume, and a digit
+or the consent beep is written into the silence as it would be into speech.
+A `sendonly` this end answered to the far end's `recvonly` is not a hold and
+carries the microphone.
+
 Among the re-offers handed up are the ones that change the security of a call
 in progress: a transport profile that moved, an `a=crypto` line that appeared
 or disappeared. An account under a *required* policy refuses them with 488
