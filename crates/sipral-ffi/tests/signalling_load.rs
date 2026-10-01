@@ -69,6 +69,65 @@ use sipral::{
 use sipral_core::auth::DigestAlgorithm;
 use sipral_core::msg::HeaderName;
 
+// -- the processor time --------------------------------------------------------
+
+/// `struct timespec` on the 64-bit targets the floor is held on.
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    target_pointer_width = "64"
+))]
+#[repr(C)]
+struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
+}
+
+#[cfg(all(
+    any(target_os = "macos", target_os = "linux"),
+    target_pointer_width = "64"
+))]
+unsafe extern "C" {
+    fn clock_gettime(clock: i32, now: *mut Timespec) -> i32;
+}
+
+/// `CLOCK_THREAD_CPUTIME_ID`: the processor time the calling thread has had.
+#[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+const THREAD_CPU: i32 = 16;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const THREAD_CPU: i32 = 3;
+
+/// The processor time this thread has been given so far, where the platform
+/// says; `None` elsewhere.
+fn thread_cpu() -> Option<Duration> {
+    #[cfg(all(
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    ))]
+    {
+        let mut now = Timespec {
+            seconds: 0,
+            nanoseconds: 0,
+        };
+        // SAFETY: a clock both platforms define, and a live structure of
+        // the layout their C library writes into.
+        let status = unsafe { clock_gettime(THREAD_CPU, &raw mut now) };
+        if status != 0 {
+            return None;
+        }
+        Some(
+            Duration::from_secs(u64::try_from(now.seconds).ok()?)
+                + Duration::from_nanos(u64::try_from(now.nanoseconds).ok()?),
+        )
+    }
+    #[cfg(not(all(
+        any(target_os = "macos", target_os = "linux"),
+        target_pointer_width = "64"
+    )))]
+    {
+        None
+    }
+}
+
 // -- the allocator ------------------------------------------------------------
 
 /// Every byte asked for, and every byte given back, since the process began.
@@ -165,13 +224,18 @@ fn media_address(host: &str, n: usize) -> SocketAddr {
 }
 
 /// One stack, and what it cost: the wall time spent inside the library on
-/// its behalf, and the messages that crossed its edge either way.
+/// its behalf, the processor time the thread was given meanwhile, and the
+/// messages that crossed its edge either way.
 struct Side {
     agent: UserAgent,
     engine: MediaEngine,
     sip: SocketAddr,
     host: &'static str,
     spent: Duration,
+    /// The processor time inside those same calls, where the platform says,
+    /// which other work on the machine does not inflate: what the floor
+    /// under a regression is held to.
+    worked: Option<Duration>,
     sent: BTreeMap<String, usize>,
     received: BTreeMap<String, usize>,
 }
@@ -216,6 +280,7 @@ impl Side {
             sip,
             host,
             spent: Duration::ZERO,
+            worked: thread_cpu().map(|_| Duration::ZERO),
             sent: BTreeMap::new(),
             received: BTreeMap::new(),
         }
@@ -224,8 +289,12 @@ impl Side {
     /// Run `work` against this stack, charging the time it took.
     fn timed<T>(&mut self, work: impl FnOnce(&mut UserAgent, &mut MediaEngine) -> T) -> T {
         let began = Instant::now();
+        let cpu = thread_cpu();
         let out = work(&mut self.agent, &mut self.engine);
         self.spent += began.elapsed();
+        if let (Some(worked), Some(from), Some(to)) = (self.worked.as_mut(), cpu, thread_cpu()) {
+            *worked += to.saturating_sub(from);
+        }
         out
     }
 
@@ -706,6 +775,13 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
     let mut run = Run::new(calls);
     run.set_up(calls);
     let setup = [run.caller.spent, run.callee.spent];
+    // the floor's measure: the processor time where the platform gives it,
+    // so that a machine running three test suites at once does not read as
+    // a regression, and the wall time elsewhere
+    let floor_measure = [
+        run.caller.worked.unwrap_or(run.caller.spent),
+        run.callee.worked.unwrap_or(run.callee.spent),
+    ];
     assert_eq!(run.challenged.len(), calls, "every INVITE was challenged");
     assert_eq!(run.answered.len(), calls, "every retry was answered");
     for call in &run.placed {
@@ -829,10 +905,12 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
 
     // A call is brought up once and held for minutes. Anything near ten
     // milliseconds of one core to set one up would put a dialler's burst of
-    // a hundred calls a second past a core of its own; the machines this
-    // has run on are two orders under it in a debug build, so this is a
-    // floor under a regression, not the number.
-    for spent in setup {
+    // a hundred calls a second past a core of its own; this is a floor under
+    // a regression, not the number. Held to the processor time the thread
+    // was given, not to the wall clock: in a debug build a call costs a few
+    // milliseconds, and on a machine busy enough the wall clock alone went
+    // past ten (a gate beside two other workspace test runs read 13 ms).
+    for spent in floor_measure {
         assert!(
             spent < Duration::from_millis(10) * u32::try_from(calls).unwrap_or(u32::MAX),
             "a call cost {spent:?} / {calls} to set up"
