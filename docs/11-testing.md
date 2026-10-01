@@ -670,6 +670,7 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | G.729, echoed | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | DTLS-SRTP, held and resumed | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | local conference | pass | 2026-10-01 |
+| Asterisk | 22.10.1 | one call of two muted on its own | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | register (C ABI) | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | call (C ABI) | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | hold and resume (C ABI) | pass | 2026-10-01 |
@@ -689,8 +690,8 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | Swift agent example | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-10-01 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2013 ms, nothing after it (C ABI) | pass | 2026-10-01 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 63 ms (C ABI) | pass | 2026-10-01 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2016 ms, nothing after it (C ABI) | pass | 2026-10-01 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 49 ms (C ABI) | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-10-01 |
@@ -728,6 +729,7 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | SipralLabAgent over TCP | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | a certificate pinned by its SHA-256 fingerprint, over TLS | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | another certificate's fingerprint pinned, refused | pass | 2026-10-01 |
+| Asterisk | 22.10.1 | two accounts in one stack, UDP through Kamailio and TLS to Asterisk | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | a challenged INVITE past 1300 bytes, taken over TCP | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP | pass | 2026-10-01 |
 | Asterisk | 22.10.1 | a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named | pass | 2026-10-01 |
@@ -799,6 +801,8 @@ the generator itself — never the block, which the next run overwrites.
 | A request past the datagram limit sent over UDP anyway, when the deployment allows it | yes | yes | yes |
 | SRTP best effort (SDES offered on RTP/AVP) | yes | yes | yes |
 | TLS trust pinned to one certificate's fingerprint | yes | yes | yes |
+| Accounts on different transports in one stack (UDP, and TLS on a connection of its own) | yes | yes | yes |
+| A call's own mute, gain and meter in the audio engine | yes | yes | yes |
 | A server named by a name, located by RFC 3263 | yes | yes | yes |
 | Local conference of N calls, each on its own codec | yes | yes | yes |
 
