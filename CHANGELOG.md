@@ -6041,6 +6041,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **A forged epoch-0 handshake message can no longer stall or end a DTLS handshake once only the peer's Finished is left.** A client that had sent flight 5, or a server that had verified CertificateVerify, still read unprotected handshake fragments: a forged HelloRequest under the number the server's Finished would carry moved the client past it, so the genuine Finished was dropped as a retransmission and the handshake waited two minutes for nothing; any other message under that number ended either end's handshake as out of place. Both ends now discard every epoch-0 fragment at or past the Finished's number at that point (RFC 6347 §4.1.2.7), and a HelloRequest is discarded before reassembly at any point of a handshake, so it never takes a number (RFC 5246 §7.4.1.1). A server that has finished answers a retransmitted last flight only when its Finished authenticates, rather than any epoch-0 fragment numbered below it for the life of the connection, and refuses to start its epoch 0 at a ClientHello record number above 2^47 (`illegal_parameter`). Fingerprints under `sha-384` and `sha-512` are read and checked, the longest hash a peer offered preferred (RFC 8122 §5.1), and the random octets a DTLS identity and handshake are drawn from are wiped as they are handed out and when their source goes.
+
 - **The SRTP master key and salt are built in a buffer that wipes itself**.
   `draw_key` drew one block of `SHA-256(media seed || counter)`
   into a plain array, copied the key and the salt out of it into two more,

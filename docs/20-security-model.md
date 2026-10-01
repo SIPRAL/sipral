@@ -483,6 +483,17 @@ this end directly rather than through the line's own proxy.
   statement is that this protocol is written from the RFCs, tested against
   itself and attacked by its own project — not by anyone independent of it.
 
+  A second internal review, of what the handshake still reads after the key
+  exchange, found that unprotected handshake fragments were read until the
+  last message arrived: one forged datagram could end a handshake, or take the
+  number of the peer's Finished so that the genuine one was discarded and the
+  handshake timed out. Once the peer's Finished is all that is left, an
+  epoch-0 fragment at or past its number is now discarded, a HelloRequest
+  never takes a number at all, and a finished server sends its last flight
+  again only for a retransmission whose Finished authenticates. Fingerprints
+  under SHA-384 and SHA-512 are read, and the longest hash the peer offered is
+  the one its certificate is checked under (RFC 8122 §5.1).
+
   One limit is known and is a property of the design rather than of the code.
   A DTLS connection ends on any fatal alert, and an alert arriving before the
   keys exist cannot be authenticated, because there is nothing yet to

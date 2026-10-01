@@ -91,6 +91,11 @@ impl Client {
         })
     }
 
+    /// Whether flight 5 is out and the server's Finished is all that is left.
+    pub(super) const fn awaits_finished(&self) -> bool {
+        matches!(self.step, Step::Finished { .. })
+    }
+
     /// Flight 1.
     pub(super) fn start(&mut self, core: &mut Core, now: Instant) -> Result<(), Failure> {
         self.send_hello(core, now)
@@ -116,12 +121,6 @@ impl Client {
         let parsed =
             HandshakeMessage::parse(message.msg_type, &message.body).map_err(Failure::Malformed)?;
         match (mem::replace(&mut self.step, Step::Done), parsed) {
-            // RFC 5246 §7.4.1.1: ignored by a client that is negotiating, and
-            // not part of the transcript
-            (step, HandshakeMessage::HelloRequest) => {
-                self.step = step;
-                Ok(())
-            }
             (Step::ServerHello, HandshakeMessage::HelloVerifyRequest(request)) => {
                 self.hello_verify_request(core, request, now)
             }

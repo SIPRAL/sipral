@@ -50,6 +50,7 @@
 //! opening it on terms nobody agreed.
 
 use std::collections::VecDeque;
+use std::mem;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,10 +110,14 @@ pub(crate) const MOST: Policy = Policy::new(Suite::AeadAes256Gcm);
 ///
 /// One 32-octet block at a time, handed out in order and never twice: the
 /// counter behind [`KeySource`] does not repeat, so neither does anything
-/// drawn here. A block is held only until it is spent.
+/// drawn here. A block is held only until it is spent: each octet is wiped
+/// from it as it is handed out, and what is left of it when the source goes
+/// is wiped then. Those octets become a private key and the nonces of its
+/// signatures, and a copy left behind in freed memory would be as good as
+/// the key.
 struct Source<'a> {
     keys: &'a mut KeySource,
-    block: [u8; 32],
+    block: Zeroizing<[u8; 32]>,
     used: usize,
 }
 
@@ -122,7 +127,7 @@ impl<'a> Source<'a> {
         // rather than handing out a block of zeros nobody asked for
         Self {
             keys,
-            block: [0; 32],
+            block: Zeroizing::new([0; 32]),
             used: 32,
         }
     }
@@ -132,10 +137,10 @@ impl Random for Source<'_> {
     fn fill(&mut self, dest: &mut [u8]) {
         for slot in dest {
             if self.used >= self.block.len() {
-                self.block = self.keys.block();
+                *self.block = self.keys.block();
                 self.used = 0;
             }
-            *slot = self.block.get(self.used).copied().unwrap_or(0);
+            *slot = self.block.get_mut(self.used).map_or(0, mem::take);
             self.used += 1;
         }
     }
@@ -791,10 +796,12 @@ mod tests {
     use sipral_core::sdp::Keying;
     use sipral_dtls::handshake::SrtpProtectionProfile;
     use sipral_dtls::setup::{Party, Setup};
+    use sipral_dtls::x509::{Fingerprint, HashFunction};
     use sipral_dtls::{Random, Retransmission, Role};
     use sipral_rtp::srtp::Suite;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use zeroize::Zeroizing;
 
     use crate::error::MediaError;
 
@@ -828,6 +835,24 @@ mod tests {
         }
         assert_eq!(all, rebuilt);
         assert_ne!(all, [0; 96], "the stream handed out nothing at all");
+    }
+
+    #[test]
+    fn an_octet_handed_out_is_wiped_from_the_block_it_came_from() {
+        let mut keys = KeySource::new([9; 32]);
+        let mut source = Source::new(&mut keys);
+        let mut drawn = [0_u8; 40];
+        source.fill(&mut drawn[..10]);
+        assert!(source.block[..10].iter().all(|&octet| octet == 0));
+        assert!(
+            source.block[10..].iter().any(|&octet| octet != 0),
+            "what is not drawn yet is still there to be drawn"
+        );
+        source.fill(&mut drawn[10..]);
+        assert!(source.block[..8].iter().all(|&octet| octet == 0));
+        assert!(drawn.iter().any(|&octet| octet != 0));
+        // and what is left goes with the source
+        let _: &Zeroizing<[u8; 32]> = &source.block;
     }
 
     #[test]
@@ -1215,6 +1240,61 @@ mod tests {
             Err(MediaError::DtlsProfile),
             "suites no DTLS-SRTP profile names leave a handshake nothing to offer"
         );
+    }
+
+    #[test]
+    fn a_peer_that_signalled_sha_384_or_sha_512_is_held_to_it() {
+        // RFC 8122 §5.1: the certificate is checked against the fingerprints
+        // under the most preferred hash the peer offered, and SHA-512 is
+        // preferred over SHA-256 here, so a wrong SHA-256 line beside a
+        // right SHA-512 one is not looked at
+        let now = Instant::now();
+        let (dialling_identity, mut dialling_keys) = identity(31);
+        let (answering_identity, mut answering_keys) = identity(32);
+        let (impostor, _) = identity(33);
+        let under = |hash, identity: &Identity| {
+            Fingerprint::of(hash, identity.certificate.der()).to_string()
+        };
+
+        let dialling_sees = Keying::Dtls {
+            fingerprints: vec![
+                impostor.fingerprint().to_owned(),
+                under(HashFunction::Sha512, &answering_identity),
+            ],
+            setup: Some("active".to_owned()),
+        };
+        let answering_sees = Keying::Dtls {
+            fingerprints: vec![under(HashFunction::Sha384, &dialling_identity)],
+            setup: Some("actpass".to_owned()),
+        };
+
+        let mut dialling = Handshake::start(
+            &dialling_identity,
+            &dialling_sees,
+            Party::Offerer,
+            Setup::ActPass,
+            every(),
+            &mut dialling_keys,
+            now,
+        )
+        .expect("a handshake")
+        .expect("one that runs");
+        let mut answering = Handshake::start(
+            &answering_identity,
+            &answering_sees,
+            Party::Answerer,
+            Setup::Active,
+            every(),
+            &mut answering_keys,
+            now,
+        )
+        .expect("a SHA-384 fingerprint is one this build reads")
+        .expect("one that runs");
+
+        let (dialled, answered) = shake_hands(&mut dialling, &mut answering, now);
+        assert!(dialled && answered, "the handshake never finished");
+        assert!(dialling.take_outcome().expect("an outcome").is_ok());
+        assert!(answering.take_outcome().expect("an outcome").is_ok());
     }
 
     #[test]
