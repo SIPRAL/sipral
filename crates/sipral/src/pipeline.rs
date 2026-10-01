@@ -609,7 +609,7 @@ mod tests {
     /// `every_codec_carries_a_frame_at_its_own_rate` gives every codec above.
     /// Microseconds per frame, encode and decode each.
     #[allow(clippy::cast_precision_loss)]
-    fn single_frame_cost(codec: Codec) -> (f64, f64) {
+    fn single_frame_cost(codec: Codec) -> (f64, f64, f64) {
         let mut pair = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
         let frame = codec.frame_samples(DEFAULT_FRAME_MS);
         let mut samples = vec![0_i16; frame];
@@ -624,18 +624,25 @@ mod tests {
         let frames = bench_frames();
         let mut encode_total = std::time::Duration::ZERO;
         let mut decode_total = std::time::Duration::ZERO;
+        let mut each = Vec::with_capacity(frames);
         for _ in 0..frames {
             tone(&mut samples, codec.sample_rate(), &mut phase);
             let started = std::time::Instant::now();
             let written = pair.encode(&samples, &mut payload).unwrap().octets;
-            encode_total += started.elapsed();
+            let encoded = started.elapsed();
             let started = std::time::Instant::now();
             pair.decode(&payload[..written], &mut back).unwrap();
-            decode_total += started.elapsed();
+            let decoded = started.elapsed();
+            encode_total += encoded;
+            decode_total += decoded;
+            each.push(encoded + decoded);
         }
+        each.sort_unstable();
+        let median = each.get(each.len() / 2).copied().unwrap_or_default();
         (
             encode_total.as_secs_f64() * 1e6 / frames as f64,
             decode_total.as_secs_f64() * 1e6 / frames as f64,
+            median.as_secs_f64() * 1e6,
         )
     }
 
@@ -712,10 +719,14 @@ mod tests {
     /// companding a sample at a time.
     #[test]
     fn cost_of_a_frame_by_codec() {
+        // compared by each codec's median frame, which a thread descheduled
+        // for a few milliseconds under another build's load moves by one
+        // frame at most; the mean is what is printed, and a mean taken while
+        // the machine was busy once put G.711 at twice Opus
         let mut by_codec = std::collections::HashMap::new();
         for codec in Codec::ALL {
-            let (encode, decode) = single_frame_cost(codec);
-            by_codec.insert(codec, encode + decode);
+            let (encode, decode, median) = single_frame_cost(codec);
+            by_codec.insert(codec, median);
             println!(
                 "codec cost: {codec} {:.2} us/frame (encode {:.2}, decode {:.2})",
                 encode + decode,
@@ -737,7 +748,7 @@ mod tests {
             let opus = by_codec.get(&Codec::Opus).copied().unwrap_or(0.0);
             assert!(
                 opus > g711,
-                "Opus cost {opus:.2} us/frame did not come out above G.711's {g711:.2}"
+                "Opus's median frame, {opus:.2} us, did not come out above G.711's, {g711:.2}"
             );
         }
     }
