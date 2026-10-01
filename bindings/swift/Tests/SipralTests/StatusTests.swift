@@ -27,6 +27,26 @@ final class StatusTests: XCTestCase {
         }
     }
 
+    /// A clock reading the poll thread overtook is read again, as a
+    /// collision with it is; anything else goes straight through.
+    func testAClockBehindIsRetriedLikeABusy() throws {
+        for status in [SipralStatus.busy, .clockBehind] {
+            var attempts = 0
+            let answer = try retryingBusy { () -> Int in
+                attempts += 1
+                if attempts < 3 { throw SipralError(status: status, message: "") }
+                return attempts
+            }
+            XCTAssertEqual(answer, 3, "\(status) was not retried")
+        }
+        var attempts = 0
+        XCTAssertThrowsError(try retryingBusy { () -> Int in
+            attempts += 1
+            throw SipralError(status: .wrongState, message: "")
+        })
+        XCTAssertEqual(attempts, 1)
+    }
+
     func testAnErrorMadeFromANameCarriesItsNumber() {
         let error = SipralError(status: .busy, message: "")
         XCTAssertEqual(error.code, SipralStatus.busy.rawValue)

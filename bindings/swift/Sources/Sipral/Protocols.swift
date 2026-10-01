@@ -6,7 +6,7 @@ import Dispatch
 
 /// What a `SipralEventKind.conferenceChanged` carries
 /// (`sipral_conference_event_t`): a notification about a conference was
-/// merged, or the focus deleted it. `Subscription.conference()` reads the
+/// merged, or the focus deleted it. `SipralSubscription.conference()` reads the
 /// picture it left.
 public struct ConferenceEventData: Sendable {
     /// Which subscription it is about.
@@ -113,7 +113,11 @@ public struct Conference: Sendable, Equatable {
 /// `SipralStack.events()`: `SipralEventKind.subscriptionChanged` and
 /// `.notified` for every package, `.presenceChanged` for `presence` and
 /// `.conferenceChanged` for `conference`, each naming this `handle`.
-public final class Subscription: @unchecked Sendable {
+///
+/// Named with the package's prefix, as `SipralStack` and `SipralEvent` are,
+/// because a bare `Subscription` is also Combine's protocol: a file that
+/// imports both would have to spell out which it means at every use.
+public final class SipralSubscription: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
     /// The event package, as the SUBSCRIBE named it.
@@ -192,6 +196,11 @@ public final class Subscription: @unchecked Sendable {
         }
     }
 }
+
+/// The name `SipralSubscription` had until the package prefixed it, which
+/// Combine's `Subscription` collides with. Kept for one minor release.
+@available(*, deprecated, renamed: "SipralSubscription")
+public typealias Subscription = SipralSubscription
 
 /// A recording session to a recording server (SIPREC, RFC 7866), from
 /// `Call.record(toServer:destination:host:)`.

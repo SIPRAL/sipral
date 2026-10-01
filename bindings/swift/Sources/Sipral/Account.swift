@@ -353,7 +353,7 @@ public final class Account: @unchecked Sendable {
         accept: String? = nil,
         expiresSeconds: UInt32 = 0,
         destination: String? = nil
-    ) throws -> Subscription {
+    ) throws -> SipralSubscription {
         let made = try CStrings.with([target, package, accept, destination]) { parts in
             var config = sipral_subscribe_config_t.sized()
             config.target = parts[0].pointer
@@ -369,14 +369,14 @@ public final class Account: @unchecked Sendable {
                 try Sipral.accountSubscribe(stack: stack.handle, account: handle, config: config, nowMs: stack.nowMs())
             }
         }
-        return Subscription(stack: stack, handle: made, package: package)
+        return SipralSubscription(stack: stack, handle: made, package: package)
     }
 
     /// Watch `target`'s presence (RFC 3856): a `presence` subscription
     /// asking for PIDF, whose every notification arrives as
     /// `SipralEventKind.presenceChanged` with `presenceData.kind ==
     /// .watched`: open or closed, the activity, the presentity and its note.
-    public func watchPresence(of target: String, expiresSeconds: UInt32 = 0, destination: String? = nil) throws -> Subscription {
+    public func watchPresence(of target: String, expiresSeconds: UInt32 = 0, destination: String? = nil) throws -> SipralSubscription {
         try subscribe(
             to: target, package: "presence", accept: "application/pidf+xml",
             expiresSeconds: expiresSeconds, destination: destination

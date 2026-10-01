@@ -14,7 +14,7 @@ let quietDeviceName = "BlackHole 2ch"
 
 /// The device `role` goes on in a test that opens the devices: the quiet one
 /// when the machine has it and it serves the role, and nil otherwise.
-func quietDevice(in devices: [AudioDevice], for role: SipralAudioRole) -> AudioDevice? {
+func quietDevice(in devices: [SipralAudioDevice], for role: SipralAudioRole) -> SipralAudioDevice? {
     devices.first { $0.isPresent && $0.name == quietDeviceName && $0.canServe(role) }
 }
 
@@ -61,8 +61,8 @@ final class AudioDeviceModeTests: XCTestCase {
     }
 
     func testTheQuietDeviceIsChosenWhenTheMachineHasItAndNothingNewOtherwise() {
-        func device(_ id: UInt32, _ name: String, _ inputs: Int, _ outputs: Int) -> AudioDevice {
-            AudioDevice(
+        func device(_ id: UInt32, _ name: String, _ inputs: Int, _ outputs: Int) -> SipralAudioDevice {
+            SipralAudioDevice(
                 id: id, name: name, inputChannels: inputs, outputChannels: outputs,
                 isDefaultInput: false, isDefaultOutput: id == 1, isPresent: true)
         }
@@ -71,7 +71,7 @@ final class AudioDeviceModeTests: XCTestCase {
             XCTAssertNil(quietDevice(in: laptop, for: role), "\(role)")
             XCTAssertEqual(quietDevice(in: laptop + [device(3, quietDeviceName, 2, 2)], for: role)?.id, 3)
         }
-        let gone = AudioDevice(
+        let gone = SipralAudioDevice(
             id: 3, name: quietDeviceName, inputChannels: 2, outputChannels: 2,
             isDefaultInput: false, isDefaultOutput: false, isPresent: false)
         XCTAssertNil(quietDevice(in: laptop + [gone], for: .speaker), "a device that went")
@@ -124,7 +124,7 @@ final class AudioDeviceModeTests: XCTestCase {
         }
         try audio.select(speaker, for: .speaker)
         XCTAssertEqual(try audio.selection(for: .speaker).selected, speaker.id)
-        try audio.select(nil as AudioDevice?, for: .speaker)
+        try audio.select(nil as SipralAudioDevice?, for: .speaker)
         XCTAssertNil(try audio.selection(for: .speaker).selected)
 
         #if os(macOS)
@@ -133,7 +133,7 @@ final class AudioDeviceModeTests: XCTestCase {
         let microphone = try XCTUnwrap(devices.first { $0.isPresent && $0.canServe(.microphone) })
         try audio.select(microphone, for: .microphone)
         XCTAssertEqual(try audio.selection(for: .microphone).selected, microphone.id)
-        try audio.select(nil as AudioDevice?, for: .microphone)
+        try audio.select(nil as SipralAudioDevice?, for: .microphone)
         XCTAssertNil(try audio.selection(for: .microphone).selected)
         #endif
     }

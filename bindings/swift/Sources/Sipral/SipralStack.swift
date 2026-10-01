@@ -109,6 +109,20 @@ public final class SipralStack: @unchecked Sendable {
     private var advertisedLocal: String?
     private var routes: Bool
     private var routeChosen: Bool
+    /// The port the application chose for the signalling socket, zero when
+    /// it let the system choose: what `networkChanged(to:)` binds again.
+    private let chosenPort: UInt16
+    private var _keptSignallingPort = true
+
+    /// Whether the last `networkChanged(to:)` that bound the UDP signalling
+    /// socket again kept its port -- `bindPort`, or the port in use when that
+    /// was zero. `false` when another socket held that port at the new
+    /// address and the system chose one instead, which `bindAddress` then
+    /// names: a peer or a firewall rule that only knows the old port has to
+    /// be told. `true` before any change.
+    public var keptSignallingPort: Bool {
+        signallingQueue.sync { _keptSignallingPort }
+    }
     /// Answers `SipralEventKind.lookupWanted`.
     private let resolver: SipralResolver
     /// What `.lookupWanted` asked, and what `.located` found, during the poll
@@ -466,6 +480,7 @@ public final class SipralStack: @unchecked Sendable {
         self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost ?? ""
         self.tlsTrust = tlsTrust
         self.linkHost = bindHost
+        self.chosenPort = bindPort
         self.routes = bindHost == nil
         self.routeChosen = bindHost != nil || streamed || streamServer != nil
         self.resolver = resolver ?? SipralDns.platform
@@ -2021,8 +2036,10 @@ public final class SipralStack: @unchecked Sendable {
     /// and what its answer asks of the stack's own sockets.
     ///
     /// When the address or the interface changed -- `SipralRecovery.rebuild`
-    /// -- the signalling socket is bound again at `to.address` and handed to
-    /// the stack as its transport, and every account is pointed at it
+    /// -- the signalling socket is bound again at `to.address`, over UDP on
+    /// the port it had (`keptSignallingPort` says when that port was taken
+    /// there), and handed to the stack as its transport, and every account
+    /// is pointed at it
     /// (`sipral_account_rebind`), so the REGISTER that follows names where
     /// this end is now. Every call up at the time then raises
     /// `SipralEventKind.callAddressWanted`: the far end is still sending its
@@ -2057,7 +2074,7 @@ public final class SipralStack: @unchecked Sendable {
                 }
             } else if moves {
                 let host = next.address ?? UDPSocket.parse(bindAddress).host
-                let fresh = try UDPSocket(host: host, port: 0)
+                let fresh = try signallingSocket(at: host)
                 // the application names the address from here on
                 signallingQueue.sync {
                     advertisedLocal = nil
@@ -2113,6 +2130,29 @@ public final class SipralStack: @unchecked Sendable {
             }
             return recovery
         }
+    }
+
+    /// The UDP signalling socket bound again at `host`, on the port chosen at
+    /// creation or, when that was zero, the port in use now; on a port the
+    /// system picks only when that one is held there by another socket,
+    /// which `keptSignallingPort` then says. The old socket holds the port
+    /// itself when it is bound on every interface or at `host` already, so
+    /// it is let go of before the port is tried a second time.
+    private func signallingSocket(at host: String) throws -> UDPSocket {
+        let inUse = signallingQueue.sync { socket.map { UDPSocket.parse($0.localAddress).port } } ?? 0
+        let wanted = chosenPort != 0 ? chosenPort : inUse
+        var made = wanted == 0 ? nil : try? UDPSocket(host: host, port: wanted)
+        if made == nil, wanted != 0, inUse == wanted {
+            signallingQueue.sync {
+                socket?.close()
+                socket = nil
+            }
+            made = try? UDPSocket(host: host, port: wanted)
+        }
+        let kept = made != nil || wanted == 0
+        let bound = try made ?? UDPSocket(host: host, port: 0)
+        signallingQueue.sync { _keptSignallingPort = kept }
+        return bound
     }
 
     /// Runs `body` with no network change half done: what `Call.moveMedia`
@@ -2382,12 +2422,18 @@ public final class SipralStack: @unchecked Sendable {
 /// than made to wait" (`docs/08-ffi.md`) is a promise about the C ABI, not
 /// something an application should have to retry by hand for the ordinary
 /// case of the poll thread and a caller arriving at the same moment.
+///
+/// `SIPRAL_STATUS_CLOCK_BEHIND` gets the same retry, as the .NET layer
+/// gives it: every `body` here reads `nowMs()` afresh on the calling thread
+/// right before the entry point runs, so a reading the stack's last one
+/// beat was overtaken by the poll thread between the two, not stale, and
+/// the next reading can only be later.
 func retryingBusy<T>(_ body: () throws -> T) throws -> T {
     let deadline = DispatchTime.now() + 0.5
     while true {
         do {
             return try body()
-        } catch let error as SipralError where error.status == .busy {
+        } catch let error as SipralError where error.status == .busy || error.status == .clockBehind {
             if DispatchTime.now() >= deadline { throw error }
             usleep(1_000)
         }

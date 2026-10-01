@@ -260,7 +260,8 @@ final class SignallingSurfaceTests: XCTestCase {
             to: SipralStack.Network(link: .wired, address: "127.0.0.1", interface: "moved")
         )
         XCTAssertEqual(recovery, .rebuild)
-        XCTAssertNotEqual(pair.alice.bindAddress, oldSignalling, "the signalling socket stayed where it was")
+        XCTAssertEqual(pair.alice.bindAddress, oldSignalling, "the address and the port did not change, so neither did the socket's")
+        XCTAssertTrue(pair.alice.keptSignallingPort)
         XCTAssertTrue(pair.aliceAccount.contact.contains(pair.alice.bindAddress))
 
         let wanted = await aliceEvents.first(within: 5) { $0.kind == .callAddressWanted }
@@ -278,6 +279,59 @@ final class SignallingSurfaceTests: XCTestCase {
             ((try? aliceMedia.statistics().packets_received) ?? 0) > before + 10
         }
         XCTAssertTrue(heard, "the far end kept sending to the socket the call left")
+    }
+
+    /// The address the route to the rest of the world leaves from, when the
+    /// machine has one beside loopback.
+    private func otherAddress() throws -> String {
+        let host = SipralStack.routeHost(toward: "192.0.2.1:5060")
+        guard host != "127.0.0.1" else { throw XCTSkip("this machine has no address but loopback") }
+        return host
+    }
+
+    /// A free UDP port at `host`, found by binding one and letting it go.
+    private func freePort(at host: String) throws -> UInt16 {
+        let probe = try UDPSocket(host: host, port: 0)
+        defer { probe.close() }
+        return UDPSocket.parse(probe.localAddress).port
+    }
+
+    /// The port the application chose survives a move to another address,
+    /// and with none chosen the port in use does.
+    func testTheSignallingPortSurvivesAMoveToAnotherAddress() throws {
+        let elsewhere = try otherAddress()
+        let chosen = try freePort(at: elsewhere)
+        let stack = try SipralStack(audio: .application, bindHost: "127.0.0.1", bindPort: chosen)
+        defer { stack.close() }
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: elsewhere, interface: "moved"))
+        XCTAssertEqual(stack.bindAddress, "\(elsewhere):\(chosen)")
+        XCTAssertTrue(stack.keptSignallingPort)
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: "127.0.0.1", interface: "back"))
+        XCTAssertEqual(stack.bindAddress, "127.0.0.1:\(chosen)")
+
+        let picked = try SipralStack(audio: .application, bindHost: "127.0.0.1")
+        defer { picked.close() }
+        let port = UDPSocket.parse(picked.bindAddress).port
+        try picked.networkChanged(to: SipralStack.Network(link: .wired, address: "127.0.0.1", interface: "moved"))
+        XCTAssertEqual(picked.bindAddress, "127.0.0.1:\(port)")
+        XCTAssertTrue(picked.keptSignallingPort)
+    }
+
+    /// A port another socket holds at the new address is not fought over:
+    /// the system picks one, and the stack says so.
+    func testAPortTakenAtTheNewAddressFallsBackAndSaysSo() throws {
+        let elsewhere = try otherAddress()
+        let squatter = try UDPSocket(host: elsewhere, port: 0)
+        defer { squatter.close() }
+        let taken = UDPSocket.parse(squatter.localAddress).port
+        let stack = try SipralStack(audio: .application, bindHost: "127.0.0.1", bindPort: taken)
+        defer { stack.close() }
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: elsewhere, interface: "moved"))
+        let now = UDPSocket.parse(stack.bindAddress)
+        XCTAssertEqual(now.host, elsewhere)
+        XCTAssertNotEqual(now.port, taken)
+        XCTAssertNotEqual(now.port, 0)
+        XCTAssertFalse(stack.keptSignallingPort)
     }
 
     func testACallUnderNoChangeIsNotAskedToMove() async throws {

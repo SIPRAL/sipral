@@ -498,13 +498,13 @@ public final class Call: @unchecked Sendable {
     /// `sipral_call_subscribe_conference`: subscribe to the conference
     /// package of this call's focus (RFC 4579 §3.4), from the call's own
     /// account. The subscription outlives the call; each notification is a
-    /// `SipralEventKind.conferenceChanged`, and `Subscription.conference()`
+    /// `SipralEventKind.conferenceChanged`, and `SipralSubscription.conference()`
     /// reads the picture. `.notAFocus` for a call whose far end is not one.
-    public func subscribeConference() throws -> Subscription {
+    public func subscribeConference() throws -> SipralSubscription {
         let made = try retryingBusy {
             try Sipral.callSubscribeConference(stack: stack.handle, call: handle, nowMs: stack.nowMs())
         }
-        return Subscription(stack: stack, handle: made, package: "conference")
+        return SipralSubscription(stack: stack, handle: made, package: "conference")
     }
 
     // MARK: - a recording server
