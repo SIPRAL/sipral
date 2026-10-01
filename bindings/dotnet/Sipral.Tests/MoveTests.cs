@@ -140,6 +140,70 @@ public sealed class MoveTests
         }
     }
 
+    private static int FreePort(string host)
+    {
+        using var probe = new System.Net.Sockets.Socket(
+            System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
+            System.Net.Sockets.ProtocolType.Udp);
+        probe.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(host), 0));
+        return ((System.Net.IPEndPoint)probe.LocalEndPoint!).Port;
+    }
+
+    /// <summary>This machine's address on its default route, or a failure
+    /// naming why the port checks cannot run.</summary>
+    private static string OtherAddress()
+    {
+        var host = NatTests.RoutableAddress();
+        Assert.False(host is null || host.StartsWith("127.", StringComparison.Ordinal),
+            "this machine has no address but loopback, and the port checks need one");
+        return host!;
+    }
+
+    /// <summary>The port the application chose survives a move to another
+    /// address and back, and with none chosen the port in use does.</summary>
+    [Fact]
+    public void TheSignallingPortSurvivesAMoveToAnotherAddress()
+    {
+        var elsewhere = OtherAddress();
+        var chosen = FreePort(elsewhere);
+        using (var stack = new SipralStack("127.0.0.1", chosen, audio: SipralAudio.Application))
+        {
+            stack.MoveTo(elsewhere);
+            Assert.Equal($"{elsewhere}:{chosen}", stack.BindAddress);
+            Assert.True(stack.KeptSignallingPort);
+            stack.MoveTo("127.0.0.1");
+            Assert.Equal($"127.0.0.1:{chosen}", stack.BindAddress);
+        }
+        using (var stack = new SipralStack(audio: SipralAudio.Application))
+        {
+            var port = stack.BindAddress[(stack.BindAddress.LastIndexOf(':') + 1)..];
+            stack.MoveTo(elsewhere);
+            Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+            Assert.True(stack.KeptSignallingPort);
+        }
+    }
+
+    /// <summary>A port another socket holds at the new address is not fought
+    /// over: the system picks one, and the stack says so.</summary>
+    [Fact]
+    public void APortTakenAtTheNewAddressFallsBackAndSaysSo()
+    {
+        var elsewhere = OtherAddress();
+        using var squatter = new System.Net.Sockets.Socket(
+            System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram,
+            System.Net.Sockets.ProtocolType.Udp);
+        squatter.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Parse(elsewhere), 0));
+        var taken = ((System.Net.IPEndPoint)squatter.LocalEndPoint!).Port;
+        using var stack = new SipralStack("127.0.0.1", taken, audio: SipralAudio.Application);
+        stack.MoveTo(elsewhere);
+        var colon = stack.BindAddress.LastIndexOf(':');
+        Assert.Equal(elsewhere, stack.BindAddress[..colon]);
+        var now = int.Parse(stack.BindAddress[(colon + 1)..], System.Globalization.CultureInfo.InvariantCulture);
+        Assert.NotEqual(taken, now);
+        Assert.NotEqual(0, now);
+        Assert.False(stack.KeptSignallingPort);
+    }
+
     [Fact]
     public async Task ASecondMoveWhileTheFirstIsOnItsWayIsRefused()
     {

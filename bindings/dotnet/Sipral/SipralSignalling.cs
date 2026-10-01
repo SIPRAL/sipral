@@ -45,10 +45,13 @@ public sealed class SipralTlsTrust
 
     /// <summary>The one certificate whose SHA-256 fingerprint is
     /// <paramref name="fingerprint"/>, and nothing else, written as
-    /// <c>openssl x509 -fingerprint -sha256</c> or RFC 8122 prints it: 64
-    /// hexadecimal digits, either case, a colon between each byte or none,
-    /// optionally after <c>sha-256 </c> or <c>SHA256=</c>; anything else
-    /// throws <see cref="ArgumentException"/>. The fingerprint is the whole
+    /// <c>openssl x509 -fingerprint -sha256</c> (<c>sha256 Fingerprint=</c>,
+    /// or <c>SHA256 Fingerprint=</c> before OpenSSL 3) or RFC 8122 prints it:
+    /// 64 hexadecimal digits, either case, colons and spaces between them
+    /// ignored, optionally after <c>sha-256 </c>, <c>SHA256=</c> or
+    /// <c>SHA256 Fingerprint=</c>, in any case; anything else throws
+    /// <see cref="ArgumentException"/> (<c>bindings/fixtures/pin-forms.txt</c>
+    /// lists what every layer takes). The fingerprint is the whole
     /// verdict: no authority, host name or date is consulted, and a
     /// certificate with any other fingerprint is refused as untrusted
     /// (<c>docs/22-tls.md</c>). It is compared in constant time, over the DER
@@ -61,26 +64,23 @@ public sealed class SipralTlsTrust
     public static byte[] PinDigest(string fingerprint)
     {
         var text = fingerprint.Trim();
-        var split = text.IndexOfAny(new[] { ' ', '=' });
-        if (split >= 0)
+        var prefix = PinPrefixes.FirstOrDefault(one => text.StartsWith(one, StringComparison.OrdinalIgnoreCase));
+        if (prefix is not null)
         {
-            var named = text[..split].Trim().ToLowerInvariant().Replace("-", "").Replace("_", "");
-            if (named != "sha256")
-            {
-                throw new ArgumentException("a certificate pin is a SHA-256 fingerprint", nameof(fingerprint));
-            }
-            text = text[(split + 1)..].Trim();
+            text = text[prefix.Length..];
         }
-        var placed = !text.Contains(':')
-            || (text.Length == 95 && text.Select((ch, at) => (at % 3 == 2) == (ch == ':')).All(ok => ok));
-        var digits = text.Replace(":", "");
-        if (!placed || digits.Length != 64 || !digits.All(Uri.IsHexDigit))
+        var digits = text.Replace(":", "").Replace(" ", "");
+        if (digits.Length != 64 || !digits.All(Uri.IsHexDigit))
         {
             throw new ArgumentException(
-                "a certificate pin is 32 bytes of hexadecimal, colons between them or not", nameof(fingerprint));
+                "a certificate pin is a SHA-256 fingerprint: 64 hexadecimal digits, "
+                + "optionally after sha-256, SHA256= or SHA256 Fingerprint=", nameof(fingerprint));
         }
         return Convert.FromHexString(digits);
     }
+
+    /// <summary>The prefixes a fingerprint may come after.</summary>
+    private static readonly string[] PinPrefixes = { "sha256 fingerprint=", "sha-256 ", "sha256=" };
 
     /// <summary>The platform's own trust anchors.</summary>
     public static SipralTlsTrust Platform { get; } = new(new X509Certificate2Collection(), only: false);

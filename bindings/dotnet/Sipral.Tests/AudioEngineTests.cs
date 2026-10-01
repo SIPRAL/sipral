@@ -264,6 +264,9 @@ public sealed class AudioEngineTests
 
                 var buffer = new byte[2048];
                 EndPoint sender = new IPEndPoint(IPAddress.Any, 0);
+                // a deadline, so that a packet that never comes fails the
+                // test instead of hanging it
+                far.ReceiveTimeout = 5_000;
                 var read = await Task.Run(() => far.ReceiveFrom(buffer, ref sender));
                 Assert.Equal(payload, buffer[..read]);
                 Assert.Equal(call.MediaAddress, SipralStack.FormatAddress((IPEndPoint)sender));
