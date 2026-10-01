@@ -1345,8 +1345,11 @@ public sealed partial class SipralStack : IDisposable
             }
         }
         var made = wanted == 0 ? null : On(wanted);
-        if (made is null && wanted != 0 && inUse == wanted)
+        // the socket in use is let go of only for an address this machine
+        // has: a move to one it lacks throws below with that socket open
+        if (made is null && wanted != 0 && inUse == wanted && On(0) is { } usable)
         {
+            usable.Dispose();
             _socket?.Dispose();
             made = On(wanted);
         }

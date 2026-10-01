@@ -206,6 +206,19 @@ class TheSignallingPortSurvivesAMove(unittest.TestCase):
             self.assertNotIn(int(port), (taken, 0))
             self.assertFalse(stack.kept_signalling_port)
 
+    def test_a_move_to_an_address_this_machine_lacks_keeps_the_socket_it_had(self) -> None:
+        with Stack(audio=AudioMode.APPLICATION) as stack:
+            before = stack.bind_address
+            port = before.rsplit(":", 1)[1]
+            # TEST-NET-1 (RFC 5737): on no interface of this machine
+            with self.assertRaises(OSError):
+                stack.move_to("192.0.2.77")
+            self.assertEqual(stack.bind_address, before)
+            # the socket it had still holds the port, and moves with it
+            stack.move_to(self.host)
+            self.assertEqual(stack.bind_address, f"{self.host}:{port}")
+            self.assertTrue(stack.kept_signalling_port)
+
 
 class ACallSaysWhichTransformSecuresIt(_Pair):
     srtp = lib.SIPRAL_SRTP_DTLS

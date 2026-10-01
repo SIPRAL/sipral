@@ -2186,7 +2186,9 @@ class SipralClient private constructor(
                 null
             }
         var made = if (wanted == 0) null else on(wanted)
-        if (made == null && wanted != 0 && inUse == wanted) {
+        // the socket in use is let go of only for an address this machine
+        // has: a move to one it lacks throws below with that socket open
+        if (made == null && wanted != 0 && inUse == wanted && on(0)?.also { it.close() } != null) {
             socket?.close()
             socket = null
             made = on(wanted)

@@ -2208,7 +2208,10 @@ public final class SipralStack: @unchecked Sendable {
         let inUse = signallingQueue.sync { socket.map { UDPSocket.parse($0.localAddress).port } } ?? 0
         let wanted = chosenPort != 0 ? chosenPort : inUse
         var made = wanted == 0 ? nil : try? UDPSocket(host: host, port: wanted)
-        if made == nil, wanted != 0, inUse == wanted {
+        // the socket in use is let go of only for an address this machine
+        // has: a move to one it lacks throws below with that socket open
+        if made == nil, wanted != 0, inUse == wanted, let usable = try? UDPSocket(host: host, port: 0) {
+            usable.close()
             signallingQueue.sync {
                 socket?.close()
                 socket = nil

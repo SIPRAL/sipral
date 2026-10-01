@@ -204,6 +204,24 @@ public sealed class MoveTests
         Assert.False(stack.KeptSignallingPort);
     }
 
+    /// <summary>A move to an address this machine lacks fails with the
+    /// signalling socket it had still open, so the next move keeps its
+    /// port.</summary>
+    [Fact]
+    public void AMoveToAnAddressThisMachineLacksKeepsTheSocketItHad()
+    {
+        var elsewhere = OtherAddress();
+        using var stack = new SipralStack(audio: SipralAudio.Application);
+        var before = stack.BindAddress;
+        var port = before[(before.LastIndexOf(':') + 1)..];
+        // TEST-NET-1 (RFC 5737): on no interface of this machine
+        Assert.ThrowsAny<System.Net.Sockets.SocketException>(() => stack.MoveTo("192.0.2.77"));
+        Assert.Equal(before, stack.BindAddress);
+        stack.MoveTo(elsewhere);
+        Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+        Assert.True(stack.KeptSignallingPort);
+    }
+
     [Fact]
     public async Task ASecondMoveWhileTheFirstIsOnItsWayIsRefused()
     {

@@ -1619,7 +1619,9 @@ class Stack:
         socket, which :attr:`kept_signalling_port` then says. The old socket
         holds the port itself when it is bound on every interface or at
         ``host`` already, so it is let go of before the port is tried a
-        second time."""
+        second time -- once ``host`` is known to be an address this machine
+        has, so that a move to one it lacks raises with the old socket still
+        open."""
         in_use = self._socket.getsockname()[1] if self._socket is not None else 0
         wanted = self._chosen_port or in_use
 
@@ -1632,8 +1634,15 @@ class Stack:
                 return None
             return sock
 
+        def usable() -> bool:
+            probe = on(0)
+            if probe is None:
+                return False
+            probe.close()
+            return True
+
         made = on(wanted) if wanted else None
-        if made is None and wanted and in_use == wanted:
+        if made is None and wanted and in_use == wanted and usable():
             old, self._socket = self._socket, None
             try:
                 self._selector.unregister(old)

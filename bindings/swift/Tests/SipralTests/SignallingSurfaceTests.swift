@@ -334,6 +334,24 @@ final class SignallingSurfaceTests: XCTestCase {
         XCTAssertFalse(stack.keptSignallingPort)
     }
 
+    /// A move to an address this machine lacks fails with the signalling
+    /// socket it had still open, so the next move keeps its port.
+    func testAMoveToAnAddressThisMachineLacksKeepsTheSocketItHad() throws {
+        let elsewhere = try otherAddress()
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let before = stack.bindAddress
+        let port = UDPSocket.parse(before).port
+        // TEST-NET-1 (RFC 5737): on no interface of this machine
+        XCTAssertThrowsError(
+            try stack.networkChanged(to: SipralStack.Network(link: .wired, address: "192.0.2.77", interface: "gone"))
+        )
+        XCTAssertEqual(stack.bindAddress, before)
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: elsewhere, interface: "moved"))
+        XCTAssertEqual(stack.bindAddress, "\(elsewhere):\(port)")
+        XCTAssertTrue(stack.keptSignallingPort)
+    }
+
     func testACallUnderNoChangeIsNotAskedToMove() async throws {
         let stack = try SipralStack(audio: .application)
         defer { stack.close() }

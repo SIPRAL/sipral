@@ -341,6 +341,25 @@ private fun aPortTakenAtTheNewAddressFallsBackAndSaysSo(): String {
     return "a port taken at the new address fell back and said so"
 }
 
+/** A move to an address this machine lacks fails with the signalling
+ * socket it had still open, so the next move keeps its port. */
+private fun aMoveToAnAddressThisMachineLacksKeepsTheSocketItHad(): String {
+    val elsewhere = otherAddress()
+    SipralClient.open(audio = SipralAudioMode.Application).use { client ->
+        val before = client.bindAddress
+        val port = before.substringAfterLast(':')
+        // TEST-NET-1 (RFC 5737): on no interface of this machine
+        assertFailsWith<java.net.SocketException> {
+            client.networkChanged(SipralNetwork(SipralLink.WIRED, "192.0.2.77", interfaceName = "gone"))
+        }
+        assertEquals(before, client.bindAddress)
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, elsewhere, interfaceName = "moved"))
+        assertEquals("$elsewhere:$port", client.bindAddress)
+        assertTrue(client.keptSignallingPort)
+    }
+    return "a move to an address this machine lacks kept the socket it had"
+}
+
 /** A clock reading the poll thread overtook is read again, as a collision
  * with it is; anything else goes straight through. */
 private fun aClockBehindIsRetriedLikeABusy(): String {
@@ -393,6 +412,7 @@ internal suspend fun signallingChecks(): String = listOf(
     aRoamThatKeepsTheAddressMovesNothing(),
     theSignallingPortSurvivesAMoveToAnotherAddress(),
     aPortTakenAtTheNewAddressFallsBackAndSaysSo(),
+    aMoveToAnAddressThisMachineLacksKeepsTheSocketItHad(),
     aClockBehindIsRetriedLikeABusy(),
     aCallPlacedPastMaxDialogsIsRefused(),
 ).joinToString(", ")
