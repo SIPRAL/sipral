@@ -364,22 +364,23 @@ fn folded(line: &str, folding: &mut bool) -> bool {
 /// credential was found — the line ending that follows it, so the output
 /// keeps the line structure the input had.
 fn split_credentials(line: &str) -> (&str, Option<&str>) {
-    // the three RFC 4566 §5.12 methods that carry a key, and RFC 4567's
-    // key management attribute, beside the credentials and the SDES key
-    const MARKERS: [&str; 8] = [
-        "proxy-authorization:",
-        "authorization:",
+    // the three RFC 4566 §5.12 methods that carry a key, RFC 4567's key
+    // management attribute and the ICE password, beside the credentials and
+    // the SDES key
+    const MARKERS: [&str; 7] = [
         "digest ",
         "inline:",
         "k=clear:",
         "k=base64:",
         "k=uri:",
         "a=key-mgmt:",
+        "a=ice-pwd:",
     ];
     let lower = line.to_ascii_lowercase();
     let cut = MARKERS
         .iter()
         .filter_map(|marker| lower.find(marker).map(|at| at + marker.len()))
+        .chain(credential_name_end(&lower))
         .min();
     let Some(cut) = cut else {
         return (line, None);
@@ -388,10 +389,42 @@ fn split_credentials(line: &str) -> (&str, Option<&str>) {
         "\r\n"
     } else if line.ends_with('\n') {
         "\n"
+    } else if line.ends_with('\r') {
+        "\r"
     } else {
         ""
     };
     (line.get(..cut).unwrap_or(line), Some(ending))
+}
+
+/// Where the first `Authorization` or `Proxy-Authorization` name in a
+/// lower-cased line ends, past its colon: the name, then any white space or
+/// control bytes — `authorization\0:` included, which a lenient reader may
+/// still take for the field — then the colon.
+fn credential_name_end(lower: &str) -> Option<usize> {
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(found) = lower
+        .get(from..)
+        .and_then(|rest| rest.find("authorization"))
+    {
+        let mut at = from + found + "authorization".len();
+        while bytes.get(at).is_some_and(|byte| ignorable(*byte)) {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b':') {
+            return Some(at + 1);
+        }
+        from = from + found + 1;
+    }
+    None
+}
+
+/// White space or a control byte: nothing a header field name is made of,
+/// and nothing that makes `Authorization` another field when it stands
+/// between the name and its colon.
+const fn ignorable(byte: u8) -> bool {
+    byte <= b' ' || byte == 0x7f
 }
 
 /// The URI and address passes of [`redact_text`] over one piece of a line,
@@ -506,6 +539,11 @@ fn redact_origin_line(line: &str, red: &mut Redactor) -> String {
 ///   when no method is written; `k=prompt` carries none and is kept.
 /// - `a=key-mgmt:` (RFC 4567 §3): the key management data after the
 ///   protocol identifier, which for MIKEY carries the keys themselves.
+/// - `a=ice-pwd:` (RFC 8839 §5.4): the password every connectivity check
+///   is authenticated with (RFC 8445 §7.2.2), which lets whoever reads it
+///   answer this end's checks as the peer. The ICE user fragment travels
+///   in every check in the clear and is kept; DTLS-SRTP's `a=fingerprint`
+///   names a public key and is kept.
 fn strip_key_line(line: &str) -> Option<String> {
     let indent = line.len() - line.trim_start().len();
     let (lead, body) = line.split_at(indent);
@@ -539,6 +577,8 @@ fn strip_key_line(line: &str) -> Option<String> {
         let value = content.get("a=key-mgmt:".len()..).unwrap_or("");
         let protocol = value.split_whitespace().next().unwrap_or("");
         format!("a=key-mgmt:{protocol} REDACTED")
+    } else if lower.starts_with("a=ice-pwd:") {
+        "a=ice-pwd:REDACTED".to_string()
     } else {
         return None;
     };
@@ -564,7 +604,7 @@ fn strip_key_line(line: &str) -> Option<String> {
 pub fn strip_secrets(message: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(message.len());
     let mut folding = false;
-    for line in message.split_inclusive(|byte| *byte == b'\n') {
+    for line in lines(message) {
         let continues = line
             .first()
             .is_some_and(|byte| matches!(*byte, b' ' | b'\t'));
@@ -659,23 +699,59 @@ fn strip_uri_passwords(text: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// The name of an `Authorization` or `Proxy-Authorization` field starting
-/// `line`, as written, when it is one: the name, optional whitespace, then
-/// the colon (RFC 3261 §7.3.1).
-fn credential_field(line: &[u8]) -> Option<&[u8]> {
-    let colon = line.iter().position(|byte| *byte == b':')?;
-    let name = line.get(..colon)?.trim_ascii_end();
-    (name.eq_ignore_ascii_case(b"authorization")
-        || name.eq_ignore_ascii_case(b"proxy-authorization"))
-    .then_some(name)
+/// The lines of a message, each with its ending: `\r\n`, `\n`, or a `\r`
+/// alone. RFC 3261 §7 ends a line with CRLF, and a lenient reader — which is
+/// what a PBX that took the message was — also ends one at either byte
+/// alone, so a field after a bare CR is a field here too and not the tail of
+/// whatever line came before it.
+fn lines(message: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = message;
+    core::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest
+            .iter()
+            .position(|byte| matches!(*byte, b'\r' | b'\n'))
+            .map_or(rest.len(), |at| {
+                if rest.get(at) == Some(&b'\r') && rest.get(at + 1) == Some(&b'\n') {
+                    at + 2
+                } else {
+                    at + 1
+                }
+            });
+        let (line, after) = rest.split_at(end);
+        rest = after;
+        Some(line)
+    })
 }
 
-/// The `\r\n` or `\n` a line ends with, or nothing for the last one.
+/// The name of an `Authorization` or `Proxy-Authorization` field starting
+/// `line`, as written, when it is one: the name, optional whitespace, then
+/// the colon (RFC 3261 §7.3.1). White space and control bytes anywhere
+/// before the colon are not counted — ` Authorization\0:` is the field to a
+/// reader lenient enough, and a trace has to assume one.
+fn credential_field(line: &[u8]) -> Option<&[u8]> {
+    let colon = line.iter().position(|byte| *byte == b':')?;
+    let written = line.get(..colon)?;
+    let name: Vec<u8> = written
+        .iter()
+        .copied()
+        .filter(|byte| !ignorable(*byte))
+        .collect();
+    (name.eq_ignore_ascii_case(b"authorization")
+        || name.eq_ignore_ascii_case(b"proxy-authorization"))
+    .then_some(written.trim_ascii())
+}
+
+/// The `\r\n`, `\n` or `\r` a line ends with, or nothing for the last one.
 fn line_ending(line: &[u8]) -> &[u8] {
     if line.ends_with(b"\r\n") {
         b"\r\n"
     } else if line.ends_with(b"\n") {
         b"\n"
+    } else if line.ends_with(b"\r") {
+        b"\r"
     } else {
         b""
     }
@@ -1428,5 +1504,116 @@ Content-Length: {}\r\n\r\n{body}",
     fn a_message_the_parser_refuses_is_an_error_rather_than_a_silent_pass_through() {
         let mut red = hash_redactor();
         assert!(redact_message(b"not a sip message at all", &mut red).is_err());
+    }
+
+    /// The ICE password (RFC 8839 §5.4) is a credential: every connectivity
+    /// check is authenticated with it. Taken out in both log modes, and in
+    /// free text; the user fragment, which every check carries in the
+    /// clear, and the DTLS fingerprint, a public key's digest, are kept.
+    #[test]
+    fn the_ice_password_is_taken_out_in_both_modes() {
+        const PASSWORD: &str = "asd88fgpdd777uzjYhagZg";
+        let body = format!(
+            "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+             a=ice-ufrag:8hhY\r\na=ice-pwd:{PASSWORD}\r\n\
+             m=audio 49170 RTP/AVP 0\r\na=ice-ufrag:9uB6\r\nA=ICE-PWD: {PASSWORD}\r\n\
+             a=fingerprint:sha-256 AB:CD\r\n"
+        );
+        let message = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1\r\n\
+             From: <sip:alice@example.com>;tag=1\r\nTo: <sip:bob@example.com>\r\nCall-ID: c\r\n\
+             CSeq: 1 INVITE\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut red = hash_redactor();
+        let pseudonymised = redact(message.as_bytes(), &mut red);
+        let whole = String::from_utf8(strip_secrets(message.as_bytes())).expect("utf-8");
+        let text = strip_secrets_text(&message);
+        let loose = redact_text(&message, &mut red);
+        for (mode, out) in [
+            ("pseudonymised", &pseudonymised),
+            ("diagnostic", &whole),
+            ("diagnostic text", &text),
+            ("free text", &loose),
+        ] {
+            assert!(!out.contains(PASSWORD), "{mode}: {out}");
+            assert!(
+                out.to_ascii_lowercase().contains("a=ice-pwd:"),
+                "{mode}: {out}"
+            );
+        }
+        for out in [&pseudonymised, &whole] {
+            assert!(out.contains("a=ice-pwd:REDACTED\r\n"), "{out}");
+            assert!(out.contains("a=ice-ufrag:9uB6\r\n"), "{out}");
+            assert!(out.contains("a=fingerprint:sha-256 AB:CD\r\n"), "{out}");
+        }
+    }
+
+    /// Every malformed shape of a credential field a lenient reader may still
+    /// take for one — any case, white space or a control byte between the
+    /// name and its colon or in front of it, lines ended by CRLF, LF or a
+    /// bare CR, the value folded or not, the field first, among the others or
+    /// last — loses its value in the diagnostic trace, in the text forms and
+    /// in the pseudonymised one wherever it parses.
+    #[test]
+    fn no_malformed_credential_field_leaks_through_any_strip() {
+        const SECRET: &str = "5ecretRe5ponse";
+        let names = [
+            "Authorization",
+            "authorization",
+            "AUTHORIZATION",
+            "Proxy-Authorization",
+            "proxy-AUTHORIZATION",
+        ];
+        let between = ["", " ", "\t", "\0", " \0 ", "\x01", "\x7f", "\0\0"];
+        let before = ["", "\0", "\x7f"];
+        let endings = ["\r\n", "\n", "\r"];
+        let mut shapes = 0;
+        for name in names {
+            for gap in between {
+                for lead in before {
+                    for ending in endings {
+                        for folded in [false, true] {
+                            let value = if folded {
+                                format!("Digest username=\"alice\",{ending} response=\"{SECRET}\"")
+                            } else {
+                                format!("Digest username=\"alice\", response=\"{SECRET}\"")
+                            };
+                            let field = format!("{lead}{name}{gap}: {value}{ending}");
+                            let head = format!(
+                                "INVITE sip:bob@example.com SIP/2.0{ending}\
+                                 Via: SIP/2.0/UDP 192.0.2.1;branch=z9hG4bK1{ending}"
+                            );
+                            let tail = format!(
+                                "From: <sip:alice@example.com>;tag=1{ending}\
+                                 To: <sip:bob@example.com>{ending}Call-ID: c{ending}\
+                                 CSeq: 1 INVITE{ending}Content-Length: 0{ending}{ending}"
+                            );
+                            for message in [
+                                format!("{head}{field}{tail}"),
+                                format!("INVITE sip:bob@example.com SIP/2.0{ending}{field}{tail}"),
+                                format!("{head}{tail}{field}"),
+                            ] {
+                                shapes += 1;
+                                let whole =
+                                    String::from_utf8_lossy(&strip_secrets(message.as_bytes()))
+                                        .into_owned();
+                                assert!(!whole.contains(SECRET), "{message:?} -> {whole:?}");
+                                let text = strip_secrets_text(&message);
+                                assert!(!text.contains(SECRET), "{message:?} -> {text:?}");
+                                let mut red = hash_redactor();
+                                let loose = redact_text(&message, &mut red);
+                                assert!(!loose.contains(SECRET), "{message:?} -> {loose:?}");
+                                if let Ok(clean) = redact_message(message.as_bytes(), &mut red) {
+                                    let clean = String::from_utf8_lossy(&clean).into_owned();
+                                    assert!(!clean.contains(SECRET), "{message:?} -> {clean:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(shapes, 5 * 8 * 3 * 3 * 2 * 3);
     }
 }

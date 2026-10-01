@@ -697,8 +697,10 @@ record! {
         /// name, number and address is then written as it went on the wire.
         /// What is never written, in either mode, is a credential or a key:
         /// every `Authorization` and `Proxy-Authorization` value, every
-        /// `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
-        /// payload is taken out first. `sipral_stack_diagnostic_trace`
+        /// `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
+        /// payload and every `a=ice-pwd` is taken out first, a field whose
+        /// name a control byte or a bare CR line end disguises included
+        /// (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
         /// turns it on and off while the stack runs.
         pub diagnostic_trace: Number<SipralToggle>,
         /// Zero.
