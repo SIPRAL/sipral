@@ -169,7 +169,9 @@ have to be wiped where they are held, and the write that survives the
 optimiser needs `unsafe`, which `sipral-rtp` denies. `sipral` itself names the
 same version directly too, for the SRTP master key and salt `draw_key` hands
 out in `crates/sipral/src/engine.rs`, for the same reason: this crate also
-denies `unsafe`.
+denies `unsafe`. `sipral-diag` names it for the pseudonym key a redactor
+holds, and `sipral-ffi` for the two seeds a stack is created with, both at
+the same version, so neither brings a second copy.
 
 #### Build-time only
 

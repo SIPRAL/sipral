@@ -3095,7 +3095,8 @@ zero.
   past 65 507 is refused. `sipral_stack_settings_t` reads both figures back.
 - `pseudonym_salt` — at least 16 bytes an installation keeps, keying the
   pseudonyms of the log and the state text so that two runs compare line by
-  line; without it they are keyed from `media_seed` and differ every run.
+  line; without it they are keyed with a key derived one way from
+  `media_seed` and differ every run.
 - `diagnostic_trace` — a `sipral_toggle_t`: the trace writes SIP messages
   whole, with the peer, credentials and keys taken out;
   `sipral_stack_diagnostic_trace` turns it on and off while the stack runs.

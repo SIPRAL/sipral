@@ -233,8 +233,8 @@ pub use local_conference::{
 };
 #[cfg(feature = "redaction")]
 pub use log::{
-    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort,
-    Travel, pseudonym_key,
+    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, PseudonymKey, QUEUE_CEILING,
+    SaltTooShort, Travel, derived_pseudonym_key, pseudonym_key,
 };
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};

@@ -424,13 +424,15 @@ pub(crate) fn snapshot_of(
     }
 }
 
-/// The key a stack's pseudonyms are made with: its `media_seed`, which is
-/// secret and never written anywhere, under a label of its own so that
-/// nothing else keyed from that seed can ever be the same key.
-pub(crate) fn pseudonym_key(media_seed: &[u8; 32]) -> Vec<u8> {
-    let mut key = media_seed.to_vec();
-    key.extend_from_slice(b"sipral log and state pseudonyms");
-    key
+/// The key a stack's pseudonyms are made with when it was given no salt:
+/// derived one way from its `media_seed`, which is secret and never written
+/// anywhere, under a label of its own (`sipral::derived_pseudonym_key`).
+///
+/// Derived, never the seed itself: every SRTP master key the stack offers is
+/// drawn from that seed, and the log holds its key for as long as the stack
+/// lives and feeds it values a far end chooses.
+pub(crate) fn pseudonym_key(media_seed: &[u8; 32]) -> sipral::PseudonymKey {
+    sipral::derived_pseudonym_key(media_seed)
 }
 
 /// A new, silent log for a stack.

@@ -932,6 +932,7 @@ dependencies = [
  "sha2",
  "sipral-core",
  "sipral-ua",
+ "zeroize",
 ]
 
 [[package]]
@@ -966,6 +967,7 @@ dependencies = [
  "sipral-nat",
  "sipral-stir",
  "sipral-ua",
+ "zeroize",
 ]
 
 [[package]]

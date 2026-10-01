@@ -1218,8 +1218,8 @@ pub(crate) struct StackState {
     /// What the configuration asked for that only the settings read back.
     pub(crate) asked: Asked,
     /// What the log's and the state snapshot's pseudonyms are keyed with
-    /// (`crate::log::pseudonym_key`).
-    pseudonyms: Box<[u8]>,
+    /// (`crate::log::pseudonym_key`), wiped when the stack goes.
+    pseudonyms: sipral::PseudonymKey,
     /// Transports retired since the last poll, each raised by it as
     /// `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` before anything else it has.
     pub(crate) lost: Vec<crate::transport::Lost>,
@@ -1704,7 +1704,7 @@ unsafe fn engine_for(
     config: &SipralStackConfig,
     media: MediaConfig,
     origin: Instant,
-    media_seed: [u8; SEED_BYTES],
+    media_seed: &[u8; SEED_BYTES],
 ) -> Result<MediaEngine, Fail> {
     let named = unsafe { text(config.codecs, config.codecs_len, "codecs") }?;
     let suites = crate::security::srtp_suites(unsafe {
@@ -1725,7 +1725,7 @@ unsafe fn engine_for(
             .map_err(|error| media_failed(&error))?;
     }
     let clock = WallClock::from_unix(origin, config.media_clock_unix_seconds, 0);
-    Ok(MediaEngine::new(catalog, media, clock, media_seed))
+    Ok(MediaEngine::new(catalog, media, clock, *media_seed))
 }
 
 entry! {
@@ -1820,7 +1820,7 @@ pub(crate) unsafe fn create_on(
     let origin = Instant::now();
     let clock = crate::audio::Clock::new(origin);
     let audio = unsafe { crate::audio::configured(&config, &clock) }?;
-    let mut engine = unsafe { engine_for(&config, media.clone(), origin, media_seed) }?;
+    let mut engine = unsafe { engine_for(&config, media.clone(), origin, &media_seed) }?;
     engine.set_rtp_ports(rtp_ports);
     let pseudonyms = match salt {
         Some(salt) => sipral::pseudonym_key(salt).map_err(|error| {
@@ -1834,7 +1834,7 @@ pub(crate) unsafe fn create_on(
     let log = crate::log::log_for(&pseudonyms);
     log.set_diagnostic(diagnostic);
     engine.set_log(log.clone());
-    let mut agent = UserAgent::new(endpoint, seed)
+    let mut agent = UserAgent::new(endpoint, *seed)
         .map_err(|error| fail(SipralStatus::InvalidArgument, error.to_string()))?;
     agent_policy(&mut agent, &config, origin)?;
     // the socket is the caller's; what the stack is told is the address
@@ -1903,7 +1903,7 @@ pub(crate) unsafe fn create_on(
             salted,
             echo_cancellation,
         },
-        pseudonyms: pseudonyms.into_boxed_slice(),
+        pseudonyms,
         lost: Vec::new(),
         conferences: Vec::new(),
     };
@@ -1977,15 +1977,15 @@ pub(crate) fn media_port_allowed(state: &StackState, local: SocketAddr) -> Resul
 }
 
 /// The signalling seed and the media seed a configuration hands over, each
-/// thirty-two bytes and never the same bytes twice.
+/// thirty-two bytes and never the same bytes twice, each in a buffer that is
+/// wiped when it is dropped: the engine and the agent keep copies of their
+/// own, and these are gone once the stack is made.
 ///
 /// # Safety
 ///
 /// `config.entropy` and `config.media_seed` must be readable for the lengths
 /// beside them.
-unsafe fn seeds_of(
-    config: &SipralStackConfig,
-) -> Result<([u8; SEED_BYTES], [u8; SEED_BYTES]), Fail> {
+unsafe fn seeds_of(config: &SipralStackConfig) -> Result<(Seed, Seed), Fail> {
     let seed = seed_from(
         unsafe { bytes(config.entropy, config.entropy_len, "entropy") }?,
         "entropy",
@@ -2009,9 +2009,12 @@ unsafe fn seeds_of(
     Ok((seed, media_seed))
 }
 
-fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<[u8; SEED_BYTES], Fail> {
+/// A seed as [`seeds_of`] holds it.
+type Seed = zeroize::Zeroizing<[u8; SEED_BYTES]>;
+
+fn seed_from(entropy: Option<&[u8]>, member: &str) -> Result<Seed, Fail> {
     let supplied = entropy.unwrap_or_default();
-    <[u8; SEED_BYTES]>::try_from(supplied).map_err(|_| {
+    <[u8; SEED_BYTES]>::try_from(supplied).map(Seed::new).map_err(|_| {
         fail(
             SipralStatus::InvalidArgument,
             format!(
@@ -3574,6 +3577,31 @@ pub(crate) mod tests {
         let mut wrong = config(record, &mut observed);
         wrong.system_echo_cancellation = 3;
         assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
+    }
+
+    /// A stack given no pseudonym salt keys its pseudonyms with a key derived
+    /// one way from its media seed, never with the seed itself: the key holds
+    /// no run of the seed's bytes, is not the seed with a label after it,
+    /// and is held in a buffer that wipes itself.
+    #[test]
+    fn the_pseudonym_key_is_derived_from_the_media_seed_and_does_not_hold_it() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let key = with_stack(handle, |state| {
+            let held: &sipral::PseudonymKey = &state.pseudonyms;
+            Ok(held.to_vec())
+        })
+        .expect("the stack is live");
+        assert_eq!(key.len(), 32);
+        assert!(
+            !key.windows(8).any(|run| MEDIA_SEED.windows(8).any(|seed| seed == run)),
+            "the pseudonym key carries a run of the media seed: {key:?}"
+        );
+        let mut labelled = MEDIA_SEED.to_vec();
+        labelled.extend_from_slice(b"sipral log and state pseudonyms");
+        assert_ne!(key, labelled);
+        assert_eq!(key, sipral::derived_pseudonym_key(&MEDIA_SEED).to_vec());
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 
     fn read_settings(handle: SipralHandle) -> SipralStackSettings {
