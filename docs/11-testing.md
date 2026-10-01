@@ -1242,7 +1242,7 @@ The mapping errs towards running more:
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | rust, abi and every layer |
 | `crates/sipral-ffi`, `bindings/c/include`, `tools/abi-gen` | rust, abi and every layer |
 | `crates/sipral`, the facade | rust, abi and every layer: their tests drive its behaviour |
-| a crate below the facade that the C library links | rust and abi |
+| a crate below the facade that the C library links | rust, abi and every layer: what it does on the wire or on a device reaches their tests through the library |
 | any other crate, `tools/`, `fixtures/`, `fuzz/`, `interop/harness`, `deny.toml` | rust |
 | `bindings/fixtures` | rust and every layer |
 | `bindings/c`, `interop/harness-c` | abi (and swift, for `bindings/c/sipral.c`) |

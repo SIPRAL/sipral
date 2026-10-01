@@ -2661,12 +2661,13 @@ area_site() { step_site; }
 # "area<TAB>path<TAB>why"; a path may reach several areas, and when in doubt
 # it reaches more rather than fewer.
 #
-# A crate below the facade reaches rust, where its own tests and the
-# facade's run, and abi, because it is linked into the C library that area
-# checks and runs from C -- but not the layers: they see it only through
-# the facade's behaviour, and a change to that is a change to crates/sipral,
-# which reaches every layer. Whether a crate is linked into the library is
-# cargo's answer, not a list kept here.
+# A crate below the facade that the C library links reaches rust, where its
+# own tests and the facade's run, abi, because that area checks the library
+# and runs it from C, and every layer: what such a crate puts on the wire or
+# in a device reaches the layers' tests through the library without a line
+# of crates/sipral changing (a request written compact by sipral-core once
+# broke the datagram-limit test of four layers). Whether a crate is linked
+# into the library is cargo's answer, not a list kept here.
 route_to() {
     local areas="$1" why="$2" area
     for area in $areas; do
@@ -2696,7 +2697,7 @@ route() {
             crate=${1#crates/}
             crate=${crate%%/*}
             if [ -z "$FFI_GRAPH" ] || printf '%s\n' "$FFI_GRAPH" | grep -qx "$crate"; then
-                route_to "rust abi" "below the facade and linked into the C library"
+                route_to "rust abi $LAYERS" "below the facade and linked into the C library every layer loads"
             else
                 route_to rust "a crate the C library does not link"
             fi ;;
