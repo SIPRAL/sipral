@@ -69,8 +69,13 @@
 #                               Python layer pinned to the certificate 5061
 #                               presents, by its SHA-256 fingerprint alone,
 #                               calling the echo, and pinned to another
-#                               one's, refused as untrusted
-#   scripts/lab.sh robust       only the field failures that need a network
+#                               one's, refused as untrusted; then two lines
+#                               in one Python stack, one account over UDP
+#                               at Kamailio and one over a pinned TLS
+#                               connection of its own at Asterisk, both
+#                               registered at once and a call up on each
+#                               (interop/lines/caller.py)
+#   scripts/lab.sh robust      only the field failures that need a network
 #                               to show (docs/11-testing.md's table): a
 #                               link that drops IP fragments, with INVITEs
 #                               carrying ICE at 1300, 1301 and 1600 bytes;
@@ -3619,6 +3624,50 @@ tls_pin_flow() {
     return "$ok"
 }
 
+# Two lines in one stack (interop/lines/caller.py): the Python layer with an
+# account on its UDP socket registered at Kamailio and another on a TLS
+# connection of its own registered at Asterisk's 5061, pinned to the
+# certificate Asterisk presents there. Both have to be registered at once,
+# then a call goes up on each together -- through the proxy to FreeSWITCH's
+# tone, and to Asterisk's echo -- each with audio both ways; 5061 takes
+# nothing but TLS, so the second line registering there is its connection.
+tls_two_lines_flow() {
+    local beside log
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    log=$(lab_run "two lines in one stack" $((LAB_START_APT_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -e SIPRAL_UDP_AOR=sip:labuser@kamailio -e SIPRAL_UDP_USER=labuser \
+        -e SIPRAL_UDP_PASSWORD=labpass -e SIPRAL_UDP_TARGET=sip:9000@kamailio \
+        -e SIPRAL_TLS_AOR=sip:labuser-agent-tls@asterisk -e SIPRAL_TLS_USER=labuser-agent-tls \
+        -e SIPRAL_TLS_PASSWORD=labpass -e SIPRAL_TLS_TARGET=sip:9008@asterisk \
+        -e SIPRAL_TLS_PIN="$(tls_fingerprint "$SIPRAL_TLS_CERTS/asterisk.pem")" \
+        -e SIPRAL_DWELL_MS=6000 -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/lines:/lines:ro" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            udp=\$(getent hosts kamailio | cut -d' ' -f1)
+            tls=\$(getent hosts asterisk | cut -d' ' -f1)
+            SIPRAL_UDP_SERVER=\"\$udp:5060\" SIPRAL_TLS_SERVER=\"\$tls:5061\" \
+                exec python3 -u /lines/caller.py" 2>&1)
+    printf '%s\n' "$log" | sed 's/^/    /'
+    said() { printf '%s\n' "$log" | grep -Eq "$1"; }
+    if said '^both registered$' && said '^both up$' \
+        && said '^udp media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
+        && said '^tls media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
+        && said '^udp ended LOCAL_HANGUP ' && said '^tls ended LOCAL_HANGUP ' \
+        && said '^udp registration UNREGISTERED$' && said '^tls registration UNREGISTERED$'; then
+        pass "two accounts in one stack, UDP through Kamailio and TLS to Asterisk: both registered at once, a call up on each together with audio both ways, both bindings given back"
+    else
+        fail "two accounts in one stack, UDP through Kamailio and TLS to Asterisk"
+        return 1
+    fi
+}
+
 tls_swift_agent() {
     tls_agent_start swift labuser-agent-swift-tcp tcp \
         -v "$ROOT:/work:ro" -v "${SWIFT_LIB_DIR:-$ROOT/target/release}:/work/target/release:ro" -- \
@@ -3661,6 +3710,7 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
                 printf '  note  no Swift lab agent was built; see its build step above\n'
             fi
             tls_pin_flow || true
+            tls_two_lines_flow || true
         fi
         ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
         wait_for asterisk "Asterisk Ready" >/dev/null || true

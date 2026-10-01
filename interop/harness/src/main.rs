@@ -50,6 +50,7 @@ mod latency;
 mod local;
 mod moved;
 mod nway;
+mod own_controls;
 mod pair;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 mod pipewire;
@@ -603,6 +604,21 @@ fn extra_flows(
             Ok(said) => println!("  pass  local conference{said}"),
             Err(why) => {
                 println!("  FAIL  local conference — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // two calls to an echo carried by the audio engine, one of them muted
+    // with its own per-call mute and then unmuted (see `own_controls`): on
+    // Asterisk's echo in a run that names nothing, or wherever it is named
+    // with `SIPRAL_ECHO_EXTENSION` saying which extension echoes
+    if (server == "asterisk" && wanted.is_empty())
+        || wanted.split(',').any(|name| name.trim() == "callmute")
+    {
+        match own_controls::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  one call of two muted on its own{said}"),
+            Err(why) => {
+                println!("  FAIL  one call of two muted on its own — {why}");
                 failures += 1;
             }
         }
@@ -2953,6 +2969,8 @@ mod tests {
             ice_nat::ANSWER_RELAY_SEED => crate::ice_nat::ANSWER_RELAY_SEED,
             join::SEED => crate::join::SEED,
             join::MEDIA_SEED => crate::join::MEDIA_SEED,
+            own_controls::SEED => crate::own_controls::SEED,
+            own_controls::MEDIA_SEED => crate::own_controls::MEDIA_SEED,
             pair::ANSWERING_SEED => crate::pair::ANSWERING_SEED,
             pair::ANSWERING_MEDIA_SEED => crate::pair::ANSWERING_MEDIA_SEED,
             pair::DIALLING_SEED => crate::pair::DIALLING_SEED,

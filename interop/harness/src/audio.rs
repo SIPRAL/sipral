@@ -440,6 +440,18 @@ impl Media {
     ///
     /// # Errors
     /// When the socket cannot say what it was bound to.
+    /// A second handle on this call's socket, for a thread of its own to
+    /// send on: the audio engine's pump, which encodes the call's frames
+    /// and hands each packet to whoever sends it (`crate::own_controls`).
+    ///
+    /// # Errors
+    /// When the socket cannot be shared.
+    pub(crate) fn sender(&self) -> Result<UdpSocket, String> {
+        self.socket
+            .try_clone()
+            .map_err(|error| format!("cannot share the RTP socket: {error}"))
+    }
+
     pub(crate) fn port(&self) -> Result<u16, String> {
         self.socket
             .local_addr()

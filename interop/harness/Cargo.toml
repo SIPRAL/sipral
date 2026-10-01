@@ -52,6 +52,11 @@ sipral-media = { path = "../../crates/sipral-media", version = "0.0.1", default-
 # reason — already in this workspace's dependency graph, so naming it here
 # adds no new crate to the tree, only a direct line to what was transitive.
 getrandom = "0.2.17"
+# The audio engine a softphone links, over its own fake devices: the flow
+# that mutes one call of two (src/own_controls.rs) needs the engine's pump,
+# its per-call controls and its meters, and the containers it runs in have
+# no sound card. `fake` is the engine's own test backend, built for this.
+sipral-audio = { path = "../../crates/sipral-audio", version = "0.0.1", features = ["fake"] }
 
 # Two flows whose audio is a real device's, one per desktop this stack
 # targets: a call whose microphone and earpiece are PipeWire nodes

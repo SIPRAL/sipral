@@ -288,6 +288,18 @@ unit_tested = true
 flows = ["a certificate pinned by its SHA-256 fingerprint, over TLS", "another certificate's fingerprint pinned, refused"]
 
 [[feature]]
+name = "Accounts on different transports in one stack (UDP, and TLS on a connection of its own)"
+implemented = true
+unit_tested = true
+flows = ["two accounts in one stack, UDP through Kamailio and TLS to Asterisk"]
+
+[[feature]]
+name = "A call's own mute, gain and meter in the audio engine"
+implemented = true
+unit_tested = true
+flows = ["one call of two muted on its own"]
+
+[[feature]]
 name = "A server named by a name, located by RFC 3263"
 implemented = true
 unit_tested = true

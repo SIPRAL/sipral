@@ -156,6 +156,7 @@ LAYER_SECTIONS = {
             "SipralLabAgent over TCP",
             "a certificate pinned by its SHA-256 fingerprint, over TLS",
             "another certificate's fingerprint pinned, refused",
+            "two accounts in one stack, UDP through Kamailio and TLS to Asterisk",
         ),
     ),
     "a challenged INVITE past 1300 bytes -- over TCP where Asterisk listens, trimmed or ended where it does not": (

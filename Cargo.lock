@@ -994,6 +994,7 @@ version = "0.0.1"
 dependencies = [
  "getrandom",
  "sipral",
+ "sipral-audio",
  "sipral-core",
  "sipral-io-pipewire",
  "sipral-io-wasapi",
