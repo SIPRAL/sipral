@@ -36,6 +36,7 @@ from .errors import PASSING as _PASSING
 from .errors import call as _retry
 from .errors import SipralError, check
 from .locate import Resolver, advertised_address, lookup
+from .settings import Settings
 from .signalling import InviteLimit, TlsTrust, classify, connect
 
 __all__ = ["TRACE", "Stack", "features", "route_host"]
@@ -254,6 +255,7 @@ class Stack:
         pseudonym_salt: bytes | None = None,
         diagnostic_trace: bool | None = None,
         resolver: Resolver | None = None,
+        system_echo_cancellation: bool | None = None,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -450,6 +452,12 @@ class Stack:
         credentials and keys taken out, for a diagnosis;
         :meth:`set_diagnostic_trace` turns it on and off later.
 
+        ``system_echo_cancellation`` ``False`` opens the devices of a stack in
+        device mode past the platform's echo cancellation, gain control and
+        noise suppression, for a headset, which has no echo to cancel, or an
+        application that cancels it on each call itself; Linux has none to
+        turn off. :meth:`sipral.audio.Audio.info` says what the platform did.
+
         ``resolver`` answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
         accounts added with ``server_uri``, on a thread of its own, one per
         lookup: a callable taking the name and the record type
@@ -492,7 +500,7 @@ class Stack:
         self._stream_server = parse_address(stream_server) if stream_server else None
         #: Where `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for a stream,
         #: during the poll that raised it, acted on right after that poll.
-        self._streams_asked: list[str] = []
+        self._streams_asked: list[dict] = []
         #: The transport numbers `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named
         #: during that same poll, acted on at the same moment.
         self._streams_let_go: list[int] = []
@@ -561,6 +569,11 @@ class Stack:
             else None
         )
         self._tls_pin = tls_trust.pin if tls_trust is not None else None
+        #: What a TLS connection of an account's own trusts when the account
+        #: pins nothing, and the name it is opened under (the server's host
+        #: when ``None``).
+        self._tls_trust = tls_trust or TlsTrust.platform()
+        self._given_tls_server_name = tls_server_name
         self._first_failure: tuple[int, int, str] | None = None
         remote = ""
         if self._streamed:
@@ -712,6 +725,7 @@ class Stack:
             config.pseudonym_salt = salt_buf
             config.pseudonym_salt_len = len(pseudonym_salt)
         config.diagnostic_trace = _toggle(diagnostic_trace)
+        config.system_echo_cancellation = _toggle(system_echo_cancellation)
         #: The RTP port range media sockets are bound in, or ``None``.
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
         #: Every callback `sipral_stack_log` was given, kept alive here for
@@ -787,6 +801,22 @@ class Stack:
         """
         return int((time.monotonic() - self._origin) * 1000)
 
+    def settings(self) -> Settings:
+        """What the stack runs with, every default filled in
+        (`sipral_stack_settings`), with the SRTP suites its calls offer in
+        order (`sipral_stack_srtp_suite_order`)."""
+        raw = ffi.new("sipral_stack_settings_t *")
+        raw.size = ffi.sizeof("sipral_stack_settings_t")
+        _retry(lambda: lib.sipral_stack_settings(self.handle, raw), "sipral_stack_settings")
+        count = int(raw.srtp_suite_count)
+        suites = ffi.new("sipral_srtp_suite_t[]", max(count, 1))
+        written = ffi.new("size_t *")
+        _retry(
+            lambda: lib.sipral_stack_srtp_suite_order(self.handle, suites, count, written),
+            "sipral_stack_srtp_suite_order",
+        )
+        return Settings.read(raw, [int(suites[i]) for i in range(count)])
+
     def set_diagnostic_trace(self, on: bool) -> None:
         """`sipral_stack_diagnostic_trace`: whether the trace level writes
         every SIP message whole, with its peer, from now on -- credentials
@@ -837,6 +867,7 @@ class Stack:
         server_naptr: bool = False,
         keepalive_ms: int = 0,
         tls_pin: str | None = None,
+        stream_protocol: int = 0,
         registrar: str | None = None,
         contact: str | None = None,
         display_name: str | None = None,
@@ -915,9 +946,26 @@ class Stack:
         an application that runs the account's TLS itself:
         :meth:`sipral.account.Account.check_certificate` is its verdict on a
         certificate a server presented.
+
+        ``stream_protocol`` (``Transport.TCP`` or ``Transport.TLS``) puts the
+        account on a connection of its own to its server, beside accounts on
+        this stack's UDP socket to other servers, in one stack with one
+        audio engine: the stack asks for the connection
+        (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, nothing outgrown), this stack
+        opens it to the account's server whatever ``stream_fallback`` says
+        and binds it, and the REGISTER and every call of the account go over
+        it. A TLS one is held to ``tls_pin`` when the account has one, to the
+        stack's ``tls_trust`` otherwise, under ``tls_server_name`` or the
+        server's host. One that closes is opened again. Until it is open a
+        call the account places raises ``SIPRAL_STATUS_TRANSPORT_DOWN``. Only
+        on a stack that signals over UDP.
         """
         if (registrar_address is None) == (server_uri is None):
             raise ValueError("an account names its server by registrar_address or by server_uri, one of the two")
+        if stream_protocol and (
+            stream_protocol not in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS) or self._streamed
+        ):
+            raise ValueError("stream_protocol is Transport.TCP or Transport.TLS, on a stack that signals over UDP")
         advertised = None
         if self._routes and contact is None and registrar_address is not None and not self._streamed:
             advertised = self._advertise_toward(registrar_address)
@@ -929,6 +977,7 @@ class Stack:
             server_naptr=server_naptr,
             keepalive_ms=keepalive_ms,
             tls_pin=tls_pin,
+            stream_protocol=stream_protocol,
             advertised=advertised,
             registrar=registrar,
             contact=contact,
@@ -1690,7 +1739,7 @@ class Stack:
         # of `self.events` may look up `self.call_for(event.call)` and
         # read its state, and that state has to already be current.
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_WANTED and not self._streamed:
-            self._streams_asked.append(event.fields["destination"])
+            self._streams_asked.append(event.fields)
         if event.kind == lib.SIPRAL_EVENT_KIND_TRANSPORT_FAILED:
             if not self._streamed:
                 self._streams_let_go.append(event.fields["transport"])
@@ -2171,7 +2220,7 @@ class Stack:
             try:
                 account.rebind(
                     remote=target,
-                    contact=_default_contact(account.aor, advertised, self.contact_parameters),
+                    contact=_default_contact(account.aor, advertised, account.contact_parameters),
                 )
             except SipralError:
                 # the account was removed meanwhile, or the stack is busy
@@ -2237,7 +2286,20 @@ class Stack:
         for transport in let_go:
             self._lose_sip_stream(transport, tell=False)
         asked, self._streams_asked = self._streams_asked, []
-        for destination in dict.fromkeys(asked):
+        seen: set[str] = set()
+        for wanted in asked:
+            destination = wanted["destination"]
+            if destination in seen:
+                continue
+            seen.add(destination)
+            # an account on a connection of its own asks with nothing
+            # outgrown; that one is opened whatever stream_fallback says
+            opens = self._stream_fallback or (wanted["request_bytes"] == 0 and wanted["limit_bytes"] == 0)
+            over = (
+                lib.SIPRAL_TRANSPORT_TLS
+                if wanted["protocol"] == lib.SIPRAL_TRANSPORT_TLS
+                else lib.SIPRAL_TRANSPORT_TCP
+            )
             with self._stream_lock:
                 if destination in self._streams_opening or any(
                     stream.destination == destination for stream in self._sip_streams.values()
@@ -2245,9 +2307,9 @@ class Stack:
                     continue
                 transport = self._next_stream
                 self._next_stream += 1
-                if self._stream_fallback:
+                if opens:
                     self._streams_opening.add(destination)
-            if not self._stream_fallback:
+            if not opens:
                 self._say_no_stream(
                     transport,
                     lib.SIPRAL_TRANSPORT_ERROR_CONNECTION_REFUSED,
@@ -2256,31 +2318,64 @@ class Stack:
                 continue
             threading.Thread(
                 target=self._open_sip_stream,
-                args=(transport, destination),
+                args=(transport, destination, over),
                 name="sipral-stream",
                 daemon=True,
             ).start()
 
-    def _open_sip_stream(self, transport: int, destination: str) -> None:
-        """Connect over TCP to ``destination`` -- or to ``stream_server``
-        when one was given -- and bind the connection at ``transport`` as
-        the stream to ``destination``; a connection that cannot be made is
-        told to the stack on that same number, which ends what was waiting
-        for it."""
+    def _stream_trust(self, destination: str) -> TlsTrust:
+        """What a TLS connection to ``destination`` trusts: the pin of an
+        account on a connection of its own to that server when it has one,
+        the stack's ``tls_trust`` otherwise."""
+        with self._lock:
+            accounts = list(self._accounts)
+        for account in accounts:
+            if (
+                account.stream_protocol == lib.SIPRAL_TRANSPORT_TLS
+                and account.registrar_address == destination
+                and account.tls_pin is not None
+            ):
+                return TlsTrust.pinned(account.tls_pin)
+        return self._tls_trust
+
+    def _open_sip_stream(self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP) -> None:
+        """Connect over TCP -- or TLS, for an account whose connection speaks
+        it -- to ``destination``, or to ``stream_server`` when one was given
+        for TCP, and bind the connection at ``transport`` as the stream to
+        ``destination``; a connection that cannot be made is told to the
+        stack on that same number, which ends what was waiting for it."""
+        tls = over == lib.SIPRAL_TRANSPORT_TLS
         try:
-            host, port = self._stream_server or parse_address(destination)
-            sock = socket.create_connection((host, port), timeout=_SIGNALLING_PATIENCE)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            host, port = parse_address(destination) if tls else self._stream_server or parse_address(destination)
+            if tls:
+                trust = self._stream_trust(destination)
+                sock = connect(
+                    (host, port),
+                    bind_host=None,
+                    context=trust.context(),
+                    server_name=self._given_tls_server_name or host,
+                    timeout=_SIGNALLING_PATIENCE,
+                    pin=trust.pin,
+                )
+            else:
+                sock = socket.create_connection((host, port), timeout=_SIGNALLING_PATIENCE)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(_SIGNALLING_PATIENCE)
             local = format_address(*sock.getsockname()[:2])
-        except (OSError, ValueError) as refused:
+        except (OSError, ValueError, ssl.SSLError) as refused:
             with self._stream_lock:
                 self._streams_opening.discard(destination)
-            error, _tls, said = classify(refused)
-            server = format_address(*self._stream_server) if self._stream_server else destination
+            error, tls_failure, said = classify(refused)
+            server = format_address(*self._stream_server) if self._stream_server and not tls else destination
             target = destination if server == destination else f"{server} (for {destination})"
             why = f": {said}" if said else ""
-            self._say_no_stream(transport, error, f"to {target} {_verdict(error)}{why}")
+            self._say_no_stream(
+                transport,
+                error,
+                f"to {target} {_verdict(error)}{why}",
+                over=over,
+                tls=tls_failure if tls else lib.SIPRAL_TLS_FAILURE_NONE,
+            )
             return
         stream = _SipStream(transport, destination, sock)
         with self._stream_lock:
@@ -2296,7 +2391,7 @@ class Stack:
                 lambda: lib.sipral_stack_transport_bind(
                     self.handle,
                     transport,
-                    lib.SIPRAL_TRANSPORT_TCP,
+                    over,
                     local_bytes,
                     len(local_bytes),
                     far,
@@ -2318,12 +2413,20 @@ class Stack:
         # just released, and a selector reports what is already waiting
         self._selector.register(sock, selectors.EVENT_READ, data=("sip", transport))
 
-    def _say_no_stream(self, transport: int, error: int, what: str) -> None:
+    def _say_no_stream(
+        self,
+        transport: int,
+        error: int,
+        what: str,
+        *,
+        over: int = lib.SIPRAL_TRANSPORT_TCP,
+        tls: int = lib.SIPRAL_TLS_FAILURE_NONE,
+    ) -> None:
         """`sipral_stack_transport_failed_with` for a connection that was not
         made; never raising on the way out. ``what`` finishes a sentence
-        that begins "TCP" -- where the connection was going and what became
-        of it -- carried to the event's detail."""
-        text = f"TCP {what}"
+        that begins with the protocol, "TCP" or "TLS" -- where the connection
+        was going and what became of it -- carried to the event's detail."""
+        text = f"{'TLS' if over == lib.SIPRAL_TRANSPORT_TLS else 'TCP'} {what}"
         text = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in text)
         encoded = text.encode("utf-8")[: lib.SIPRAL_TRANSPORT_DETAIL_BYTES].decode("utf-8", "ignore")
         detail = encoded.encode("utf-8")
@@ -2331,7 +2434,7 @@ class Stack:
         failure.size = ffi.sizeof("sipral_transport_failure_t")
         failure.transport = transport
         failure.error = error
-        failure.tls = lib.SIPRAL_TLS_FAILURE_NONE
+        failure.tls = tls
         detail_buf = ffi.new("char[]", detail)
         failure.detail = detail_buf
         failure.detail_len = len(detail)
@@ -2366,14 +2469,19 @@ class Stack:
             return
         try:
             with stream.lock:
+                # read without waiting: over TLS the selector said bytes
+                # arrived, not that they make application data
                 stream.sock.settimeout(0.0)
                 try:
                     data = stream.sock.recv(_TRANSMIT_BYTES)
+                    pending = getattr(stream.sock, "pending", None)
+                    while pending is not None and pending() > 0:
+                        data += stream.sock.recv(pending())
                 finally:
                     stream.sock.settimeout(_SIGNALLING_PATIENCE)
-        except (BlockingIOError, socket.timeout):
+        except (ssl.SSLWantReadError, BlockingIOError, socket.timeout):
             return
-        except OSError:
+        except (OSError, ssl.SSLError):
             data = b""
         if not data:
             self._lose_sip_stream(transport, tell=True)

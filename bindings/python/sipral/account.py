@@ -58,6 +58,16 @@ def _default_contact(aor: str, bind_address: str, parameters: str = "") -> str:
     return f"{scheme}:{user}@{bind_address}{parameters}"
 
 
+def _contact_parameters(stack: "Stack", stream_protocol: int) -> str:
+    """``;transport=tcp`` or ``;transport=tls`` for an account on a
+    connection of its own, the stack's own parameters otherwise."""
+    if stream_protocol == lib.SIPRAL_TRANSPORT_TLS:
+        return ";transport=tls"
+    if stream_protocol == lib.SIPRAL_TRANSPORT_TCP:
+        return ";transport=tcp"
+    return stack.contact_parameters
+
+
 class Account:
     """`sipral_account_add`, and the entry points that take its handle.
 
@@ -78,8 +88,17 @@ class Account:
         contact_given: bool = False,
         server_uri: str | None = None,
         advertised: str | None = None,
+        stream_protocol: int = 0,
+        tls_pin: str | None = None,
     ) -> None:
         self.stack = stack
+        #: The protocol of the connection of its own the account's requests
+        #: go over, ``Transport.TCP`` or ``Transport.TLS``, or ``0`` for the
+        #: stack's own transport.
+        self.stream_protocol = stream_protocol
+        #: The certificate pin it was added with, which a TLS connection of
+        #: its own is held to.
+        self.tls_pin = tls_pin
         self.handle = handle
         self.aor = aor
         #: Where this account's requests go, ``host:port``: the registrar or
@@ -99,6 +118,13 @@ class Account:
         #: its connection is made again.
         self.wants_registration = False
 
+    @property
+    def contact_parameters(self) -> str:
+        """What goes after the address in the `Contact` this package derives
+        for it: the parameter naming its own connection's protocol (RFC 3261
+        Section 19.1.1), or the stack's."""
+        return _contact_parameters(self.stack, self.stream_protocol)
+
     @classmethod
     def add(
         cls,
@@ -112,6 +138,7 @@ class Account:
         server_naptr: bool = False,
         keepalive_ms: int = 0,
         tls_pin: str | None = None,
+        stream_protocol: int = 0,
         advertised: str | None = None,
         display_name: str | None,
         auth_user: str | None,
@@ -136,7 +163,9 @@ class Account:
         registrar_bytes = _optional(registrar)
         contact_bytes = (
             contact
-            or _default_contact(aor, advertised or stack.bind_address, stack.contact_parameters)
+            or _default_contact(
+                aor, advertised or stack.bind_address, _contact_parameters(stack, stream_protocol)
+            )
         ).encode("utf-8")
         display_name_bytes = _optional(display_name)
         auth_user_bytes = _optional(auth_user)
@@ -174,6 +203,7 @@ class Account:
         if server_naptr:
             config.server_naptr = lib.SIPRAL_TOGGLE_ON
         config.keepalive_ms = keepalive_ms
+        config.stream_protocol = int(stream_protocol)
         pin_bytes = _optional(tls_pin)
         pin_buf = ffi.new("char[]", pin_bytes) if pin_bytes else None
         if pin_buf is not None:
@@ -244,6 +274,8 @@ class Account:
             contact_given=bool(contact),
             server_uri=server_uri,
             advertised=advertised,
+            stream_protocol=int(stream_protocol),
+            tls_pin=tls_pin,
         )
 
     def check_certificate(self, certificate: bytes, unix_seconds: int | None = None) -> PinnedCertificate | None:
@@ -284,7 +316,7 @@ class Account:
         remote_bytes = (remote or self.registrar_address).encode("utf-8")
         contact_bytes = (
             contact
-            or _default_contact(self.aor, self.stack.bind_address, self.stack.contact_parameters)
+            or _default_contact(self.aor, self.stack.bind_address, self.contact_parameters)
         ).encode("utf-8")
         _call(
             lambda: lib.sipral_account_rebind(

@@ -128,6 +128,18 @@ In device mode `call.media.pumped` is true, `call.media.frames` stays
 empty and `send_audio` raises: the packets the engine encodes are handed
 back to this package, which sends them from the call's own media socket.
 
+Each call has a gain, a mute and a meter of its own on top of the
+direction's: `set_gain`, `gain`, `set_muted`, `muted` and `level` take
+`call=`. The input direction is what the microphone sends that call alone
+and the output how loud it is in the loudspeaker beside the others — mute
+the call being spoken about in a consultation, turn one conference member
+down. They hold from the moment the call's media starts to its end, through
+a hold or a local conference and back, and raise
+`SIPRAL_STATUS_WRONG_STATE` outside that. `Stack(system_echo_cancellation=False)`
+opens the devices past the platform's echo cancellation, for a headset,
+which has no echo to cancel, or an application that cancels it on each call
+itself; `info()` says what the platform did.
+
 ## Who is calling, why a call ended, where it went
 
 Every call event carries `event.identity` (`CallerIdentity`: the
@@ -485,6 +497,34 @@ stack connects again, one second later and up to thirty seconds apart,
 registering every account again once it is back. `stack.connected` says
 whether it is up; `Account.register()` asked meanwhile is kept for then.
 `docs/22-tls.md` has the whole mapping.
+
+An account can have a connection of its own on a stack that signals over
+UDP, so that one stack and one audio engine hold an account on UDP with one
+PBX and another on TCP or TLS with a second:
+
+```python
+stack = Stack(loop=loop)
+office = stack.add_account("sip:alice@office.example", registrar="sip:office.example",
+                           registrar_address="192.0.2.10:5060")
+carrier = stack.add_account("sip:+15550100@carrier.example", registrar="sip:carrier.example",
+                            registrar_address="198.51.100.20:5061",
+                            tls_pin="sha256 Fingerprint=AB:CD:...", stream_protocol=Transport.TLS)
+```
+
+The stack asks for the connection with `EventKind.TRANSPORT_WANTED`,
+nothing outgrown, and this package opens it to the account's server
+whatever `stream_fallback` says: a TLS one held to the account's `tls_pin`
+when it has one, to `tls_trust` under `tls_server_name` otherwise. The
+account's REGISTER and every request of its calls go over it, its `Contact`
+names the protocol, and a connection that closes is opened again and the
+account registered again. Until it is open a call the account places
+raises `SIPRAL_STATUS_TRANSPORT_DOWN`.
+
+`stack.settings()` reads back what the stack runs with, every default
+filled in (`sipral.Settings`): the timers, the codecs' count, the SRTP
+suites its calls offer in order, whether a pseudonym salt was given, whether
+the diagnostic trace is whole now, and whether the platform's echo
+cancellation is asked for.
 
 `invite_limit` is how fast one address may ring the stack: every stack
 starts at `InviteLimit.DEFAULT`, ten INVITEs at once and one every two

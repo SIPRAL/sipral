@@ -58,6 +58,7 @@ from .events import (
 )
 from .locate import advertised_address, lookup
 from .media import Media
+from .settings import Settings
 from .signalling import InviteLimit, TlsTrust
 from .stack import TRACE, Stack, features
 from .subscription import ConferencePicture, Participant, Subscription
@@ -86,6 +87,7 @@ __all__ = [
     "PinnedCertificate",
     "Presence",
     "Protection",
+    "Settings",
     "SipralError",
     "Stack",
     "Subscription",

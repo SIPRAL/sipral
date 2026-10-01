@@ -24,6 +24,7 @@ from .errors import call as _call
 from .errors import check
 
 if TYPE_CHECKING:
+    from .call import Call
     from .stack import Stack
 
 __all__ = ["Audio", "AudioDevice", "AudioInfo", "UNITY_GAIN"]
@@ -202,57 +203,101 @@ class Audio:
 
     # -- gain, mute and the meter -----------------------------------------
 
-    def set_gain(self, direction: int, gain: float) -> None:
+    def set_gain(self, direction: int, gain: float, *, call: "Call | None" = None) -> None:
         """Set ``direction``'s gain as a ratio: ``1.0`` is unity, ``0.5``
         halves, ``2.0`` doubles, anything above ``4.0`` is ``4.0``. The input
         gain is the microphone gain, the output gain the volume. Applied to
         the call's audio rather than to the operating system's control, and
-        kept across every device change."""
+        kept across every device change.
+
+        With ``call``, that call's own gain, on top of the direction's: the
+        input direction is what the microphone sends that call alone, the
+        output how loud that call is in the loudspeaker beside the others.
+        Kept while the call is held or in a local conference and back, and
+        gone when it ends; ``SIPRAL_STATUS_WRONG_STATE`` before the call's
+        media starts and after it ends. The same ``call`` keyword reads it
+        back in :meth:`gain`, mutes one call alone in :meth:`set_muted` and
+        :meth:`muted`, and reads one call's meter in :meth:`level`."""
         if gain < 0:
             raise ValueError(f"a gain is a ratio of zero or more, not {gain}")
         steps = round(min(gain, _GAIN_MOST) * _GAIN_STEPS)
+        if call is not None:
+            _call(
+                lambda: lib.sipral_audio_call_set_gain(self._handle, call.handle, int(direction), steps),
+                "sipral_audio_call_set_gain",
+            )
+            return
         _call(
             lambda: lib.sipral_audio_set_gain(self._handle, int(direction), steps),
             "sipral_audio_set_gain",
         )
 
-    def gain(self, direction: int) -> float:
-        """``direction``'s gain, as the ratio :meth:`set_gain` takes."""
+    def gain(self, direction: int, *, call: "Call | None" = None) -> float:
+        """``direction``'s gain -- ``call``'s own, with one -- as the ratio
+        :meth:`set_gain` takes."""
         out = ffi.new("uint32_t *")
-        _call(
-            lambda: lib.sipral_audio_gain(self._handle, int(direction), out),
-            "sipral_audio_gain",
-        )
+        if call is not None:
+            _call(
+                lambda: lib.sipral_audio_call_gain(self._handle, call.handle, int(direction), out),
+                "sipral_audio_call_gain",
+            )
+        else:
+            _call(
+                lambda: lib.sipral_audio_gain(self._handle, int(direction), out),
+                "sipral_audio_gain",
+            )
         return int(out[0]) / _GAIN_STEPS
 
-    def set_muted(self, direction: int, muted: bool) -> None:
+    def set_muted(self, direction: int, muted: bool, *, call: "Call | None" = None) -> None:
         """Mute ``direction`` or unmute it, kept across every device change. A
         muted microphone still sends silence, so the far end hears a stream
-        rather than a gap."""
+        rather than a gap. With ``call``, that call alone, while every other
+        call goes on."""
+        if call is not None:
+            _call(
+                lambda: lib.sipral_audio_call_set_muted(
+                    self._handle, call.handle, int(direction), int(bool(muted))
+                ),
+                "sipral_audio_call_set_muted",
+            )
+            return
         _call(
             lambda: lib.sipral_audio_set_muted(self._handle, int(direction), int(bool(muted))),
             "sipral_audio_set_muted",
         )
 
-    def muted(self, direction: int) -> bool:
-        """Whether ``direction`` is muted."""
+    def muted(self, direction: int, *, call: "Call | None" = None) -> bool:
+        """Whether ``direction`` is muted -- for ``call`` alone, with one."""
         out = ffi.new("uint32_t *")
-        _call(
-            lambda: lib.sipral_audio_muted(self._handle, int(direction), out),
-            "sipral_audio_muted",
-        )
+        if call is not None:
+            _call(
+                lambda: lib.sipral_audio_call_muted(self._handle, call.handle, int(direction), out),
+                "sipral_audio_call_muted",
+            )
+        else:
+            _call(
+                lambda: lib.sipral_audio_muted(self._handle, int(direction), out),
+                "sipral_audio_muted",
+            )
         return bool(out[0])
 
-    def level(self, direction: int) -> int:
+    def level(self, direction: int, *, call: "Call | None" = None) -> int:
         """The meter: the loudest sample of the last tenth of a second in
         ``direction``, 0 to 32767, held long enough that a bar drawn from it
         neither flickers nor sticks. Cheap enough for a window's timer; zero
-        while nothing is open."""
+        while nothing is open. With ``call``, that call's own, after its own
+        gain and mute."""
         out = ffi.new("uint32_t *")
-        _call(
-            lambda: lib.sipral_audio_level(self._handle, int(direction), out),
-            "sipral_audio_level",
-        )
+        if call is not None:
+            _call(
+                lambda: lib.sipral_audio_call_level(self._handle, call.handle, int(direction), out),
+                "sipral_audio_call_level",
+            )
+        else:
+            _call(
+                lambda: lib.sipral_audio_level(self._handle, int(direction), out),
+                "sipral_audio_level",
+            )
         return int(out[0])
 
     @property
