@@ -3837,15 +3837,8 @@ impl MediaEngine {
         // a live call that required SRTP and is re-offered a stream without
         // it is where a silent downgrade would happen, so it is where the
         // refusal has to be
-        if !keying_allows(&catalog, Some(&offer)) {
-            self.events
-                .push_back((call, MediaEvent::Failed(MediaError::SrtpRequired)));
-            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
-            return;
-        }
-        if best_effort_refuses(&catalog, Some(&offer)) {
-            self.events
-                .push_back((call, MediaEvent::Failed(MediaError::UnusableKeying)));
+        if let Some(error) = keying_refusal(&catalog, &offer) {
+            self.events.push_back((call, MediaEvent::Failed(error)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
@@ -5234,6 +5227,17 @@ fn best_effort_refuses(catalog: &CodecCatalog, offered: Option<&SessionDescripti
         .is_some_and(|stream| {
             keying::best_effort_unkeyable(catalog.srtp(), catalog.srtp_suites(), stream)
         })
+}
+
+/// Why a re-offer inside a live call is refused for its keys, if it is: a
+/// plain one under a policy that requires keys, or, under best effort, one
+/// whose keys this end cannot take, as a first offer would be.
+fn keying_refusal(catalog: &CodecCatalog, offer: &SessionDescription) -> Option<MediaError> {
+    if keying_allows(catalog, Some(offer)) {
+        best_effort_refuses(catalog, Some(offer)).then_some(MediaError::UnusableKeying)
+    } else {
+        Some(MediaError::SrtpRequired)
+    }
 }
 
 /// Refuse an INVITE whose offer wrote keys this call's best-effort policy
