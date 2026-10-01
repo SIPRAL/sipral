@@ -140,6 +140,49 @@ Future<(SecurityContext, String)?> certificate(Directory directory) async {
   }
 }
 
+/// An impostor for the registrar [certificate] made in [directory]: a leaf
+/// of its own, under a key of its own, sent with the registrar's real
+/// certificate above it in the chain, as if that had issued it. Null where
+/// there is no `openssl` command.
+Future<SecurityContext?> chainAbove(Directory directory) async {
+  final path = directory.path;
+  final steps = [
+    [
+      'req', '-x509', '-newkey', 'ec', '-pkeyopt', //
+      'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
+      '-subj', '/CN=$serverName', '-keyout', '$path/issuer.key',
+      '-out', '$path/issuer.pem',
+    ],
+    [
+      'req', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', //
+      '-nodes', '-subj', '/CN=$serverName', '-keyout', '$path/impostor.key',
+      '-out', '$path/impostor.csr',
+    ],
+    [
+      'x509', '-req', '-in', '$path/impostor.csr', '-CA', //
+      '$path/issuer.pem', '-CAkey', '$path/issuer.key', '-set_serial', '7',
+      '-days', '1', '-out', '$path/impostor.pem',
+    ],
+  ];
+  try {
+    for (final step in steps) {
+      if ((await Process.run('openssl', step)).exitCode != 0) {
+        return null;
+      }
+    }
+  } on ProcessException {
+    return null;
+  }
+  final chain = File('$path/chain.pem');
+  await chain.writeAsString(
+    await File('$path/impostor.pem').readAsString() +
+        await File('$path/registrar.pem').readAsString(),
+  );
+  return SecurityContext()
+    ..useCertificateChain(chain.path)
+    ..usePrivateKey('$path/impostor.key');
+}
+
 void main() {
   final opened = <SipralStack>[];
 
@@ -226,6 +269,45 @@ void main() {
       expect(udp.received.any((one) => one.contains('dave@')), isFalse);
       expect(tls.requests.any((one) => one.$2.contains('carol@')), isFalse);
     },
+  );
+
+  test(
+    'a server that sends the pinned certificate above a leaf of its own is refused',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('sipral-dart');
+      addTearDown(() => directory.delete(recursive: true));
+      final made = await certificate(directory);
+      final impostor = made == null ? null : await chainAbove(directory);
+      if (made == null || impostor == null) {
+        markTestSkipped('no openssl command to make the certificates with');
+        return;
+      }
+      final tls = await StreamRegistrar.open(impostor);
+      addTearDown(tls.close);
+      final client = await stack();
+      final account = client.addAccount(
+        'sip:bob@$serverName',
+        registrarAddress: tls.address,
+        registrar: 'sip:$serverName',
+        tlsPin: made.$2,
+        streamProtocol: SipralTransport.tls,
+      );
+      final settled = account.registration
+          .firstWhere(
+            (state) =>
+                state == SipralRegistrationState.registered ||
+                state == SipralRegistrationState.retrying ||
+                state == SipralRegistrationState.failed,
+          )
+          .timeout(const Duration(seconds: 30));
+      account.register();
+      // the pinned certificate is in the chain, but the leaf, whose key
+      // signed the handshake, is the impostor's own: no connection is
+      // bound, and the registration gives up waiting for one
+      expect(await settled, isNot(SipralRegistrationState.registered));
+      expect(tls.requests, isEmpty, reason: 'nothing went to the impostor');
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
   );
 
   test(

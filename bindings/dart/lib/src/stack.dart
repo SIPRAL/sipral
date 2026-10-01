@@ -653,15 +653,28 @@ final class SipralStack {
                 )
                 .firstOrNull;
         final pinned = account?._tlsPin != null;
-        socket = await SecureSocket.secure(
+        final secured = await SecureSocket.secure(
           plain,
           host: _tlsServerName ?? address.$1.address,
-          // a pin is the whole verdict: no authority is trusted beside it,
-          // so every certificate reaches the account's own check
+          // a pin is the whole verdict: no authority is trusted beside it.
+          // The handshake is let through here and the verdict read below,
+          // on the leaf: what this callback is handed is whichever
+          // certificate of the chain failed, the top one, and a server
+          // that sends the pinned certificate above a leaf of its own
+          // would pass on it
           context: pinned ? SecurityContext(withTrustedRoots: false) : null,
-          onBadCertificate:
-              pinned ? (certificate) => _pinned(account!, certificate) : null,
+          onBadCertificate: pinned ? (_) => true : null,
         );
+        if (pinned) {
+          final leaf = secured.peerCertificate;
+          if (leaf == null || !_pinned(account!, leaf)) {
+            secured.destroy();
+            throw const HandshakeException(
+              'the server\'s certificate is not the one the account pins',
+            );
+          }
+        }
+        socket = secured;
       } else {
         socket = plain;
       }
