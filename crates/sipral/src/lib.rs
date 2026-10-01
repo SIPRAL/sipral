@@ -229,7 +229,7 @@ pub use join::{MixOutcome, mix_two};
 pub use keying::{AccountSrtp, SrtpPolicy};
 pub use local_conference::{
     ConferenceChange, ConferenceDirection, ConferencePacket, Departure, Gain, LocalConference,
-    LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member,
+    LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member, MemberFilter,
 };
 #[cfg(feature = "redaction")]
 pub use log::{

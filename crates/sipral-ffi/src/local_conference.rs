@@ -632,10 +632,13 @@ entry! {
                 }
             }
             if let Some(audio) = state.audio.clone() {
-                audio
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .detach(call);
+                let mut engine = audio.lock().unwrap_or_else(PoisonError::into_inner);
+                engine.detach(call);
+                // the call's own gain, mute and meter go into the conference
+                // with it, and act on its path there
+                if let Some(controls) = engine.call_controls(call) {
+                    let _ = lock(&entry.shared).inner.filter(named, Box::new(controls));
+                }
             }
             Ok(())
         })
@@ -1080,7 +1083,10 @@ mod tests {
         sipral_local_conference_tick,
     };
     use crate::audio::tests::{Packets, a_desk, transmit};
-    use crate::audio::{FAKE_PLATFORM, SipralAudio, SipralAudioActivation};
+    use crate::audio::{
+        FAKE_PLATFORM, SipralAudio, SipralAudioActivation, SipralAudioDirection,
+        SipralAudioTransmit, sipral_audio_call_level, sipral_audio_call_set_muted,
+    };
     use crate::call::tests::{
         ANSWER, PEER_MEDIA, SECOND_PEER_MEDIA, hangup, media_call_pair, media_line,
         second_media_call, up,
@@ -1764,21 +1770,139 @@ mod tests {
         Packets,
         FakeControl,
     ) {
-        let fake = a_desk();
-        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
         let packets: Packets = Arc::new(Mutex::new(Vec::new()));
         let leaked: &'static Packets = Box::leak(Box::new(Arc::clone(&packets)));
+        let (stack, call_a, call_b, fake) = device_pair_through(
+            observed,
+            transmit,
+            ptr::from_ref(leaked).cast_mut().cast::<c_void>(),
+        );
+        (stack, call_a, call_b, packets, fake)
+    }
+
+    /// The same, every packet handed to `callback` with `user_data`.
+    fn device_pair_through(
+        observed: &mut Observed,
+        callback: unsafe extern "C" fn(*const SipralAudioTransmit, *mut c_void),
+        user_data: *mut c_void,
+    ) -> (SipralHandle, SipralHandle, SipralHandle, FakeControl) {
+        let fake = a_desk();
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
         let (stack, account) = media_line(observed, |config| {
             config.audio = SipralAudio::Device as u32;
             config.audio_activation = SipralAudioActivation::Automatic as u32;
-            config.audio_transmit_callback = Some(transmit);
-            config.audio_transmit_user_data = ptr::from_ref(leaked).cast_mut().cast::<c_void>();
+            config.audio_transmit_callback = Some(callback);
+            config.audio_transmit_user_data = user_data;
             config.audio_probe_ms = 500;
         });
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
         let (_, call_a) = up(observed, stack, account, ANSWER);
         let call_b = second_media_call(observed, stack, account);
-        (stack, call_a, call_b, packets, fake)
+        (stack, call_a, call_b, fake)
+    }
+
+    /// Every packet the engine sent, whole, by the call it was sent for.
+    type Payloads = Arc<Mutex<Vec<(SipralHandle, Vec<u8>)>>>;
+
+    unsafe extern "C" fn keep_payloads(event: *const SipralAudioTransmit, user_data: *mut c_void) {
+        let transmit = unsafe { &*event };
+        let payload =
+            unsafe { std::slice::from_raw_parts(transmit.payload, transmit.payload_len) }.to_vec();
+        let kept = unsafe { &*user_data.cast::<Payloads>() };
+        kept.lock().unwrap().push((transmit.call, payload));
+    }
+
+    /// One call's meter in one direction, through the C entry point.
+    fn call_level(stack: SipralHandle, call: SipralHandle, direction: u32) -> u32 {
+        let mut peak = u32::MAX;
+        assert_eq!(
+            unsafe { sipral_audio_call_level(stack, call, direction, &raw mut peak) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        peak
+    }
+
+    /// In device mode a call's own controls go into a local conference with
+    /// it and act on its path there: with call a's input muted — what the
+    /// microphone sends it — its far end hears silence while call b's hears
+    /// this end, and call b's meter reads what its far end is sent.
+    #[test]
+    fn in_device_mode_a_calls_own_controls_act_inside_a_conference() {
+        let mut observed = Observed::default();
+        let payloads: Payloads = Arc::default();
+        let leaked: &'static Payloads = Box::leak(Box::new(Arc::clone(&payloads)));
+        let (stack, call_a, call_b, fake) = device_pair_through(
+            &mut observed,
+            keep_payloads,
+            ptr::from_ref(leaked).cast_mut().cast::<c_void>(),
+        );
+        let input = SipralAudioDirection::Input as u32;
+        assert_eq!(
+            unsafe { sipral_audio_call_set_muted(stack, call_a, input, 1) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let conference = create(stack, &config(3, 16_000));
+        assert_eq!(add(conference, call_a), SipralStatus::Ok);
+        assert_eq!(add(conference, call_b), SipralStatus::Ok);
+
+        // a 500 Hz square wave near the top of the scale, at the fake
+        // microphone's 48 kHz
+        let square: Vec<i16> = (0..960)
+            .map(|n| if (n / 48) % 2 == 0 { 12_000 } else { -12_000 })
+            .collect();
+        let started = Instant::now();
+        let mut cleared = false;
+        let (to_a, to_b) = loop {
+            fake.speak_into("builtin-mic", &square);
+            std::thread::sleep(Duration::from_millis(10));
+            if !cleared && started.elapsed() > Duration::from_millis(400) {
+                payloads.lock().unwrap().clear();
+                cleared = true;
+            }
+            let sent = payloads.lock().unwrap().clone();
+            let shares = |call: SipralHandle| -> Vec<f64> {
+                sent.iter()
+                    .filter(|(named, _)| *named == call)
+                    .map(|(_, payload)| loud_share(payload))
+                    .collect()
+            };
+            let (to_a, to_b) = (shares(call_a), shares(call_b));
+            if cleared && to_a.len() >= 25 && to_b.len() >= 25 {
+                break (to_a, to_b);
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the engine sent too few packets: {} to a, {} to b",
+                to_a.len(),
+                to_b.len()
+            );
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let mean = |shares: &[f64]| shares.iter().sum::<f64>() / shares.len().max(1) as f64;
+        assert!(
+            mean(&to_a) < 0.01,
+            "call a's far end heard this end through its own mute: {to_a:?}"
+        );
+        assert!(
+            mean(&to_b) > 0.3,
+            "call b's far end did not hear this end: {to_b:?}"
+        );
+        assert_eq!(call_level(stack, call_a, input), 0);
+        let up = call_level(stack, call_b, input);
+        assert!(up > 4_000, "call b's meter read {up} inside the conference");
+
+        assert_eq!(
+            unsafe { sipral_local_conference_destroy(conference) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
     }
 
     fn attached(stack: SipralHandle) -> Vec<SipralHandle> {

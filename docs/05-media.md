@@ -2804,6 +2804,16 @@ rate with the controls it had; one whose media ends leaves on the next tick.
 Joins, departures and their reasons, the talkers and a recording that
 stopped by itself are `ConferenceChange`s, oldest first.
 
+A call's own controls kept outside the conference go into it with the call:
+`LocalConference::filter` puts a `MemberFilter` in the member's path, whose
+`said` sees every frame the call says before it is mixed and whose `heard`
+every frame it is owed before it is encoded, at the call's own rate, on top
+of the conference's member controls. The audio engine hands each call's
+own gain, mute and meter over this way (`sipral_audio::CallControls`), so a
+call muted with `sipral_audio_call_set_muted` stays muted after it joins.
+A frame silenced in `said` never reaches the mixer, so a call muted that way
+is not listed as talking either.
+
 ### Recording
 
 `LocalConference::start_recording` writes the tap through the call recorder

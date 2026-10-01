@@ -559,6 +559,95 @@ fn a_mute_silences_one_member_one_way() {
     );
 }
 
+/// A member filter that silences one way of a call and notes the rates it
+/// was handed frames at.
+struct Silencing {
+    said: bool,
+    heard: bool,
+    rates: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl crate::local_conference::MemberFilter for Silencing {
+    fn said(&mut self, frame: &mut [i16], hertz: u32) {
+        self.rates.lock().expect("the rates").push(hertz);
+        if self.said {
+            frame.fill(0);
+        }
+    }
+
+    fn heard(&mut self, frame: &mut [i16], hertz: u32) {
+        self.rates.lock().expect("the rates").push(hertz);
+        if self.heard {
+            frame.fill(0);
+        }
+    }
+}
+
+/// A call's own controls put in its path act there: bob's filter silencing
+/// what he is owed leaves his far end hearing nobody while everybody still
+/// hears him, and carol's silencing what she says leaves nobody hearing her
+/// while she hears everybody. Each filter is handed its own call's frames at
+/// its own call's rate.
+#[test]
+fn a_filter_acts_on_its_own_member_and_no_other() {
+    let mut quartet = three_calls_and_this_end();
+    let bob = quartet.end(0).near;
+    let carol = quartet.end(1).near;
+    let bob_rates = std::sync::Arc::default();
+    let carol_rates = std::sync::Arc::default();
+    quartet
+        .conference
+        .filter(
+            bob,
+            Box::new(Silencing {
+                said: false,
+                heard: true,
+                rates: std::sync::Arc::clone(&bob_rates),
+            }),
+        )
+        .expect("bob is a member");
+    quartet
+        .conference
+        .filter(
+            carol,
+            Box::new(Silencing {
+                said: true,
+                heard: false,
+                rates: std::sync::Arc::clone(&carol_rates),
+            }),
+        )
+        .expect("carol is a member");
+    quartet.run(20, true);
+    quartet.forget();
+    quartet.run(25, true);
+
+    assert_hears("bob", quartet.heard_by(0), [false, false, false, false]);
+    assert_hears("carol", quartet.heard_by(1), [true, false, true, true]);
+    assert_hears("dave", quartet.heard_by(2), [true, false, false, true]);
+    assert_hears("this end", quartet.heard_here(), [true, false, true, false]);
+    let bob_rates = bob_rates.lock().expect("the rates").clone();
+    let carol_rates = carol_rates.lock().expect("the rates").clone();
+    assert!(!bob_rates.is_empty() && bob_rates.iter().all(|hz| *hz == 8_000));
+    assert!(!carol_rates.is_empty() && carol_rates.iter().all(|hz| *hz == 16_000));
+
+    let stranger = quartet.end(2).near;
+    quartet
+        .conference
+        .remove(stranger)
+        .expect("dave is a member");
+    assert_eq!(
+        quartet.conference.filter(
+            stranger,
+            Box::new(Silencing {
+                said: true,
+                heard: true,
+                rates: std::sync::Arc::default(),
+            }),
+        ),
+        Err(MediaError::NotInConference)
+    );
+}
+
 /// A gain on one member's input changes how loud everybody else hears it,
 /// and nobody else.
 #[test]

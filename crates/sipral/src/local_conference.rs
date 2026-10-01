@@ -115,6 +115,25 @@ pub struct ConferencePacket {
     pub transport: crate::TurnTransport,
 }
 
+/// What one call's own audio passes through on its way into a conference's
+/// mix and out of it: the gain, mute and meter its application keeps for
+/// the call whether or not it is in a conference, which
+/// [`LocalConference::filter`] puts in the member's path.
+///
+/// Both run on the thread that ticks the conference, once per frame of the
+/// member's own, at its own rate: they are the real-time path and take no
+/// lock that thread could wait on.
+pub trait MemberFilter: Send {
+    /// A frame the member said, at `hertz`, before it is mixed: what is
+    /// left of it is what every other member, this end included, hears of
+    /// that call.
+    fn said(&mut self, frame: &mut [i16], hertz: u32);
+    /// A frame of the mix the member is owed, at `hertz`, before it is
+    /// encoded for its far end: what is left of it is what that far end
+    /// hears.
+    fn heard(&mut self, frame: &mut [i16], hertz: u32);
+}
+
 /// A call in the conference.
 struct Seat {
     call: CallHandle,
@@ -129,6 +148,8 @@ struct Seat {
     due: usize,
     /// One frame, reused.
     buffer: Vec<i16>,
+    /// The call's own controls, when its application put them in its path.
+    filter: Option<Box<dyn MemberFilter>>,
 }
 
 /// A local conference of any number of calls, with or without this end.
@@ -362,8 +383,32 @@ impl LocalConference {
             frame,
             due: 0,
             buffer: vec![0; frame],
+            filter: None,
         });
         self.note(ConferenceChange::Joined(Member::Call(call)));
+        Ok(())
+    }
+
+    /// Put a call's own controls in its path, from the next tick until it
+    /// leaves: every frame it says passes through [`MemberFilter::said`]
+    /// before it is mixed, and every frame it is owed through
+    /// [`MemberFilter::heard`] before it is encoded, on top of the
+    /// conference's own controls for that member. A filter already there
+    /// is replaced, and dropped.
+    ///
+    /// # Errors
+    /// [`MediaError::NotInConference`] for a call that is not a member.
+    pub fn filter(
+        &mut self,
+        call: CallHandle,
+        filter: Box<dyn MemberFilter>,
+    ) -> Result<(), MediaError> {
+        let seat = self
+            .seats
+            .iter_mut()
+            .find(|seat| seat.call == call)
+            .ok_or(MediaError::NotInConference)?;
+        seat.filter = Some(filter);
         Ok(())
     }
 
@@ -650,6 +695,7 @@ impl LocalConference {
                 frame,
                 due,
                 buffer,
+                filter,
             } = seat;
             *due += Rate::from_hz(*rate).map_or(0, Rate::tick_samples);
             let read = share.with(|session| {
@@ -659,6 +705,9 @@ impl LocalConference {
                 }
                 while *due >= *frame {
                     session.playback(buffer);
+                    if let Some(filter) = filter.as_mut() {
+                        filter.said(buffer, *rate);
+                    }
                     let _ = mixer.push(*id, buffer);
                     *due -= *frame;
                 }
@@ -723,8 +772,10 @@ impl LocalConference {
                 share,
                 buffer,
                 frame,
+                rate,
                 id,
                 call,
+                filter,
                 ..
             } = seat;
             let mixer = &mut self.mixer;
@@ -733,6 +784,9 @@ impl LocalConference {
             let sent = share.with(|session| {
                 while mixer.available(*id).unwrap_or(0) >= *frame {
                     let _ = mixer.pull(*id, buffer);
+                    if let Some(filter) = filter.as_mut() {
+                        filter.heard(buffer, *rate);
+                    }
                     let Ok(Some(datagram)) = session.capture(buffer, now) else {
                         continue;
                     };

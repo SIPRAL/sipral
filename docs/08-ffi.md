@@ -3272,13 +3272,16 @@ and mute. For two calls at once: mute the call being spoken about, turn one
 down. They exist from the moment a call's media starts to the moment it
 ends, a hold or a move into a local conference and back keeping them, and
 are `SIPRAL_STATUS_WRONG_STATE` outside that and in application mode, where
-the frames are the application's to scale. While a call is a member of a
-local conference the engine carries the conference in its place, so its own
-controls are kept but act on nothing, and its meter reads silence, until it
-leaves — a muted call that
-joins one is heard, and hears this end, like every member; inside a
-conference, `sipral_local_conference_set_muted` and `_set_gain` are the
-controls that act.
+the frames are the application's to scale. A call that joins a local
+conference takes them with it, and there they act on its own path, on top
+of the conference's member controls (`sipral_local_conference_set_muted` and
+`_set_gain`): the input direction on what the conference sends the call —
+muted, its far end hears nobody — and the output direction on what the call
+says into the conference — muted, neither this end nor any other member
+hears it — with each meter reading what passed. Outside a conference the
+output direction reaches the loudspeaker alone; inside one, the loudspeaker
+is one listener among the members, so the call's own output reaches them
+all.
 
 **Settings read back** (`sipral_stack_settings_t`, after
 `datagram_without_stream_bytes`): `srtp_suite_count`, with

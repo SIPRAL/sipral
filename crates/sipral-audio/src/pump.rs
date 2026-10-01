@@ -101,6 +101,52 @@ impl CallChannels {
     }
 }
 
+/// One call's own gain, mute and meter, handed to whatever carries the call
+/// while the engine does not: a local conference, which puts them in the
+/// member's path ([`sipral::LocalConference::filter`]) so that a call's own
+/// controls act inside it as they do outside, from
+/// [`Engine::call_controls`](crate::Engine::call_controls).
+///
+/// The input direction — what the microphone sends that call alone — acts
+/// on what the conference sends the call, which is what its far end hears;
+/// the output direction on what the call says into the conference, which
+/// is what this end and every other member hear of it. The meters read
+/// each after its own gain and mute, and read silence again once the
+/// conference lets go.
+#[derive(Debug)]
+pub struct CallControls {
+    channels: CallChannels,
+}
+
+impl CallControls {
+    pub(crate) const fn new(channels: CallChannels) -> Self {
+        Self { channels }
+    }
+}
+
+impl sipral::MemberFilter for CallControls {
+    fn said(&mut self, frame: &mut [i16], hertz: u32) {
+        let covered = frame.len();
+        self.channels.down.set_window(window_samples(hertz));
+        self.channels.down.apply(frame, covered);
+    }
+
+    fn heard(&mut self, frame: &mut [i16], hertz: u32) {
+        let covered = frame.len();
+        self.channels.up.set_window(window_samples(hertz));
+        self.channels.up.apply(frame, covered);
+    }
+}
+
+impl Drop for CallControls {
+    fn drop(&mut self) {
+        // what carried the call has let go: the meters stop reading the
+        // last frame it had
+        self.channels.up.quiet();
+        self.channels.down.quiet();
+    }
+}
+
 /// What the engine asks the pump to do.
 pub(crate) enum Command {
     /// Carry this call's audio from here on, through its own controls.

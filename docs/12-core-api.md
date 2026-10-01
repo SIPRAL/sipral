@@ -1539,6 +1539,10 @@ peer elsewhere (`sipral_advertised_address`).
   (`sipral_audio_call_*`, `SIPRAL_STATUS_WRONG_STATE`). A call's controls are
   made at its first attach, kept across a detach, and dropped by
   `forget_call`.
+- `call_controls` hands a call's own controls, as a `CallControls`, to
+  whatever carries the call in the engine's place: `CallControls` is a
+  `sipral::MemberFilter`, and `LocalConference::filter` puts it in the
+  call's path in a conference, so the controls act there too.
 
 ## Projection onto C
 

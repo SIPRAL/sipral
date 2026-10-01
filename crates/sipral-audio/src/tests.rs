@@ -1000,6 +1000,52 @@ fn one_calls_mute_gain_and_meter_are_its_own() {
     assert_eq!(engine.call_muted(1, Direction::Input), None);
 }
 
+/// A call's own controls, handed to a conference, act on the frames it
+/// passes them: the input direction on what the call is sent, the output
+/// direction on what it says, each with its meter; a call never carried has
+/// none to hand, and once the conference lets go the meters read silence.
+#[test]
+fn a_calls_own_controls_act_where_a_conference_carries_it() {
+    use sipral::MemberFilter;
+
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    assert!(engine.call_controls(1).is_none(), "not carried yet");
+    let call = FakeCallControl::new(8_000, 1_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    engine.detach(1);
+    assert!(engine.set_call_muted(1, Direction::Output, true));
+    assert!(engine.set_call_gain(1, Direction::Input, Gain::from_ratio(0.5)));
+    let mut controls = engine.call_controls(1).expect("the call's controls");
+
+    let mut sent = vec![4_000_i16; 160];
+    controls.heard(&mut sent, 8_000);
+    assert!(
+        sent.iter().all(|s| (*s - 2_000).abs() <= 1),
+        "{:?}",
+        &sent[..4]
+    );
+    let mut said = vec![4_000_i16; 160];
+    controls.said(&mut said, 8_000);
+    assert!(said.iter().all(|s| *s == 0));
+    let up = engine
+        .call_level(1, Direction::Input)
+        .map_or(0, Level::peak);
+    assert!((1_999..=2_001).contains(&up), "{up}");
+    assert_eq!(
+        engine.call_level(1, Direction::Output).map(Level::peak),
+        Some(0)
+    );
+
+    drop(controls);
+    assert_eq!(
+        engine.call_level(1, Direction::Input).map(Level::peak),
+        Some(0)
+    );
+    engine.forget_call(1);
+    assert!(engine.call_controls(1).is_none());
+}
+
 /// On a platform that runs one duplex unit, the microphone and the ringer
 /// cannot be put on devices of their own, and say so.
 #[test]

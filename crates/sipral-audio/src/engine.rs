@@ -19,7 +19,9 @@ use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };
 use crate::probe::{DEFAULT_PROBE_WAIT, probe};
-use crate::pump::{CallChannels, Carried, Command, Finished, Pump, Report, Ring, Stream};
+use crate::pump::{
+    CallChannels, CallControls, Carried, Command, Finished, Pump, Report, Ring, Stream,
+};
 
 /// When the devices are opened.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -544,6 +546,17 @@ impl Engine {
     /// into a conference, say — keeps its gain and its mute.
     pub fn forget_call(&mut self, id: CallId) {
         self.call_channels.remove(&id);
+    }
+
+    /// A call's own gain, mute and meter, for whatever carries the call in
+    /// the engine's place: a local conference it joins puts them in its path
+    /// there. `None` for a call this engine has never carried, or has
+    /// forgotten.
+    #[must_use]
+    pub fn call_controls(&self, id: CallId) -> Option<CallControls> {
+        self.call_channels
+            .get(&id)
+            .map(|channels| CallControls::new(channels.clone()))
     }
 
     /// One direction of one call's own controls: `Input` is what the

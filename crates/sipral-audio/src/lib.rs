@@ -83,6 +83,7 @@ pub use device::{
 };
 pub use engine::{Activation, Config, Engine, Info};
 pub use probe::DEFAULT_PROBE_WAIT;
+pub use pump::CallControls;
 pub use sipral_io_common::level::{Gain, Level};
 
 /// Whether this crate has a backend for the platform it runs on, without
