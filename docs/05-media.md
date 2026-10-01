@@ -2466,7 +2466,15 @@ old unit is closed, and the pump confirms it let go, before the new one is
 opened on a device change: two alive at once is what blocks inside the
 framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
 on a device other than the loudspeaker's plays through a plain output unit
-beside the call's, never a second voice-processing unit. The capture
+beside the call's, never a second voice-processing unit. Nor is the
+process's one unit made again for every call: a voice stream that closes
+leaves its unit stopped and uninitialised for the next one to configure
+again, because a new unit opened after an old one was taken down was seen,
+under the guard allocator, to read freed memory on the framework's own
+property-listener thread within a few rounds of activation, whatever the
+order or the spacing of stop, uninitialise and dispose. A unit whose device
+was lost, or that would not uninitialise, is disposed of, and so is the one a
+recovery replaces. The capture
 callback renders exactly the frames it is told of, into a buffer that holds
 a whole device slice converted to the stream's rate, or not at all. On iOS
 the route is the audio session's, so only the loudspeaker role is chosen.

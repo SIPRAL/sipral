@@ -28,7 +28,7 @@ use core::time::Duration;
 use std::cell::UnsafeCell;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::abi;
 use crate::counters::Counters;
@@ -93,7 +93,11 @@ const DEFAULT_DEPTH_FRAMES: usize = 16;
 pub enum StreamKind {
     /// The voice-processing unit: the microphone and the speaker together,
     /// with the system's echo canceller between them. At most one is open in
-    /// a process at a time ([`voice_units_open`]).
+    /// a process at a time ([`voice_units_open`]), and the process makes it
+    /// once: a voice stream that closes leaves its unit, stopped and
+    /// uninitialised, for the next voice stream to configure again, because
+    /// opening a new one after an old one was taken down was seen to read
+    /// freed memory inside the framework.
     #[default]
     Voice,
     /// A plain output unit — the hardware output unit on macOS, the remote
@@ -191,9 +195,10 @@ impl Default for StreamConfig {
 /// Apple supports one such unit per process: a second one opened beside the
 /// first was seen to block inside the framework, and two with their
 /// microphones enabled hand the canceller two captures of one room. So the
-/// room is taken before a unit is created and given back only once it has
-/// been disposed of, and a stream that was deliberately leaked keeps it for
-/// good, because its unit was never taken down either.
+/// room is taken before a unit is created or taken from [`SPARE`], and given
+/// back only once it has been disposed of or put back there; a stream that
+/// was deliberately leaked keeps it for good, because its unit was never
+/// taken down either.
 struct Slot(AtomicBool);
 
 /// The room held, for as long as this lives.
@@ -223,6 +228,102 @@ impl Drop for Claim {
 }
 
 static VOICE_UNIT: Slot = Slot::new();
+
+/// The voice-processing unit a closed voice stream left behind, uninitialised,
+/// for the next one to configure again rather than create.
+///
+/// Opening a voice unit while an earlier one had been taken down — disposed
+/// of, or only stopped and uninitialised and left to leak — was seen to read
+/// freed memory on macOS, under the guard allocator and with a scribble on
+/// what is freed: one round of open and close passed, and an open in a later
+/// round faulted at `0xaaaaaaaaaaaaaaaa` on the thread the hardware layer
+/// calls property listeners on, inside the framework's own voice-processing
+/// code, looking a device up in a table of its own whose storage had been
+/// freed under it. The listener is the framework's, not this crate's, so
+/// there is nothing here to remove or keep alive; the order of stop,
+/// uninitialise and dispose made no difference, and nor did a second and a
+/// half between them. What made the difference was not making a second
+/// unit: one unit configured, initialised, started, stopped and uninitialised
+/// a hundred times over, its microphone changed between rounds, never
+/// faulted, where a new unit each time faulted within ten rounds in half the
+/// runs, with or without a second and a half between a close and the next
+/// open. So the
+/// process keeps the one voice unit it makes: a stream that closes puts its
+/// unit here instead of disposing of it, and the next voice stream takes it.
+///
+/// Only a unit that came down cleanly is kept: one that would not
+/// uninitialise, or whose device was lost under it, is disposed of as before,
+/// and so is the unit under [`Stream::recover`], which is for a unit that has
+/// stopped answering.
+static SPARE: Spare = Spare::new();
+
+/// Room for one unit put aside.
+struct Spare(Mutex<Option<Kept>>);
+
+/// A unit handle, which is a pointer the framework hands out and the type
+/// system cannot see is only ever used by one owner at a time.
+struct Kept(sys::Unit);
+
+// SAFETY: the handle is moved, never shared: whoever takes it out of the
+// `Spare` is the only one holding it, as the `Stream` that put it there was.
+unsafe impl Send for Kept {}
+
+impl Spare {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// Put `unit` aside, and hand back whatever was there before it.
+    fn keep(&self, unit: sys::Unit) -> Option<sys::Unit> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(Kept(unit))
+            .map(|kept| kept.0)
+    }
+
+    /// Take the unit put aside, if there is one.
+    fn take(&self) -> Option<sys::Unit> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .map(|kept| kept.0)
+    }
+}
+
+/// Whether a teardown puts the unit aside rather than disposing of it: a
+/// voice unit, whose device was not lost, that the stream is allowed to
+/// keep, and that the framework uninitialised without complaint.
+fn spares(kind: StreamKind, lost: bool, allowed: bool, uninitialized: sys::Status) -> bool {
+    kind == StreamKind::Voice && !lost && allowed && uninitialized == 0
+}
+
+/// A new instance of the unit `kind` names.
+fn new_unit(kind: StreamKind) -> Result<sys::Unit, Error> {
+    let wanted = abi::ComponentDescription {
+        component_type: abi::UNIT_TYPE_OUTPUT,
+        subtype: match kind {
+            StreamKind::Voice => abi::UNIT_SUBTYPE_VOICE_PROCESSING,
+            StreamKind::Playback => abi::UNIT_SUBTYPE_PLAIN_OUTPUT,
+        },
+        manufacturer: abi::MANUFACTURER_APPLE,
+        flags: 0,
+        flags_mask: 0,
+    };
+    // SAFETY: null asks for the first match; the description is a local the
+    // call only reads.
+    let component = unsafe { sys::find_component(ptr::null_mut(), &raw const wanted) };
+    if component.is_null() {
+        return Err(Error::UnitMissing);
+    }
+    let mut unit: sys::Unit = ptr::null_mut();
+    // SAFETY: `unit` is a live out-parameter of the right type.
+    sys::check("AudioComponentInstanceNew", unsafe {
+        sys::open_component(component, &raw mut unit)
+    })?;
+    Ok(unit)
+}
 
 /// How many voice-processing units this process has open right now: zero or
 /// one. A [`StreamKind::Voice`] stream opened while it is one is refused with
@@ -641,8 +742,13 @@ pub struct Stream {
     /// then freed, ever.
     leak: bool,
     /// The process's room for a voice-processing unit, held by a
-    /// [`StreamKind::Voice`] stream until its unit has been disposed of.
+    /// [`StreamKind::Voice`] stream until its unit has been disposed of or
+    /// put aside.
     claim: Option<Claim>,
+    /// Whether teardown may put a voice unit aside for the next stream
+    /// ([`SPARE`]) rather than dispose of it. Cleared where the next stream
+    /// has to be on a new unit.
+    spare: bool,
 }
 
 /// The device object under each half of a stream.
@@ -716,28 +822,16 @@ impl Stream {
             StreamKind::Voice => Some(VOICE_UNIT.take().ok_or(Error::Busy)?),
             StreamKind::Playback => None,
         };
-        let wanted = abi::ComponentDescription {
-            component_type: abi::UNIT_TYPE_OUTPUT,
-            subtype: match config.kind {
-                StreamKind::Voice => abi::UNIT_SUBTYPE_VOICE_PROCESSING,
-                StreamKind::Playback => abi::UNIT_SUBTYPE_PLAIN_OUTPUT,
-            },
-            manufacturer: abi::MANUFACTURER_APPLE,
-            flags: 0,
-            flags_mask: 0,
+        // the voice unit the last voice stream put aside, configured again
+        // from the top below rather than a new one made beside its remains
+        let spare = match config.kind {
+            StreamKind::Voice => SPARE.take(),
+            StreamKind::Playback => None,
         };
-        // SAFETY: null asks for the first match; the description is a local
-        // the call only reads.
-        let component = unsafe { sys::find_component(ptr::null_mut(), &raw const wanted) };
-        if component.is_null() {
-            return Err(Error::UnitMissing);
-        }
-
-        let mut unit: sys::Unit = ptr::null_mut();
-        // SAFETY: `unit` is a live out-parameter of the right type.
-        sys::check("AudioComponentInstanceNew", unsafe {
-            sys::open_component(component, &raw mut unit)
-        })?;
+        let unit = match spare {
+            Some(unit) => unit,
+            None => new_unit(config.kind)?,
+        };
 
         // The unit belongs to a `Stream` from here on, before anything is set
         // on it. Configuration installs the callbacks partway through and can
@@ -765,8 +859,26 @@ impl Stream {
             closed: false,
             leak: false,
             claim,
+            spare: true,
         };
-        configure(unit, &stream.config, &stream.shared)?;
+        if let Err(error) = configure(unit, &stream.config, &stream.shared) {
+            if spare.is_none() {
+                return Err(error);
+            }
+            // A unit set aside can have gone bad since — the media services
+            // reset under it — and a new one is what answers that. So the
+            // one that refused goes, and the open is tried once more on a
+            // unit of its own; what that one refuses is the answer.
+            let config = stream.config.clone();
+            let (microphone, speaker) =
+                (Arc::clone(&stream.microphone), Arc::clone(&stream.speaker));
+            stream.spare = false;
+            if let Err(error @ Error::Draining { .. }) = stream.teardown() {
+                return Err(error);
+            }
+            drop(stream);
+            return Self::open_with(config, microphone, speaker);
+        }
         stream.route = route_of(unit);
         if stream.config.kind == StreamKind::Playback {
             // no microphone half, so no device under one to watch or to
@@ -1028,6 +1140,9 @@ impl Stream {
         // What the framework says about taking down a unit whose device has
         // gone is not a reason to stop: that is the situation being recovered
         // from. Failing to drain is another matter entirely.
+        // and the unit the stream comes back on is a new one: after a reset
+        // of the media services the old one no longer answers at all
+        self.spare = false;
         if let Err(error @ Error::Draining { .. }) = self.teardown() {
             return Err(error);
         }
@@ -1100,7 +1215,9 @@ impl Stream {
     /// the stream's memory within two seconds — in which case that memory and
     /// the audio unit are deliberately never freed. Otherwise [`Error::Call`]
     /// carrying the first of stop, uninitialise and dispose to complain; all
-    /// three are attempted regardless.
+    /// three are attempted regardless, except that a voice unit that came
+    /// down cleanly is put aside for the next voice stream rather than
+    /// disposed of (see `SPARE` in the source).
     pub fn close(mut self) -> Result<(), Error> {
         self.teardown()
     }
@@ -1116,7 +1233,9 @@ impl Stream {
     ///    after this point;
     /// 3. wait for anything already inside to come out, which is the only
     ///    thing that says so about a callback that was already running;
-    /// 4. only then take the unit apart and let the memory go.
+    /// 4. only then take the unit apart and let the memory go — uninitialised,
+    ///    and then disposed of or, for a voice unit, put aside for the next
+    ///    voice stream ([`SPARE`]).
     ///
     /// Step 3 failing is not recoverable and not survivable by freeing
     /// anyway, so it stops the sequence and marks the stream to be leaked.
@@ -1131,6 +1250,7 @@ impl Stream {
             return Ok(());
         }
         self.closed = true;
+        let lost = self.health == Health::Lost;
         self.health = Health::Stopped;
 
         self.shared.gate.close();
@@ -1148,9 +1268,25 @@ impl Stream {
         // SAFETY: no callback is inside and none can start, so nothing is
         // reading the unit or anything reachable from it.
         let uninitialized = unsafe { sys::uninitialize_unit(self.unit) };
-        // SAFETY: as above.
-        let disposed = unsafe { sys::dispose_component(self.unit) };
-        // the unit is gone, and with it the reason to keep the room
+        let disposed = if spares(self.config.kind, lost, self.spare, uninitialized) {
+            // Set aside for the next voice stream, uninitialised and with no
+            // callback able to run, rather than disposed of: see `SPARE`.
+            // The callbacks it still names point into `shared`, which goes
+            // with this stream; the next stream installs its own before it
+            // initialises the unit again, and nothing calls them before then.
+            match SPARE.keep(self.unit) {
+                // there is only ever one voice unit, so there is never a
+                // second one to put aside; one would go the usual way
+                // SAFETY: as above, and nothing else holds it.
+                Some(other) => unsafe { sys::dispose_component(other) },
+                None => 0,
+            }
+        } else {
+            // SAFETY: as above.
+            unsafe { sys::dispose_component(self.unit) }
+        };
+        // the unit is gone or put aside, and with it the reason to keep the
+        // room
         self.claim = None;
 
         sys::check("AudioOutputUnitStop", stopped)?;
@@ -2695,6 +2831,7 @@ mod tests {
             closed: false,
             leak: false,
             claim: None,
+            spare: true,
         }
     }
 
@@ -2951,5 +3088,147 @@ mod tests {
         // were zeroed, and the flag is not ours to set
         assert_eq!(flags, 0);
         assert_eq!(shared.meters.read().played, 0);
+    }
+
+    #[test]
+    fn a_spare_holds_one_unit_and_gives_it_to_whoever_takes_it() {
+        let spare = super::Spare::new();
+        let (first, second) = (
+            ptr::without_provenance_mut(8),
+            ptr::without_provenance_mut(16),
+        );
+        assert_eq!(spare.take(), None);
+        assert_eq!(spare.keep(first), None);
+        assert_eq!(
+            spare.keep(second),
+            Some(first),
+            "the one it displaced comes back"
+        );
+        assert_eq!(spare.take(), Some(second));
+        assert_eq!(spare.take(), None, "and taking empties it");
+    }
+
+    #[test]
+    fn only_a_voice_unit_that_came_down_cleanly_is_kept() {
+        use super::{StreamKind, spares};
+        assert!(spares(StreamKind::Voice, false, true, 0));
+        assert!(
+            !spares(StreamKind::Playback, false, true, 0),
+            "a player is disposed of"
+        );
+        assert!(
+            !spares(StreamKind::Voice, true, true, 0),
+            "so is a unit whose device went"
+        );
+        assert!(
+            !spares(StreamKind::Voice, false, false, 0),
+            "and one that may not be kept"
+        );
+        assert!(
+            !spares(StreamKind::Voice, false, true, -50),
+            "and one that would not uninitialise"
+        );
+    }
+
+    /// The teardown itself, on a real voice unit that was made and never
+    /// initialised, which needs no device: closing the stream puts the unit
+    /// aside for the next voice stream instead of disposing of it, and a
+    /// stream whose device was lost, or that is reopening onto a new unit,
+    /// disposes of it as before. One test, because the room it is put aside
+    /// in is the process's.
+    #[test]
+    fn a_closed_voice_stream_leaves_its_unit_for_the_next_and_a_lost_one_does_not() {
+        use super::{SPARE, StreamKind, new_unit};
+        let Ok(unit) = new_unit(StreamKind::Voice) else {
+            // a system with no voice-processing unit has nothing to keep
+            return;
+        };
+        let mut stream = detached();
+        stream.unit = unit;
+        stream
+            .close()
+            .expect("a unit that was never started comes down cleanly");
+        assert_eq!(SPARE.take(), Some(unit), "the unit was disposed of");
+
+        let mut lost = detached();
+        lost.unit = unit;
+        lost.health = Health::Lost;
+        lost.close().expect("disposed of");
+        assert_eq!(SPARE.take(), None, "a unit whose device went is not kept");
+
+        let Ok(unit) = new_unit(StreamKind::Voice) else {
+            return;
+        };
+        let mut reopening = detached();
+        reopening.unit = unit;
+        reopening.spare = false;
+        reopening.close().expect("disposed of");
+        assert_eq!(SPARE.take(), None, "nor is one the stream may not keep");
+    }
+
+    /// Voice streams opened and closed round after round on the quiet route,
+    /// the microphone on the system's default input and then named, which
+    /// is a reopen in the middle of each round as a person choosing a device
+    /// during a call makes: every stream after the first runs on the unit the
+    /// first one made, and each one moves frames. The sequence that, with a
+    /// new unit each time, read freed memory inside the framework within a
+    /// few rounds when run under the guard allocator:
+    ///
+    ///   SIPRAL_AUDIO_ROUNDS=10 DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib \
+    ///   MallocScribble=1 target/debug/deps/sipral_io_coreaudio-<hash> \
+    ///   --ignored --exact stream::tests::repeated_voice_streams_run_on_one_unit
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "opens the real devices, round after round"]
+    fn repeated_voice_streams_run_on_one_unit() {
+        use super::{Stream, StreamConfig};
+        use crate::device::Direction;
+        use crate::hal::{default_device, devices};
+
+        let rounds = std::env::var("SIPRAL_AUDIO_ROUNDS")
+            .ok()
+            .and_then(|rounds| rounds.parse::<usize>().ok())
+            .unwrap_or(5);
+        let (route, _) = crate::quiet::route().expect("the device list");
+        let input = default_device(Direction::Input)
+            .expect("the default input")
+            .expect("a machine with a microphone");
+        let uid = devices()
+            .expect("the list")
+            .into_iter()
+            .find(|device| device.id == input)
+            .and_then(|device| device.uid)
+            .expect("the default input has a uid");
+        let format = StreamFormat::with_frame_millis(48_000, 20).expect("a twenty ms frame");
+        let mut first = None;
+        for round in 1..=rounds {
+            for microphone in [DeviceChoice::System, DeviceChoice::Preferred(uid.clone())] {
+                let config = StreamConfig {
+                    device: route.clone(),
+                    capture_device: microphone,
+                    ..StreamConfig::new(format)
+                };
+                let mut stream = Stream::open(config).expect("open");
+                assert_eq!(
+                    *first.get_or_insert(stream.unit),
+                    stream.unit,
+                    "round {round}: a second voice unit was made"
+                );
+                stream.start().expect("start");
+                std::thread::sleep(Duration::from_millis(400));
+                let mut frame = vec![0i16; format.frame_samples()];
+                let mut arrived = 0;
+                while stream.read(&mut frame) {
+                    arrived += 1;
+                }
+                assert!(
+                    arrived > 0,
+                    "round {round}: nothing came from the microphone"
+                );
+                stream.close().expect("close");
+                assert_eq!(super::voice_units_open(), 0, "the room came back");
+            }
+            println!("round {round} of {rounds}");
+        }
     }
 }
