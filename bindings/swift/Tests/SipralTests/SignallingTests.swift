@@ -53,6 +53,8 @@ final class FakeRegistrar: @unchecked Sendable {
 
     var address: String { "127.0.0.1:\(port)" }
 
+    var requests: [(connection: Int, message: String)] { lock.withLock { _requests } }
+
     var registers: [(connection: Int, message: String)] {
         lock.withLock { _requests.filter { $0.message.hasPrefix("REGISTER ") } }
     }
@@ -140,7 +142,7 @@ final class FakeRegistrar: @unchecked Sendable {
 /// again on the new one; and the INVITE rate floor's voice-agent preset lets
 /// through a burst the default answers 480.
 final class SignallingTests: XCTestCase {
-    private static let serverName = "registrar.sipral.test"
+    static let serverName = "registrar.sipral.test"
 
     private func stack(
         _ server: String, _ signalling: SipralTransport = .tls, name: String? = serverName,
@@ -443,7 +445,7 @@ final class SignallingTests: XCTestCase {
 
     /// A key and a certificate for `serverName`, made with the `openssl`
     /// command and imported into memory alone -- never into a keychain.
-    private static func certificate(_ name: String, _ dates: [String] = ["-days", "1"]) throws -> (SecIdentity, [UInt8]) {
+    static func certificate(_ name: String, _ dates: [String] = ["-days", "1"]) throws -> (SecIdentity, [UInt8]) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("sipral-\(name)-\(UInt32.random(in: 0...UInt32.max))")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

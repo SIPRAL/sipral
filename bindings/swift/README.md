@@ -230,6 +230,21 @@ and whether the system cancels the echo. `SipralEventKind.audioDevicesChanged`
 carries `event.audioData`: what changed, and whether the `.system` or the
 `.engine` changed it -- an application re-applies nothing on the second.
 
+Each call has a gain, a mute and a meter of its own on top of the
+direction's: `setGain(_:for:of:)`, `setMuted(_:for:of:)`, `gain(for:of:)`,
+`isMuted(_:of:)` and `level(for:of:)` take the `Call`. The input direction is
+what the microphone sends that call alone and the output how loud it is in
+the loudspeaker beside the others -- mute the call being spoken about in a
+consultation, turn one conference member down. They hold from the moment the
+call's media starts to its end, through a hold or a local conference and
+back, and throw `.wrongState` outside that.
+
+`systemEchoCancellation: false` opens the devices past the platform's echo
+cancellation, gain control and noise suppression -- on macOS and iOS the
+voice-processing unit with its processing bypassed -- for a headset, which
+has no echo to cancel, or an application that cancels it on each call
+itself; `status().systemEchoCancellation` says what the platform did.
+
 `.device(activation: .manual)` opens the devices only between
 `audio.activate()` and `audio.deactivate()`, which is CallKit's rule:
 `CallKitBridge.drive(stack.audio!)` opens them at `didActivate`, closes them
@@ -559,6 +574,32 @@ initializer. One that fails, or breaks later, arrives as
 later and up to thirty seconds apart, registering every account again once
 it is back; `stack.connected` says whether it is up, and `account.register()`
 asked meanwhile is kept for then. `docs/22-tls.md` has the whole mapping.
+
+An account can have a connection of its own on a stack that signals over
+UDP, so that one stack and one audio engine hold an account on UDP with one
+PBX and another on TCP or TLS with a second:
+
+```swift
+let stack = try SipralStack()
+let office = try stack.addAccount(aor: "sip:alice@office.example", registrarAddress: "192.0.2.10:5060")
+let carrier = try stack.addAccount(
+    aor: "sip:+15550100@carrier.example", registrarAddress: "198.51.100.20:5061",
+    tlsPin: "sha256 Fingerprint=AB:CD:...", streamProtocol: .tls
+)
+```
+
+The stack asks for the connection with `SipralEventKind.transportWanted`,
+nothing outgrown, and this layer opens it to the account's server whatever
+`streamFallback` says: a TLS one held to the account's `tlsPin` when it has
+one, to `tlsTrust` under `tlsServerName` otherwise. The account's REGISTER
+and every request of its calls go over it, its `Contact` names the protocol,
+and a connection that closes is opened again and the account registered
+again. Until it is open, a call the account places throws `.transportDown`.
+
+`stack.settings()` reads back what the stack runs with, every default filled
+in: the timers, the codecs' count, the SRTP suites its calls offer in order,
+whether a pseudonym salt was given, whether the diagnostic trace is whole
+now, and whether the platform's echo cancellation is asked for.
 
 `inviteLimit` is how fast one address may ring the stack: every stack
 starts at `InviteLimit.standard`, ten INVITEs at once and one every two

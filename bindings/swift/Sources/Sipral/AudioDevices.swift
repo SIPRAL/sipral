@@ -290,6 +290,49 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         Double(try Sipral.audioLevel(stack: stack.handle, direction: direction.rawValue)) / Double(Int16.max)
     }
 
+    // MARK: - one call's own gain, mute and level
+
+    /// Set one call's own gain in one direction, as a factor, on top of the
+    /// direction's (`setGain(_:for:)`): the input direction is what the
+    /// microphone sends that call alone, the output how loud that call is in
+    /// the loudspeaker beside the others. Kept while the call is held or in a
+    /// local conference and back; gone when it ends. Throws `.wrongState`
+    /// before the call's media starts and after it ends.
+    public func setGain(_ gain: Double, for direction: SipralAudioDirection, of call: Call) throws {
+        let steps = (max(gain, 0) * Double(Self.unity)).rounded()
+        try Sipral.audioCallSetGain(
+            stack: stack.handle, call: call.handle, direction: direction.rawValue,
+            gain: UInt32(min(steps, Double(UInt32.max)))
+        )
+    }
+
+    /// The gain `setGain(_:for:of:)` set for one call, as a factor.
+    public func gain(for direction: SipralAudioDirection, of call: Call) throws -> Double {
+        Double(try Sipral.audioCallGain(stack: stack.handle, call: call.handle, direction: direction.rawValue))
+            / Double(Self.unity)
+    }
+
+    /// Mute or unmute one call in one direction while every other call goes
+    /// on: the far end of that call alone hears silence, or that call alone
+    /// is silent in the loudspeaker. Kept and refused as
+    /// `setGain(_:for:of:)` is.
+    public func setMuted(_ muted: Bool, for direction: SipralAudioDirection, of call: Call) throws {
+        try Sipral.audioCallSetMuted(
+            stack: stack.handle, call: call.handle, direction: direction.rawValue, muted: muted ? 1 : 0
+        )
+    }
+
+    public func isMuted(_ direction: SipralAudioDirection, of call: Call) throws -> Bool {
+        try Sipral.audioCallMuted(stack: stack.handle, call: call.handle, direction: direction.rawValue) != 0
+    }
+
+    /// One call's meter in one direction, 0 to 1, after its own gain and
+    /// mute: what the microphone sent that call, or what it played.
+    public func level(for direction: SipralAudioDirection, of call: Call) throws -> Double {
+        Double(try Sipral.audioCallLevel(stack: stack.handle, call: call.handle, direction: direction.rawValue))
+            / Double(Int16.max)
+    }
+
     // MARK: - activation and the ring
 
     /// Open the devices, under `SipralAudioActivation.manual`: what

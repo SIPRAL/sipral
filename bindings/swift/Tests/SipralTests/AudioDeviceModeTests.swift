@@ -156,6 +156,45 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertEqual(try audio.level(for: .output), 0, "a closed device has a level")
     }
 
+    /// A call's own gain and mute, which the engine holds from the moment the
+    /// call's media starts -- the devices left closed under manual
+    /// activation -- to the moment it ends, beside the stack's own.
+    func testACallsOwnGainAndMuteLastFromItsMediaToItsEnd() async throws {
+        let bob = try deviceStack()
+        let alice = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let audio = try XCTUnwrap(bob.audio)
+        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let bobEvents = Recorder(bob.events())
+        let placed = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        let arrived = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let taken = try bob.takeIncomingCall(try XCTUnwrap(arrived))
+        defer { placed.close(); taken.close() }
+        XCTAssertThrowsError(try audio.setGain(0.5, for: .output, of: taken)) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .wrongState, "before its media starts")
+        }
+
+        try taken.answer()
+        let carried = await eventually(within: 5) { (try? audio.setGain(0.5, for: .output, of: taken)) != nil }
+        XCTAssertTrue(carried, "the engine never took the call's media")
+        try audio.setMuted(true, for: .input, of: taken)
+        XCTAssertEqual(try audio.gain(for: .output, of: taken), 0.5)
+        XCTAssertEqual(try audio.gain(for: .input, of: taken), 1)
+        XCTAssertTrue(try audio.isMuted(.input, of: taken))
+        XCTAssertFalse(try audio.isMuted(.output, of: taken))
+        XCTAssertFalse(try audio.isMuted(.input), "the stack's own mute is another")
+        XCTAssertEqual(try audio.level(for: .output, of: taken), 0, "the devices are closed")
+
+        try placed.hangup()
+        _ = await bobEvents.first(within: 5) { $0.kind == .callEnded }
+        let forgotten = await eventually(within: 5) { (try? audio.gain(for: .output, of: taken)) == nil }
+        XCTAssertTrue(forgotten, "a call that ended still has controls")
+        XCTAssertThrowsError(try audio.setMuted(false, for: .input, of: taken)) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .wrongState, "after its end")
+        }
+    }
+
     func testManualActivationOpensAndClosesTheDevicesOnlyWhenAsked() throws {
         let stack = try openingStack(.manual)
         defer { stack.close() }

@@ -154,7 +154,10 @@ public final class SipralStack: @unchecked Sendable {
     /// raised it. All guarded by `signallingQueue`.
     private var streamLinks: [UInt32: (destination: String, link: SignallingConnection)] = [:]
     private var streamsOpening: Set<String> = []
-    private var streamsAsked: [String] = []
+    private var streamsAsked: [TransportWantedEventData] = []
+    /// The `tlsServerName` the application gave, which a TLS connection of
+    /// an account's own is opened under; `nil` for the address's host.
+    private let givenTlsServerName: String?
     /// The transport ids `SipralEventKind.transportFailed` named during that
     /// same poll, acted on at the same moment; guarded by `signallingQueue`.
     private var streamsLetGo: [UInt32] = []
@@ -463,6 +466,7 @@ public final class SipralStack: @unchecked Sendable {
         datagramWithoutStreamBytes: UInt32 = 0,
         pseudonymSalt: [UInt8]? = nil,
         diagnosticTrace: Bool? = nil,
+        systemEchoCancellation: Bool? = nil,
         resolver: SipralResolver? = nil
     ) throws {
         self.streamFallback = streamFallback
@@ -477,6 +481,7 @@ public final class SipralStack: @unchecked Sendable {
         }
         self.signalling = signalling
         self.signallingServer = signallingServer
+        self.givenTlsServerName = tlsServerName
         self.tlsServerName = tlsServerName ?? signallingServer.map { UDPSocket.parse($0).host } ?? bindHost ?? ""
         self.tlsTrust = tlsTrust
         self.linkHost = bindHost
@@ -602,6 +607,7 @@ public final class SipralStack: @unchecked Sendable {
                     config.path_mtu = pathMtu
                     config.datagram_without_stream_bytes = datagramWithoutStreamBytes
                     config.diagnostic_trace = SipralStack.toggle(diagnosticTrace)
+                    config.system_echo_cancellation = SipralStack.toggle(systemEchoCancellation)
                     let salt = pseudonymSalt ?? []
                     return try salt.withUnsafeBufferPointer { saltBytes in
                         if !saltBytes.isEmpty {
@@ -898,44 +904,64 @@ public final class SipralStack: @unchecked Sendable {
         for id in letGo {
             loseStreamLink(id, tell: false)
         }
-        let asked = signallingQueue.sync { () -> [String] in
+        let asked = signallingQueue.sync { () -> [TransportWantedEventData] in
             defer { streamsAsked = [] }
             return streamsAsked
         }
         var seen: Set<String> = []
-        for destination in asked where seen.insert(destination).inserted {
+        for wanted in asked where seen.insert(wanted.destination).inserted {
+            let destination = wanted.destination
+            // an account on a connection of its own asks with nothing
+            // outgrown; that one is opened whatever `streamFallback` says
+            let opens = streamFallback || (wanted.requestBytes == 0 && wanted.limitBytes == 0)
             let id = signallingQueue.sync { () -> UInt32? in
                 if streamsOpening.contains(destination)
                     || streamLinks.values.contains(where: { $0.destination == destination }) {
                     return nil
                 }
-                if streamFallback {
+                if opens {
                     streamsOpening.insert(destination)
                 }
                 return takeLinkId()
             }
             guard let id else { continue }
-            guard streamFallback else {
+            guard opens else {
                 sayNoStream(id, .connectionRefused, "to \(destination) not tried: streamFallback is off")
                 continue
             }
+            let over: SipralTransport = wanted.protocolRaw == SipralTransport.tls.rawValue ? .tls : .tcp
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.openStreamLink(id, to: destination)
+                self?.openStreamLink(id, to: destination, over: over)
             }
         }
     }
 
-    /// Connect over TCP to `destination` -- or to `streamServer` when one was
-    /// given -- and bind the connection under `id` as the stream to
+    /// What a TLS connection to `destination` trusts: the pin of an account
+    /// on a connection of its own to that server when it has one, the
+    /// stack's `tlsTrust` otherwise.
+    private func streamTrust(to destination: String) -> TLSTrust {
+        let pinned = movingQueue.sync {
+            accounts.values.first { $0.streamProtocol == .tls && $0.registrarAddress == destination && $0.tlsPin != nil }
+        }
+        if let pin = pinned?.tlsPin, let trust = try? TLSTrust.pinned(pin) {
+            return trust
+        }
+        return tlsTrust
+    }
+
+    /// Connect over TCP -- or TLS, for an account whose connection speaks
+    /// it -- to `destination`, or to `streamServer` when one was given for
+    /// TCP, and bind the connection under `id` as the stream to
     /// `destination`; a connection that cannot be made is told to the stack
     /// under that same id, which ends what was waiting for it.
-    private func openStreamLink(_ id: UInt32, to destination: String) {
+    private func openStreamLink(_ id: UInt32, to destination: String, over: SipralTransport = .tcp) {
         let made: SignallingConnection
-        let server = streamServer ?? destination
+        let server = over == .tcp ? streamServer ?? destination : destination
         do {
             made = try SignallingConnection(
-                server: server, bindHost: signallingQueue.sync { linkHost }, transport: .tcp,
-                serverName: UDPSocket.parse(server).host, trust: .platform, patienceMs: Self.patienceMs
+                server: server, bindHost: signallingQueue.sync { linkHost }, transport: over,
+                serverName: over == .tls ? givenTlsServerName ?? UDPSocket.parse(server).host : UDPSocket.parse(server).host,
+                trust: over == .tls ? streamTrust(to: destination) : .platform, patienceMs: Self.patienceMs
             )
         } catch {
             signallingQueue.sync { _ = streamsOpening.remove(destination) }
@@ -943,7 +969,10 @@ public final class SipralStack: @unchecked Sendable {
             let kind = refusal?.error ?? .other
             let target = server == destination ? destination : "\(server) (for \(destination))"
             let said = refusal?.detail ?? "\(error)"
-            sayNoStream(id, kind, "to \(target) \(Self.verdict(kind))\(said.isEmpty ? "" : ": \(said)")")
+            sayNoStream(
+                id, kind, "to \(target) \(Self.verdict(kind))\(said.isEmpty ? "" : ": \(said)")", over: over,
+                tls: over == .tls ? refusal?.tls ?? SipralTlsFailure.none : SipralTlsFailure.none
+            )
             return
         }
         let closing = isClosed
@@ -960,7 +989,7 @@ public final class SipralStack: @unchecked Sendable {
         do {
             _ = try retryingBusy {
                 try Sipral.stackTransportBind(
-                    stack: handle, transport: id, protocol: SipralTransport.tcp.rawValue,
+                    stack: handle, transport: id, protocol: over.rawValue,
                     local: made.local, remote: destination, nowMs: nowMs()
                 )
             }
@@ -977,14 +1006,18 @@ public final class SipralStack: @unchecked Sendable {
 
     /// `sipral_stack_transport_failed_with` for a connection that was not made,
     /// never throwing on the way out. `what` finishes a sentence that begins
-    /// "TCP" -- where it was going and what became of it -- and is carried
-    /// to `transportFailedData.detail`.
-    private func sayNoStream(_ id: UInt32, _ error: SipralTransportError, _ what: String) {
-        let detail = SignallingRefusal.sentence("TCP \(what)")
+    /// with the protocol -- "TCP" or "TLS" -- where it was going and what
+    /// became of it, and is carried to `transportFailedData.detail`.
+    private func sayNoStream(
+        _ id: UInt32, _ error: SipralTransportError, _ what: String, over: SipralTransport = .tcp,
+        tls: SipralTlsFailure = SipralTlsFailure.none
+    ) {
+        let detail = SignallingRefusal.sentence("\(over == .tls ? "TLS" : "TCP") \(what)")
         detail.withCString { text in
             var failure = sipral_transport_failure_t.sized()
             failure.transport = id
             failure.error = error.rawValue
+            failure.tls = tls.rawValue
             failure.detail = text
             failure.detail_len = detail.utf8.count
             _ = try? retryingBusy { try Sipral.stackTransportFailedWith(stack: handle, failure: failure, nowMs: nowMs()) }
@@ -1295,6 +1328,19 @@ public final class SipralStack: @unchecked Sendable {
     /// fingerprint of the one TLS certificate the account trusts, for an
     /// application that runs the account's TLS itself:
     /// `Account.checkCertificate(_:unixSeconds:)` is its verdict.
+    ///
+    /// `streamProtocol` (`.tcp` or `.tls`) puts the account on a connection
+    /// of its own to its server, beside accounts on this stack's UDP socket
+    /// to other servers, all in one stack with one audio engine: the stack
+    /// asks for the connection (`SipralEventKind.transportWanted`, with
+    /// nothing outgrown), this layer opens it to the account's server and
+    /// binds it, and the REGISTER and every call of the account go over it.
+    /// A TLS one is held to `tlsPin` when the account has one, to the stack's
+    /// `tlsTrust` otherwise, under `tlsServerName` or the server's host. One
+    /// that closes is asked for and opened again. Until it is open a call
+    /// the account places throws `.transportDown`. Only on a stack that
+    /// signals over UDP; anything but `.tcp` or `.tls` throws
+    /// `.invalidArgument`.
     public func addAccount(
         aor: String,
         registrarAddress: String? = nil,
@@ -1302,6 +1348,7 @@ public final class SipralStack: @unchecked Sendable {
         serverNaptr: Bool = false,
         keepaliveMs: UInt64 = 0,
         tlsPin: String? = nil,
+        streamProtocol: SipralTransport? = nil,
         registrar: String? = nil,
         contact: String? = nil,
         displayName: String? = nil,
@@ -1319,6 +1366,14 @@ public final class SipralStack: @unchecked Sendable {
                 message: "an account names its server by registrarAddress or by serverUri, one of the two"
             )
         }
+        if let streamProtocol {
+            guard streamProtocol == .tcp || streamProtocol == .tls, signalling == .udp else {
+                throw SipralError(
+                    status: .invalidArgument,
+                    message: "streamProtocol is .tcp or .tls, on a stack that signals over UDP"
+                )
+            }
+        }
         var advertised: String?
         if contact == nil, signalling == .udp, let registrarAddress, signallingQueue.sync(execute: { routes }) {
             advertised = try advertise(toward: registrarAddress)
@@ -1331,6 +1386,7 @@ public final class SipralStack: @unchecked Sendable {
             serverNaptr: serverNaptr,
             keepaliveMs: keepaliveMs,
             tlsPin: tlsPin,
+            streamProtocol: streamProtocol,
             advertised: advertised,
             registrar: registrar,
             contact: contact,
@@ -1442,6 +1498,16 @@ public final class SipralStack: @unchecked Sendable {
     /// is written unless the log is at `.trace`.
     public func setDiagnosticTrace(_ on: Bool) throws {
         try retryingBusy { try Sipral.stackDiagnosticTrace(stack: handle, on: SipralStack.toggle(on)) }
+    }
+
+    /// What the stack runs with, every default filled in
+    /// (`sipral_stack_settings`), with the SRTP suites its calls offer in
+    /// order (`sipral_stack_srtp_suite_order`).
+    public func settings() throws -> SipralSettings {
+        let raw = try retryingBusy { try Sipral.stackSettings(stack: handle) }
+        var suites = [UInt32](repeating: 0, count: Int(raw.srtp_suite_count))
+        _ = try retryingBusy { try Sipral.stackSrtpSuiteOrder(stack: handle, outSuites: &suites) }
+        return SipralSettings(raw, srtpSuites: suites.compactMap(SipralSrtpSuite.init(rawValue:)))
     }
 
     /// The diagnostic record of every call the stack keeps, as JSON
@@ -2195,7 +2261,7 @@ public final class SipralStack: @unchecked Sendable {
             natQueue.sync { turnAsked.append(stream) }
         }
         if signalling == .udp, let wanted = event.transportWantedData {
-            signallingQueue.sync { streamsAsked.append(wanted.destination) }
+            signallingQueue.sync { streamsAsked.append(wanted) }
         }
         if let locate = event.locateData {
             if event.kindRaw == SipralEventKind.lookupWanted.rawValue, let name = locate.name {

@@ -38,6 +38,13 @@ public final class Account: @unchecked Sendable {
     private var _registrarAddress: String
     /// The server named by a URI RFC 3263 locates, or `nil`.
     public let serverUri: String?
+    /// The protocol of the connection of its own the account's requests go
+    /// over, `.tcp` or `.tls`, or `nil` for the stack's own transport
+    /// (`SipralStack.addAccount(streamProtocol:)`).
+    public let streamProtocol: SipralTransport?
+    /// The certificate pin it was added with, which a TLS connection of its
+    /// own is held to.
+    let tlsPin: String?
 
     private let stateQueue = DispatchQueue(label: "org.sipral.account.state")
     /// The `Contact` the application wrote, or `nil` when the account's is
@@ -51,13 +58,15 @@ public final class Account: @unchecked Sendable {
 
     init(
         stack: SipralStack, handle: SipralHandle, aor: String, registrarAddress: String, serverUri: String?,
-        contact: String, given: String?
+        contact: String, given: String?, streamProtocol: SipralTransport? = nil, tlsPin: String? = nil
     ) {
         self.stack = stack
         self.handle = handle
         self.aor = aor
         self._registrarAddress = registrarAddress
         self.serverUri = serverUri
+        self.streamProtocol = streamProtocol
+        self.tlsPin = tlsPin
         self._contact = contact
         self.givenContact = given
     }
@@ -65,6 +74,21 @@ public final class Account: @unchecked Sendable {
     /// Whether its `Contact` is the one this layer derives, rather than one
     /// the application wrote.
     var derivesContact: Bool { givenContact == nil }
+
+    /// What goes after the address in the `Contact` this layer derives for
+    /// it: the parameter naming its own connection's protocol (RFC 3261
+    /// §19.1.1), or the stack's.
+    var contactParameters: String {
+        Self.contactParameters(streamProtocol, stack: stack)
+    }
+
+    static func contactParameters(_ streamProtocol: SipralTransport?, stack: SipralStack) -> String {
+        switch streamProtocol {
+        case .tcp: return ";transport=tcp"
+        case .tls: return ";transport=tls"
+        default: return stack.contactParameters
+        }
+    }
 
     /// The account's server was located at `target`.
     func located(at target: String) {
@@ -74,7 +98,7 @@ public final class Account: @unchecked Sendable {
     /// `sipral_account_rebind` toward `remote`, reached at `advertised`
     /// (`host:port`), unless its `Contact` names that already.
     func reach(at advertised: String, remote: String) throws {
-        let next = Self.defaultContact(aor: aor, bindAddress: advertised, parameters: stack.contactParameters)
+        let next = Self.defaultContact(aor: aor, bindAddress: advertised, parameters: contactParameters)
         guard next != contact else { return }
         try retryingBusy {
             try Sipral.accountRebind(
@@ -111,7 +135,7 @@ public final class Account: @unchecked Sendable {
     func rebind(local now: String, previous: String?) throws {
         let next: String
         if givenContact == nil {
-            next = Self.defaultContact(aor: aor, bindAddress: now, parameters: stack.contactParameters)
+            next = Self.defaultContact(aor: aor, bindAddress: now, parameters: contactParameters)
         } else if let previous, !previous.isEmpty {
             next = Self.replacing(previous, with: UDPSocket.parse(now).host, in: contact)
         } else {
@@ -166,6 +190,7 @@ public final class Account: @unchecked Sendable {
         serverNaptr: Bool,
         keepaliveMs: UInt64,
         tlsPin: String?,
+        streamProtocol: SipralTransport?,
         advertised: String?,
         registrar: String?,
         contact: String?,
@@ -180,7 +205,8 @@ public final class Account: @unchecked Sendable {
     ) throws -> Account {
         let given = contact
         let contact = contact ?? defaultContact(
-            aor: aor, bindAddress: advertised ?? stack.bindAddress, parameters: stack.contactParameters
+            aor: aor, bindAddress: advertised ?? stack.bindAddress,
+            parameters: contactParameters(streamProtocol, stack: stack)
         )
         let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
         let suites = security.srtpSuites.isEmpty ? nil : security.srtpSuites.joined(separator: ",")
@@ -212,6 +238,7 @@ public final class Account: @unchecked Sendable {
             }
             config.server_naptr = serverNaptr ? SipralToggle.on.rawValue : 0
             config.keepalive_ms = keepaliveMs
+            config.stream_protocol = streamProtocol?.rawValue ?? 0
             if let displayNamePointer = parts[4].pointer {
                 config.display_name = displayNamePointer
                 config.display_name_len = parts[4].count
@@ -265,7 +292,7 @@ public final class Account: @unchecked Sendable {
         }
         return Account(
             stack: stack, handle: handle, aor: aor, registrarAddress: registrarAddress ?? "", serverUri: serverUri,
-            contact: contact, given: given
+            contact: contact, given: given, streamProtocol: streamProtocol, tlsPin: tlsPin
         )
     }
 
