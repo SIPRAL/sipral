@@ -3,7 +3,9 @@
 //
 // The loader's choice: which pair each os.name and os.arch get, that each
 // pair the build staged is an ELF shared object for the machine its
-// directory names, and that the running JVM loads its own pair once.
+// directory names, and that the running JVM loads its own pair once. The
+// last two need the natives a Linux build stages, and say so as skips where
+// there are none rather than passing with nothing checked.
 
 package org.sipral.jvm
 
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 
 class SipralNativesTest {
@@ -81,6 +84,12 @@ class SipralNativesTest {
             }
         }
         val expected = System.getProperty("sipral.expected.platforms")?.split(',')?.filter { it.isNotBlank() }
+        // with nothing staged and nothing expected, nothing above was
+        // checked: said as a skip, not passed as if it had been
+        assumeTrue(
+            staged > 0 || !expected.isNullOrEmpty(),
+            "no natives are staged on this classpath: they are built and checked on Linux, by scripts/package/jvm.sh",
+        )
         if (expected != null) {
             assertEquals(expected.size * 2, staged, "the natives staged for $expected")
         }
@@ -89,6 +98,10 @@ class SipralNativesTest {
     /** The running JVM's own pair loads, and a second load is a no-op. */
     @Test
     fun theRunningJvmLoadsItsOwnPair() {
+        assumeTrue(
+            System.getProperty("os.name").startsWith("Linux"),
+            "the jar carries natives for Linux only, so a JVM elsewhere has no pair of its own to load",
+        )
         val platform = SipralNatives.currentPlatform()
         assertNotNull(platform, "the JVM this test runs on is one the jar carries natives for")
         SipralNatives.load()
