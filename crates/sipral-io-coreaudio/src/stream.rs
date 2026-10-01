@@ -1697,7 +1697,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::device::{DeviceChoice, DeviceId};
 
-    /// Held by every test that opens or closes a real voice unit. The unit a
+    /// Held by every test that opens or closes a real voice unit, the ignored
+    /// ones on real devices included. The unit a
     /// voice stream leaves behind is the process's (`SPARE`), and the tests
     /// run on threads of one process: a refused open closing its unit there
     /// while another test reads what is put aside gave that test a unit it
@@ -2345,6 +2346,7 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
+        let _units = voice_units();
         record_and_play();
         let format = StreamFormat::narrowband();
         let mut stream = Stream::open(StreamConfig::new(format)).expect("open the default device");
@@ -2572,6 +2574,7 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
+        let _units = voice_units();
         #[cfg(target_os = "macos")]
         let (route, quiet) = crate::quiet::route().expect("the device list");
         #[cfg(target_os = "macos")]
@@ -2722,6 +2725,7 @@ mod tests {
         use crate::device::Direction;
         use crate::hal::{default_device, devices};
 
+        let _units = voice_units();
         let wanted = std::env::var("SIPRAL_AUDIO_MIC").expect("SIPRAL_AUDIO_MIC names an input");
         let input = devices()
             .expect("the list")
@@ -2794,6 +2798,7 @@ mod tests {
 
         const WAIT: Duration = Duration::from_secs(30);
 
+        let _units = voice_units();
         let format = StreamFormat::narrowband();
         let mut stream = Stream::open(StreamConfig::new(format)).expect("open the system route");
         stream.start().expect("start the device");

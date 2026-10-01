@@ -365,6 +365,8 @@ private suspend fun aWatchedPresentityIsToldWithItsActivityAndNote(): String = F
 private class FakeRecordingServer(private val streams: Pair<Int, Int>) : AutoCloseable {
     private val listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     val address: String = "127.0.0.1:${listener.localPort}"
+
+    /** Written by the server's thread: read it through `toList()`, which copies it under its lock. */
     val requests: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val open: MutableList<Socket> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -480,7 +482,7 @@ private suspend fun aCallIsRecordedToARecordingServerOverItsOwnConnection(): Str
                 ) { callA.recordTo("sip:srs@127.0.0.1", destination = server.address) }
                 assertEquals(session.handle, confirmed.call)
                 assertTrue(callA.recordingSession === session)
-                val invite = assertNotNull(server.requests.firstOrNull { it.startsWith("INVITE ") })
+                val invite = assertNotNull(server.requests.toList().firstOrNull { it.startsWith("INVITE ") })
                 assertTrue(invite.startsWith("INVITE sip:srs@127.0.0.1"), invite)
                 assertEquals("siprec", header("Require", invite))
                 assertTrue(header("Content-Type", invite)?.startsWith("multipart/mixed") == true, invite)
@@ -508,7 +510,7 @@ private suspend fun aCallIsRecordedToARecordingServerOverItsOwnConnection(): Str
                 ) { session.stop() }
                 assertNull(callA.recordingSession)
                 withTimeout(5_000) {
-                    while (server.requests.none { it.startsWith("BYE ") }) {
+                    while (server.requests.toList().none { it.startsWith("BYE ") }) {
                         delay(20)
                     }
                 }
@@ -565,11 +567,11 @@ private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean, l
                             link?.let { alice.nextLink.set(it) }
                             placed.recordTo("sip:srs@127.0.0.1", destination = server.address)
                             withTimeout(5_000) {
-                                while (server.requests.none { it.startsWith("INVITE ") }) {
+                                while (server.requests.toList().none { it.startsWith("INVITE ") }) {
                                     delay(20)
                                 }
                             }
-                            return server.requests.first { it.startsWith("INVITE ") }
+                            return server.requests.toList().first { it.startsWith("INVITE ") }
                         }
                     }
                 }
