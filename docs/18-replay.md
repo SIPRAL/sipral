@@ -56,6 +56,16 @@ replay writes different requests, and the recorded answers — which echo `Via`,
 sent. A recording that did not carry the seed would replay into a different
 call and would not say so.
 
+It is not the seed the stack was built with. Anyone holding that one could
+work out every `Call-ID`, tag, branch and SSRC the stack will ever draw, and
+address in-dialog requests or RTP to calls they never saw; a recording is a
+file that gets handed to people. So `UserAgent::start_recording` moves the
+endpoint onto a fresh seed (`Endpoint::reseed`), drawn from a stream derived
+one way from the stack's own, and the recording carries that one;
+`stop_recording` moves the endpoint onto another. A replay built with the
+recording's seed draws exactly what the stack drew while it recorded, and
+nothing drawn before or after it can be predicted from the file.
+
 The media keys are not in that list, and the format has no field for them.
 They come from a second seed the application supplies to `MediaEngine::new`,
 which is never written here. The two are separate for exactly this reason: a
@@ -251,16 +261,19 @@ while replay.next_at().is_some() {
 The simplest way is built in. `UserAgent::start_recording(Some("note"))`
 starts one, and `UserAgent::stop_recording()` hands back the `Recording` (or
 the `RecordError`), or `None` when nothing was being recorded. From C, `sipral_stack_recording_start` and
-`sipral_stack_recording_stop` do the same and copy out the text. Both use the
-seed the stack was built with. They record arrivals and wakes only, with no
+`sipral_stack_recording_stop` do the same and copy out the text. Both use a
+seed drawn for the recording, as above. They record arrivals and wakes only, with no
 cues and no `resolved` answers, so a replay of one has to repeat the
 application's own actions itself.
 
 The recorder can also be driven by hand, which is what a layer with cues or
 `resolved` answers of its own needs. It is passive: it is told about the
 calls the driver is already making, and it never reads a clock of its own.
-Its seed must be the same 32 bytes passed to `Endpoint::new` or
-`UserAgent::new`.
+Its seed must be the 32 bytes the endpoint is drawing from when it starts:
+the ones passed to `Endpoint::new` or `UserAgent::new` for a recording from
+the first frame, or, better, what `Endpoint::reseed` returns at that moment,
+followed by another `reseed` when the recording ends, so the file carries no
+seed that outlives it.
 
 ```rust
 let mut recorder = Recorder::new(seed).about("Asterisk 20.5, one-way audio after hold");

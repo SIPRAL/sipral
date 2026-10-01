@@ -31,14 +31,36 @@ use crate::auth::digest::hex;
 #[derive(Debug)]
 pub(crate) struct Tokens {
     keys: KeySource,
+    /// Where every seed after the caller's comes from ([`Tokens::reseed`]):
+    /// derived one way from the caller's seed, and never drawn for the wire
+    /// or written anywhere, so no seed handed out lets anyone work out the
+    /// ones handed out after it.
+    ratchet: KeySource,
 }
+
+/// The label [`Tokens::reseed`]'s stream is derived under.
+const RATCHET: &[u8] = b"sipral endpoint seeds after the first";
 
 impl Tokens {
     /// Start from the caller's seed.
-    pub(crate) const fn new(seed: [u8; 32]) -> Self {
-        Self {
-            keys: KeySource::new(seed),
-        }
+    pub(crate) fn new(seed: [u8; 32]) -> Self {
+        let keys = KeySource::new(seed);
+        let ratchet = keys.derived(RATCHET);
+        Self { keys, ratchet }
+    }
+
+    /// Carry on from a seed of its own, and say what it is.
+    ///
+    /// The stream starts over, counter at zero, from the next block of the
+    /// ratchet: a seed nothing before it predicts, and one that predicts
+    /// nothing drawn after the next reseed. What a replay recording carries
+    /// is one of these and never the caller's seed, so a recording replays
+    /// from its own first frame and stops predicting the moment the
+    /// recording ends and this is called again.
+    pub(crate) fn reseed(&mut self) -> [u8; 32] {
+        let seed = self.ratchet.block();
+        self.keys = KeySource::new(seed);
+        seed
     }
 
     /// A fresh token: 32 hexadecimal characters.

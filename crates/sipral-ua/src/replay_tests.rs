@@ -341,3 +341,68 @@ fn a_recording_of_one_layer_replays_into_the_layer_below_it() {
         "and without a layer that knows how to do it, nothing was sent"
     );
 }
+
+/// The first `count` tokens a fresh endpoint built with `seed` draws: every
+/// `Call-ID`, tag and branch a holder of `seed` could work out.
+fn predicted(seed: [u8; 32], count: usize) -> Vec<Vec<u8>> {
+    let mut endpoint = sipral_core::endpoint::Endpoint::new(EndpointConfig::default(), seed)
+        .expect("an endpoint");
+    (0..count).map(|_| endpoint.token().to_vec()).collect()
+}
+
+/// The token a `Call-ID` was drawn as.
+fn call_id_of(request: &[u8]) -> Vec<u8> {
+    header(request, HeaderName::CallId)
+}
+
+/// G1: a recording made through the agent carries a seed of its own rather
+/// than the one the agent was built with. Replayed, that seed draws exactly
+/// what the agent drew while it recorded; once the recording stops, the
+/// agent moves on to another seed, and neither the recording's nor the
+/// agent's first one predicts the `Call-ID` it draws next.
+#[test]
+fn a_recording_carries_a_seed_of_its_own_and_predicts_nothing_after_it() {
+    let t0 = Instant::now();
+    let mut agent = UserAgent::new(EndpointConfig::default(), SEED).unwrap();
+    agent.receive(bound(), t0).expect("binding a transport");
+    let _ = agent.poll_transmit();
+
+    agent.start_recording(Some("what a support engineer asked for"));
+    let _ = ask(&mut agent, t0);
+    let during = agent.poll_transmit().expect("the REGISTER").payload.to_vec();
+    let recording = agent
+        .stop_recording()
+        .expect("a recording was running")
+        .expect("and it was whole")
+        .clone();
+    assert_ne!(recording.seed(), SEED, "the agent's own seed left in the file");
+
+    let mut replayed = UserAgent::new(EndpointConfig::default(), recording.seed()).unwrap();
+    replayed.receive(bound(), t0).expect("binding a transport");
+    let _ = replayed.poll_transmit();
+    let _ = ask(&mut replayed, t0);
+    let again = replayed.poll_transmit().expect("the REGISTER").payload;
+    assert_eq!(*again, *during, "the replay drew what the recording did");
+
+    let _ = ask(&mut agent, t0 + Duration::from_secs(1));
+    let after = call_id_of(&agent.poll_transmit().expect("a REGISTER").payload);
+    assert!(!after.is_empty());
+    for (seed, whose) in [(recording.seed(), "the recording's"), (SEED, "the agent's")] {
+        assert!(
+            !predicted(seed, 256).contains(&after),
+            "{whose} seed predicts the Call-ID drawn after the recording stopped"
+        );
+    }
+}
+
+/// F3: a user agent printed with `{:?}` prints nothing of its seed, in any
+/// of the ways an array of bytes is printed.
+#[test]
+fn a_printed_user_agent_does_not_print_its_seed() {
+    let mut agent = UserAgent::new(EndpointConfig::default(), [0xa7; 32]).unwrap();
+    agent.start_recording(None);
+    let printed = format!("{agent:?}");
+    for shape in ["167, 167", "a7a7", "A7A7", "0xa7"] {
+        assert!(!printed.contains(shape), "{shape} in {printed}");
+    }
+}

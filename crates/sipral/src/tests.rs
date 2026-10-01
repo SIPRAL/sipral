@@ -6019,7 +6019,7 @@ fn offered_with_seeds(
 
 /// The other half of 8.2.4: the media seed, not the endpoint seed, is what a
 /// negotiated key follows. Two calls placed from user agents that share one
-/// endpoint seed — which is what a replay recording carries in clear — offer
+/// endpoint seed — whose draws go on the wire in clear — offer
 /// two different keys as long as their media seeds differ.
 ///
 /// `key_source_tests::the_media_key_follows_the_media_seed_and_nothing_else`

@@ -1997,12 +1997,12 @@ unsafe fn seeds_of(config: &SipralStackConfig) -> Result<(Seed, Seed), Fail> {
     if media_seed == seed {
         // The one check that has to live here: nowhere else can see both.
         // Sharing them undoes the separation silently — every message
-        // still looks right, and every SRTP key is derivable from a
-        // recording that was meant to carry none.
+        // still looks right, and every SRTP key is a block the Call-IDs and
+        // tags on the wire were cut from.
         return Err(fail(
             SipralStatus::InvalidArgument,
-            "media_seed is the same as entropy; they must be two independent draws, because a \
-             replay recording carries entropy in clear and must not permit deriving a key"
+            "media_seed is the same as entropy; they must be two independent draws, because what \
+             is drawn from entropy goes on the wire in clear and must not permit deriving a key"
                 .to_owned(),
         ));
     }

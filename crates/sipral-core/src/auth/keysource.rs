@@ -10,8 +10,10 @@
 //!
 //! Two of these exist in a running stack and they are deliberately separate.
 //! The endpoint's drives everything that goes on the wire in clear — branches,
-//! tags, `Call-ID`s, the client nonce — and is written into a replay recording
-//! so that a recorded session can be replayed byte for byte. The media
+//! tags, `Call-ID`s, the client nonce — and a replay recording carries the
+//! seed it runs on while it records, one derived for the recording
+//! ([`KeySource::derived`]), so that a recorded session can be replayed byte
+//! for byte without the file holding the seed the stack was built with. The media
 //! engine's derives SRTP master keys, and is written nowhere. Sharing one
 //! between them would put every key this stack will ever offer into every
 //! recording it makes.
@@ -56,6 +58,21 @@ impl KeySource {
         let digest = sha256(&input);
         wipe(&mut input);
         digest
+    }
+
+    /// A stream of its own, seeded with `SHA-256(label || seed)`.
+    ///
+    /// One way: neither stream's blocks say anything about the other's, and
+    /// a different `label` gives an unrelated stream. What the endpoint
+    /// draws the seed of each replay recording from, so that a recording
+    /// carries a seed of its own and never this one.
+    pub(crate) fn derived(&self, label: &[u8]) -> Self {
+        let mut input = Vec::with_capacity(label.len() + self.seed.len());
+        input.extend_from_slice(label);
+        input.extend_from_slice(&self.seed);
+        let seed = sha256(&input);
+        wipe(&mut input);
+        Self::new(seed)
     }
 }
 

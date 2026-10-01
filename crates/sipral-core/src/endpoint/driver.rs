@@ -471,11 +471,26 @@ impl Endpoint {
     ///
     /// This is the stream for everything that goes on the wire in clear, and
     /// only for that. Media keys come from a generator of their own, seeded
-    /// separately, because this seed is written into every replay recording
-    /// and a recording must not carry the means to decrypt what it recorded.
+    /// separately, because a replay recording carries the seed this stream
+    /// runs on while it records ([`Endpoint::reseed`]) and a recording must
+    /// not carry the means to decrypt what it recorded.
     #[must_use]
     pub fn token(&mut self) -> Box<[u8]> {
         self.tokens.token()
+    }
+
+    /// Move the stream every branch, tag, `Call-ID` and client nonce comes
+    /// from onto a seed of its own, and return that seed.
+    ///
+    /// The seed comes from a second stream derived one way from the one
+    /// [`Endpoint::new`] was given, so it says nothing about that seed and
+    /// nothing about the seed the next call here moves to. It is what a
+    /// replay recording started now carries (`docs/18-replay.md`): a replay
+    /// built with it draws exactly what this endpoint draws from here on,
+    /// and once the recording ends, calling this again leaves the recording
+    /// unable to predict any identifier drawn after it.
+    pub fn reseed(&mut self) -> [u8; 32] {
+        self.tokens.reseed()
     }
 
     /// What a bound transport speaks and the address it was bound at — the

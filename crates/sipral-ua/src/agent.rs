@@ -213,13 +213,6 @@ pub struct UserAgent {
     pub(crate) next_subscription: u32,
     pub(crate) next_announcement: u32,
     pub(crate) next_message: u32,
-    /// The signalling seed this agent was built with (`docs/18-replay.md`).
-    ///
-    /// Kept so that [`UserAgent::start_recording`] can hand a [`Recorder`] the
-    /// seed that matches: a recording made with any other one would replay
-    /// into requests whose branches and tags do not agree with the answers
-    /// this session actually received.
-    replay_seed: [u8; 32],
     /// The recording in progress, if the application asked for one.
     ///
     /// `None` for the whole life of an agent nobody records. Everything that
@@ -279,7 +272,6 @@ impl UserAgent {
         let sdp_limits = config.sdp_limits;
         Ok(Self {
             endpoint: Endpoint::new(config, seed)?,
-            replay_seed: seed,
             recorder: None,
             stopped_recording: None,
             accounts: HashMap::new(),
@@ -418,9 +410,16 @@ impl UserAgent {
 
     /// Starts a recording of everything this agent is fed from here on
     /// (`docs/18-replay.md`): every [`UserAgent::receive`] and
-    /// [`UserAgent::handle_timeout`], with the seed this agent was built
-    /// with, since a replay needs that same seed to write the branches and
-    /// tags the recorded answers belong to.
+    /// [`UserAgent::handle_timeout`], with the seed the agent's identifiers
+    /// are drawn from from here on, since a replay needs that same seed to
+    /// write the branches and tags the recorded answers belong to.
+    ///
+    /// That seed is not the one the agent was built with. Starting moves the
+    /// endpoint onto a fresh seed derived one way from that one
+    /// ([`Endpoint::reseed`]) and the recording carries the fresh one, and
+    /// stopping moves it on again, so a recording handed to somebody predicts
+    /// no `Call-ID`, tag, branch or SSRC drawn before it started or after it
+    /// stopped.
     ///
     /// A recording already running is discarded rather than extended: the
     /// two would disagree about where their own clock starts, and a caller
@@ -433,9 +432,13 @@ impl UserAgent {
     /// [`UserAgent::stop_recording`] is called, the same as any other reason
     /// a recording could not be produced.
     pub fn start_recording(&mut self, note: Option<&str>) {
+        // the recording carries a seed of its own, never the one this agent
+        // was built with: a replay of it draws what this agent draws from
+        // here on, and nothing about the seed it was built with
+        let seed = self.endpoint.reseed();
         let recorder = match note {
-            Some(note) => Recorder::new(self.replay_seed).about(note),
-            None => Recorder::new(self.replay_seed),
+            Some(note) => Recorder::new(seed).about(note),
+            None => Recorder::new(seed),
         };
         self.recorder = Some(recorder);
         // an answer nobody came back for is abandoned rather than kept: a
@@ -462,6 +465,10 @@ impl UserAgent {
     pub fn stop_recording(&mut self) -> Option<Result<&Recording, RecordError>> {
         if self.stopped_recording.is_none() {
             self.stopped_recording = Some(self.recorder.take()?.finish());
+            // the seed the recording carries stops here: whoever is handed
+            // the file can work out every identifier it covers, which the
+            // file already shows, and none drawn after this
+            let _ = self.endpoint.reseed();
         }
         self.stopped_recording
             .as_ref()

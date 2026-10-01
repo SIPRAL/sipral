@@ -6962,7 +6962,7 @@ mod key_source_tests {
     #[test]
     fn the_media_key_follows_the_media_seed_and_nothing_else() {
         // The whole of the fix, in three lines: two stacks given the same
-        // signalling entropy — which a replay recording carries in clear —
+        // signalling entropy — whose draws go on the wire in clear —
         // must not be derivable from it to the same media keys.
         let mut one = KeySource::new([1; 32]);
         let mut other = KeySource::new([2; 32]);
