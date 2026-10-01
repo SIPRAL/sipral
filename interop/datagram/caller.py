@@ -323,6 +323,8 @@ async def main() -> None:
                         flush=True,
                     )
                     return
+    except TimeoutError:
+        print("timed out", flush=True)
     finally:
         for task in tasks:
             task.cancel()
