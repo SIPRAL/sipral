@@ -41,11 +41,7 @@ final class LocalConferenceTests: XCTestCase {
         XCTAssertEqual(members.first?.mutedInput, true)
         XCTAssertEqual(members.first?.gainOutput, 128)
 
-        var announced: LocalConferenceEventData?
-        for await event in events where event.kind == .localConferenceChanged {
-            announced = event.localConferenceData
-            break
-        }
+        let announced = await firstOne(of: events) { $0.kind == .localConferenceChanged }?.localConferenceData
         XCTAssertEqual(announced?.conference, conference.handle)
         XCTAssertEqual(announced?.change, .joined)
         XCTAssertEqual(announced?.member, conference.handle)
@@ -93,20 +89,17 @@ final class LocalConferenceTests: XCTestCase {
         let farEvents = far.events()
         let near = try alice.placeCall(account: account, target: "sip:\(user)@\(far.bindAddress)")
         let nearEvents = near.events()
-        var answered: (call: Call, events: AsyncStream<SipralEvent>)?
-        for await event in farEvents where event.kind == .incomingCall {
-            let incoming = try far.takeIncomingCall(event)
-            let events = incoming.events()
-            try incoming.answer()
-            answered = (incoming, events)
-            break
+        let arrived = await firstOne(of: farEvents) { $0.kind == .incomingCall }
+        let incoming = try far.takeIncomingCall(try XCTUnwrap(arrived, "no incoming call arrived"))
+        let events = incoming.events()
+        try incoming.answer()
+        if near.media == nil {
+            _ = await firstOne(of: nearEvents) { _ in near.media != nil }
         }
-        guard let answered else { throw XCTSkip("no incoming call arrived") }
-        for await _ in nearEvents where near.media != nil { break }
-        if answered.call.media == nil {
-            for await _ in answered.events where answered.call.media != nil { break }
+        if incoming.media == nil {
+            _ = await firstOne(of: events) { _ in incoming.media != nil }
         }
-        return (near, answered.call)
+        return (near, incoming)
     }
 
     /// Alice calls Bob and Carol and bridges the two calls, taking no part
@@ -134,23 +127,28 @@ final class LocalConferenceTests: XCTestCase {
         for _ in 0..<100 {
             bobMedia.sendAudio(square(bobMedia.frameSamples))
         }
+        let heard = Recorder(carolFrames)
         var loudest = 0
         var steady = 0
         var counted = 0
-        let deadline = Date().addingTimeInterval(10)
-        for await frame in carolFrames {
-            if loudest > 2000 {
-                // and steadily, for sixty of Bob's hundred frames: a call
-                // whose own thread still carried frames beside the conference
-                // would have every other frame taken from under it, and a
-                // frame clock slower than the conference's leaves gaps the
-                // buffers fill with silence
-                steady += loudness(frame) > 2000 ? 1 : 0
-                counted += 1
-                if counted == 60 { break }
+        _ = await eventually(within: 10) {
+            loudest = 0
+            steady = 0
+            counted = 0
+            for frame in heard.elements {
+                if loudest > 2000 {
+                    // and steadily, for sixty of Bob's hundred frames: a
+                    // call whose own thread still carried frames beside the
+                    // conference would have every other frame taken from
+                    // under it, and a frame clock slower than the
+                    // conference's leaves gaps the buffers fill with silence
+                    steady += loudness(frame) > 2000 ? 1 : 0
+                    counted += 1
+                    if counted == 60 { return true }
+                }
+                loudest = max(loudest, loudness(frame))
             }
-            loudest = max(loudest, loudness(frame))
-            if Date() > deadline { break }
+            return false
         }
         XCTAssertGreaterThan(loudest, 2000, "Carol never heard Bob")
         XCTAssertGreaterThanOrEqual(steady, 57, "Carol heard Bob in \(steady) of 60 frames")

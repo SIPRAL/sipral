@@ -153,13 +153,12 @@ final class SignallingTests: XCTestCase {
     }
 
     private func refusal(_ stack: SipralStack) async throws -> TransportFailedEventData {
-        for await event in stack.events() where event.kind == .transportFailed {
-            XCTAssertFalse(stack.connected)
-            let failed = try XCTUnwrap(event.transportFailedData)
-            XCTAssertEqual(failed.protocolRaw, SipralTransport.tls.rawValue)
-            return failed
-        }
-        throw XCTSkip("the stack closed before it said why")
+        let event = await firstOne(of: stack.events(), within: 10) { $0.kind == .transportFailed }
+        let said = try XCTUnwrap(event, "the stack never said why the connection failed")
+        XCTAssertFalse(stack.connected)
+        let failed = try XCTUnwrap(said.transportFailedData)
+        XCTAssertEqual(failed.protocolRaw, SipralTransport.tls.rawValue)
+        return failed
     }
 
     private func registered(_ account: Account) async throws {
@@ -327,11 +326,9 @@ final class SignallingTests: XCTestCase {
         try await registered(account)
         let first = stack.bindAddress
         registrar.drop()
-        for await event in events where event.kind == .transportFailed {
-            XCTAssertEqual(event.transportFailedData?.error, .closed)
-            XCTAssertEqual(event.transportFailedData?.protocolRaw, SipralTransport.tcp.rawValue)
-            break
-        }
+        let closed = await firstOne(of: events, within: 10) { $0.kind == .transportFailed }
+        XCTAssertEqual(closed?.transportFailedData?.error, .closed)
+        XCTAssertEqual(closed?.transportFailedData?.protocolRaw, SipralTransport.tcp.rawValue)
         for _ in 0..<200 where !registrar.registers.contains(where: { $0.connection == 2 }) {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -362,10 +359,8 @@ final class SignallingTests: XCTestCase {
                 error: SipralTransportError.timedOut.rawValue, nowMs: stack.nowMs()
             )
         }
-        for await event in events where event.kind == .transportFailed {
-            XCTAssertEqual(event.transportFailedData?.transport, Sipral.transportMain)
-            break
-        }
+        let letGo = await firstOne(of: events, within: 10) { $0.kind == .transportFailed }
+        XCTAssertEqual(letGo?.transportFailedData?.transport, Sipral.transportMain)
         for _ in 0..<200 where !registrar.registers.contains(where: { $0.connection == 2 }) {
             try await Task.sleep(nanoseconds: 50_000_000)
         }

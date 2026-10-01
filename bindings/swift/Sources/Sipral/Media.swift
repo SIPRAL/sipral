@@ -158,8 +158,27 @@ public final class Media: @unchecked Sendable {
         try Sipral.mediaInfo(media: handle)
     }
 
+    /// What the stream has cost so far (`sipral_media_statistics`). Once
+    /// the call has ended the stream is gone and the library answers
+    /// `.wrongState`; from the moment the end-of-call record has arrived
+    /// this answers with that record instead, which counts everything up to
+    /// the end.
     public func statistics() throws -> sipral_stream_stats_t {
-        try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+        do {
+            return try Sipral.mediaStatistics(media: handle, nowMs: stack.nowMs())
+        } catch let error as SipralError where error.status == .wrongState {
+            guard let record = finalQueue.sync(execute: { finalRecord }) else { throw error }
+            return record
+        }
+    }
+
+    private let finalQueue = DispatchQueue(label: "org.sipral.media.final")
+    private var finalRecord: sipral_stream_stats_t?
+
+    /// The end-of-call record arrived: what `statistics()` answers from now
+    /// on, when the library no longer can.
+    func ended(with record: sipral_stream_stats_t) {
+        finalQueue.sync { finalRecord = record }
     }
 
     /// What the call agreed about RTCP feedback (RFC 4585, RFC 5506), read

@@ -28,15 +28,11 @@ final class CallLoopbackTests: XCTestCase {
         let aliceCall = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
         let aliceEvents = aliceCall.events()
 
-        var answered: (call: Call, events: AsyncStream<SipralEvent>)?
-        for await event in bobEvents where event.kind == .incomingCall {
-            let call = try bob.takeIncomingCall(event)
-            let events = call.events()
-            try call.answer()
-            answered = (call, events)
-            break
-        }
-        guard let answered else { throw XCTSkip("no incoming call arrived") }
+        let arrived = await firstOrGiveUp(bobEvents, within: 5) { $0.kind == .incomingCall }
+        let call = try bob.takeIncomingCall(try XCTUnwrap(arrived, "no incoming call arrived"))
+        let events = call.events()
+        try call.answer()
+        let answered = (call: call, events: events)
 
         try await waitForMedia(aliceCall, aliceEvents)
         try await waitForMedia(answered.call, answered.events)
@@ -47,11 +43,7 @@ final class CallLoopbackTests: XCTestCase {
         _ call: Call, _ events: AsyncStream<SipralEvent>, timeoutSeconds: Double = 5
     ) async throws {
         if call.media != nil { return }
-        let deadline = DispatchTime.now() + timeoutSeconds
-        for await _ in events {
-            if call.media != nil { return }
-            if DispatchTime.now() >= deadline { break }
-        }
+        _ = await firstOrGiveUp(events, within: timeoutSeconds) { _ in call.media != nil }
         XCTAssertNotNil(call.media, "media never started for call \(call.handle)")
     }
 
@@ -89,20 +81,12 @@ final class CallLoopbackTests: XCTestCase {
         let bobFrames = bobMedia.frames()
         aliceMedia.sendAudio(tone)
 
-        var heard: [Int16]?
-        for await frame in bobFrames {
-            heard = frame
-            break
-        }
+        let heard = await firstOne(of: bobFrames)
         XCTAssertEqual(heard?.count, aliceMedia.frameSamples)
 
         let aliceFrames = aliceMedia.frames()
         bobMedia.sendAudio(tone)
-        var heardBack: [Int16]?
-        for await frame in aliceFrames {
-            heardBack = frame
-            break
-        }
+        let heardBack = await firstOne(of: aliceFrames)
         XCTAssertEqual(heardBack?.count, bobMedia.frameSamples)
     }
 
@@ -116,33 +100,25 @@ final class CallLoopbackTests: XCTestCase {
 
         let holdEvents = aliceCall.events()
         try aliceCall.hold()
-        var sawHeldHere = false
-        for await event in holdEvents {
-            if event.callData?.heldHere == true { sawHeldHere = true; break }
-        }
-        XCTAssertTrue(sawHeldHere)
+        let sawHeldHere = await firstOne(of: holdEvents) { $0.callData?.heldHere == true }
+        XCTAssertNotNil(sawHeldHere)
 
         let resumeEvents = aliceCall.events()
         try aliceCall.resume()
-        var sawResumed = false
-        for await event in resumeEvents {
+        let sawResumed = await firstOne(of: resumeEvents) { event in
             // A resume re-offers the session the way a hold does, and its
             // outcome arrives the same way (`docs/08-ffi.md`, "The
             // application hears the outcome as
             // SIPRAL_EVENT_KIND_MEDIA_CHANGED"): a SESSION_CHANGED naming
             // `heldHere` false, `SipralEventKind.mediaResumed` is a
             // different thing (recovery from a suspend, not an un-hold).
-            if event.callData?.heldHere == false { sawResumed = true; break }
+            event.callData?.heldHere == false
         }
-        XCTAssertTrue(sawResumed)
+        XCTAssertNotNil(sawResumed)
 
         let digits = aliceCall.dtmf()
         try bobCall.sendDtmf("5")
-        var digit: Character?
-        for await d in digits {
-            digit = d
-            break
-        }
+        let digit = await firstOne(of: digits)
         XCTAssertEqual(digit, "5")
 
         let media = try XCTUnwrap(aliceCall.media)
@@ -275,10 +251,7 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertTrue(settled, "the readers placeAndAnswer took must be gone once it returned")
 
         let quitter = Task { [events = aliceCall.events()] () -> SipralEvent? in
-            for await event in events {
-                return event
-            }
-            return nil
+            await firstOrGiveUp(events, within: 5)
         }
         let neverRead = aliceCall.events()
         let steady = Recorder(aliceCall.events())
@@ -375,6 +348,40 @@ final class CallLoopbackTests: XCTestCase {
         let lateDigits = await drain(aliceCall.dtmf())
         XCTAssertEqual(lateDigits, [])
         XCTAssertEqual(aliceCall.debugEventReaders, 0)
+    }
+
+    /// The end-of-call record travels in `.mediaStatistics` itself, is kept
+    /// on the call, and is what `Media.statistics()` answers once the stream
+    /// is gone, where the library alone says `.wrongState`.
+    func testTheEndOfCallRecordIsDecodedKeptAndStillReadable() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let media = try XCTUnwrap(aliceCall.media)
+        for _ in 0..<5 {
+            media.sendAudio([Int16](repeating: 0, count: media.frameSamples))
+        }
+        let sent = await eventually(within: 5) { ((try? media.statistics().packets_sent) ?? 0) >= 5 }
+        XCTAssertTrue(sent, "the frames given were never sent")
+
+        let stackEvents = Recorder(alice.events())
+        try bobCall.hangup()
+        let recorded = await stackEvents.first(within: 5) {
+            $0.kind == .mediaStatistics && $0.call == aliceCall.handle
+        }
+        let record = try XCTUnwrap(recorded?.mediaData?.statistics, "the end-of-call record was not decoded")
+        XCTAssertGreaterThanOrEqual(record.packets_sent, 5)
+        XCTAssertEqual(record.size, MemoryLayout.size(ofValue: record))
+
+        let kept = try XCTUnwrap(aliceCall.finalStatistics, "the call did not keep its record")
+        XCTAssertEqual(kept.packets_sent, record.packets_sent)
+        XCTAssertThrowsError(try Sipral.mediaStatistics(media: media.handle, nowMs: alice.nowMs())) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .wrongState, "the library itself has nothing left")
+        }
+        XCTAssertEqual(try media.statistics().packets_sent, record.packets_sent)
     }
 
     /// A stack's stream finishes when the stack closes, and one taken after

@@ -4,13 +4,13 @@
 import XCTest
 @testable import Sipral
 
-/// Everything `stream` yields, once it has finished.
-func drain<Element>(_ stream: AsyncStream<Element>) async -> [Element] {
-    var seen: [Element] = []
-    for await element in stream {
-        seen.append(element)
-    }
-    return seen
+/// Everything `stream` yields, once it has finished; a failure, and what it
+/// had yielded so far, when it has not within `seconds`.
+func drain<Element: Sendable>(_ stream: AsyncStream<Element>, within seconds: Double = 10) async -> [Element] {
+    let recorder = Recorder(stream)
+    let finished = await recorder.finished(within: seconds)
+    XCTAssertTrue(finished, "the stream did not finish within \(seconds) seconds")
+    return recorder.elements
 }
 
 /// `Broadcast` on its own, with no stack: what every reader of

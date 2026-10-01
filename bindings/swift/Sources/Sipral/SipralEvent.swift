@@ -370,6 +370,12 @@ public struct MediaEventData: Sendable {
     public let keyExchange: SipralKeyExchange?
     public let encrypted: Bool
     public let authenticated: Bool
+    /// What the call's media cost, on `SipralEventKind.mediaStatistics`
+    /// only: the end-of-call record `payload.media.statistics` points at,
+    /// copied out while the callback still owns it. The stream is gone by
+    /// then, so this -- or `Call.finalStatistics`, which keeps it -- is the
+    /// only place the last second of measurements can still be read.
+    public var statistics: sipral_stream_stats_t? = nil
 
     /// Which SRTP suite keys the call, on `SipralEventKind.mediaSecured`:
     /// RFC 4568's AES-CM, RFC 6188's AES-256 and RFC 7714's AES-GCM each have
@@ -543,8 +549,25 @@ enum SipralEventDecoder {
             source: SipralDigitSource(rawValue: media.source),
             keyExchange: SipralKeyExchange(rawValue: media.key_exchange),
             encrypted: media.encrypted != 0,
-            authenticated: media.authenticated != 0
+            authenticated: media.authenticated != 0,
+            statistics: statistics(media.statistics)
         )
+    }
+
+    /// A copy of the record `pointer` names, or `nil` for none. Only the
+    /// bytes its own `size` says the library wrote are read: a library
+    /// older than this package wrote a shorter record, and what it did not
+    /// write stays zero here rather than being read past its end.
+    static func statistics(_ pointer: UnsafePointer<sipral_stream_stats_t>?) -> sipral_stream_stats_t? {
+        guard let pointer else { return nil }
+        var copy = sipral_stream_stats_t.sized()
+        let said = UnsafeRawPointer(pointer).loadUnaligned(as: Int.self)
+        let written = min(max(said, 0), MemoryLayout<sipral_stream_stats_t>.size)
+        withUnsafeMutableBytes(of: &copy) { into in
+            guard let base = into.baseAddress else { return }
+            base.copyMemory(from: UnsafeRawPointer(pointer), byteCount: written)
+        }
+        return copy
     }
 
     private static func registrationData(_ registration: sipral_registration_event_t) -> RegistrationEventData {

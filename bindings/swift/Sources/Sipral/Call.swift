@@ -47,7 +47,8 @@ public final class Call: @unchecked Sendable {
     /// that starts after the end gets that `callEnded` event alone and
     /// finishes at once, so `for await` over a fresh stream always ends.
     /// `SipralEventKind.mediaStatistics`, which comes after `callEnded`,
-    /// reaches the stack's `SipralStack.events()` only.
+    /// reaches the stack's `SipralStack.events()` only; the record it
+    /// carries is kept in `finalStatistics`.
     ///
     /// Each reader buffers on its own, up to `Call.eventBuffer` events; one
     /// that falls further behind drops its own oldest, and never slows the
@@ -96,6 +97,19 @@ public final class Call: @unchecked Sendable {
 
     public var ended: Bool {
         stateQueue.sync { _ended }
+    }
+
+    private var _finalStatistics: sipral_stream_stats_t?
+
+    /// What the call's media cost in the end: the record
+    /// `SipralEventKind.mediaStatistics` carries, kept here from the moment
+    /// it arrives -- right after `SipralEventKind.callEnded`, on the poll
+    /// thread -- and `nil` before that or for a call whose media never
+    /// started. `Media.statistics()` answers with it too once the stream is
+    /// gone, so a reader that asks after the end gets the last second of
+    /// measurements rather than `.wrongState`.
+    public var finalStatistics: sipral_stream_stats_t? {
+        stateQueue.sync { _finalStatistics }
     }
 
     /// The socket the call was placed or answered on: until `media` exists it
@@ -174,6 +188,10 @@ public final class Call: @unchecked Sendable {
             ) {
                 setMedia(minted)
             }
+        }
+        if event.kindRaw == SipralEventKind.mediaStatistics.rawValue, let record = event.mediaData?.statistics {
+            stateQueue.sync { _finalStatistics = record }
+            media?.ended(with: record)
         }
         if event.kindRaw == SipralEventKind.callEnded.rawValue {
             stateQueue.sync { _ended = true }
