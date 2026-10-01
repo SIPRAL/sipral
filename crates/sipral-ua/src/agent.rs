@@ -180,6 +180,14 @@ pub struct UserAgent {
     pub(crate) keepalives: crate::keepalive::Keepalives,
     /// The addresses of the accounts that find their server by name.
     pub(crate) locations: crate::locate::Locations,
+    /// The accounts on a connection of their own that asked for one, and
+    /// when (`crate::flow`).
+    pub(crate) flows_wanted: HashMap<AccountId, Instant>,
+    /// The accounts that never register whose connection has been asked for
+    /// once already.
+    pub(crate) flows_asked: std::collections::HashSet<AccountId>,
+    /// The accounts whose connection was lost since the last round of work.
+    pub(crate) flows_lost: Vec<AccountId>,
     /// 64·T1, read off the configuration once. RFC 6665 §4.1.2.4's Timer N is
     /// the only deadline this layer takes from the transaction timings, and
     /// the endpoint does not hand its configuration back out.
@@ -306,6 +314,9 @@ impl UserAgent {
             recording_server: false,
             keepalives: crate::keepalive::Keepalives::default(),
             locations: crate::locate::Locations::default(),
+            flows_wanted: HashMap::new(),
+            flows_asked: std::collections::HashSet::new(),
+            flows_lost: Vec::new(),
             timer_n,
             sdp_limits,
             life: Machine::default(),
@@ -368,7 +379,16 @@ impl UserAgent {
             recorder.arrived(&input, now);
         }
         let bound = crate::announce::bound_transport(&input);
+        let lost = match input {
+            Input::TransportFailed { transport, .. } | Input::StreamClosed { transport } => {
+                Some(transport)
+            }
+            _ => None,
+        };
         let outcome = self.endpoint.receive(input, now);
+        if let Some(transport) = lost {
+            self.flow_lost(transport);
+        }
         if let Some(transport) = bound {
             self.on_transport_bound(transport, now);
         }
@@ -615,6 +635,8 @@ impl UserAgent {
         self.owners.retain(|_, owner| *owner != account);
         self.forget_keepalive(account);
         self.forget_location(account);
+        self.flows_wanted.remove(&account);
+        self.flows_asked.remove(&account);
         self.forget_publications(account);
     }
 
@@ -769,6 +791,10 @@ impl UserAgent {
                     reg.state = RegistrationState::Registering;
                 }
             }
+            return Ok(());
+        }
+        // and one on a connection of its own waits for the connection
+        if self.register_waits_for_flow(account, unregistering, now)? {
             return Ok(());
         }
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
@@ -960,6 +986,9 @@ impl UserAgent {
         self.send_waiting_holds(now);
         // a trunk that finds its proxy by name starts looking once it can
         self.settle_locations(now);
+        // and one on a connection of its own asks for it once it has an
+        // address to connect to
+        self.settle_flows(now);
         // and after every registration this round won or lost
         self.settle_keepalives(now);
         // last of all: whatever this round left waiting for a stream is

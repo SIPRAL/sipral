@@ -1256,8 +1256,15 @@ impl UserAgent {
     ///
     /// The Request-URI is where the registrar sent it, so it is this end's
     /// contact; the `To` is the address of record. Either identifies a line.
-    /// Neither matching is not a reason to refuse the call — a misrouted INVITE
-    /// that vanishes silently is worse than one the application can see.
+    /// Among the lines either names, the one whose requests use the transport
+    /// the request arrived on wins, and then the one whose server it came
+    /// from: two accounts with the same user, on two servers or on UDP and
+    /// TLS in one stack, are each found by their own flow. With neither
+    /// matching, a line on the arrival flow whose contact has the
+    /// Request-URI's user is the one — a server that rewrote the host still
+    /// names the user it registered. None matching is not a reason to refuse
+    /// the call — a misrouted INVITE that vanishes silently is worse than one
+    /// the application can see.
     ///
     /// General enough for any incoming request, not only an INVITE, because
     /// `reliable::on_require_event` needs the same answer for a request that
@@ -1270,17 +1277,53 @@ impl UserAgent {
             .to()
             .ok()
             .and_then(|to| Uri::parse(to.uri_bytes()).ok());
-        self.accounts
-            .iter()
-            .find(|(_, config)| {
-                target
+        // the flow it arrived on, and the peer it came from: two accounts
+        // with the same user on two servers, or one on UDP and another on
+        // TLS, are told apart by these where the URIs name both alike
+        let flow = self.guard.arrived_on();
+        let source = self.guard.source();
+        let closeness = |config: &Account| {
+            (
+                flow.is_some_and(|transport| transport == config.transport),
+                source.is_some_and(|peer| peer == config.remote),
+            )
+        };
+        let best = |candidates: &mut dyn Iterator<Item = (&AccountId, &Account)>| {
+            candidates
+                .max_by(|(a, one), (b, other)| {
+                    closeness(one)
+                        .cmp(&closeness(other))
+                        // the oldest account among equals, so that the
+                        // answer never depends on a map's order
+                        .then_with(|| b.cmp(a))
+                })
+                .map(|(id, _)| *id)
+        };
+        let addressed = best(&mut self.accounts.iter().filter(|(_, config)| {
+            target
+                .as_ref()
+                .is_some_and(|uri| config.contact.equivalent(uri))
+                || record
                     .as_ref()
-                    .is_some_and(|uri| config.contact.equivalent(uri))
-                    || record
-                        .as_ref()
-                        .is_some_and(|uri| config.aor.equivalent(uri))
-            })
-            .map(|(id, _)| *id)
+                    .is_some_and(|uri| config.aor.equivalent(uri))
+        }));
+        if addressed.is_some() {
+            return addressed;
+        }
+        // a server that rewrote the host of the Contact it was given still
+        // names the user it registered: on the flow an account's requests
+        // use, that user is the account's
+        let user = target
+            .as_ref()
+            .and_then(|uri| uri.sip().and_then(|sip| sip.user.map(str::to_owned)))?;
+        best(&mut self.accounts.iter().filter(|(_, config)| {
+            flow.is_some_and(|transport| transport == config.transport)
+                && config
+                    .contact
+                    .sip()
+                    .and_then(|sip| sip.user)
+                    .is_some_and(|own| own == user)
+        }))
     }
 }
 

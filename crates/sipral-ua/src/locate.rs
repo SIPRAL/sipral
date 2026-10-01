@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 
 use sipral_core::endpoint::{
     AddressFamily, Answer, Event, FailureReason, LocateError, Located, Locator, Query,
+    TransportProtocol,
 };
 use sipral_core::msg::{HostRef, StatusCode, Uri};
 use sipral_core::transaction::AnyTransactionId;
@@ -219,8 +220,10 @@ impl UserAgent {
             return false;
         };
         // an unbound transport has no family to look up for, and the
-        // REGISTER goes on to be refused for it the way any other is
-        if config.server.is_none() || self.endpoint.bound_transport(config.transport).is_none() {
+        // REGISTER goes on to be refused for it the way any other is — save
+        // for an account whose connection is asked for once it has an
+        // address, which looks up over the family of what is bound
+        if config.server.is_none() || self.lookup_flow(account).is_none() {
             return false;
         }
         let location = self.locations.held.entry(account).or_default();
@@ -362,6 +365,24 @@ impl UserAgent {
         self.publish_retry_went_if_held(failed, sent);
     }
 
+    /// The protocol a lookup for `account` asks SRV for and the address
+    /// whose family it asks addresses in: its transport's, once bound, and
+    /// for an account on a connection of its own not opened yet
+    /// ([`crate::Account::on_stream`]), that protocol over the family of any
+    /// transport that is bound.
+    fn lookup_flow(&self, account: AccountId) -> Option<(TransportProtocol, SocketAddr)> {
+        let config = self.accounts.get(&account)?;
+        match (
+            self.endpoint.bound_transport(config.transport),
+            config.own_stream,
+        ) {
+            (Some((protocol, local)), Some(own)) if protocol != own => Some((own, local)),
+            (Some(bound), _) => Some(bound),
+            (None, Some(own)) => self.endpoint.any_bound_address().map(|local| (own, local)),
+            (None, None) => None,
+        }
+    }
+
     /// The account is gone, and nothing is looked up for it.
     pub(crate) fn forget_location(&mut self, account: AccountId) {
         self.locations.held.remove(&account);
@@ -431,7 +452,7 @@ impl UserAgent {
             return;
         };
         let naptr = config.naptr;
-        let Some((protocol, local)) = self.endpoint.bound_transport(config.transport) else {
+        let Some((protocol, local)) = self.lookup_flow(account) else {
             return;
         };
         let seed = u64::from(spread(&self.endpoint.token())) << 32

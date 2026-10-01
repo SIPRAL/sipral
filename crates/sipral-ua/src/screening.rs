@@ -609,6 +609,9 @@ pub(crate) struct Guard {
     /// addressed to no account still needs a `Contact` naming where this end
     /// can be reached, and this is the one address that is true of it.
     arrival: Option<(SocketAddr, TransportProtocol)>,
+    /// The transport the bytes being worked through arrived on: the flow an
+    /// incoming request is matched to its account by.
+    arrived_on: Option<TransportId>,
     /// Each bound transport's own address and protocol, for the bytes that
     /// arrive on a stream with neither on them. Bounded as `connected` is.
     bound: HashMap<TransportId, (SocketAddr, TransportProtocol)>,
@@ -682,6 +685,12 @@ impl Guard {
             Input::StreamData { transport, .. } => Some(transport),
             _ => None,
         };
+        self.arrived_on = match *input {
+            Input::Datagram { transport, .. } | Input::StreamData { transport, .. } => {
+                Some(transport)
+            }
+            _ => None,
+        };
     }
 
     /// What the rate limit counts the bytes being worked through against:
@@ -703,6 +712,12 @@ impl Guard {
     /// what. `None` between arrivals and for a transport never bound.
     pub(crate) const fn arrival(&self) -> Option<(SocketAddr, TransportProtocol)> {
         self.arrival
+    }
+
+    /// The transport the bytes being worked through arrived on. `None`
+    /// between arrivals.
+    pub(crate) const fn arrived_on(&self) -> Option<TransportId> {
+        self.arrived_on
     }
 
     /// What the application says about an INVITE whose `Replaces` names one

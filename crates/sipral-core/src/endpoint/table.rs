@@ -131,6 +131,11 @@ impl Transports {
         self.open.remove(&transport)
     }
 
+    /// The local address of the open transport with the lowest number.
+    pub(crate) fn any_local(&self) -> Option<SocketAddr> {
+        self.open.values().next().map(|bound| bound.local)
+    }
+
     /// What is known about a transport.
     pub(crate) fn get(&self, transport: TransportId) -> Option<&Bound> {
         self.open.get(&transport)

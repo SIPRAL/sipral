@@ -451,6 +451,9 @@ impl UserAgent {
     /// be is to have the REGISTER ready and send it in the same call in which
     /// the application hands it a transport.
     pub(crate) fn on_transport_bound(&mut self, transport: TransportId, now: Instant) {
+        // an account waiting for a connection of its own takes this one when
+        // it reaches the account's server (`crate::flow`)
+        self.adopt_flows(now);
         let owed: Vec<AccountId> = self
             .accounts
             .iter()

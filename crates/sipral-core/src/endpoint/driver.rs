@@ -496,6 +496,28 @@ impl Endpoint {
             .map(|bound| (bound.protocol, bound.local))
     }
 
+    /// A bound transport of `protocol` that carries a message to
+    /// `destination`: one connected to it, or an unconnected one of that
+    /// protocol, the first found. For a layer above that keeps an account on
+    /// a flow of its own and adopts whichever transport the application
+    /// bound for it.
+    #[must_use]
+    pub fn transport_to(
+        &self,
+        protocol: TransportProtocol,
+        destination: SocketAddr,
+    ) -> Option<TransportId> {
+        self.transports.speaking_to(protocol, destination)
+    }
+
+    /// The address one bound transport is bound at, any of them: the family
+    /// a name is looked up for when the transport an account will use is not
+    /// bound yet.
+    #[must_use]
+    pub fn any_bound_address(&self) -> Option<SocketAddr> {
+        self.transports.any_local()
+    }
+
     /// Ping the stream transport `transport` every `every` rather than every
     /// [`EndpointConfig::keepalive_interval`], or with `None` go back to the
     /// endpoint's own interval (RFC 5626 §4.4.1's double CRLF, jittered

@@ -3711,3 +3711,86 @@ fn a_malformed_ack_is_dropped_rather_than_answered() {
     );
     assert!(events(&mut endpoint).is_empty());
 }
+
+// -- RFC 3263 §4.3: a request outside a dialog sent to the next server -------
+
+/// A MESSAGE answered 503 is kept, and goes to the next address as itself
+/// with a new branch; a 404 is an answer and keeps nothing; a request inside
+/// a dialog is never kept.
+#[test]
+fn a_request_that_found_no_server_is_kept_and_sent_elsewhere_as_itself() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().unwrap();
+    let id = endpoint.request(&request(Method::Message), t0).unwrap();
+    let first = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &respond_to(&first, 503, "Service Unavailable", None),
+        t0,
+    );
+    let failed = AnyTransactionId::NonInviteClient(id);
+    let unreached = endpoint.unreached(failed).expect("kept");
+    assert_eq!(unreached.destination, peer());
+    assert_eq!(unreached.transport, UDP);
+    assert!(!unreached.register && !unreached.invite);
+    let again = endpoint.send_elsewhere(failed, elsewhere, t0).unwrap();
+    assert_ne!(again, failed);
+    let out = transmits(&mut endpoint);
+    let moved = out.last().expect("sent again");
+    assert_eq!(moved.destination, elsewhere);
+    for name in [
+        HeaderName::CallId,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::CSeq,
+    ] {
+        assert_eq!(header(&moved.payload, name), header(&first, name));
+    }
+    assert_ne!(
+        header(&moved.payload, HeaderName::Via),
+        header(&first, HeaderName::Via)
+    );
+    assert!(endpoint.unreached(failed).is_none(), "consumed");
+
+    let answered = endpoint.request(&request(Method::Message), t0).unwrap();
+    let request_bytes = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &respond_to(&request_bytes, 404, "Not Found", None),
+        t0,
+    );
+    assert!(
+        endpoint
+            .unreached(AnyTransactionId::NonInviteClient(answered))
+            .is_none(),
+        "the right server's answer"
+    );
+}
+
+/// Timer F and timer B keep what timed out, an INVITE among them.
+#[test]
+fn a_request_that_timed_out_is_kept_for_the_next_server() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let message = endpoint.request(&request(Method::Message), t0).unwrap();
+    let invite = endpoint.invite(&invite_request(), t0).unwrap();
+    let _ = transmits(&mut endpoint);
+    let mut now = t0;
+    while let Some(due) = endpoint.poll_timeout() {
+        if due > t0 + 64 * T1 {
+            break;
+        }
+        now = due;
+        endpoint.handle_timeout(now);
+    }
+    assert!(
+        endpoint
+            .unreached(AnyTransactionId::NonInviteClient(message))
+            .is_some()
+    );
+    let kept = endpoint
+        .unreached(AnyTransactionId::InviteClient(invite))
+        .expect("the INVITE");
+    assert!(kept.invite);
+}

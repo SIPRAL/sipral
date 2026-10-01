@@ -271,6 +271,9 @@ pub struct Account {
     /// The one TLS server certificate this account trusts, by fingerprint,
     /// in place of a trust anchor. See [`Account::tls_pin`].
     pub(crate) tls_pin: Option<CertificatePin>,
+    /// The protocol of the connection of its own this account's requests go
+    /// over, when it has one. See [`Account::on_stream`].
+    pub(crate) own_stream: Option<TransportProtocol>,
 }
 
 impl Account {
@@ -351,6 +354,7 @@ impl Account {
             naptr: false,
             located: true,
             tls_pin: None,
+            own_stream: None,
         }
     }
 
@@ -756,6 +760,27 @@ impl Account {
     /// this stack's to have no knowledge of.
     #[must_use]
     pub const fn transport_protocol(mut self, protocol: TransportProtocol) -> Self {
+        self.protocol = Some(protocol);
+        self
+    }
+
+    /// Send this account's requests over a TCP or TLS connection of its
+    /// own, to its own server, which this crate asks the application to open
+    /// (`crate::flow`): the account's transport is whichever one of
+    /// `protocol` the application binds to the server's address, under any
+    /// number, adopted when it is bound. Until then a REGISTER waits, and an
+    /// [`Event::TransportWanted`](sipral_core::endpoint::Event::TransportWanted)
+    /// names the protocol and the address — once when the account is added,
+    /// for one that never registers. Beside an account on the stack's UDP
+    /// transport, to another server, in the same agent: each keeps its own
+    /// flow, and its calls keep it for every request inside them. Implies
+    /// [`Account::transport_protocol`]. A datagram protocol is the account's
+    /// own transport as it was given, and changes nothing.
+    #[must_use]
+    pub const fn on_stream(mut self, protocol: TransportProtocol) -> Self {
+        if protocol.is_stream() {
+            self.own_stream = Some(protocol);
+        }
         self.protocol = Some(protocol);
         self
     }
