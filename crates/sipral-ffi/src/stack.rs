@@ -326,9 +326,11 @@ record! {
         /// §19.3 wants a tag unguessable — cryptographically random, not a
         /// counter or a clock. Two stacks must never be given the same bytes.
         ///
-        /// Not the media keys: those come from `media_seed`, and the reason
-        /// they are a separate draw is that a replay recording carries this
-        /// one in clear.
+        /// Not the media keys: those come from `media_seed`, a separate draw,
+        /// because what is drawn from this one goes on the wire in clear. A
+        /// replay recording carries neither: it carries a seed drawn for it
+        /// from a stream derived one way from this one, which says nothing
+        /// about these bytes (`sipral_stack_recording_start`).
         pub entropy: *const u8,
         /// How many bytes of it. Thirty-two.
         pub entropy_len: usize,

@@ -4510,9 +4510,11 @@ struct sipral_stack_config {
      * §19.3 wants a tag unguessable — cryptographically random, not a
      * counter or a clock. Two stacks must never be given the same bytes.
      *
-     * Not the media keys: those come from `media_seed`, and the reason
-     * they are a separate draw is that a replay recording carries this
-     * one in clear.
+     * Not the media keys: those come from `media_seed`, a separate draw,
+     * because what is drawn from this one goes on the wire in clear. A
+     * replay recording carries neither: it carries a seed drawn for it
+     * from a stream derived one way from this one, which says nothing
+     * about these bytes (`sipral_stack_recording_start`).
      */
     const uint8_t *entropy;
     /**
@@ -6387,7 +6389,7 @@ struct sipral_stream_stats {
  * The caller fills in `size`, the two pointers and the two capacities; the
  * library fills in the two lengths and the bytes. A `len` of zero means there
  * was nothing to send, which on a capture is an ordinary answer: this end may
- * be holding the far end, or silence suppression may have swallowed the frame.
+ * be held by the far end, or silence suppression may have swallowed the frame.
  *
  * Both buffers are checked before anything is produced. A packet that was
  * built and then had nowhere to go would be a packet missing from a stream
@@ -10686,12 +10688,14 @@ sipral_status_t sipral_media_playback(sipral_handle_t media, int16_t *samples, s
  * whole one is what a peer hears as a stutter.
  *
  * A `len` of zero in the packet means the frame was deliberately not sent:
- * this end is holding the far end, silence suppression swallowed it, or
+ * the far end is holding this end, silence suppression swallowed it, or
  * ICE has not chosen a path for this call yet. The RTP timestamp moves by
  * a frame in the first two cases, because RFC 3550 §5.1 makes it a
  * measure of time rather than of packets; in the third nothing is
  * encoded at all, since there is no packet for the timestamp to belong
  * to and a codec that carries state would have moved it for nothing.
+ * While this end holds the far end the frame goes out as silence, never
+ * as the microphone.
  *
  * `now_ms` is read as the stack reads it and moves nothing, as with every
  * media entry point. It is what tells ICE that traffic went out on the
@@ -12117,9 +12121,14 @@ sipral_status_t sipral_media_poll_recording(sipral_handle_t media, sipral_media_
 
 /**
  * Start recording the signalling this stack is fed from here on
- * (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
- * it with. Read `docs/18-replay.md` before reaching for this: it records
- * what arrives, exactly as it arrived, and never what this end sent.
+ * (`docs/18-replay.md`), on a seed of its own. Starting moves every
+ * branch, tag and `Call-ID` the stack draws from here on onto a fresh
+ * seed, derived one way from the `entropy` `sipral_stack_create` was
+ * given; the recording carries that seed and never `entropy`, and
+ * stopping moves the stack on again, so nothing drawn after the stop
+ * can be worked out from the file. Read `docs/18-replay.md` before
+ * reaching for this: it records what arrives, exactly as it arrived,
+ * and never what this end sent.
  *
  * `note` is one line of prose for whoever opens the file later, or null
  * for none.

@@ -26,9 +26,10 @@
 //! before this needed a driver that fed a [`sipral_core::replay::Recorder`]
 //! beside every [`sipral_ua::UserAgent::receive`] and
 //! [`sipral_ua::UserAgent::handle_timeout`], so that driving is done inside
-//! `UserAgent` itself now, with the same seed the agent was built with
-//! (`entropy` on `sipral_stack_create`), and it is done for every caller of
-//! this crate rather than once for this one.
+//! `UserAgent` itself now, on a seed drawn for the recording from a stream
+//! derived one way from the one the agent was built with (`entropy` on
+//! `sipral_stack_create`), and it is done for every caller of this crate
+//! rather than once for this one.
 //!
 //! **What it does not do, on purpose: it never records what this end sent.**
 //! [`sipral_ua::UserAgent::receive`] offers the recorder the input before
@@ -191,9 +192,14 @@ entry! {
 
 entry! {
     /// Start recording the signalling this stack is fed from here on
-    /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
-    /// it with. Read `docs/18-replay.md` before reaching for this: it records
-    /// what arrives, exactly as it arrived, and never what this end sent.
+    /// (`docs/18-replay.md`), on a seed of its own. Starting moves every
+    /// branch, tag and `Call-ID` the stack draws from here on onto a fresh
+    /// seed, derived one way from the `entropy` `sipral_stack_create` was
+    /// given; the recording carries that seed and never `entropy`, and
+    /// stopping moves the stack on again, so nothing drawn after the stop
+    /// can be worked out from the file. Read `docs/18-replay.md` before
+    /// reaching for this: it records what arrives, exactly as it arrived,
+    /// and never what this end sent.
     ///
     /// `note` is one line of prose for whoever opens the file later, or null
     /// for none.
