@@ -205,7 +205,7 @@ const fn hex(nibble: u8) -> u8 {
 
 /// The transport an account on a connection of its own names until it has
 /// one ([`Account::on_stream`]): a number no transport is bound under.
-const NO_FLOW_YET: TransportId = TransportId(u32::MAX);
+pub(crate) const NO_FLOW_YET: TransportId = TransportId(u32::MAX);
 
 /// An identity, where its requests go, how to prove it — and, for every
 /// account but a trunk, the registrar that keeps it reachable.

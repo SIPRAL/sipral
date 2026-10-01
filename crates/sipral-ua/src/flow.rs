@@ -37,7 +37,7 @@ use std::time::Instant;
 
 use sipral_core::endpoint::{Event, TransportId};
 
-use crate::account::AccountId;
+use crate::account::{AccountId, NO_FLOW_YET};
 use crate::agent::UserAgent;
 use crate::event::{RegistrationState, UaEvent};
 use crate::oversize::STREAM_WAIT;
@@ -153,6 +153,35 @@ impl UserAgent {
                     self.register_unsent(account, &error, now);
                 }
             }
+        }
+    }
+
+    /// `account` was pointed at `transport` again ([`UserAgent::rebind`]):
+    /// one on a connection of its own keeps a transport of its protocol to
+    /// its server — `transport` when it is one, else whichever is bound
+    /// there — or names none, and asks again, rather than taking a transport
+    /// of another protocol.
+    pub(crate) fn keep_own_flow(&mut self, account: AccountId, transport: TransportId) {
+        let Some(config) = self.accounts.get_mut(&account) else {
+            return;
+        };
+        let Some(protocol) = config.own_stream else {
+            return;
+        };
+        let given = self
+            .endpoint
+            .bound_transport(transport)
+            .is_some_and(|(spoken, _)| spoken == protocol);
+        if given {
+            return;
+        }
+        config.transport = self
+            .endpoint
+            .transport_to(protocol, config.remote)
+            .unwrap_or(NO_FLOW_YET);
+        if config.transport == NO_FLOW_YET {
+            self.flows_wanted.remove(&account);
+            self.flows_asked.remove(&account);
         }
     }
 
@@ -652,6 +681,48 @@ mod tests {
             wanted(&events),
             [(TransportProtocol::Tcp, second())],
             "a lost connection is asked for again"
+        );
+    }
+    #[test]
+    fn an_account_on_tls_pointed_at_the_udp_socket_keeps_its_connection() {
+        let t0 = Instant::now();
+        let (mut agent, _, on_tls) = registered_lines(t0);
+        // what every layer does after a network change: the account is
+        // rebound onto the stack's main transport
+        let moved = uri("sips:100@192.0.2.9:50123;transport=tls");
+        agent.rebind(on_tls, UDP, second(), &moved, t0).unwrap();
+        let _ = drain(&mut agent);
+        agent
+            .call(
+                on_tls,
+                &OutgoingCall::new(uri("sips:300@second.example.com")),
+                t0,
+            )
+            .unwrap();
+        let (sent, _) = drain(&mut agent);
+        let placed = sent
+            .iter()
+            .find(|one| one.bytes.starts_with(b"INVITE "))
+            .expect("an INVITE");
+        assert_eq!((placed.transport, placed.destination), (TLS, second()));
+
+        // with the connection gone as well, nothing goes until another is
+        // bound, and none of it over UDP
+        agent
+            .receive(Input::StreamClosed { transport: TLS }, t0)
+            .unwrap();
+        let _ = drain(&mut agent);
+        agent.rebind(on_tls, UDP, second(), &moved, t0).unwrap();
+        let refused = agent.call(
+            on_tls,
+            &OutgoingCall::new(uri("sips:301@second.example.com")),
+            t0,
+        );
+        assert!(refused.is_err(), "{refused:?}");
+        let (sent, _) = drain(&mut agent);
+        assert!(
+            sent.iter().all(|one| one.transport != UDP),
+            "nothing of the TLS account's over UDP"
         );
     }
 }

@@ -649,6 +649,13 @@ impl UserAgent {
     /// somewhere the far end cannot reach, and a stack that let it stand would
     /// register a binding that silently receives nothing.
     ///
+    /// An account on a connection of its own ([`crate::Account::on_stream`])
+    /// takes `transport` only when it speaks the account's protocol: given
+    /// any other — the stack's UDP socket, after a network change — it keeps
+    /// a connection of its protocol to `remote` if one is bound, and
+    /// otherwise names none until one is, so nothing it sends goes in the
+    /// clear to a server it reaches over TLS.
+    ///
     /// When the machine is waiting to be told this, being told it climbs the
     /// next rung at once rather than at the end of the wait — the application
     /// answering in milliseconds is the normal case and there is nothing to be
@@ -671,6 +678,7 @@ impl UserAgent {
         config.transport = transport;
         config.remote = remote;
         config.contact = contact.clone();
+        self.keep_own_flow(account, transport);
         if matches!(
             self.life.last(),
             Some(Rung::WantTransport | Rung::WantAddress)
