@@ -161,6 +161,8 @@ mod engine;
 mod error;
 mod event;
 mod feedback;
+#[cfg(test)]
+mod flows_tests;
 #[cfg(feature = "headless")]
 mod headless;
 mod ice;
