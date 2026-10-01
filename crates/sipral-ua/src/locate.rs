@@ -32,9 +32,13 @@
 //! the next address; RFC 3261 §10.2.7's "SHOULD NOT immediately re-attempt a
 //! registration to the same registrar" is about the one that failed. Once
 //! every address has failed, the account backs off as it always does (RFC
-//! 5626 §4.5), and the attempt after the wait looks the name up again. Any
-//! other final response — a 404, a 500 — is an answer from the right server
-//! and moves nothing.
+//! 5626 §4.5), and the attempt after the wait looks the name up again. Every
+//! other request outside a dialog that went to the account's located address
+//! — an INVITE, a MESSAGE, a SUBSCRIBE, a PUBLISH — fails over the same way,
+//! as the very request that failed with a new branch
+//! ([`UserAgent::on_unreached_event`]), and is reported as failed only once
+//! no address is left. Any other final response — a 404, a 500 — is an
+//! answer from the right server and moves nothing.
 //!
 //! **A time-to-live.** Honoured, but with a floor of [`MIN_TTL`] so that a
 //! zone publishing zero does not turn an account into a stream of lookups,
@@ -47,8 +51,11 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use sipral_core::endpoint::{AddressFamily, Answer, LocateError, Located, Locator, Query};
-use sipral_core::msg::{HostRef, Uri};
+use sipral_core::endpoint::{
+    AddressFamily, Answer, Event, FailureReason, LocateError, Located, Locator, Query,
+};
+use sipral_core::msg::{HostRef, StatusCode, Uri};
+use sipral_core::transaction::AnyTransactionId;
 
 use crate::account::AccountId;
 use crate::agent::UserAgent;
@@ -252,6 +259,107 @@ impl UserAgent {
             config.remote = address;
         }
         self.send_register(account, unregistering, now).is_ok()
+    }
+
+    /// RFC 3263 §4.3 for every request but a REGISTER: an INVITE, a MESSAGE,
+    /// a SUBSCRIBE or a PUBLISH outside any dialog, sent to the address a
+    /// located account's name gave, that timed out, lost its transport or was
+    /// answered 503, goes again at once to the next address the same answer
+    /// named, and the account's requests go there from then on. The request
+    /// is the one that failed but for its `Via` branch
+    /// ([`Endpoint::send_elsewhere`](sipral_core::endpoint::Endpoint::send_elsewhere)),
+    /// and whatever held it — the call, the message, the subscription, the
+    /// publication — holds the new transaction instead, so the failure that
+    /// was only the first server's is never reported. With no address left,
+    /// or a request that went somewhere else, the event goes on as it came.
+    pub(crate) fn on_unreached_event(&mut self, event: Event, now: Instant) -> Option<Event> {
+        let failed = match event {
+            Event::Failed {
+                invite,
+                status,
+                reason,
+                ..
+            } if status == Some(StatusCode::SERVICE_UNAVAILABLE)
+                || (status.is_none()
+                    && matches!(
+                        reason,
+                        FailureReason::Timeout | FailureReason::TransportFailed
+                    )) =>
+            {
+                AnyTransactionId::InviteClient(invite)
+            }
+            Event::RequestFailed {
+                transaction,
+                reason: FailureReason::Timeout | FailureReason::TransportFailed,
+            }
+            | Event::Response {
+                transaction,
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                ..
+            } => AnyTransactionId::NonInviteClient(transaction),
+            _ => return Some(event),
+        };
+        let Some(unreached) = self.endpoint.unreached(failed) else {
+            return Some(event);
+        };
+        if unreached.register {
+            return Some(event);
+        }
+        let next = self.accounts.iter().find_map(|(account, config)| {
+            if config.server.is_none()
+                || !config.located
+                || config.remote != unreached.destination
+                || config.transport != unreached.transport
+            {
+                return None;
+            }
+            let location = self.locations.held.get(account)?;
+            if location.targets.get(location.at) != Some(&unreached.destination) {
+                return None;
+            }
+            let address = location.targets.get(location.at + 1).copied()?;
+            Some((*account, address))
+        });
+        let Some((account, address)) = next else {
+            self.endpoint.forget_unreached(failed);
+            return Some(event);
+        };
+        let Ok(sent) = self.endpoint.send_elsewhere(failed, address, now) else {
+            return Some(event);
+        };
+        if let Some(location) = self.locations.held.get_mut(&account) {
+            location.at += 1;
+        }
+        if let Some(config) = self.accounts.get_mut(&account) {
+            config.remote = address;
+        }
+        self.events.push_back(UaEvent::Located {
+            account,
+            targets: self.located_targets(account),
+        });
+        self.request_sent_elsewhere(failed, sent);
+        None
+    }
+
+    /// Whatever named the transaction that failed names the one that went to
+    /// the next server.
+    fn request_sent_elsewhere(&mut self, failed: AnyTransactionId, sent: AnyTransactionId) {
+        if let (AnyTransactionId::InviteClient(old), AnyTransactionId::InviteClient(new)) =
+            (failed, sent)
+            && let Some(call) = self.by_invite.get(&old).copied()
+        {
+            self.call_retry_went(call, failed, new);
+            return;
+        }
+        if let Some(message) = self.by_message.get(&failed).copied() {
+            self.message_retry_went(message, failed, sent);
+            return;
+        }
+        if let Some(subscription) = self.by_subscribe.remove(&failed) {
+            self.by_subscribe.insert(sent, subscription);
+            return;
+        }
+        self.publish_retry_went_if_held(failed, sent);
     }
 
     /// The account is gone, and nothing is looked up for it.
@@ -811,6 +919,218 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A response to `request` with `status_line`, the To tagged.
+    fn respond(request: &[u8], status_line: &str) -> Vec<u8> {
+        let mut out = format!("{status_line}\r\n").into_bytes();
+        let mut to = header(request, HeaderName::To);
+        to.extend_from_slice(b";tag=far");
+        for (name, value) in [
+            ("Via", header(request, HeaderName::Via)),
+            ("From", header(request, HeaderName::From)),
+            ("To", to),
+            ("Call-ID", header(request, HeaderName::CallId)),
+            ("CSeq", header(request, HeaderName::CSeq)),
+        ] {
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(&value);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"Content-Length: 0\r\n\r\n");
+        out
+    }
+
+    /// A located account registered at the first address the name gave.
+    fn registered_at_the_first(t0: Instant) -> (UserAgent, AccountId, Dns) {
+        let mut agent = agent(t0);
+        let id = agent.add_account(located("sip:pbx.example.com"));
+        agent.register(id, t0).unwrap();
+        let dns = pbx(3_600);
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (_, register) = seen.sent.last().unwrap();
+        deliver(&mut agent, addr("192.0.2.40:5080"), &granted(register), t0);
+        let _ = settle(&mut agent, id, &dns, t0);
+        (agent, id, dns)
+    }
+
+    fn sent<'a>(seen: &'a Seen, method: &str) -> Vec<&'a (SocketAddr, Vec<u8>)> {
+        seen.sent
+            .iter()
+            .filter(|(_, bytes)| bytes.starts_with(format!("{method} ").as_bytes()))
+            .collect()
+    }
+
+    #[test]
+    fn a_call_answered_503_goes_to_the_next_address_as_the_same_request() {
+        // RFC 3263 §4.3 for every request, not only REGISTER
+        let t0 = Instant::now();
+        let (mut agent, id, dns) = registered_at_the_first(t0);
+        let call = agent
+            .call(id, &OutgoingCall::new(uri("sip:bob@example.com")), t0)
+            .unwrap();
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (to, invite) = sent(&seen, "INVITE")[0].clone();
+        assert_eq!(to, addr("192.0.2.40:5080"));
+        deliver(
+            &mut agent,
+            to,
+            &respond(&invite, "SIP/2.0 503 Service Unavailable"),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        let again = sent(&seen, "INVITE");
+        assert_eq!(again.len(), 1, "one INVITE, to the next address");
+        let (to, retried) = again[0];
+        assert_eq!(*to, addr("198.51.100.41:5080"));
+        for name in [HeaderName::CallId, HeaderName::From, HeaderName::CSeq] {
+            assert_eq!(header(retried, name), header(&invite, name));
+        }
+        assert_ne!(
+            header(retried, HeaderName::Via),
+            header(&invite, HeaderName::Via),
+            "a new branch, so a new transaction"
+        );
+        assert!(
+            !seen
+                .events
+                .iter()
+                .any(|event| matches!(event, UaEvent::CallEnded { .. })),
+            "a failover is not the end of the call: {:?}",
+            seen.events
+        );
+        assert_eq!(
+            agent.located_targets(id).first(),
+            Some(&addr("198.51.100.41:5080")),
+            "the account's requests go there from now on"
+        );
+
+        // and what the next server answers is the call's
+        deliver(
+            &mut agent,
+            *to,
+            &respond(retried, "SIP/2.0 486 Busy Here"),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert!(seen.events.iter().any(|event| matches!(
+            event,
+            UaEvent::CallEnded { call: ended, .. } if *ended == call
+        )));
+        assert!(
+            sent(&seen, "INVITE").is_empty(),
+            "a 486 is the server's answer"
+        );
+    }
+
+    #[test]
+    fn a_message_that_times_out_and_a_subscribe_answered_503_go_to_the_next_address() {
+        let t0 = Instant::now();
+        let (mut agent, id, dns) = registered_at_the_first(t0);
+        agent
+            .message(id, uri("sip:bob@example.com"), b"text/plain", b"hello", t0)
+            .unwrap();
+        let seen = run(&mut agent, id, &dns, t0, t0 + Duration::from_secs(33));
+        let messages = sent(&seen, "MESSAGE");
+        assert_eq!(
+            messages.last().map(|(to, _)| *to),
+            Some(addr("198.51.100.41:5080")),
+            "timer F, then the next address"
+        );
+        assert!(
+            !seen
+                .events
+                .iter()
+                .any(|event| matches!(event, UaEvent::MessageSent { .. })),
+            "nothing was reported of the first server's silence"
+        );
+        let (to, message) = messages.last().unwrap();
+        deliver(&mut agent, *to, &respond(message, "SIP/2.0 200 OK"), t0);
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert!(seen.events.iter().any(|event| matches!(
+            event,
+            UaEvent::MessageSent { status, .. } if status.get() == 200
+        )));
+
+        // the account now sends to the second address; a SUBSCRIBE refused
+        // 503 there has nowhere left to go and is reported
+        let wanted = crate::subscription::Subscribe::new(uri("sip:bob@example.com"), "presence");
+        agent.subscribe(id, &wanted, t0).unwrap();
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (to, subscribe) = sent(&seen, "SUBSCRIBE")[0].clone();
+        assert_eq!(to, addr("198.51.100.41:5080"));
+        deliver(
+            &mut agent,
+            to,
+            &respond(&subscribe, "SIP/2.0 503 Service Unavailable"),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert!(sent(&seen, "SUBSCRIBE").is_empty(), "no address left");
+        assert!(
+            seen.events
+                .iter()
+                .any(|event| matches!(event, UaEvent::SubscriptionEnded { .. })),
+            "{:?}",
+            seen.events
+        );
+    }
+
+    #[test]
+    fn a_subscribe_answered_503_by_the_first_address_goes_to_the_second() {
+        let t0 = Instant::now();
+        let (mut agent, id, dns) = registered_at_the_first(t0);
+        let wanted = crate::subscription::Subscribe::new(uri("sip:bob@example.com"), "presence");
+        agent.subscribe(id, &wanted, t0).unwrap();
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (to, subscribe) = sent(&seen, "SUBSCRIBE")[0].clone();
+        assert_eq!(to, addr("192.0.2.40:5080"));
+        deliver(
+            &mut agent,
+            to,
+            &respond(&subscribe, "SIP/2.0 503 Service Unavailable"),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        let again = sent(&seen, "SUBSCRIBE");
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].0, addr("198.51.100.41:5080"));
+        assert!(
+            !seen
+                .events
+                .iter()
+                .any(|event| matches!(event, UaEvent::SubscriptionEnded { .. }))
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_destination_of_its_own_is_not_moved() {
+        let t0 = Instant::now();
+        let (mut agent, id, dns) = registered_at_the_first(t0);
+        let elsewhere = addr("203.0.113.9:5060");
+        agent
+            .call(
+                id,
+                &OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, elsewhere),
+                t0,
+            )
+            .unwrap();
+        let seen = settle(&mut agent, id, &dns, t0);
+        let (_, invite) = sent(&seen, "INVITE")[0].clone();
+        deliver(
+            &mut agent,
+            elsewhere,
+            &respond(&invite, "SIP/2.0 503 Service Unavailable"),
+            t0,
+        );
+        let seen = settle(&mut agent, id, &dns, t0);
+        assert!(sent(&seen, "INVITE").is_empty());
+        assert!(
+            seen.events
+                .iter()
+                .any(|event| matches!(event, UaEvent::CallEnded { .. }))
+        );
     }
 
     #[test]

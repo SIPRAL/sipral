@@ -24,6 +24,7 @@ mod dialogs;
 mod driver;
 mod error;
 mod event;
+mod failover;
 mod inbound;
 mod locate;
 mod outgoing;
@@ -57,6 +58,7 @@ pub use error::{
     AckError, AuthRetryError, CancelError, PrackError, ReceiveError, RespondError, SendError,
 };
 pub use event::{DialogEndReason, Event, FailureReason, TerminationReason};
+pub use failover::UnreachedRequest;
 pub use locate::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };

@@ -511,7 +511,7 @@ impl Endpoint {
     ///
     /// A retry is a new transaction, not a continuation: a new branch went
     /// into the `Via` above, and §17.1.3 matches responses on that.
-    fn start_retry(
+    pub(super) fn start_retry(
         &mut self,
         method: Method<'_>,
         message: OwnedMessage,
@@ -720,7 +720,7 @@ impl Endpoint {
 /// Everything else is copied in the order it arrived, so that the retry is the
 /// request the far end already saw rather than a different one that happens to
 /// ask for the same thing.
-fn rebuild(
+pub(super) fn rebuild(
     request: &RawMessage<'_>,
     via: &[u8],
     cseq: u32,

@@ -542,6 +542,18 @@ impl UserAgent {
         }
     }
 
+    /// A PUBLISH that went to the next server (RFC 3263 §4.3): the
+    /// publication names the new transaction, when it held the old one.
+    pub(crate) fn publish_retry_went_if_held(
+        &mut self,
+        failed: AnyTransactionId,
+        sent: AnyTransactionId,
+    ) {
+        if let Some(publication) = self.publications.by_transaction.get(&failed).copied() {
+            self.publish_retry_went(publication, failed, sent);
+        }
+    }
+
     /// The retry is a transaction now, and the publication names it.
     fn publish_retry_went(
         &mut self,

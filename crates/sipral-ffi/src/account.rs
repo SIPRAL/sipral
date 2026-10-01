@@ -284,9 +284,11 @@ record! {
         /// and the fallback to the host's own addresses are the stack's.
         /// The first REGISTER waits for the first answer, and a call placed
         /// before it with no `destination` of its own is
-        /// `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+        /// `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
+        /// INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
         /// transport fails or that is answered 503 moves to the next address
-        /// found at once (§4.3); the name is looked up again when the
+        /// found at once (§4.3; every request but REGISTER from ABI 0.35);
+        /// the name is looked up again when the
         /// answer's time-to-live runs out, and when the stack's recovery
         /// asks for an address. A host with a port skips SRV, and a numeric
         /// host asks nothing.

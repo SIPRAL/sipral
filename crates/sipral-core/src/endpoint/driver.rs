@@ -142,6 +142,9 @@ pub struct Endpoint {
     pub(super) reinvites: Reinvites,
     /// Requests that were refused with a challenge, waiting for a password.
     pub(super) challenges: Challenges,
+    /// Requests outside a dialog that found no server, kept for
+    /// [`Endpoint::send_elsewhere`] (RFC 3263 §4.3).
+    pub(super) unreached: super::failover::Unreached,
     /// Which dialog a client transaction is inside, when it is inside one.
     /// A retry after a challenge has to take its `CSeq` from there.
     pub(super) dialogs_of: HashMap<AnyTransactionId, DialogId>,
@@ -234,6 +237,7 @@ impl Endpoint {
             reliable: Reliables::new(),
             reinvites: Reinvites::new(),
             challenges: Challenges::new(),
+            unreached: super::failover::Unreached::new(),
             dialogs_of: HashMap::new(),
             known: Known::new(),
             refused: 0,

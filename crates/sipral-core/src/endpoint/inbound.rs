@@ -419,6 +419,16 @@ impl Endpoint {
         let notify = effects.notify;
         let ending =
             self.apply_deferred(effects, flow, AnyTransactionId::NonInviteClient(id), false);
+        // RFC 3263 §4.3: a 503 and the two ways a request finds nobody are
+        // what a request outside a dialog may go to the next server for
+        let unreached = match notify {
+            Some(Notify::Response) => response.status() == Some(StatusCode::SERVICE_UNAVAILABLE),
+            Some(Notify::TimedOut | Notify::TransportFailed) => true,
+            Some(Notify::Ack) | None => false,
+        };
+        if unreached {
+            self.keep_unreached(AnyTransactionId::NonInviteClient(id), &sent, flow);
+        }
 
         match notify {
             Some(Notify::Response) => {
@@ -488,6 +498,16 @@ impl Endpoint {
             .then(|| sent.as_raw().call_id().ok().map(CallId::new))
             .flatten();
         let ending = self.apply_deferred(effects, flow, AnyTransactionId::InviteClient(id), false);
+        // RFC 3263 §4.3, as for a request that is not an INVITE: a call
+        // answered 503 by a server that is not its last may go to the next
+        let unreached = match notify {
+            Some(Notify::Response) => response.status() == Some(StatusCode::SERVICE_UNAVAILABLE),
+            Some(Notify::TimedOut | Notify::TransportFailed) => true,
+            Some(Notify::Ack) | None => false,
+        };
+        if unreached {
+            self.keep_unreached(AnyTransactionId::InviteClient(id), &sent, flow);
+        }
 
         if notify == Some(Notify::Response) {
             // §14.1: a re-INVITE never forks, so its answer is not one of
@@ -1429,6 +1449,10 @@ impl Endpoint {
                     // and the same for the name the record is kept under, which
                     // is why it is read here and not where it is used
                     let call = over.then(|| self.call_of(id)).flatten();
+                    // and the request, which RFC 3263 §4.3 may send elsewhere
+                    if over {
+                        self.keep_unreached_in_flight(id, flow);
+                    }
                     self.apply_again(effects, flow, id);
                     if over {
                         self.count_timeout();
@@ -1454,6 +1478,10 @@ impl Endpoint {
                     // read before applying: retiring a non-INVITE client
                     // transaction forgets which dialog it was inside
                     let dialog = over.then(|| self.dialog_of(id)).flatten();
+                    // and what it carried, for RFC 3263 §4.3
+                    if over {
+                        self.keep_unreached_in_flight(id, flow);
+                    }
                     self.apply_again(effects, flow, id);
                     if over {
                         self.count_timeout();
@@ -1700,6 +1728,11 @@ impl Endpoint {
             | AnyTransactionId::InviteServer(_)
             | AnyTransactionId::NonInviteServer(_) => None,
         };
+        // the request a client transaction carried, before applying retires
+        // it, for RFC 3263 §4.3
+        if notify == Some(Notify::TransportFailed) {
+            self.keep_unreached_in_flight(id, flow);
+        }
         // read before applying, same as `renegotiated`: retiring a non-INVITE
         // client transaction forgets which dialog it was inside
         let dialog = match id {

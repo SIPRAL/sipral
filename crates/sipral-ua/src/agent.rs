@@ -990,6 +990,10 @@ impl UserAgent {
         // §8.2.2.3 refuses the request; it does not undo what honouring it did.
         let event = self.on_require_event(event, now)?;
         let event = self.on_options_event(event, now)?;
+        // RFC 3263 §4.3, before any handler takes the failure for a verdict:
+        // a request to a located server that found nobody there goes to the
+        // next address the name gave, and its owner never hears of the first
+        let event = self.on_unreached_event(event, now)?;
         let event = self.on_registration_event(event, now)?;
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;

@@ -365,7 +365,7 @@ impl UserAgent {
     }
 
     /// The retry is a transaction now, and the handle names it.
-    fn message_retry_went(
+    pub(crate) fn message_retry_went(
         &mut self,
         message: MessageHandle,
         transaction: AnyTransactionId,
