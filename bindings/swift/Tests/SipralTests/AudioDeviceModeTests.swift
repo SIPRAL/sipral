@@ -245,4 +245,49 @@ final class AudioDeviceModeTests: XCTestCase {
         let heard = await eventually(within: 3) { ((try? aliceMedia.statistics().packets_received) ?? 0) > 20 }
         XCTAssertTrue(heard, "the engine's packets never reached the far end")
     }
+
+    /// Ending a call in device mode does not need the main thread: an
+    /// application that hangs up on it and then holds it -- waiting there
+    /// for the call to be over, as one shutting down does -- still gets its
+    /// BYE out while the voice unit is being taken down.
+    @MainActor
+    func testAHangupInDeviceModeLeavesWhileTheMainThreadIsHeld() async throws {
+        let bob = try openingStack(.automatic)
+        let alice = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+        let audio = try XCTUnwrap(bob.audio)
+        try audio.setGain(0.05, for: .output)
+
+        let aliceAccount = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.bindAddress)
+        _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.bindAddress)
+        let bobEvents = Recorder(bob.events())
+        let placed = try alice.placeCall(account: aliceAccount, target: "sip:bob@\(bob.bindAddress)")
+        let arrived = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
+        let taken = try bob.takeIncomingCall(try XCTUnwrap(arrived))
+        defer { placed.close(); taken.close() }
+        try taken.answer()
+        let running = await eventually(within: 5) { ((try? audio.status().speakerRateHz) ?? 0) != 0 }
+        XCTAssertTrue(running, "the call's media opened no device")
+        // the voice unit carrying the call for a while, as it is when a
+        // person ends one
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+
+        XCTAssertTrue(Thread.isMainThread)
+        try taken.hangup()
+        let seconds = holdThisThread(atMost: 3) { placed.ended }
+        XCTAssertTrue(placed.ended, "no BYE reached the far end while the main thread was held")
+        XCTAssertLessThan(seconds, 1, "the BYE waited for the main thread")
+    }
+}
+
+/// Hold the calling thread, without giving it back to its run loop, until
+/// `done` or `seconds` have passed; how long that took.
+private func holdThisThread(atMost seconds: Double, until done: () -> Bool) -> Double {
+    let started = DispatchTime.now()
+    var held = 0.0
+    while !done(), held < seconds {
+        Thread.sleep(forTimeInterval: 0.01)
+        held = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1e9
+    }
+    return held
 }

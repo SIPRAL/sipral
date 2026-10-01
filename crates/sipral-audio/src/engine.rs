@@ -4,22 +4,22 @@
 //! The engine: the devices named, chosen, opened and kept open.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, TryLockError};
-use std::thread::JoinHandle;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use sipral_io_common::level::{Channel, Controls, Gain, Level};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
+    RawDevice, Scheduling,
 };
 use crate::call::{CallAudio, CallId, Outgoing};
 use crate::device::{
     AudioEvent, Change, DeviceHandle, DeviceInfo, Direction, Origin, Role, SelectError, Selection,
 };
 use crate::probe::{DEFAULT_PROBE_WAIT, probe};
-use crate::pump::{CallChannels, Carried, Command, Finished, Pump, Report, Ring, Stream};
+use crate::pump::{CallChannels, Carried, Command, Done, Finished, Pump, Report, Ring, Stream};
 
 /// When the devices are opened.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -123,7 +123,10 @@ impl Default for Setting {
 /// The pump's thread and the way to it.
 struct PumpHandle {
     sender: Sender<Command>,
-    thread: Option<PumpThread>,
+    /// What the pump hands back when it finishes, before its devices go.
+    finished: Receiver<Finished>,
+    /// Set once the pump has let go of its devices.
+    closed: Arc<Done>,
     report: Arc<Report>,
 }
 
@@ -177,6 +180,48 @@ pub struct Engine {
     call_channels: HashMap<CallId, CallChannels>,
     ringing: bool,
     events: VecDeque<AudioEvent>,
+    /// How the pump's thread asks for the scheduling class audio runs in.
+    promote: Option<Promote>,
+    /// Devices being let go of on a thread of their own — a finished
+    /// pump's, or ones an open in the background brought back for a pump
+    /// that had already stopped — which every open waits for, a bounded
+    /// time, before it asks the platform for the next.
+    closing: Vec<Arc<Done>>,
+    /// Which pump is running, counted, so that devices opened in the
+    /// background for one that has since stopped are not handed to the next.
+    generation: u64,
+    /// The open running in the background, for a caller that does not wait
+    /// for it.
+    opening: Option<Opening>,
+    /// What is to be opened in the background once that one has landed.
+    wanted: Vec<Want>,
+}
+
+/// One role to open in the background, and what to say when it lands.
+#[derive(Clone, Copy, Debug)]
+struct Want {
+    role: Role,
+    origin: Origin,
+    change: Change,
+}
+
+/// What an open in the background hands back: each role's stream, or why
+/// there is none, and the platform's list as it stood just after.
+struct Landing {
+    streams: Vec<(Role, Result<Opened, BackendError>)>,
+    devices: Option<Vec<RawDevice>>,
+}
+
+/// An open running in the background.
+struct Opening {
+    /// The pump it was asked for.
+    generation: u64,
+    wants: Vec<Want>,
+    answer: Receiver<Landing>,
+    since: Instant,
+    /// Whether its roles have already been reported unavailable for taking
+    /// longer than the probe wait.
+    overdue: bool,
 }
 
 /// One of something per role.
@@ -228,10 +273,6 @@ impl<T> PerDirection<T> {
     }
 }
 
-/// The pump's thread, returning the transmit function it was given and the
-/// calls it was carrying.
-type PumpThread = JoinHandle<Finished>;
-
 impl Engine {
     /// An engine over `backend`.
     ///
@@ -247,6 +288,7 @@ impl Engine {
     ) -> Self {
         backend.set_system_echo_cancellation(config.system_echo_cancellation);
         let duplex_only = backend.duplex_only();
+        let promote = backend.pump_scheduling();
         let chooses = PerRole {
             microphone: backend.chooses(Role::Microphone),
             speaker: backend.chooses(Role::Speaker),
@@ -271,6 +313,11 @@ impl Engine {
             call_channels: HashMap::new(),
             ringing: false,
             events: VecDeque::new(),
+            promote,
+            closing: Vec::new(),
+            generation: 0,
+            opening: None,
+            wanted: Vec::new(),
         }
     }
 
@@ -295,6 +342,17 @@ impl Engine {
     /// [`BackendError::TimedOut`] when the platform did not answer in
     /// [`Config::probe_wait`], and the list is left as it was.
     pub fn refresh(&mut self) -> Result<&[DeviceInfo], BackendError> {
+        // an open still running in the background has the platform: what it
+        // brings back is put to work first, rather than this listing being
+        // refused as a stuck driver
+        self.finish_opening();
+        self.refresh_now(false)
+    }
+
+    /// The listing itself; a role whose chosen device is back is reopened
+    /// in the background when `later`, as the stack's own servicing wants,
+    /// and at once otherwise.
+    fn refresh_now(&mut self, later: bool) -> Result<&[DeviceInfo], BackendError> {
         let backend = Arc::clone(&self.backend);
         let found = probe(self.config.probe_wait, move || {
             let mut backend = match backend.try_lock() {
@@ -308,7 +366,7 @@ impl Engine {
         })?;
         self.absorb(found);
         self.listed = true;
-        self.follow_preferences();
+        self.follow_preferences(later);
         Ok(&self.devices)
     }
 
@@ -417,7 +475,8 @@ impl Engine {
         }
         *self.selection.get_mut(role) = selection;
         if self.is_active() {
-            self.reopen(role, Origin::Engine, Change::Selected(role));
+            self.finish_opening();
+            self.reopen(role, Origin::Engine, Change::Selected(role), false);
         } else {
             self.events.push_back(AudioEvent {
                 change: Change::Selected(role),
@@ -507,16 +566,29 @@ impl Engine {
     /// opens the devices; under [`Activation::Manual`] a call attached
     /// before [`Engine::activate`] is carried from the activation on.
     ///
+    /// Nothing here waits on a device. The stack attaches a call from the
+    /// poll that saw its media start, and opening a headset has been seen to
+    /// take a second and a half: a poll held that long stalls every other
+    /// call's signalling, and the far end's packets pile up behind it and
+    /// reach the call in one burst. So the pump starts at once and carries
+    /// the call on no device — silence to the far end, and the far end's
+    /// audio pulled at its own pace and let go of, each frame counted
+    /// ([`Engine::frames_without_device`]) — while the devices are opened on
+    /// a thread of their own, and put under the call by the next
+    /// [`Engine::service`] after they answer, with a `Reopened` event for
+    /// each role, or `Unavailable` for one the platform refused or did not
+    /// answer for within [`Config::probe_wait`].
+    ///
     /// # Errors
-    /// What opening the devices said, under automatic activation; the call
-    /// is attached all the same and gets audio when a device arrives.
+    /// [`BackendError::Refused`] when the pump's thread could not start; the
+    /// call is attached all the same and is carried once a pump runs.
     pub fn attach(&mut self, id: CallId, audio: Box<dyn CallAudio>) -> Result<(), BackendError> {
         if !self.attached.contains(&id) {
             self.attached.push(id);
         }
         self.parked.retain(|(parked, _)| *parked != id);
         let opened = if self.config.activation == Activation::Automatic && !self.is_active() {
-            self.start()
+            self.start_later()
         } else {
             Ok(())
         };
@@ -619,7 +691,10 @@ impl Engine {
             && self.attached.is_empty()
             && !self.ringing
         {
-            self.stop();
+            // reached from the stack's own poll, through a call's media
+            // ending: the devices go on the pump's thread and nothing here
+            // waits for them
+            self.stop(None);
         }
     }
 
@@ -683,8 +758,15 @@ impl Engine {
 
     /// Close the devices and stop the pump. Calls stay attached and get
     /// their audio back on the next activation.
+    ///
+    /// The devices are let go of on the pump's thread, and this waits for
+    /// that at most [`Config::probe_wait`]: a teardown that waits on the
+    /// thread this was called from — the voice unit's, on macOS, has been
+    /// seen to wait for the main thread — finishes after this returns
+    /// rather than never.
     pub fn deactivate(&mut self) {
-        self.stop();
+        self.finish_opening();
+        self.stop(Some(self.config.probe_wait));
     }
 
     /// Whether the devices are open.
@@ -693,74 +775,148 @@ impl Engine {
         self.pump.is_some()
     }
 
-    fn start(&mut self) -> Result<(), BackendError> {
+    /// Whether devices are still being let go of, on a thread of their own,
+    /// after the pump that ran them stopped or an open nobody wanted any
+    /// more answered.
+    #[must_use]
+    pub fn is_closing(&mut self) -> bool {
+        self.closing.retain(|closed| !closed.is_set());
+        !self.closing.is_empty()
+    }
+
+    /// Start the pump on no device at all.
+    fn spawn_pump(&mut self) -> Result<bool, BackendError> {
         let Some(transmit) = self.transmit.take() else {
-            return Ok(());
+            return Ok(false);
         };
         let (sender, receiver) = mpsc::channel();
+        let (handback, finished) = mpsc::channel();
         let report = Arc::new(Report::default());
+        let closed = Arc::new(Done::default());
         let pump = Pump::new(
             receiver,
             Arc::clone(&report),
             transmit,
             Arc::clone(&self.now),
             self.config.device_rate_hz,
+            self.promote.clone(),
         );
-        let thread = std::thread::Builder::new()
+        let done = Arc::clone(&closed);
+        std::thread::Builder::new()
             .name("sipral-audio".to_owned())
-            .spawn(move || pump.run())
+            .spawn(move || pump.run(&handback, &done))
             .map_err(|_| BackendError::Refused("the pump's thread could not start".to_owned()))?;
+        self.generation = self.generation.wrapping_add(1);
         self.pump = Some(PumpHandle {
             sender,
-            thread: Some(thread),
+            finished,
+            closed,
             report,
         });
+        Ok(true)
+    }
+
+    /// Hand every parked call to the pump just started.
+    fn unpark(&mut self) {
+        let parked: Vec<_> = self.parked.drain(..).collect();
+        for (id, audio) in parked {
+            let channels = self.channels_of(id);
+            if let Some(pump) = self.pump.as_ref() {
+                let _ = pump.sender.send(Command::Attach(id, audio, channels));
+            }
+        }
+    }
+
+    /// Start the pump and open the devices under it, waiting for them.
+    fn start(&mut self) -> Result<(), BackendError> {
+        self.finish_opening();
+        if !self.spawn_pump()? {
+            return Ok(());
+        }
         let (microphone, speaker) = self.open_pair();
         let microphone = self.install(
             Role::Microphone,
-            microphone,
+            microphone.map(Opened::from),
             Origin::Engine,
             Change::Reopened(Role::Microphone),
+            false,
         );
         let speaker = self.install(
             Role::Speaker,
-            speaker,
+            speaker.map(Opened::from),
             Origin::Engine,
             Change::Reopened(Role::Speaker),
+            false,
         );
         if self.wants_own_ringer() {
-            let ringer = self.open_one(Role::Ringer);
+            let ringer = self.open_one(Role::Ringer).map(Opened::from);
             let _ = self.install(
                 Role::Ringer,
                 ringer,
                 Origin::Engine,
                 Change::Reopened(Role::Ringer),
+                false,
             );
         }
-        if self.pump.is_some() {
-            let parked: Vec<_> = self.parked.drain(..).collect();
-            for (id, audio) in parked {
-                let channels = self.channels_of(id);
-                if let Some(pump) = self.pump.as_ref() {
-                    let _ = pump.sender.send(Command::Attach(id, audio, channels));
-                }
-            }
-        }
+        self.unpark();
         microphone.and(speaker)
     }
 
-    fn stop(&mut self) {
-        let Some(mut pump) = self.pump.take() else {
+    /// Start the pump now, and open the devices under it in the background.
+    fn start_later(&mut self) -> Result<(), BackendError> {
+        if !self.spawn_pump()? {
+            return Ok(());
+        }
+        let mut wants = vec![
+            Want {
+                role: Role::Microphone,
+                origin: Origin::Engine,
+                change: Change::Reopened(Role::Microphone),
+            },
+            Want {
+                role: Role::Speaker,
+                origin: Origin::Engine,
+                change: Change::Reopened(Role::Speaker),
+            },
+        ];
+        if self.wants_own_ringer() {
+            wants.push(Want {
+                role: Role::Ringer,
+                origin: Origin::Engine,
+                change: Change::Reopened(Role::Ringer),
+            });
+        }
+        self.unpark();
+        self.want(wants);
+        Ok(())
+    }
+
+    /// Stop the pump, take back what the next one needs, and leave its
+    /// devices to be let go of on its own thread: waiting for that at most
+    /// `wait`, and not at all for `None`.
+    fn stop(&mut self, wait: Option<Duration>) {
+        let Some(pump) = self.pump.take() else {
             return;
         };
         let _ = pump.sender.send(Command::Quit);
-        if let Some(thread) = pump.thread.take()
-            && let Ok((transmit, carried)) = thread.join()
-        {
+        // the pump answers as soon as the tick it is in is over: what it
+        // hands back comes before its devices go
+        if let Ok((transmit, carried)) = pump.finished.recv() {
             self.transmit = Some(transmit);
             self.parked = carried;
         }
         self.running = PerRole::default();
+        // an open still under way was for this pump: what it brings back
+        // goes on its own thread, and what was still to be opened is not
+        if let Some(opening) = self.opening.take() {
+            drop(opening.answer);
+        }
+        self.wanted.clear();
+        if let Some(within) = wait {
+            pump.closed.wait(within);
+        }
+        self.closing.retain(|closed| !closed.is_set());
+        self.closing.push(pump.closed);
     }
 
     /// Whether the ringer runs on a stream of its own: only when it was put
@@ -784,7 +940,19 @@ impl Engine {
         }
     }
 
+    /// Wait, at most [`Config::probe_wait`] in all, for devices still being
+    /// let go of on a thread of their own: a platform with room for one
+    /// voice unit has none for the next until the last one is gone.
+    fn wait_closed(&mut self) {
+        let deadline = Instant::now() + self.config.probe_wait;
+        for closed in &self.closing {
+            closed.wait(deadline.saturating_duration_since(Instant::now()));
+        }
+        self.closing.retain(|closed| !closed.is_set());
+    }
+
     fn open_pair(&mut self) -> Duplex {
+        self.wait_closed();
         let microphone = self.identity_for(Role::Microphone);
         let speaker = self.identity_for(Role::Speaker);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
@@ -806,6 +974,7 @@ impl Engine {
     }
 
     fn open_one(&mut self, role: Role) -> Result<Box<dyn PlaybackStream>, BackendError> {
+        self.wait_closed();
         let identity = self.identity_for(role);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
         let backend = Arc::clone(&self.backend);
@@ -824,6 +993,7 @@ impl Engine {
     }
 
     fn open_capture_one(&mut self, role: Role) -> Result<Box<dyn CaptureStream>, BackendError> {
+        self.wait_closed();
         let identity = self.identity_for(role);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
         let backend = Arc::clone(&self.backend);
@@ -837,22 +1007,237 @@ impl Engine {
         })
     }
 
+    // -- opening in the background -------------------------------------------
+
+    /// Ask for roles to be opened in the background: at once when nothing
+    /// else is being opened, and once that has landed otherwise, so that two
+    /// opens never race for the platform's one voice unit.
+    fn want(&mut self, wants: Vec<Want>) {
+        for want in wants {
+            self.wanted.retain(|queued| queued.role != want.role);
+            self.wanted.push(want);
+        }
+        if self.opening.is_none() {
+            self.submit();
+        }
+    }
+
+    /// Open what is wanted on a thread of its own.
+    fn submit(&mut self) {
+        if !self.is_active() {
+            self.wanted.clear();
+        }
+        if self.wanted.is_empty() {
+            return;
+        }
+        let mut wants = std::mem::take(&mut self.wanted);
+        let wants_role = |wants: &[Want], role: Role| wants.iter().any(|want| want.role == role);
+        let duplex = self.duplex_only
+            && (wants_role(&wants, Role::Microphone) || wants_role(&wants, Role::Speaker));
+        let pair =
+            duplex || (wants_role(&wants, Role::Microphone) && wants_role(&wants, Role::Speaker));
+        let mut settled = None;
+        if duplex {
+            // the one unit is reopened whole, and the old one closed first:
+            // the pump drops its halves, and it is the open's own thread,
+            // not this caller, that waits for the pump to have done so
+            let origin = wants.first().map_or(Origin::Engine, |want| want.origin);
+            for role in [Role::Microphone, Role::Speaker] {
+                if !wants_role(&wants, role) {
+                    wants.push(Want {
+                        role,
+                        origin,
+                        change: Change::Reopened(role),
+                    });
+                }
+                *self.running.get_mut(role) = None;
+            }
+            if let Some(pump) = self.pump.as_ref() {
+                let _ = pump.sender.send(Command::Replace(Role::Microphone, None));
+                let _ = pump.sender.send(Command::Replace(Role::Speaker, None));
+                let (done, answer) = mpsc::channel();
+                let _ = pump.sender.send(Command::Settled(done));
+                settled = Some(answer);
+            }
+        }
+        let asked: Vec<(Role, Option<String>)> = wants
+            .iter()
+            .map(|want| (want.role, self.identity_for(want.role)))
+            .collect();
+        self.closing.retain(|closed| !closed.is_set());
+        let closing = self.closing.clone();
+        let backend = Arc::clone(&self.backend);
+        let format = Format::twenty_ms(self.config.device_rate_hz);
+        let wait = self.config.probe_wait;
+        let (reply, answer) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("sipral-audio-open".to_owned())
+            .spawn(move || {
+                let deadline = Instant::now() + wait;
+                for closed in &closing {
+                    closed.wait(deadline.saturating_duration_since(Instant::now()));
+                }
+                if let Some(settled) = settled {
+                    let _ = settled.recv_timeout(Duration::from_secs(1));
+                }
+                let landing = open_in_background(&backend, &asked, pair, format);
+                // nobody is waiting for it any more: the devices are let go
+                // of here, on this thread, rather than on whoever asked
+                let _ = reply.send(landing);
+            });
+        if spawned.is_err() {
+            let refused = BackendError::Refused(
+                "the thread that opens the devices could not start".to_owned(),
+            );
+            self.unanswered(&wants, &refused);
+            return;
+        }
+        self.opening = Some(Opening {
+            generation: self.generation,
+            wants,
+            answer,
+            since: Instant::now(),
+            overdue: false,
+        });
+    }
+
+    /// Put what an open in the background brought back under the pump it
+    /// was asked for, or let it go when that pump has stopped since.
+    fn land(&mut self, opening: &Opening, landing: Landing) {
+        if opening.generation != self.generation || !self.is_active() {
+            self.let_go(landing);
+            return;
+        }
+        if let Some(found) = landing.devices {
+            self.absorb(found);
+            self.listed = true;
+        }
+        for (role, opened) in landing.streams {
+            let want = opening
+                .wants
+                .iter()
+                .find(|want| want.role == role)
+                .copied()
+                .unwrap_or(Want {
+                    role,
+                    origin: Origin::Engine,
+                    change: Change::Reopened(role),
+                });
+            let _ = self.install(role, opened, want.origin, want.change, true);
+        }
+    }
+
+    /// Let devices nobody wants any more go, on a thread of their own.
+    fn let_go(&mut self, landing: Landing) {
+        let closed = Arc::new(Done::default());
+        let done = Arc::clone(&closed);
+        let spawned = std::thread::Builder::new()
+            .name("sipral-audio-close".to_owned())
+            .spawn(move || {
+                drop(landing);
+                done.set();
+            });
+        if spawned.is_ok() {
+            self.closing.push(closed);
+        }
+    }
+
+    /// An open that ended with no answer, or has not answered within the
+    /// probe wait: every role it was for is reported unavailable.
+    fn unanswered(&mut self, wants: &[Want], error: &BackendError) {
+        for want in wants {
+            let _ = self.install(
+                want.role,
+                Err(error.clone()),
+                want.origin,
+                want.change,
+                true,
+            );
+        }
+    }
+
+    /// Land an open in the background that has answered, without waiting
+    /// for one that has not.
+    fn poll_opening(&mut self) {
+        let Some(mut opening) = self.opening.take() else {
+            return;
+        };
+        match opening.answer.try_recv() {
+            Ok(landing) => {
+                self.land(&opening, landing);
+                self.submit();
+            }
+            Err(TryRecvError::Empty) => {
+                if !opening.overdue && opening.since.elapsed() >= self.config.probe_wait {
+                    // said once; what it brings back later is still put to
+                    // work, with a reopened event of its own
+                    opening.overdue = true;
+                    self.unanswered(&opening.wants, &BackendError::TimedOut);
+                }
+                self.opening = Some(opening);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.unanswered(&opening.wants, &gone_without_answer());
+                self.submit();
+            }
+        }
+    }
+
+    /// Wait, at most [`Config::probe_wait`] for each, for the devices being
+    /// opened in the background, and put them under the calls; `true` once
+    /// nothing is left being opened.
+    ///
+    /// The stack never calls this: its poll lands an open in
+    /// [`Engine::service`] once it has answered. It is for a caller on its
+    /// own thread that wants the devices before it goes on, and the engine
+    /// calls it itself before anything that asks the platform while it
+    /// waits.
+    pub fn finish_opening(&mut self) -> bool {
+        while let Some(opening) = self.opening.take() {
+            match opening.answer.recv_timeout(self.config.probe_wait) {
+                Ok(landing) => {
+                    self.land(&opening, landing);
+                    self.submit();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.opening = Some(opening);
+                    return false;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.unanswered(&opening.wants, &gone_without_answer());
+                    self.submit();
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether devices are being opened in the background, which the next
+    /// [`Engine::service`] after they answer puts to work: a caller that
+    /// services the engine from a loop of its own comes back soon while
+    /// this holds.
+    #[must_use]
+    pub fn is_opening(&self) -> bool {
+        self.opening.is_some() || !self.wanted.is_empty()
+    }
+
     /// Hand an opened stream to the pump, note where it landed and apply the
     /// direction's gain and mute to it; or note that the role has nothing.
-    fn install<S>(
+    ///
+    /// A device the list has not met is listed first, unless `later` says
+    /// the caller is the stack's own poll, which does not wait on the
+    /// platform: an open in the background lists the devices itself.
+    fn install(
         &mut self,
         role: Role,
-        opened: Result<S, BackendError>,
+        opened: Result<Opened, BackendError>,
         origin: Origin,
         change: Change,
-    ) -> Result<(), BackendError>
-    where
-        S: Into<Opened>,
-    {
+        later: bool,
+    ) -> Result<(), BackendError> {
         let setting = *self.settings.get(role.direction());
         match opened {
-            Ok(stream) => {
-                let opened: Opened = stream.into();
+            Ok(opened) => {
                 let running = Running {
                     identity: opened.identity().to_owned(),
                     controls: opened.controls(),
@@ -862,10 +1247,10 @@ impl Engine {
                 };
                 running.controls.set_gain(setting.gain);
                 running.controls.set_muted(setting.muted);
-                if self.handle_of(&running.identity).is_none() {
+                if !later && self.handle_of(&running.identity).is_none() {
                     // a device the list has not met yet: the system's
                     // default, opened before the first refresh
-                    let _ = self.refresh();
+                    let _ = self.refresh_now(false);
                 }
                 let device = self.handle_of(&running.identity);
                 *self.running.get_mut(role) = Some(running);
@@ -896,9 +1281,40 @@ impl Engine {
         }
     }
 
-    /// Open a role again on whatever its selection resolves to now.
-    fn reopen(&mut self, role: Role, origin: Origin, change: Change) {
+    /// Open a role again on whatever its selection resolves to now: in the
+    /// background when `later`, as the stack's own poll wants it, and at
+    /// once otherwise.
+    fn reopen(&mut self, role: Role, origin: Origin, change: Change, later: bool) {
         if !self.is_active() {
+            return;
+        }
+        if later {
+            let mut wants = Vec::new();
+            if role != Role::Ringer {
+                wants.push(Want {
+                    role,
+                    origin,
+                    change,
+                });
+            }
+            if matches!(role, Role::Speaker | Role::Ringer) {
+                // a ringer that shares the loudspeaker's device is the
+                // loudspeaker's stream; one that no longer does needs its own
+                if self.wants_own_ringer() {
+                    wants.push(Want {
+                        role: Role::Ringer,
+                        origin,
+                        change: if role == Role::Ringer {
+                            change
+                        } else {
+                            Change::Reopened(Role::Ringer)
+                        },
+                    });
+                } else {
+                    self.drop_ringer();
+                }
+            }
+            self.want(wants);
             return;
         }
         if self.duplex_only && matches!(role, Role::Microphone | Role::Speaker) {
@@ -915,11 +1331,18 @@ impl Engine {
             let (microphone, speaker) = self.open_pair();
             let _ = self.install(
                 Role::Microphone,
-                microphone,
+                microphone.map(Opened::from),
                 origin,
                 Change::Reopened(Role::Microphone),
+                false,
             );
-            let _ = self.install(Role::Speaker, speaker, origin, change);
+            let _ = self.install(
+                Role::Speaker,
+                speaker.map(Opened::from),
+                origin,
+                change,
+                false,
+            );
             if role == Role::Speaker {
                 // a ringer on its own device may now be on the loudspeaker's,
                 // or the other way round
@@ -929,12 +1352,12 @@ impl Engine {
         }
         match role {
             Role::Microphone => {
-                let opened = self.open_capture_one(role);
-                let _ = self.install(role, opened, origin, change);
+                let opened = self.open_capture_one(role).map(Opened::from);
+                let _ = self.install(role, opened, origin, change, false);
             }
             Role::Speaker => {
-                let opened = self.open_one(role);
-                let _ = self.install(role, opened, origin, change);
+                let opened = self.open_one(role).map(Opened::from);
+                let _ = self.install(role, opened, origin, change, false);
                 // a ringer that shares the loudspeaker's device is the
                 // loudspeaker's stream; one that no longer does needs its own
                 self.settle_ringer(origin);
@@ -945,19 +1368,30 @@ impl Engine {
 
     fn settle_ringer(&mut self, origin: Origin) {
         if self.wants_own_ringer() {
-            let opened = self.open_one(Role::Ringer);
-            let _ = self.install(Role::Ringer, opened, origin, Change::Reopened(Role::Ringer));
+            let opened = self.open_one(Role::Ringer).map(Opened::from);
+            let _ = self.install(
+                Role::Ringer,
+                opened,
+                origin,
+                Change::Reopened(Role::Ringer),
+                false,
+            );
         } else {
-            *self.running.get_mut(Role::Ringer) = None;
-            if let Some(pump) = self.pump.as_ref() {
-                let _ = pump.sender.send(Command::Replace(Role::Ringer, None));
-            }
+            self.drop_ringer();
+        }
+    }
+
+    /// The ringer back on the loudspeaker's stream.
+    fn drop_ringer(&mut self) {
+        *self.running.get_mut(Role::Ringer) = None;
+        if let Some(pump) = self.pump.as_ref() {
+            let _ = pump.sender.send(Command::Replace(Role::Ringer, None));
         }
     }
 
     /// A role whose chosen device is present again and is not what it is
-    /// running on goes back to it.
-    fn follow_preferences(&mut self) {
+    /// running on goes back to it, in the background when `later`.
+    fn follow_preferences(&mut self, later: bool) {
         if !self.is_active() {
             return;
         }
@@ -973,8 +1407,15 @@ impl Engine {
                 .get(role)
                 .as_ref()
                 .map(|running| running.identity.clone());
-            if on.as_deref() != Some(wanted.identity.as_str()) {
-                self.reopen(role, Origin::Engine, Change::Reopened(role));
+            // a role already being opened in the background lands on what
+            // its selection resolved to when it was asked
+            let pending = self
+                .opening
+                .as_ref()
+                .is_some_and(|opening| opening.wants.iter().any(|want| want.role == role))
+                || self.wanted.iter().any(|want| want.role == role);
+            if on.as_deref() != Some(wanted.identity.as_str()) && !(later && pending) {
+                self.reopen(role, Origin::Engine, Change::Reopened(role), later);
             }
         }
     }
@@ -982,23 +1423,30 @@ impl Engine {
     // -- servicing ----------------------------------------------------------
 
     /// Take in what the platform and the pump reported since last time, and
-    /// act on it: a device gone is reopened on the fallback, a default that
-    /// moved is followed by a role that follows it, a list that changed is
+    /// act on it: devices opened in the background are put to work, a
+    /// device gone is reopened on the fallback, a default that moved is
+    /// followed by a role that follows it, a list that changed is
     /// refreshed. Called from the application's own loop, a few times a
     /// second; every consequence comes out of [`Engine::poll_event`].
+    ///
+    /// Nothing here waits for a device to open or to close: what has to be
+    /// reopened is opened in the background, and put to work by a later
+    /// call once it has answered ([`Engine::is_opening`]).
     pub fn service(&mut self) {
+        self.poll_opening();
         let notices = match self.backend.try_lock() {
             Ok(mut backend) => drain_notices(&mut **backend),
             Err(TryLockError::Poisoned(poisoned)) => drain_notices(&mut **poisoned.into_inner()),
-            // a probe the engine walked away from is still inside the
-            // platform: what it announced waits for a later service, and
-            // the application's loop does not wait on the driver
+            // a probe the engine walked away from, or an open in the
+            // background, is still inside the platform: what it announced
+            // waits for a later service, and the application's loop does
+            // not wait on the driver
             Err(TryLockError::WouldBlock) => Vec::new(),
         };
         for notice in notices {
             match notice {
                 Notice::ListChanged => {
-                    let _ = self.refresh();
+                    let _ = self.refresh_now(true);
                     self.events.push_back(AudioEvent {
                         change: Change::ListChanged,
                         origin: Origin::System,
@@ -1006,7 +1454,7 @@ impl Engine {
                     });
                 }
                 Notice::DefaultChanged(direction) => {
-                    let _ = self.refresh();
+                    let _ = self.refresh_now(true);
                     self.events.push_back(AudioEvent {
                         change: Change::DefaultChanged(direction),
                         origin: Origin::System,
@@ -1021,7 +1469,7 @@ impl Engine {
                             && self.selection(role) == Selection::System
                             && self.running.get(role).is_some()
                         {
-                            self.reopen(role, Origin::System, Change::Reopened(role));
+                            self.reopen(role, Origin::System, Change::Reopened(role), true);
                         }
                     }
                 }
@@ -1047,8 +1495,8 @@ impl Engine {
                     origin: Origin::System,
                     device,
                 });
-                let _ = self.refresh();
-                self.reopen(role, Origin::Engine, Change::Reopened(role));
+                let _ = self.refresh_now(true);
+                self.reopen(role, Origin::Engine, Change::Reopened(role), true);
             }
         }
         self.settle();
@@ -1080,6 +1528,26 @@ impl Engine {
     pub fn ticks(&self) -> u64 {
         self.pump.as_ref().map_or(0, |pump| pump.report.ticks())
     }
+
+    /// Frames the running pump has carried with no device under them while
+    /// calls were up — a microphone or a loudspeaker still being opened, or
+    /// one the platform refused: for `Input`, the silence sent to the far
+    /// end in place of the microphone; for `Output`, the far end's audio
+    /// pulled at its own pace and let go of. Zero while no pump runs.
+    #[must_use]
+    pub fn frames_without_device(&self, direction: Direction) -> u64 {
+        self.pump.as_ref().map_or(0, |pump| {
+            pump.report.stand_in(direction == Direction::Input)
+        })
+    }
+
+    /// What the running pump's thread got when it asked the platform's
+    /// scheduler for the class audio runs in: `None` while no pump runs, or
+    /// before it has asked.
+    #[must_use]
+    pub fn pump_scheduling(&self) -> Option<Scheduling> {
+        self.pump.as_ref().and_then(|pump| pump.report.scheduling())
+    }
 }
 
 /// Everything a platform announced since it was last asked.
@@ -1091,9 +1559,66 @@ fn drain_notices(backend: &mut dyn Backend) -> Vec<Notice> {
     notices
 }
 
+/// Open `asked`, on the calling thread, which is an open's own: a probe the
+/// engine walked away from that is still inside the platform is waited for
+/// here, where nobody else is waiting. The microphone and the loudspeaker
+/// together as one `pair` where they are opened as one unit, or both are
+/// wanted; each on its own otherwise. The list is taken afterwards, so that
+/// whoever puts the streams to work knows the devices they landed on
+/// without asking the platform itself.
+fn open_in_background(
+    backend: &Mutex<Box<dyn Backend>>,
+    asked: &[(Role, Option<String>)],
+    pair: bool,
+    wanted: Format,
+) -> Landing {
+    let mut backend = backend.lock().unwrap_or_else(PoisonError::into_inner);
+    let wants = |role: Role| asked.iter().any(|(asked, _)| *asked == role);
+    let identity = |role: Role| {
+        asked
+            .iter()
+            .find(|(asked, _)| *asked == role)
+            .and_then(|(_, identity)| identity.as_deref())
+    };
+    let mut streams = Vec::new();
+    if pair {
+        let (microphone, speaker) =
+            backend.open_duplex(identity(Role::Microphone), identity(Role::Speaker), wanted);
+        streams.push((Role::Microphone, microphone.map(Opened::from)));
+        streams.push((Role::Speaker, speaker.map(Opened::from)));
+    } else {
+        if wants(Role::Microphone) {
+            let opened = backend.open_capture(identity(Role::Microphone), wanted);
+            streams.push((Role::Microphone, opened.map(Opened::from)));
+        }
+        if wants(Role::Speaker) {
+            let opened = backend.open_playback(identity(Role::Speaker), wanted);
+            streams.push((Role::Speaker, opened.map(Opened::from)));
+        }
+    }
+    if wants(Role::Ringer) {
+        let opened = backend.open_ringer(identity(Role::Ringer), wanted);
+        streams.push((Role::Ringer, opened.map(Opened::from)));
+    }
+    Landing {
+        streams,
+        devices: backend.devices().ok(),
+    }
+}
+
+/// What an open in the background that ended without answering is
+/// reported as.
+fn gone_without_answer() -> BackendError {
+    BackendError::Refused("the thread opening the devices ended without an answer".to_owned())
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.stop();
+        // the stack is going: what is being opened is let go of where it
+        // lands, and the devices in use go on the pump's thread, waited for
+        // a bounded time rather than for ever
+        self.opening = None;
+        self.stop(Some(self.config.probe_wait));
     }
 }
 

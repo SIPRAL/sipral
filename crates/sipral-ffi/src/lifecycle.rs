@@ -1725,4 +1725,57 @@ mod tests {
             SipralStatus::Ok
         );
     }
+
+    /// What an account reads between `sipral_account_unregister` and the
+    /// registrar's answer: `UNREGISTERED`, from the moment the call returns
+    /// and before the REGISTER that gives the binding up has even been
+    /// written. The answer is not a state of its own: it is the
+    /// `REGISTRATION_CHANGED` the 200 raises, which is what an application
+    /// that waits for the binding to be gone waits for.
+    #[test]
+    fn unregistered_is_read_at_once_and_the_registrars_answer_is_an_event() {
+        let mut observed = Observed::default();
+        let (handle, account) = registered(&mut observed, &named_account(), 1_000);
+        poll(handle, 1_000);
+        let changes = |observed: &Observed| {
+            observed
+                .kinds()
+                .iter()
+                .filter(|kind| **kind == SipralEventKind::RegistrationChanged)
+                .count()
+        };
+        let before = changes(&observed);
+        assert_eq!(
+            unsafe { crate::account::sipral_account_unregister(handle, account, 2_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::Unregistered as u32,
+            "read before anything was written"
+        );
+        poll(handle, 2_000);
+        let mut out = drain(handle);
+        let request = out.pop().expect("the REGISTER that gives the binding up");
+        assert_eq!(header(&request, HeaderName::Expires), b"0");
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::Unregistered as u32,
+            "read while the registrar has not answered"
+        );
+        assert_eq!(changes(&observed), before, "an event before the answer");
+        receive(handle, &granted(&request, 0), 2_100);
+        poll(handle, 2_100);
+        assert_eq!(changes(&observed), before + 1, "the answer raised nothing");
+        assert_eq!(
+            state_of(handle, account),
+            SipralRegistrationState::Unregistered as u32
+        );
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(handle) },
+            SipralStatus::Ok
+        );
+    }
 }

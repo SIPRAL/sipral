@@ -189,6 +189,36 @@ pub trait Backend: Send {
     /// A platform with nothing to turn off ignores it, and a stream says
     /// what it got ([`CaptureStream::system_echo_cancellation`]).
     fn set_system_echo_cancellation(&mut self, _on: bool) {}
+
+    /// How the pump's thread asks the platform's scheduler for the class
+    /// audio runs in, or nothing where this backend has none to ask for.
+    ///
+    /// The engine calls what this returns once, on the pump's own thread,
+    /// before the first tick, and keeps what it answers for as long as that
+    /// thread runs: a registration that is given back when it is dropped —
+    /// Windows' — is given back when the pump finishes.
+    fn pump_scheduling(&self) -> Option<Promote> {
+        None
+    }
+}
+
+/// A real-time scheduling class the calling thread holds for as long as this
+/// value lives.
+pub type Promoted = Box<dyn core::any::Any>;
+
+/// Ask the platform to run the calling thread as audio: `Some` with what it
+/// granted, `None` when it refused.
+pub type Promote = std::sync::Arc<dyn Fn() -> Option<Promoted> + Send + Sync>;
+
+/// What the pump's thread asked of the scheduler, and what it got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scheduling {
+    /// The platform has no class to ask for: the thread runs as any other.
+    Ordinary,
+    /// The platform runs it as audio.
+    Granted,
+    /// It was asked and refused, and the thread runs as any other.
+    Refused,
 }
 
 /// A call's two halves, as a platform answered for each.
