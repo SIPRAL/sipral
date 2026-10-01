@@ -3902,6 +3902,108 @@ fn a_recording_takes_both_directions_of_a_live_call() {
     );
 }
 
+/// What a recording keeps of this end is what the far end heard of it:
+/// silence while the microphone is muted — the engine hands the call frames
+/// of silence then — and silence while the call is on hold, whichever end
+/// holds it, however loud the microphone; and every one of those frames is
+/// in the file, in its place, so the conversation stays on the call's own
+/// timeline.
+#[test]
+fn a_recording_keeps_silence_for_this_end_while_muted_and_on_hold() {
+    const FRAMES: usize = 10;
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let file = Buffer::new();
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .start_recording_with(
+            Box::new(file.clone()),
+            &crate::RecordingOptions {
+                layout: crate::RecordingLayout::Stereo,
+                ..crate::RecordingOptions::default()
+            },
+        )
+        .expect("the recording starts");
+    let loud = vec![8_000_i16; 160];
+    let muted = vec![0_i16; 160];
+    // ten frames of this end's microphone, and the earpiece's frame beside
+    // each, as the engine's pump runs them
+    let frames = |pair: &mut Pair, microphone: &[i16]| {
+        for _ in 0..FRAMES {
+            let mut session = pair.caller.engine.session(call).expect("media");
+            let _ = session.capture(microphone, pair.now).expect("no error");
+            let mut played = vec![0_i16; 160];
+            session.playback(&mut played);
+            drop(session);
+            pair.advance();
+        }
+    };
+    let settle = |pair: &mut Pair| {
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        pair.settle();
+    };
+
+    frames(&mut pair, &loud);
+    frames(&mut pair, &muted);
+    frames(&mut pair, &loud);
+    // this end holds the far end
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    pair.caller
+        .agent
+        .resume(call, pair.now)
+        .expect("the resume");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    // the far end holds this end
+    pair.callee.agent.hold(remote, pair.now).expect("the hold");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    pair.callee
+        .agent
+        .resume(remote, pair.now)
+        .expect("the resume");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording()
+        .expect("the file is finished");
+    let wav = file.contents();
+    let samples: Vec<i16> = wav[sipral_media::formats::wav::HEADER_LEN..]
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let this_end: Vec<i16> = samples.iter().step_by(2).copied().collect();
+    let heard: Vec<bool> = this_end
+        .chunks(160)
+        .map(|frame| loudness(frame) > 1_000)
+        .collect();
+    let expected: Vec<bool> = [true, false, true, false, true, false, true]
+        .iter()
+        .flat_map(|loud| std::iter::repeat_n(*loud, FRAMES))
+        .collect();
+    assert_eq!(
+        heard.len(),
+        expected.len(),
+        "every frame is in the file, muted and held ones too"
+    );
+    assert_eq!(
+        heard, expected,
+        "this end's side, a frame at a time: loud, muted, loud, holding, \
+         loud, held, loud"
+    );
+}
+
 #[test]
 fn a_recording_cannot_be_started_twice_on_one_call() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");

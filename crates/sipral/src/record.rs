@@ -380,6 +380,9 @@ pub(crate) struct Recorder {
     /// Two, fed the same lengths, so they give the same lengths back.
     convert: Option<(Resampler, Resampler)>,
     silence: Vec<i16>,
+    /// This end's frame while the call is on hold: silence, kept apart from
+    /// the one a missing direction is written against.
+    held: Vec<i16>,
     local: Vec<i16>,
     remote: Vec<i16>,
     /// The sum or the interleaving, reused so that a recording allocates as
@@ -436,6 +439,7 @@ impl Recorder {
             pending: None,
             convert: converters(heard_at, rate)?,
             silence: Vec::new(),
+            held: Vec::new(),
             local: Vec::new(),
             remote: Vec::new(),
             out: Vec::new(),
@@ -452,6 +456,20 @@ impl Recorder {
     /// Whatever the sink says.
     pub(crate) fn captured(&mut self, samples: &[i16]) -> Result<(), MediaError> {
         self.offer(Leg::Captured, samples)
+    }
+
+    /// A frame of `length` samples of this end's while the call is on
+    /// hold, either way: written as silence, in its place.
+    ///
+    /// # Errors
+    /// Whatever the sink says.
+    pub(crate) fn captured_on_hold(&mut self, length: usize) -> Result<(), MediaError> {
+        let mut held = core::mem::take(&mut self.held);
+        held.clear();
+        held.resize(length, 0);
+        let offered = self.offer(Leg::Captured, &held);
+        self.held = held;
+        offered
     }
 
     /// A frame handed to the earpiece.
