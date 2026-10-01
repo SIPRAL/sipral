@@ -483,6 +483,11 @@ pub(crate) unsafe fn configured(
     if config.audio_device_rate_hz != 0 {
         settings.device_rate_hz = config.audio_device_rate_hz;
     }
+    settings.system_echo_cancellation = crate::media::toggled(
+        config.system_echo_cancellation,
+        "system_echo_cancellation",
+        true,
+    )?;
     let mut transmit = CTransmit {
         callback,
         user_data: config.audio_transmit_user_data as usize,
@@ -813,10 +818,8 @@ entry! {
     /// Reads no memory the caller owns.
     fn sipral_audio_set_gain(stack: SipralHandle, direction: Number<SipralAudioDirection>, gain: u32) {
         let direction = direction_of(direction)?;
-        let steps = u16::try_from(gain).unwrap_or(GAIN_MOST).min(GAIN_MOST);
-        let ratio = f32::from(steps) / f32::from(GAIN_UNITY);
         with_engine(stack, |engine| {
-            engine.set_gain(direction, Gain::from_ratio(ratio));
+            engine.set_gain(direction, gain_of(gain));
             Ok(())
         })
     }
@@ -834,13 +837,7 @@ entry! {
         }
         let direction = direction_of(direction)?;
         let gain = with_engine(stack, |engine| Ok(engine.gain(direction)))?;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a ratio is between 0 and 4, so its steps are between 0 and 1024"
-        )]
-        let steps = (gain.ratio() * f32::from(GAIN_UNITY)).round() as u32;
-        unsafe { out_gain.write(steps) };
+        unsafe { out_gain.write(steps_of(gain)) };
         Ok(())
     }
 }
@@ -894,6 +891,180 @@ entry! {
         }
         let direction = direction_of(direction)?;
         let peak = with_engine(stack, |engine| Ok(engine.level(direction).peak()))?;
+        unsafe { out_peak.write(u32::from(peak)) };
+        Ok(())
+    }
+}
+
+/// The steps `sipral_audio_set_gain` takes, as a gain: anything above four
+/// times unity is taken as four times.
+fn gain_of(steps: u32) -> Gain {
+    let steps = u16::try_from(steps).unwrap_or(GAIN_MOST).min(GAIN_MOST);
+    Gain::from_ratio(f32::from(steps) / f32::from(GAIN_UNITY))
+}
+
+/// A gain, as the steps `sipral_audio_gain` hands back.
+fn steps_of(gain: Gain) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a ratio is between 0 and 4, so its steps are between 0 and 1024"
+    )]
+    let steps = (gain.ratio() * f32::from(GAIN_UNITY)).round() as u32;
+    steps
+}
+
+/// Why one call's controls cannot be reached: the engine has never carried
+/// it, or has let it go.
+fn not_carried(call: SipralHandle) -> Fail {
+    fail(
+        SipralStatus::WrongState,
+        format!(
+            "the engine is not carrying call {call}: a call's own gain, mute and meter exist \
+             from the moment its media starts until it ends"
+        ),
+    )
+}
+
+entry! {
+    /// Set one call's own gain in one direction, on top of the stack's
+    /// (`sipral_audio_set_gain`), in the same steps: the input direction is
+    /// what the microphone sends that call alone, the output how loud that
+    /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
+    /// the engine's mix from the next frame; kept while the call is held or
+    /// moved into a conference and back, and gone when it ends.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
+    /// carrying — before its media starts, after it ends, or in application
+    /// mode, where the frames are the application's own.
+    ///
+    /// # Safety
+    ///
+    /// Reads no memory the caller owns.
+    fn sipral_audio_call_set_gain(
+        stack: SipralHandle,
+        call: SipralHandle,
+        direction: Number<SipralAudioDirection>,
+        gain: u32,
+    ) {
+        let direction = direction_of(direction)?;
+        with_engine(stack, |engine| {
+            if engine.set_call_gain(call, direction, gain_of(gain)) {
+                Ok(())
+            } else {
+                Err(not_carried(call))
+            }
+        })
+    }
+}
+
+entry! {
+    /// One call's own gain in one direction, in the steps
+    /// `sipral_audio_call_set_gain` takes (ABI 0.35).
+    ///
+    /// # Safety
+    ///
+    /// `out_gain` must point at one `uint32_t`.
+    fn sipral_audio_call_gain(
+        stack: SipralHandle,
+        call: SipralHandle,
+        direction: Number<SipralAudioDirection>,
+        out_gain: *mut u32,
+    ) {
+        if out_gain.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_gain is null"));
+        }
+        let direction = direction_of(direction)?;
+        let gain = with_engine(stack, |engine| {
+            engine
+                .call_gain(call, direction)
+                .ok_or_else(|| not_carried(call))
+        })?;
+        unsafe { out_gain.write(steps_of(gain)) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
+    /// of that call alone hears silence, or that call alone is silent in the
+    /// loudspeaker, while every other call goes on — the other half of a
+    /// consultation, a conference member being spoken about. A muted
+    /// direction still runs and sends silence. Kept and dropped as
+    /// `sipral_audio_call_set_gain` is, and refused the same way.
+    ///
+    /// # Safety
+    ///
+    /// Reads no memory the caller owns.
+    fn sipral_audio_call_set_muted(
+        stack: SipralHandle,
+        call: SipralHandle,
+        direction: Number<SipralAudioDirection>,
+        muted: u32,
+    ) {
+        let direction = direction_of(direction)?;
+        with_engine(stack, |engine| {
+            if engine.set_call_muted(call, direction, muted != 0) {
+                Ok(())
+            } else {
+                Err(not_carried(call))
+            }
+        })
+    }
+}
+
+entry! {
+    /// Whether one call is muted in one direction: one or zero into
+    /// `out_muted` (ABI 0.35).
+    ///
+    /// # Safety
+    ///
+    /// `out_muted` must point at one `uint32_t`.
+    fn sipral_audio_call_muted(
+        stack: SipralHandle,
+        call: SipralHandle,
+        direction: Number<SipralAudioDirection>,
+        out_muted: *mut u32,
+    ) {
+        if out_muted.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_muted is null"));
+        }
+        let direction = direction_of(direction)?;
+        let muted = with_engine(stack, |engine| {
+            engine
+                .call_muted(call, direction)
+                .ok_or_else(|| not_carried(call))
+        })?;
+        unsafe { out_muted.write(u32::from(muted)) };
+        Ok(())
+    }
+}
+
+entry! {
+    /// One call's meter in one direction (ABI 0.35): the loudest sample of
+    /// the last tenth of a second of what the microphone sent that call, or
+    /// of what the call played, after its own gain and mute, 0 to 32767 —
+    /// `sipral_audio_level`'s reading for one call of several. Cheap enough
+    /// to poll at a window's frame rate.
+    ///
+    /// # Safety
+    ///
+    /// `out_peak` must point at one `uint32_t`.
+    fn sipral_audio_call_level(
+        stack: SipralHandle,
+        call: SipralHandle,
+        direction: Number<SipralAudioDirection>,
+        out_peak: *mut u32,
+    ) {
+        if out_peak.is_null() {
+            return Err(fail(SipralStatus::InvalidArgument, "out_peak is null"));
+        }
+        let direction = direction_of(direction)?;
+        let peak = with_engine(stack, |engine| {
+            engine
+                .call_level(call, direction)
+                .map(sipral_audio::Level::peak)
+                .ok_or_else(|| not_carried(call))
+        })?;
         unsafe { out_peak.write(u32::from(peak)) };
         Ok(())
     }
@@ -1020,6 +1191,10 @@ pub(crate) mod tests {
         sipral_audio_gain, sipral_audio_info, sipral_audio_level, sipral_audio_muted,
         sipral_audio_refresh, sipral_audio_ring, sipral_audio_select, sipral_audio_selection,
         sipral_audio_set_gain, sipral_audio_set_muted, sipral_audio_stop_ringing,
+    };
+    use super::{
+        sipral_audio_call_gain, sipral_audio_call_level, sipral_audio_call_muted,
+        sipral_audio_call_set_gain, sipral_audio_call_set_muted,
     };
     use crate::call::tests::{hangup, media_call_tuned};
     use crate::error::last_error_text;
@@ -1167,6 +1342,108 @@ pub(crate) mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// One call's own gain, mute and meter, by its handle: set and read back
+    /// while the engine carries it, refused before and after, and refused in
+    /// application mode.
+    #[test]
+    fn a_calls_own_gain_mute_and_meter_cross_by_its_handle() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        let (stack, call, _) = device_call(&mut observed, &fake, SipralAudioActivation::Manual);
+        let input = SipralAudioDirection::Input as u32;
+        let output = SipralAudioDirection::Output as u32;
+        assert_eq!(
+            unsafe { sipral_audio_call_set_muted(stack, call, input, 1) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(
+            unsafe { sipral_audio_call_set_gain(stack, call, output, u32::from(GAIN_UNITY / 2)) },
+            SipralStatus::Ok
+        );
+        let (mut muted, mut gain, mut peak) = (u32::MAX, u32::MAX, u32::MAX);
+        assert_eq!(
+            unsafe { sipral_audio_call_muted(stack, call, input, &raw mut muted) },
+            SipralStatus::Ok
+        );
+        assert_eq!(muted, 1);
+        assert_eq!(
+            unsafe { sipral_audio_call_muted(stack, call, output, &raw mut muted) },
+            SipralStatus::Ok
+        );
+        assert_eq!(muted, 0, "each direction its own");
+        assert_eq!(
+            unsafe { sipral_audio_call_gain(stack, call, output, &raw mut gain) },
+            SipralStatus::Ok
+        );
+        assert_eq!(gain, u32::from(GAIN_UNITY / 2));
+        assert_eq!(
+            unsafe { sipral_audio_call_level(stack, call, input, &raw mut peak) },
+            SipralStatus::Ok
+        );
+        assert_eq!(peak, 0, "nothing has gone past yet");
+        // the stack-wide mute is another switch, and was not touched
+        assert_eq!(
+            unsafe { sipral_audio_muted(stack, input, &raw mut muted) },
+            SipralStatus::Ok
+        );
+        assert_eq!(muted, 0);
+        assert_eq!(
+            unsafe { sipral_audio_call_level(stack, call, 3, &raw mut peak) },
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { sipral_audio_call_level(stack, call, input, ptr::null_mut()) },
+            SipralStatus::InvalidArgument
+        );
+        let stranger = call ^ 0x5555;
+        assert_eq!(
+            unsafe { sipral_audio_call_set_muted(stack, stranger, input, 1) },
+            SipralStatus::WrongState,
+            "a handle the engine never carried"
+        );
+        hangup(stack, call, 3_000);
+        assert_eq!(
+            unsafe { sipral_audio_call_muted(stack, call, input, &raw mut muted) },
+            SipralStatus::WrongState,
+            "gone with the call's media"
+        );
+
+        let mut observed = Observed::default();
+        let (status, plain) = create(&config(record, &mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_audio_call_set_muted(plain, call, input, 1) },
+            SipralStatus::WrongState
+        );
+        assert!(last_error_text().contains("application mode"));
+    }
+
+    /// The platform's echo cancellation turned off at creation is not asked
+    /// for, and the engine says it runs without it.
+    #[test]
+    fn the_echo_cancellation_switch_reaches_the_platform() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        fake.set_system_echo_cancellation(true);
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
+        let packets: Packets = Arc::new(Mutex::new(Vec::new()));
+        let leaked: &'static Packets = Box::leak(Box::new(packets));
+        let (stack, _) = media_call_tuned(&mut observed, |config| {
+            config.audio = SipralAudio::Device as u32;
+            config.audio_activation = SipralAudioActivation::Manual as u32;
+            config.audio_transmit_callback = Some(transmit);
+            config.audio_transmit_user_data = ptr::from_ref(leaked).cast_mut().cast::<c_void>();
+            config.audio_probe_ms = 500;
+            config.system_echo_cancellation = crate::media::SipralToggle::Off as u32;
+        });
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
+        assert!(!fake.echo_cancellation_asked());
+        assert_eq!(unsafe { sipral_audio_activate(stack) }, SipralStatus::Ok);
+        assert_eq!(info(stack).system_echo_cancellation, 0);
     }
 
     #[test]

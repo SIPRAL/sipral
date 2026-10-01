@@ -982,6 +982,26 @@ impl Endpoint {
         protocol: Option<TransportProtocol>,
     );
 
+    /// RFC 3263 §4.3 outside a dialog: a request that timed out, lost its
+    /// transport or was answered 503 is kept (at most 32 of them), `unreached`
+    /// says where it went and whether it was a REGISTER or an INVITE, and
+    /// `send_elsewhere` sends it again to the next server as the same request
+    /// with a new `Via` branch — a new transaction, whose id it returns —
+    /// without the credentials meant for the server that failed. The list of
+    /// servers is the caller's; `sipral-ua` walks a located account's.
+    pub fn unreached(&self, failed: AnyTransactionId) -> Option<UnreachedRequest>;
+    pub fn send_elsewhere(&mut self, failed: AnyTransactionId, destination: SocketAddr, now: Instant)
+        -> Result<AnyTransactionId, SendError>;
+    pub fn forget_unreached(&mut self, failed: AnyTransactionId) -> bool;
+
+    /// A bound transport of `protocol` that reaches `destination` — connected
+    /// to it, or unconnected — for a layer that keeps an account on a
+    /// connection of its own and adopts whichever one the application bound;
+    /// and the address of any bound transport, for the family a name is
+    /// looked up in before that connection exists.
+    pub fn transport_to(&self, protocol: TransportProtocol, destination: SocketAddr) -> Option<TransportId>;
+    pub fn any_bound_address(&self) -> Option<SocketAddr>;
+
     // -- UAS ------------------------------------------------------------------
     /// 100, or any final response. Rejected with `MustBeReliable` if the
     /// INVITE carried `Require: 100rel` and the status is a non-100 1xx.

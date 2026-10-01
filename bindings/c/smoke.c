@@ -1999,6 +1999,89 @@ static void what_0_34_added(void)
     expect("the new status has no name", named != NULL && strcmp(named, "unreachable address") == 0);
 }
 
+/* What the transport-wanted event of an account's own connection named. */
+static uint32_t wanted_protocol;
+static char wanted_destination[64];
+
+static void on_wanted_event(const sipral_event_t *event, void *user_data)
+{
+    (void)user_data;
+    if (event->kind == SIPRAL_EVENT_KIND_TRANSPORT_WANTED) {
+        size_t len = event->payload.transport_wanted.destination_len;
+        if (len >= sizeof wanted_destination) {
+            len = sizeof wanted_destination - 1;
+        }
+        wanted_protocol = event->payload.transport_wanted.protocol;
+        memcpy(wanted_destination, event->payload.transport_wanted.destination, len);
+        wanted_destination[len] = '\0';
+    }
+}
+
+/* ABI 0.35, from C: an account on a TLS connection of its own, which the
+ * stack asks for; the SRTP suites, the salt, the trace and the echo switch
+ * read back; and a call's own mute, refused in application mode. */
+static void what_0_35_added(void)
+{
+    static const char suites[] = "AES_CM_128_HMAC_SHA1_32,AES_CM_128_HMAC_SHA1_80";
+    static const uint8_t salt[16] = { 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
+    uint8_t entropy[32];
+    uint8_t media_seed[32];
+    if (!draw(entropy, sizeof entropy) || !draw(media_seed, sizeof media_seed)) {
+        expect("could not read entropy for the ABI 0.35 stack", 0);
+        return;
+    }
+    wanted_protocol = 0;
+    wanted_destination[0] = '\0';
+
+    sipral_stack_config_t config = fixture_stack_config(sizeof config, entropy, media_seed);
+    config.event_callback = on_wanted_event;
+    config.srtp_suites = suites;
+    config.srtp_suites_len = strlen(suites);
+    config.pseudonym_salt = salt;
+    config.pseudonym_salt_len = sizeof salt;
+    config.system_echo_cancellation = SIPRAL_TOGGLE_OFF;
+    sipral_handle_t stack = SIPRAL_HANDLE_NONE;
+    expect("the ABI 0.35 stack would not start",
+           sipral_stack_create(&config, &stack) == SIPRAL_STATUS_OK);
+    if (stack == SIPRAL_HANDLE_NONE) {
+        return;
+    }
+    sipral_stack_settings_t settings = { 0 };
+    settings.size = sizeof settings;
+    expect("the 0.35 settings did not read back",
+           sipral_stack_settings(stack, &settings) == SIPRAL_STATUS_OK &&
+               settings.srtp_suite_count == 2 && settings.pseudonym_salted == SIPRAL_TOGGLE_ON &&
+               settings.diagnostic_trace == SIPRAL_TOGGLE_OFF &&
+               settings.system_echo_cancellation == SIPRAL_TOGGLE_OFF);
+    sipral_srtp_suite_t order[4] = { 0 };
+    size_t count = 0;
+    expect("the suites did not read back in their order",
+           sipral_stack_srtp_suite_order(stack, order, 4, &count) == SIPRAL_STATUS_OK &&
+               count == 2 && order[0] == SIPRAL_SRTP_SUITE_AES_CM32 &&
+               order[1] == SIPRAL_SRTP_SUITE_AES_CM80);
+
+    sipral_account_config_t account_config = fixture_account_config(sizeof account_config);
+    account_config.stream_protocol = SIPRAL_TRANSPORT_TLS;
+    sipral_handle_t account = SIPRAL_HANDLE_NONE;
+    expect("the account on a connection of its own was refused",
+           sipral_account_add(stack, &account_config, &account) == SIPRAL_STATUS_OK);
+    expect("the account on a connection of its own would not register",
+           sipral_account_register(stack, account, 0) == SIPRAL_STATUS_OK);
+    sipral_poll_result_t poll = { 0 };
+    poll.size = sizeof poll;
+    sipral_stack_poll(stack, 0, &poll);
+    expect("the account's connection was not asked for",
+           wanted_protocol == SIPRAL_TRANSPORT_TLS &&
+               strncmp(wanted_destination, account_config.registrar_address,
+                       account_config.registrar_address_len) == 0);
+
+    uint32_t muted = 0;
+    expect("a call's own mute was not refused in application mode",
+           sipral_audio_call_muted(stack, account, SIPRAL_AUDIO_DIRECTION_INPUT, &muted) ==
+               SIPRAL_STATUS_WRONG_STATE);
+    sipral_stack_destroy(stack);
+}
+
 static void a_next_hop_is_asked_about_and_answered(void)
 {
     static const char elsewhere[] = "198.51.100.7:5080";
@@ -2804,6 +2887,7 @@ int main(void)
     a_registration_freezes_and_thaws();
     a_next_hop_is_asked_about_and_answered();
     what_0_34_added();
+    what_0_35_added();
 
     config.size = sizeof config;
     config.event_callback = on_event;

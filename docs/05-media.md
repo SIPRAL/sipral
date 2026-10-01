@@ -1012,6 +1012,16 @@ are the catalogue's or the account's (`with_srtp_suites`), and one suite —
 `AES_CM_128_HMAC_SHA1_80` alone — keeps an authenticated INVITE under RFC 3261
 §18.1.1's 1300 bytes where two would not.
 
+**Best effort is never a plain call nobody chose.** An answer with no
+`a=crypto` line is plain; an answer whose lines give no key — none parses,
+none names a suite this end offered, one names a tag it never wrote — is a far
+end that meant to encrypt and a negotiation that failed, so the call ends with
+`MediaError::UnusableKeying` and a BYE whose `Reason` is 488 "No usable SRTP
+key". Answering, an offer on `RTP/AVP` whose lines this end cannot take is
+refused with 488 (`MediaEngine::answer` returns `UnusableKeying`), and a
+re-offer like it is refused as any other; one with no line at all is answered
+plainly.
+
 **Why `Offered` and `Required` are two settings.** They write the same offer,
 and a peer that refuses `RTP/SAVP` leaves the call with no audio under both —
 this stack does not follow a refusal with a plain re-offer. They differ in one

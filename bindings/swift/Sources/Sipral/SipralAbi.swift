@@ -2883,7 +2883,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 34
+    public static let abiVersionMinor: UInt32 = 35
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3292,11 +3292,11 @@ public enum Sipral {
         ("sipral_abi_version_t", MemoryLayout<sipral_abi_version_t>.size, 24, 20, 20),
         ("sipral_capabilities_t", MemoryLayout<sipral_capabilities_t>.size, 24, 16, 16),
         ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 232, 228, 232),
-        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 416, 280, 288),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 424, 288, 296),
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
-        ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 120, 112, 120),
+        ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 440, 240, 248),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 448, 248, 256),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 152, 84, 84),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
@@ -7092,6 +7092,12 @@ public enum Sipral {
 
     /// How many devices the list holds, present or not.
     ///
+    /// The first read of a stack's list, here or through
+    /// `sipral_audio_device_at`, asks the platform when nothing has yet, so
+    /// a new stack lists every device without `sipral_audio_refresh`
+    /// (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
+    /// answer within `audio_probe_ms`, and the next read asks again.
+    ///
     /// Safety
     ///
     /// `out_count` must point at one `size_t`.
@@ -7962,6 +7968,110 @@ public enum Sipral {
         try ensureAbi()
         let status = sipral_stack_diagnostic_trace(stack, on)
         try check(status)
+    }
+
+    /// The SRTP suites this stack's calls offer and accept unless their
+    /// account names its own, in the order they are offered, as
+    /// `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
+    /// creation, or this build's own (ABI 0.35). `out_count` always receives
+    /// how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
+    /// caller that passes a capacity of zero and a null buffer learns how
+    /// much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
+    /// `sipral_stack_codec_order` does.
+    ///
+    /// Safety
+    ///
+    /// `out_suites` must be writable for `capacity` `uint32_t` or null with a
+    /// capacity of zero, and `out_count` must point at one `size_t` or be null.
+    public static func stackSrtpSuiteOrder(stack: SipralHandle, outSuites: inout [UInt32]) throws -> Int {
+        try ensureAbi()
+        var count = Int()
+        let status =
+            outSuites.withUnsafeMutableBufferPointer { p1 in
+                sipral_stack_srtp_suite_order(stack, p1.baseAddress, p1.count, &count)
+            }
+        try check(status)
+        return count
+    }
+
+    /// Set one call's own gain in one direction, on top of the stack's
+    /// (`sipral_audio_set_gain`), in the same steps: the input direction is
+    /// what the microphone sends that call alone, the output how loud that
+    /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
+    /// the engine's mix from the next frame; kept while the call is held or
+    /// moved into a conference and back, and gone when it ends.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
+    /// carrying — before its media starts, after it ends, or in application
+    /// mode, where the frames are the application's own.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioCallSetGain(stack: SipralHandle, call: SipralHandle, direction: UInt32, gain: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_audio_call_set_gain(stack, call, direction, gain)
+        try check(status)
+    }
+
+    /// One call's own gain in one direction, in the steps
+    /// `sipral_audio_call_set_gain` takes (ABI 0.35).
+    ///
+    /// Safety
+    ///
+    /// `out_gain` must point at one `uint32_t`.
+    public static func audioCallGain(stack: SipralHandle, call: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var gain = UInt32()
+        let status = sipral_audio_call_gain(stack, call, direction, &gain)
+        try check(status)
+        return gain
+    }
+
+    /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
+    /// of that call alone hears silence, or that call alone is silent in the
+    /// loudspeaker, while every other call goes on — the other half of a
+    /// consultation, a conference member being spoken about. A muted
+    /// direction still runs and sends silence. Kept and dropped as
+    /// `sipral_audio_call_set_gain` is, and refused the same way.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func audioCallSetMuted(stack: SipralHandle, call: SipralHandle, direction: UInt32, muted: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_audio_call_set_muted(stack, call, direction, muted)
+        try check(status)
+    }
+
+    /// Whether one call is muted in one direction: one or zero into
+    /// `out_muted` (ABI 0.35).
+    ///
+    /// Safety
+    ///
+    /// `out_muted` must point at one `uint32_t`.
+    public static func audioCallMuted(stack: SipralHandle, call: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var muted = UInt32()
+        let status = sipral_audio_call_muted(stack, call, direction, &muted)
+        try check(status)
+        return muted
+    }
+
+    /// One call's meter in one direction (ABI 0.35): the loudest sample of
+    /// the last tenth of a second of what the microphone sent that call, or
+    /// of what the call played, after its own gain and mute, 0 to 32767 —
+    /// `sipral_audio_level`'s reading for one call of several. Cheap enough
+    /// to poll at a window's frame rate.
+    ///
+    /// Safety
+    ///
+    /// `out_peak` must point at one `uint32_t`.
+    public static func audioCallLevel(stack: SipralHandle, call: SipralHandle, direction: UInt32) throws -> UInt32 {
+        try ensureAbi()
+        var peak = UInt32()
+        let status = sipral_audio_call_level(stack, call, direction, &peak)
+        try check(status)
+        return peak
     }
 
 }

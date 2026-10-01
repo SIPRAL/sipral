@@ -1408,6 +1408,8 @@ pub(crate) mod tests {
             tls_pin_sha256_len: 0,
             server_naptr: 0,
             reserved: 0,
+            stream_protocol: 0,
+            reserved_35: 0,
         }
     }
 
@@ -2165,6 +2167,88 @@ pub(crate) mod tests {
         let (answer, _, from) = take_one(handle);
         assert!(answer.starts_with(b"SIP/2.0 200 "));
         assert_eq!(from, moved);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// ABI 0.35: an account on a TLS connection of its own beside the
+    /// stack's UDP transport. Adding it asks for the connection, naming the
+    /// protocol and the account's server; registering waits for it; the
+    /// application binds it under a number of its own and the REGISTER
+    /// leaves on it. A protocol this ABI has no number for is refused.
+    #[test]
+    fn an_account_on_a_connection_of_its_own_asks_for_it_and_registers_over_it() {
+        let mut observed = Observed::default();
+        let mut wanted = Wanted::default();
+        let mut settings = config(keep_wanted, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut wanted).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        let on_tls = SipralAccountConfig {
+            stream_protocol: SipralTransport::Tls as u32,
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tls), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        assert!(drain(handle).is_empty(), "nothing over the stack's UDP");
+        assert_eq!(
+            wanted.seen,
+            [(SipralTransport::Tls as u32, REGISTRAR.to_owned(), 0, 0)]
+        );
+
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                9,
+                SipralTransport::Tls as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_100,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        poll(handle, 1_100);
+        let mut buffers = Buffers::new();
+        let mut transmit = buffers.transmit();
+        let status = unsafe { sipral_stack_poll_transmit(handle, &raw mut transmit) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (message, destination, _) = buffers.taken(&transmit);
+        assert!(
+            message.starts_with(b"REGISTER "),
+            "{}",
+            String::from_utf8_lossy(&message)
+        );
+        assert_eq!(
+            transmit.transport, 9,
+            "on the connection, not the main transport"
+        );
+        assert_eq!(transmit.protocol, SipralTransport::Tls as u32);
+        assert_eq!(destination, REGISTRAR);
+
+        let unknown = SipralAccountConfig {
+            stream_protocol: 9,
+            ..account_config()
+        };
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&unknown), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("stream_protocol"),
+            "{}",
+            last_error_text()
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

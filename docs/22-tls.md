@@ -85,9 +85,13 @@ A PBX on a LAN usually serves a certificate it signed itself, for
 `localhost` or its factory hostname, and no authority an application ships
 vouches for it. Rather than turn checking off, an account can pin that one
 certificate by the SHA-256 fingerprint of its DER encoding
-(`Account::tls_pin`, `sipral::CertificatePin`): the value `openssl x509
--noout -fingerprint -sha256` prints, taken with or without colons, or after
-`sha-256 ` or `SHA256=`. The application's certificate verifier hands the leaf
+(`Account::tls_pin`, `sipral::CertificatePin`): 64 hexadecimal digits in
+either case, colons and spaces among them ignored, bare or after one of the
+prefixes the tools print, matched in any case — `sha256 Fingerprint=` and
+`SHA256 Fingerprint=` (the whole line `openssl x509 -noout -fingerprint
+-sha256` prints, OpenSSL 3 and 1.1), `sha-256 ` (RFC 8122, as `a=fingerprint`
+writes it) and `SHA256=`. Anything else is refused, another hash named in
+front as such; every layer reads a pin by the same rule. The application's certificate verifier hands the leaf
 certificate the server presented to `CertificatePin::check`, which compares
 the digests in constant time; `crates/sipral/examples/tls.rs` does it as a
 `rustls` verifier (`--pin`). Over the C ABI the pin is

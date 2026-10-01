@@ -3201,3 +3201,110 @@ binding's readme has its spelling:
   `Sipral.open` and `addAccount`. What a layer leaves out is in its readme:
   Dart opens no TLS and no stream, and React Native exposes the stack's pin
   but not an account's, and no settings readback.
+
+## What ABI 0.35 added
+
+Grown as 0.34 was: every member appended after the last one its struct had,
+every pin and every 0.34 member's offset where it was on all three layouts,
+and the new entry points at the end of the surface. A 0.34 header is refused
+at load by the exact-minor rule; a struct declared at its 0.34 length is taken,
+its new members read as zero.
+
+**An account on a connection of its own** (`sipral_account_config_t`, after
+`reserved`):
+
+- `stream_protocol` — a `sipral_transport_t`: the protocol of a TCP or TLS
+  connection the account's requests go over, to its own server, beside an
+  account on the stack's UDP transport to another, in one stack with one
+  audio engine. The stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming
+  the protocol and the server's address, with `request_bytes` and
+  `limit_bytes` zero since no request outgrew anything, and the account
+  adopts whichever transport of that protocol the application binds to that
+  address with `sipral_stack_transport_bind`, under any number; one bound
+  before the account is added is used at once. Until then the REGISTER waits,
+  ten seconds after the question it fails as unreachable and its retry asks
+  again, and a call the account places is `SIPRAL_STATUS_TRANSPORT_DOWN`. One
+  that never registers asks when it is added; any account asks again at once
+  when its connection fails or closes, a registered one by registering
+  again. It is the event the four layers that open streams already answer
+  for §18.1.1 (`stream_fallback`), so a per-account transport in a layer is
+  that handler opening the protocol the event names and the account config
+  carrying the member.
+- `reserved_35`.
+
+Two things the account already had are what the rest of it rests on:
+`transport` and `registrar_address` (or `server_uri`) were per account
+before, and a call keeps the flow its INVITE went over for every request
+inside it. What 0.35 adds below the ABI is the other direction: a request is
+matched to its account by the transport it arrived on and the server it came
+from, among the accounts its Request-URI or `To` name, and by the
+Request-URI's user among the accounts on that transport when neither URI
+matches (`docs/04-ua.md`). And RFC 3263 §4.3's failover now covers every
+request outside a dialog to a located server — INVITE, MESSAGE, SUBSCRIBE,
+PUBLISH — not only REGISTER.
+
+**The platform's echo cancellation as a switch** (`sipral_stack_config_t`,
+after `reserved`):
+
+- `system_echo_cancellation` — a `sipral_toggle_t`, on by default and read
+  only in device mode. Off: macOS and iOS open the voice-processing unit with
+  `kAUVoiceIOProperty_BypassVoiceProcessing`, so the unit and its claim on the
+  process are the same and its canceller, gain control and noise suppression
+  are out of the path; Windows declares the stream
+  `AudioCategory_Communications` with `AUDCLNT_STREAMOPTIONS_RAW`, a call for
+  routing and ducking past the endpoint's processing; Android opens the
+  microphone with `AAUDIO_INPUT_PRESET_VOICE_RECOGNITION`, which has no
+  canceller, rather than `VOICE_COMMUNICATION`; Linux has no device-mode
+  backend and nothing to turn off. `sipral_audio_info_t::system_echo_cancellation`
+  says what the platform did. For a headset, which has no echo to cancel and
+  whose voice the processing only colours, and for an application that runs
+  a canceller of its own on each call.
+- `reserved_35`.
+
+**A call's own mute, gain and meter.** `sipral_audio_call_set_gain`,
+`sipral_audio_call_gain`, `sipral_audio_call_set_muted`,
+`sipral_audio_call_muted` and `sipral_audio_call_level` take a call handle
+and a direction and do for one call what the stack-wide five do for all of
+them, on top of them, in the engine's mix: the input direction is what the
+microphone sends that call alone, the output how loud that call is in the
+loudspeaker beside the others, and the meter reads each after its own gain
+and mute. For a conference or two calls at once: mute the call being spoken
+about, turn one down. They exist from the moment a call's media starts to the
+moment it ends, a hold or a move into a local conference and back keeping
+them, and are `SIPRAL_STATUS_WRONG_STATE` outside that and in application
+mode, where the frames are the application's to scale.
+
+**Settings read back** (`sipral_stack_settings_t`, after
+`datagram_without_stream_bytes`): `srtp_suite_count`, with
+`sipral_stack_srtp_suite_order` listing the suites the stack's calls offer
+and accept in order, as `sipral_srtp_suite_t` numbers — the ones
+`srtp_suites` named, or this build's own — in the ask-then-fetch shape of
+`sipral_stack_codec_order`; `pseudonym_salted`, whether a salt was given
+(the salt itself is never read back); `diagnostic_trace`, whether the trace is
+whole now, after `sipral_stack_diagnostic_trace`; and
+`system_echo_cancellation`.
+
+**Behaviour below the same declarations:**
+
+- **A new stack's device list is complete on its first read.** An engine's
+  list started empty and filled only on a refresh, a platform notice, or an
+  activation that opened a device it had not met; a second stack whose
+  platform's announcement another engine had taken listed what it happened
+  to open. `sipral_audio_device_count` and `sipral_audio_device_at` now ask
+  the platform first when nothing has; `sipral_audio_refresh` is for a
+  settings screen opening again.
+- **SRTP best effort never ends in a plain call nobody chose.** An answer
+  whose `a=crypto` lines give no key ends the call with a 488 reason;
+  answering, an offer on `RTP/AVP` whose lines this end cannot take is
+  refused with 488 (`docs/05-media.md`).
+- **A certificate pin in every form the tools print**: bare or colon hex,
+  colons and spaces ignored, after `sha256 Fingerprint=` or `SHA256
+  Fingerprint=` (the `openssl x509 -fingerprint -sha256` line, 3.x and 1.1),
+  `sha-256 ` or `SHA256=`, each in any case (`docs/22-tls.md`).
+- **The ICE password never reaches a log**, in either trace mode, and the
+  diagnostic trace ends lines at CRLF, LF or a bare CR and does not let
+  `Authorization\0:`-style names past (`docs/17-observability.md`).
+
+**In the layers.** Nothing yet: every binding is regenerated from the new
+declarations and every layer builds and passes as before, and the idiomatic
+spellings come with the layers' own step.

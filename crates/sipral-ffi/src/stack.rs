@@ -125,8 +125,8 @@ use crate::handle::{
 };
 use crate::inband::SipralDtmfDetection;
 use crate::media::{
-    SipralIce, SipralSrtp, SipralStreamStats, SipralToggle, catalog_of, ice_policy, media_failed,
-    srtp_policy, stream_stats, toggle_of, toggled,
+    SipralIce, SipralSrtp, SipralSrtpSuite, SipralStreamStats, SipralToggle, catalog_of,
+    ice_policy, media_failed, srtp_policy, stream_stats, toggle_of, toggled,
 };
 use crate::names::Names;
 use crate::nat::SipralNat;
@@ -705,6 +705,20 @@ record! {
         pub diagnostic_trace: Number<SipralToggle>,
         /// Zero.
         pub reserved: u32,
+        /// A `SipralToggle`: whether a stack in device mode opens the
+        /// devices behind the platform's own echo cancellation, where the
+        /// platform lets it be turned off; on by default (ABI 0.35). Off,
+        /// macOS and iOS run the voice-processing unit with its processing
+        /// bypassed, Windows opens a communications stream raw, past the
+        /// endpoint's processing, and Android opens the microphone with the
+        /// voice-recognition preset rather than the voice-communication one;
+        /// Linux has nothing to turn off. For a headset, which has no echo
+        /// to cancel, or an application that cancels it on each call itself.
+        /// `sipral_audio_info_t::system_echo_cancellation` says what the
+        /// platform did. Read only in device mode.
+        pub system_echo_cancellation: Number<SipralToggle>,
+        /// Zero.
+        pub reserved_35: u32,
     }
 }
 
@@ -842,6 +856,22 @@ record! {
         /// The largest request sent over UDP once no stream is coming, as
         /// given; zero for never (ABI 0.34).
         pub datagram_without_stream_bytes: u32,
+        /// How many SRTP suites the stack's calls offer and accept unless
+        /// their account names its own: the ones `srtp_suites` named, or
+        /// this build's own. `sipral_stack_srtp_suite_order` says which, in
+        /// order (ABI 0.35).
+        pub srtp_suite_count: u32,
+        /// A `SipralToggle`: whether the stack was given a `pseudonym_salt`,
+        /// so that its pseudonyms are the same from run to run. The salt
+        /// itself is never read back (ABI 0.35).
+        pub pseudonym_salted: Number<SipralToggle>,
+        /// A `SipralToggle`: whether the trace writes whole messages now,
+        /// as `diagnostic_trace` set it at creation or
+        /// `sipral_stack_diagnostic_trace` since (ABI 0.35).
+        pub diagnostic_trace: Number<SipralToggle>,
+        /// A `SipralToggle`: whether the platform's echo cancellation is
+        /// asked for, with the default filled in (ABI 0.35).
+        pub system_echo_cancellation: Number<SipralToggle>,
     }
 }
 
@@ -886,6 +916,17 @@ const OUTBOX_CEILING: usize = 4096;
 /// caller that has stopped polling rather than one running a few seconds
 /// behind.
 pub(crate) const FAREWELL_CEILING: usize = 256;
+
+/// What a stack's configuration asked for that nothing but
+/// `sipral_stack_settings` reads back.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Asked {
+    /// Whether it was given a pseudonym salt; the salt itself is not kept
+    /// here.
+    pub(crate) salted: bool,
+    /// Whether device mode asks for the platform's echo cancellation.
+    pub(crate) echo_cancellation: bool,
+}
 
 /// One stack.
 ///
@@ -1174,6 +1215,8 @@ pub(crate) struct StackState {
     /// This stack's log, shared with the engine and the entry: lines are
     /// queued while the stack is held and delivered once it is not.
     pub(crate) log: sipral::Log,
+    /// What the configuration asked for that only the settings read back.
+    pub(crate) asked: Asked,
     /// What the log's and the state snapshot's pseudonyms are keyed with
     /// (`crate::log::pseudonym_key`).
     pseudonyms: Box<[u8]>,
@@ -1767,6 +1810,12 @@ pub(crate) unsafe fn create_on(
         )
     }?;
     let diagnostic = toggled(config.diagnostic_trace, "diagnostic_trace", false)?;
+    let salted = salt.is_some();
+    let echo_cancellation = toggled(
+        config.system_echo_cancellation,
+        "system_echo_cancellation",
+        true,
+    )?;
 
     let origin = Instant::now();
     let clock = crate::audio::Clock::new(origin);
@@ -1850,6 +1899,10 @@ pub(crate) unsafe fn create_on(
         #[cfg(feature = "stir")]
         media_clock: config.media_clock_unix_seconds != 0,
         log: log.clone(),
+        asked: Asked {
+            salted,
+            echo_cancellation,
+        },
         pseudonyms: pseudonyms.into_boxed_slice(),
         lost: Vec::new(),
         conferences: Vec::new(),
@@ -2022,9 +2075,67 @@ entry! {
                     .datagram_limit
                     .without_stream_bytes
                     .unwrap_or(0),
+                srtp_suite_count: u32::try_from(catalog.srtp_suites_in_force().len())
+                    .unwrap_or(u32::MAX),
+                pseudonym_salted: toggle_of(state.asked.salted),
+                diagnostic_trace: toggle_of(state.log.diagnostic()),
+                system_echo_cancellation: toggle_of(state.asked.echo_cancellation),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;
+        Ok(())
+    }
+}
+
+entry! {
+    /// The SRTP suites this stack's calls offer and accept unless their
+    /// account names its own, in the order they are offered, as
+    /// `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
+    /// creation, or this build's own (ABI 0.35). `out_count` always receives
+    /// how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
+    /// caller that passes a capacity of zero and a null buffer learns how
+    /// much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
+    /// `sipral_stack_codec_order` does.
+    ///
+    /// # Safety
+    ///
+    /// `out_suites` must be writable for `capacity` `uint32_t` or null with a
+    /// capacity of zero, and `out_count` must point at one `size_t` or be null.
+    fn sipral_stack_srtp_suite_order(
+        stack: SipralHandle,
+        out_suites: *mut Number<SipralSrtpSuite>,
+        capacity: usize,
+        out_count: *mut usize,
+    ) {
+        if out_suites.is_null() && capacity != 0 {
+            return Err(fail(SipralStatus::InvalidArgument, "out_suites is null"));
+        }
+        let order = with_stack(stack, |state| {
+            Ok(state
+                .engine
+                .catalog()
+                .srtp_suites_in_force()
+                .into_iter()
+                .map(|suite| crate::event::suite_of(suite) as u32)
+                .collect::<Vec<u32>>())
+        })?;
+        if !out_count.is_null() {
+            unsafe { out_count.write(order.len()) };
+        }
+        if capacity < order.len() {
+            return Err(fail(
+                SipralStatus::BufferTooSmall,
+                format!(
+                    "this stack runs {} SRTP suites and there is room for {capacity}",
+                    order.len()
+                ),
+            ));
+        }
+        // the capacity reaches the length, so a non-empty order has a
+        // buffer; an empty one is nothing to copy
+        if !order.is_empty() {
+            unsafe { std::ptr::copy_nonoverlapping(order.as_ptr(), out_suites, order.len()) };
+        }
         Ok(())
     }
 }
@@ -2342,10 +2453,11 @@ fn drain(
                         }
                         MediaEvent::Ended(_) => {
                             if let Ok(handle) = state.calls.name_of(call) {
-                                audio
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .detach(handle);
+                                let mut engine =
+                                    audio.lock().unwrap_or_else(PoisonError::into_inner);
+                                engine.detach(handle);
+                                // its own gain, mute and meter go with it
+                                engine.forget_call(handle);
                             }
                         }
                         _ => {}
@@ -3189,6 +3301,8 @@ pub(crate) mod tests {
             pseudonym_salt_len: 0,
             diagnostic_trace: 0,
             reserved: 0,
+            system_echo_cancellation: 0,
+            reserved_35: 0,
             dtmf_detection: 0,
         }
     }
@@ -3373,7 +3487,93 @@ pub(crate) mod tests {
             rtp_port_max: u32::MAX,
             path_mtu: u32::MAX,
             datagram_without_stream_bytes: u32::MAX,
+            srtp_suite_count: u32::MAX,
+            pseudonym_salted: u32::MAX,
+            diagnostic_trace: u32::MAX,
+            system_echo_cancellation: u32::MAX,
         }
+    }
+
+    fn suite_order(handle: SipralHandle) -> Vec<u32> {
+        let mut count = usize::MAX;
+        let status = unsafe {
+            super::sipral_stack_srtp_suite_order(handle, ptr::null_mut(), 0, &raw mut count)
+        };
+        assert_eq!(
+            status,
+            SipralStatus::BufferTooSmall,
+            "{}",
+            last_error_text()
+        );
+        let mut suites = vec![u32::MAX; count];
+        let status = unsafe {
+            super::sipral_stack_srtp_suite_order(
+                handle,
+                suites.as_mut_ptr(),
+                suites.len(),
+                &raw mut count,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        suites
+    }
+
+    /// What 0.34 configured and could not be read back: the suites in force
+    /// and their order, whether a pseudonym salt was given (never the salt),
+    /// and whether the trace is whole now; and the echo canceller's switch.
+    #[test]
+    fn the_suites_the_salt_the_trace_and_the_echo_switch_read_back() {
+        use crate::media::SipralSrtpSuite;
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let read = read_settings(handle);
+        assert_eq!(read.pseudonym_salted, SipralToggle::Off as u32);
+        assert_eq!(read.diagnostic_trace, SipralToggle::Off as u32);
+        assert_eq!(read.system_echo_cancellation, SipralToggle::On as u32);
+        let built_in = suite_order(handle);
+        assert_eq!(built_in.len(), read.srtp_suite_count as usize);
+        assert!(
+            built_in.contains(&(SipralSrtpSuite::AesCm80 as u32)),
+            "{built_in:?}"
+        );
+        assert_eq!(
+            unsafe { crate::log::sipral_stack_diagnostic_trace(handle, SipralToggle::On as u32) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            read_settings(handle).diagnostic_trace,
+            SipralToggle::On as u32
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let suites = "AES_256_CM_HMAC_SHA1_80,AES_CM_128_HMAC_SHA1_32";
+        let salt = [0x5a_u8; 16];
+        let mut observed = Observed::default();
+        let mut given = config(record, &mut observed);
+        given.srtp_suites = suites.as_ptr().cast();
+        given.srtp_suites_len = suites.len();
+        given.pseudonym_salt = salt.as_ptr();
+        given.pseudonym_salt_len = salt.len();
+        given.system_echo_cancellation = SipralToggle::Off as u32;
+        let (status, handle) = create(&given);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let read = read_settings(handle);
+        assert_eq!(read.pseudonym_salted, SipralToggle::On as u32);
+        assert_eq!(read.system_echo_cancellation, SipralToggle::Off as u32);
+        assert_eq!(read.srtp_suite_count, 2);
+        assert_eq!(
+            suite_order(handle),
+            [
+                SipralSrtpSuite::Aes256Cm80 as u32,
+                SipralSrtpSuite::AesCm32 as u32
+            ]
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+
+        let mut observed = Observed::default();
+        let mut wrong = config(record, &mut observed);
+        wrong.system_echo_cancellation = 3;
+        assert_eq!(create(&wrong).0, SipralStatus::InvalidArgument);
     }
 
     fn read_settings(handle: SipralHandle) -> SipralStackSettings {

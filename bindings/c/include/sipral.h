@@ -141,7 +141,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)34)
+#define SIPRAL_ABI_VERSION_MINOR ((uint32_t)35)
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -5073,8 +5073,10 @@ struct sipral_stack_config {
      * name, number and address is then written as it went on the wire.
      * What is never written, in either mode, is a credential or a key:
      * every `Authorization` and `Proxy-Authorization` value, every
-     * `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
-     * payload is taken out first. `sipral_stack_diagnostic_trace`
+     * `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
+     * payload and every `a=ice-pwd` is taken out first, a field whose
+     * name a control byte or a bare CR line end disguises included
+     * (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
      * turns it on and off while the stack runs.
      */
     sipral_toggle_t diagnostic_trace;
@@ -5082,6 +5084,24 @@ struct sipral_stack_config {
      * Zero.
      */
     uint32_t reserved;
+    /**
+     * A `sipral_toggle_t`: whether a stack in device mode opens the
+     * devices behind the platform's own echo cancellation, where the
+     * platform lets it be turned off; on by default (ABI 0.35). Off,
+     * macOS and iOS run the voice-processing unit with its processing
+     * bypassed, Windows opens a communications stream raw, past the
+     * endpoint's processing, and Android opens the microphone with the
+     * voice-recognition preset rather than the voice-communication one;
+     * Linux has nothing to turn off. For a headset, which has no echo
+     * to cancel, or an application that cancels it on each call itself.
+     * `sipral_audio_info_t::system_echo_cancellation` says what the
+     * platform did. Read only in device mode.
+     */
+    sipral_toggle_t system_echo_cancellation;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_35;
 };
 
 /**
@@ -5250,6 +5270,30 @@ struct sipral_stack_settings {
      * given; zero for never (ABI 0.34).
      */
     uint32_t datagram_without_stream_bytes;
+    /**
+     * How many SRTP suites the stack's calls offer and accept unless
+     * their account names its own: the ones `srtp_suites` named, or
+     * this build's own. `sipral_stack_srtp_suite_order` says which, in
+     * order (ABI 0.35).
+     */
+    uint32_t srtp_suite_count;
+    /**
+     * A `sipral_toggle_t`: whether the stack was given a `pseudonym_salt`,
+     * so that its pseudonyms are the same from run to run. The salt
+     * itself is never read back (ABI 0.35).
+     */
+    sipral_toggle_t pseudonym_salted;
+    /**
+     * A `sipral_toggle_t`: whether the trace writes whole messages now,
+     * as `diagnostic_trace` set it at creation or
+     * `sipral_stack_diagnostic_trace` since (ABI 0.35).
+     */
+    sipral_toggle_t diagnostic_trace;
+    /**
+     * A `sipral_toggle_t`: whether the platform's echo cancellation is
+     * asked for, with the default filled in (ABI 0.35).
+     */
+    sipral_toggle_t system_echo_cancellation;
 };
 
 /**
@@ -5622,9 +5666,11 @@ struct sipral_account_config {
      * and the fallback to the host's own addresses are the stack's.
      * The first REGISTER waits for the first answer, and a call placed
      * before it with no `destination` of its own is
-     * `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+     * `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
+     * INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
      * transport fails or that is answered 503 moves to the next address
-     * found at once (§4.3); the name is looked up again when the
+     * found at once (§4.3; every request but REGISTER from ABI 0.35);
+     * the name is looked up again when the
      * answer's time-to-live runs out, and when the stack's recovery
      * asks for an address. A host with a port skips SRV, and a numeric
      * host asks nothing.
@@ -5638,9 +5684,11 @@ struct sipral_account_config {
      * The SHA-256 fingerprint of the one TLS server certificate this
      * account trusts, in place of a trust anchor, for a PBX that serves
      * a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-     * either case, with a colon between each byte or none, optionally
-     * after `sha-256 ` or `SHA256=` — the forms `openssl x509
-     * -fingerprint -sha256` and RFC 8122 print. Null for none.
+     * either case, colons and spaces among them ignored, bare or after
+     * `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
+     * prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
+     * prefix in any case (ABI 0.35 for the first and the spaces).
+     * Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
      *
      * TLS is the application's, so this is what its certificate
      * verifier asks, with `sipral_account_check_certificate`: with a
@@ -5663,6 +5711,39 @@ struct sipral_account_config {
      * Zero.
      */
     uint32_t reserved;
+    /**
+     * A sipral_transport_t: the protocol
+     * of a connection of this account's own to its server, which the
+     * stack asks the application to open, or zero for none (ABI 0.35).
+     *
+     * For an account on TCP or TLS to one server beside an account on
+     * the stack's UDP transport to another, in one stack with one audio
+     * engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
+     * stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
+     * protocol and the server's address — `request_bytes` and
+     * `limit_bytes` zero, since no request outgrew anything — and the
+     * account's requests go over whichever transport of that protocol
+     * the application binds to that address with
+     * `sipral_stack_transport_bind`, under any number; one bound before
+     * the account is added is used as it stands. Until then its
+     * REGISTER waits; ten seconds after the question it fails as
+     * unreachable and its retry, after the usual back-off, asks again.
+     * An account that never registers asks when it is added, and any
+     * account asks again at once when its connection fails or closes —
+     * a registered one by registering again. A call placed before the
+     * connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
+     * request inside the account's calls keeps the connection their
+     * INVITE went over, and a request arriving over it is matched to
+     * this account before any other with the same user. `transport` is
+     * then where the account starts, and is replaced by the connection
+     * once there is one. `SIPRAL_TRANSPORT_UDP` only says what
+     * `transport` speaks.
+     */
+    sipral_transport_t stream_protocol;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_35;
 };
 
 /**
@@ -12183,6 +12264,12 @@ sipral_status_t sipral_audio_refresh(sipral_handle_t stack, size_t *out_count);
 /**
  * How many devices the list holds, present or not.
  *
+ * The first read of a stack's list, here or through
+ * `sipral_audio_device_at`, asks the platform when nothing has yet, so
+ * a new stack lists every device without `sipral_audio_refresh`
+ * (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
+ * answer within `audio_probe_ms`, and the next read asks again.
+ *
  * Safety
  *
  * `out_count` must point at one `size_t`.
@@ -12871,6 +12958,87 @@ sipral_status_t sipral_advertised_address(const char *bound, size_t bound_len, c
  * Safe to call with any handle value.
  */
 sipral_status_t sipral_stack_diagnostic_trace(sipral_handle_t stack, sipral_toggle_t on);
+
+/**
+ * The SRTP suites this stack's calls offer and accept unless their
+ * account names its own, in the order they are offered, as
+ * `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
+ * creation, or this build's own (ABI 0.35). `out_count` always receives
+ * how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
+ * caller that passes a capacity of zero and a null buffer learns how
+ * much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
+ * `sipral_stack_codec_order` does.
+ *
+ * Safety
+ *
+ * `out_suites` must be writable for `capacity` `uint32_t` or null with a
+ * capacity of zero, and `out_count` must point at one `size_t` or be null.
+ */
+sipral_status_t sipral_stack_srtp_suite_order(sipral_handle_t stack, sipral_srtp_suite_t *out_suites, size_t capacity, size_t *out_count);
+
+/**
+ * Set one call's own gain in one direction, on top of the stack's
+ * (`sipral_audio_set_gain`), in the same steps: the input direction is
+ * what the microphone sends that call alone, the output how loud that
+ * call is in the loudspeaker beside the others (ABI 0.35). Applied in
+ * the engine's mix from the next frame; kept while the call is held or
+ * moved into a conference and back, and gone when it ends.
+ * `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
+ * carrying — before its media starts, after it ends, or in application
+ * mode, where the frames are the application's own.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_call_set_gain(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t gain);
+
+/**
+ * One call's own gain in one direction, in the steps
+ * `sipral_audio_call_set_gain` takes (ABI 0.35).
+ *
+ * Safety
+ *
+ * `out_gain` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_call_gain(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_gain);
+
+/**
+ * Mute one call in one direction, or unmute it (ABI 0.35): the far end
+ * of that call alone hears silence, or that call alone is silent in the
+ * loudspeaker, while every other call goes on — the other half of a
+ * consultation, a conference member being spoken about. A muted
+ * direction still runs and sends silence. Kept and dropped as
+ * `sipral_audio_call_set_gain` is, and refused the same way.
+ *
+ * Safety
+ *
+ * Reads no memory the caller owns.
+ */
+sipral_status_t sipral_audio_call_set_muted(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t muted);
+
+/**
+ * Whether one call is muted in one direction: one or zero into
+ * `out_muted` (ABI 0.35).
+ *
+ * Safety
+ *
+ * `out_muted` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_call_muted(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_muted);
+
+/**
+ * One call's meter in one direction (ABI 0.35): the loudest sample of
+ * the last tenth of a second of what the microphone sent that call, or
+ * of what the call played, after its own gain and mute, 0 to 32767 —
+ * `sipral_audio_level`'s reading for one call of several. Cheap enough
+ * to poll at a window's frame rate.
+ *
+ * Safety
+ *
+ * `out_peak` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_audio_call_level(sipral_handle_t stack, sipral_handle_t call, sipral_audio_direction_t direction, uint32_t *out_peak);
 
 #ifdef __cplusplus
 } /* extern "C" */

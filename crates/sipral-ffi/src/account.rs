@@ -40,7 +40,7 @@ use crate::header::{SipralHeader, supplied};
 use crate::identity::SipralSessionTimer;
 use crate::media::{SipralSrtp, SipralToggle, media_failed, toggled};
 use crate::security::{SipralAttestation, SipralStirVerification};
-use crate::stack::{StackState, handle_failed, with_stack, with_stack_at};
+use crate::stack::{SipralTransport, StackState, handle_failed, with_stack, with_stack_at};
 use crate::status::SipralStatus;
 use crate::text::{required_text, text};
 use crate::versioned::{Versioned, read_versioned};
@@ -318,6 +318,35 @@ record! {
         pub server_naptr: Number<SipralToggle>,
         /// Zero.
         pub reserved: u32,
+        /// A [`SipralTransport`]: the protocol
+        /// of a connection of this account's own to its server, which the
+        /// stack asks the application to open, or zero for none (ABI 0.35).
+        ///
+        /// For an account on TCP or TLS to one server beside an account on
+        /// the stack's UDP transport to another, in one stack with one audio
+        /// engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
+        /// stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
+        /// protocol and the server's address — `request_bytes` and
+        /// `limit_bytes` zero, since no request outgrew anything — and the
+        /// account's requests go over whichever transport of that protocol
+        /// the application binds to that address with
+        /// `sipral_stack_transport_bind`, under any number; one bound before
+        /// the account is added is used as it stands. Until then its
+        /// REGISTER waits; ten seconds after the question it fails as
+        /// unreachable and its retry, after the usual back-off, asks again.
+        /// An account that never registers asks when it is added, and any
+        /// account asks again at once when its connection fails or closes —
+        /// a registered one by registering again. A call placed before the
+        /// connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
+        /// request inside the account's calls keeps the connection their
+        /// INVITE went over, and a request arriving over it is matched to
+        /// this account before any other with the same user. `transport` is
+        /// then where the account starts, and is replaced by the connection
+        /// once there is one. `SIPRAL_TRANSPORT_UDP` only says what
+        /// `transport` speaks.
+        pub stream_protocol: Number<SipralTransport>,
+        /// Zero.
+        pub reserved_35: u32,
     }
 }
 
@@ -637,6 +666,20 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         Some(registrar) => Account::new(aor, registrar, contact, transport, remote),
         None => Account::unregistered(aor, contact, transport, remote),
     };
+    if config.stream_protocol != 0 {
+        let protocol = crate::stack::transport_of(config.stream_protocol)
+            .map_err(|_| {
+                fail(
+                    SipralStatus::InvalidArgument,
+                    format!(
+                        "stream_protocol is {}, which is not a SIPRAL_TRANSPORT",
+                        config.stream_protocol
+                    ),
+                )
+            })?
+            .protocol();
+        account = account.on_stream(protocol);
+    }
     account = unsafe { with_reach(account, config, server) }?;
     if let Some(display) = display {
         account = account.display_name(display);
@@ -923,6 +966,8 @@ pub(crate) mod tests {
             tls_pin_sha256_len: 0,
             server_naptr: 0,
             reserved: 0,
+            stream_protocol: 0,
+            reserved_35: 0,
         }
     }
 

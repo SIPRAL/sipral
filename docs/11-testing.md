@@ -1139,7 +1139,10 @@ credentials on hardware that is not ours, and for Apple signing there is no way
 to give it one at all — a runner has no keychain. So the gate is a script.
 
 `scripts/check.sh` is it: `cargo fmt`, `cargo clippy` with warnings as errors,
-the test suite, `rustdoc` with warnings as errors, a release build, the symbols
+the test suite — every `cargo test` run's whole output kept in
+`target/check-logs/`, one file per run, so that a test that fails only on a
+loaded machine is named on the FAIL line and readable afterwards rather than
+lost with the run — `rustdoc` with warnings as errors, a release build, the symbols
 in the C library that build produces, `bindings/c/smoke.c` compiled against the
 header and run, the C that ships or drives the lab — that test, the Swift
 package's translation unit, the JNI shim and its thread helper, and the lab's C

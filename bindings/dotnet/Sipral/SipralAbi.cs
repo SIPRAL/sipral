@@ -4488,8 +4488,10 @@ public struct SipralStackConfig
     /// name, number and address is then written as it went on the wire.
     /// What is never written, in either mode, is a credential or a key:
     /// every `Authorization` and `Proxy-Authorization` value, every
-    /// `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
-    /// payload is taken out first. `sipral_stack_diagnostic_trace`
+    /// `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
+    /// payload and every `a=ice-pwd` is taken out first, a field whose
+    /// name a control byte or a bare CR line end disguises included
+    /// (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
     /// turns it on and off while the stack runs.
     /// </summary>
     public uint DiagnosticTrace;
@@ -4497,6 +4499,24 @@ public struct SipralStackConfig
     /// Zero.
     /// </summary>
     public uint Reserved;
+    /// <summary>
+    /// A `SipralToggle`: whether a stack in device mode opens the
+    /// devices behind the platform's own echo cancellation, where the
+    /// platform lets it be turned off; on by default (ABI 0.35). Off,
+    /// macOS and iOS run the voice-processing unit with its processing
+    /// bypassed, Windows opens a communications stream raw, past the
+    /// endpoint's processing, and Android opens the microphone with the
+    /// voice-recognition preset rather than the voice-communication one;
+    /// Linux has nothing to turn off. For a headset, which has no echo
+    /// to cancel, or an application that cancels it on each call itself.
+    /// `sipral_audio_info_t::system_echo_cancellation` says what the
+    /// platform did. Read only in device mode.
+    /// </summary>
+    public uint SystemEchoCancellation;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved35;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -4687,6 +4707,30 @@ public struct SipralStackSettings
     /// given; zero for never (ABI 0.34).
     /// </summary>
     public uint DatagramWithoutStreamBytes;
+    /// <summary>
+    /// How many SRTP suites the stack's calls offer and accept unless
+    /// their account names its own: the ones `srtp_suites` named, or
+    /// this build's own. `sipral_stack_srtp_suite_order` says which, in
+    /// order (ABI 0.35).
+    /// </summary>
+    public uint SrtpSuiteCount;
+    /// <summary>
+    /// A `SipralToggle`: whether the stack was given a `pseudonym_salt`,
+    /// so that its pseudonyms are the same from run to run. The salt
+    /// itself is never read back (ABI 0.35).
+    /// </summary>
+    public uint PseudonymSalted;
+    /// <summary>
+    /// A `SipralToggle`: whether the trace writes whole messages now,
+    /// as `diagnostic_trace` set it at creation or
+    /// `sipral_stack_diagnostic_trace` since (ABI 0.35).
+    /// </summary>
+    public uint DiagnosticTrace;
+    /// <summary>
+    /// A `SipralToggle`: whether the platform's echo cancellation is
+    /// asked for, with the default filled in (ABI 0.35).
+    /// </summary>
+    public uint SystemEchoCancellation;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5072,9 +5116,11 @@ public struct SipralAccountConfig
     /// and the fallback to the host's own addresses are the stack's.
     /// The first REGISTER waits for the first answer, and a call placed
     /// before it with no `destination` of its own is
-    /// `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+    /// `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
+    /// INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
     /// transport fails or that is answered 503 moves to the next address
-    /// found at once (§4.3); the name is looked up again when the
+    /// found at once (§4.3; every request but REGISTER from ABI 0.35);
+    /// the name is looked up again when the
     /// answer's time-to-live runs out, and when the stack's recovery
     /// asks for an address. A host with a port skips SRV, and a numeric
     /// host asks nothing.
@@ -5088,9 +5134,11 @@ public struct SipralAccountConfig
     /// The SHA-256 fingerprint of the one TLS server certificate this
     /// account trusts, in place of a trust anchor, for a PBX that serves
     /// a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-    /// either case, with a colon between each byte or none, optionally
-    /// after `sha-256 ` or `SHA256=` — the forms `openssl x509
-    /// -fingerprint -sha256` and RFC 8122 print. Null for none.
+    /// either case, colons and spaces among them ignored, bare or after
+    /// `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
+    /// prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
+    /// prefix in any case (ABI 0.35 for the first and the spaces).
+    /// Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
     ///
     /// TLS is the application's, so this is what its certificate
     /// verifier asks, with `sipral_account_check_certificate`: with a
@@ -5113,6 +5161,39 @@ public struct SipralAccountConfig
     /// Zero.
     /// </summary>
     public uint Reserved;
+    /// <summary>
+    /// A SipralTransport: the protocol
+    /// of a connection of this account's own to its server, which the
+    /// stack asks the application to open, or zero for none (ABI 0.35).
+    ///
+    /// For an account on TCP or TLS to one server beside an account on
+    /// the stack's UDP transport to another, in one stack with one audio
+    /// engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
+    /// stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
+    /// protocol and the server's address — `request_bytes` and
+    /// `limit_bytes` zero, since no request outgrew anything — and the
+    /// account's requests go over whichever transport of that protocol
+    /// the application binds to that address with
+    /// `sipral_stack_transport_bind`, under any number; one bound before
+    /// the account is added is used as it stands. Until then its
+    /// REGISTER waits; ten seconds after the question it fails as
+    /// unreachable and its retry, after the usual back-off, asks again.
+    /// An account that never registers asks when it is added, and any
+    /// account asks again at once when its connection fails or closes —
+    /// a registered one by registering again. A call placed before the
+    /// connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
+    /// request inside the account's calls keeps the connection their
+    /// INVITE went over, and a request arriving over it is matched to
+    /// this account before any other with the same user. `transport` is
+    /// then where the account starts, and is replaced by the connection
+    /// once there is one. `SIPRAL_TRANSPORT_UDP` only says what
+    /// `transport` speaks.
+    /// </summary>
+    public uint StreamProtocol;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved35;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -9713,6 +9794,24 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_stack_diagnostic_trace(ulong stack, uint on);
 
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_srtp_suite_order(ulong stack, uint[] outSuites, nuint capacity, out nuint count);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_call_set_gain(ulong stack, ulong call, uint direction, uint gain);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_call_gain(ulong stack, ulong call, uint direction, out uint gain);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_call_set_muted(ulong stack, ulong call, uint direction, uint muted);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_call_muted(ulong stack, ulong call, uint direction, out uint muted);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_audio_call_level(ulong stack, ulong call, uint direction, out uint peak);
+
 }
 
 /// <summary>Everything the library does, with the C conventions read
@@ -9769,7 +9868,7 @@ public static partial class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 34;
+    public const uint AbiVersionMinor = 35;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10223,11 +10322,11 @@ public static partial class Sipral
         ("sipral_abi_version_t", Marshal.SizeOf<SipralAbiVersion>(), 24, 20, 20),
         ("sipral_capabilities_t", Marshal.SizeOf<SipralCapabilities>(), 24, 16, 16),
         ("sipral_counters_t", Marshal.SizeOf<SipralCounters>(), 232, 228, 232),
-        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 416, 280, 288),
+        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 424, 288, 296),
         ("sipral_poll_result_t", Marshal.SizeOf<SipralPollResult>(), 48, 28, 32),
-        ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 120, 112, 120),
+        ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 440, 240, 248),
+        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 448, 248, 256),
         ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 152, 84, 84),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),
@@ -13969,6 +14068,12 @@ public static partial class Sipral
     /// <summary>
     /// How many devices the list holds, present or not.
     ///
+    /// The first read of a stack's list, here or through
+    /// `sipral_audio_device_at`, asks the platform when nothing has yet, so
+    /// a new stack lists every device without `sipral_audio_refresh`
+    /// (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
+    /// answer within `audio_probe_ms`, and the next read asks again.
+    ///
     /// Safety
     ///
     /// `out_count` must point at one `size_t`.
@@ -14828,6 +14933,109 @@ public static partial class Sipral
     public static void StackDiagnosticTrace(ulong stack, uint on)
     {
         Check(NativeMethods.sipral_stack_diagnostic_trace(stack, on));
+    }
+
+    /// <summary>
+    /// The SRTP suites this stack's calls offer and accept unless their
+    /// account names its own, in the order they are offered, as
+    /// `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
+    /// creation, or this build's own (ABI 0.35). `out_count` always receives
+    /// how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
+    /// caller that passes a capacity of zero and a null buffer learns how
+    /// much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
+    /// `sipral_stack_codec_order` does.
+    ///
+    /// Safety
+    ///
+    /// `out_suites` must be writable for `capacity` `uint32_t` or null with a
+    /// capacity of zero, and `out_count` must point at one `size_t` or be null.
+    /// </summary>
+    public static nuint StackSrtpSuiteOrder(ulong stack, uint[] outSuites)
+    {
+        Check(NativeMethods.sipral_stack_srtp_suite_order(stack, outSuites, (nuint)outSuites.Length, out var count));
+        return count;
+    }
+
+    /// <summary>
+    /// Set one call's own gain in one direction, on top of the stack's
+    /// (`sipral_audio_set_gain`), in the same steps: the input direction is
+    /// what the microphone sends that call alone, the output how loud that
+    /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
+    /// the engine's mix from the next frame; kept while the call is held or
+    /// moved into a conference and back, and gone when it ends.
+    /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
+    /// carrying — before its media starts, after it ends, or in application
+    /// mode, where the frames are the application's own.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioCallSetGain(ulong stack, ulong call, uint direction, uint gain)
+    {
+        Check(NativeMethods.sipral_audio_call_set_gain(stack, call, direction, gain));
+    }
+
+    /// <summary>
+    /// One call's own gain in one direction, in the steps
+    /// `sipral_audio_call_set_gain` takes (ABI 0.35).
+    ///
+    /// Safety
+    ///
+    /// `out_gain` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioCallGain(ulong stack, ulong call, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_call_gain(stack, call, direction, out var gain));
+        return gain;
+    }
+
+    /// <summary>
+    /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
+    /// of that call alone hears silence, or that call alone is silent in the
+    /// loudspeaker, while every other call goes on — the other half of a
+    /// consultation, a conference member being spoken about. A muted
+    /// direction still runs and sends silence. Kept and dropped as
+    /// `sipral_audio_call_set_gain` is, and refused the same way.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void AudioCallSetMuted(ulong stack, ulong call, uint direction, uint muted)
+    {
+        Check(NativeMethods.sipral_audio_call_set_muted(stack, call, direction, muted));
+    }
+
+    /// <summary>
+    /// Whether one call is muted in one direction: one or zero into
+    /// `out_muted` (ABI 0.35).
+    ///
+    /// Safety
+    ///
+    /// `out_muted` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioCallMuted(ulong stack, ulong call, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_call_muted(stack, call, direction, out var muted));
+        return muted;
+    }
+
+    /// <summary>
+    /// One call's meter in one direction (ABI 0.35): the loudest sample of
+    /// the last tenth of a second of what the microphone sent that call, or
+    /// of what the call played, after its own gain and mute, 0 to 32767 —
+    /// `sipral_audio_level`'s reading for one call of several. Cheap enough
+    /// to poll at a window's frame rate.
+    ///
+    /// Safety
+    ///
+    /// `out_peak` must point at one `uint32_t`.
+    /// </summary>
+    public static uint AudioCallLevel(ulong stack, ulong call, uint direction)
+    {
+        Check(NativeMethods.sipral_audio_call_level(stack, call, direction, out var peak));
+        return peak;
     }
 
 }

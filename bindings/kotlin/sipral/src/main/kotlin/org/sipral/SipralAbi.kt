@@ -4356,9 +4356,33 @@ data class SipralStackSettings(
      * given; zero for never (ABI 0.34).
      */
     val datagramWithoutStreamBytes: Long,
+    /**
+     * How many SRTP suites the stack's calls offer and accept unless
+     * their account names its own: the ones `srtp_suites` named, or
+     * this build's own. `sipral_stack_srtp_suite_order` says which, in
+     * order (ABI 0.35).
+     */
+    val srtpSuiteCount: Long,
+    /**
+     * A `SipralToggle`: whether the stack was given a `pseudonym_salt`,
+     * so that its pseudonyms are the same from run to run. The salt
+     * itself is never read back (ABI 0.35).
+     */
+    val pseudonymSalted: Long,
+    /**
+     * A `SipralToggle`: whether the trace writes whole messages now,
+     * as `diagnostic_trace` set it at creation or
+     * `sipral_stack_diagnostic_trace` since (ABI 0.35).
+     */
+    val diagnosticTrace: Long,
+    /**
+     * A `SipralToggle`: whether the platform's echo cancellation is
+     * asked for, with the default filled in (ABI 0.35).
+     */
+    val systemEchoCancellation: Long,
 ) {
     internal companion object {
-        const val SLOTS: Int = 23
+        const val SLOTS: Int = 27
 
         fun of(slots: LongArray): SipralStackSettings = SipralStackSettings(
             slots[0],
@@ -4384,6 +4408,10 @@ data class SipralStackSettings(
             slots[20],
             slots[21],
             slots[22],
+            slots[23],
+            slots[24],
+            slots[25],
+            slots[26],
         )
     }
 }
@@ -6104,8 +6132,10 @@ class SipralStackConfig(
      * name, number and address is then written as it went on the wire.
      * What is never written, in either mode, is a credential or a key:
      * every `Authorization` and `Proxy-Authorization` value, every
-     * `a=crypto` `inline:` key, every `k=` key and every `a=key-mgmt`
-     * payload is taken out first. `sipral_stack_diagnostic_trace`
+     * `a=crypto` `inline:` key, every `k=` key, every `a=key-mgmt`
+     * payload and every `a=ice-pwd` is taken out first, a field whose
+     * name a control byte or a bare CR line end disguises included
+     * (ABI 0.35 for the last two). `sipral_stack_diagnostic_trace`
      * turns it on and off while the stack runs.
      */
     val diagnosticTrace: Long = 0,
@@ -6113,6 +6143,24 @@ class SipralStackConfig(
      * Zero.
      */
     val reserved: Long = 0,
+    /**
+     * A `SipralToggle`: whether a stack in device mode opens the
+     * devices behind the platform's own echo cancellation, where the
+     * platform lets it be turned off; on by default (ABI 0.35). Off,
+     * macOS and iOS run the voice-processing unit with its processing
+     * bypassed, Windows opens a communications stream raw, past the
+     * endpoint's processing, and Android opens the microphone with the
+     * voice-recognition preset rather than the voice-communication one;
+     * Linux has nothing to turn off. For a headset, which has no echo
+     * to cancel, or an application that cancels it on each call itself.
+     * `sipral_audio_info_t::system_echo_cancellation` says what the
+     * platform did. Read only in device mode.
+     */
+    val systemEchoCancellation: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved35: Long = 0,
 )
 
 /**
@@ -6379,9 +6427,11 @@ class SipralAccountConfig(
      * and the fallback to the host's own addresses are the stack's.
      * The first REGISTER waits for the first answer, and a call placed
      * before it with no `destination` of its own is
-     * `SIPRAL_STATUS_WRONG_STATE`. A REGISTER that times out, whose
+     * `SIPRAL_STATUS_WRONG_STATE`. A request outside a dialog — REGISTER,
+     * INVITE, MESSAGE, SUBSCRIBE, PUBLISH — that times out, whose
      * transport fails or that is answered 503 moves to the next address
-     * found at once (§4.3); the name is looked up again when the
+     * found at once (§4.3; every request but REGISTER from ABI 0.35);
+     * the name is looked up again when the
      * answer's time-to-live runs out, and when the stack's recovery
      * asks for an address. A host with a port skips SRV, and a numeric
      * host asks nothing.
@@ -6391,9 +6441,11 @@ class SipralAccountConfig(
      * The SHA-256 fingerprint of the one TLS server certificate this
      * account trusts, in place of a trust anchor, for a PBX that serves
      * a certificate it signed itself (ABI 0.34): 64 hexadecimal digits,
-     * either case, with a colon between each byte or none, optionally
-     * after `sha-256 ` or `SHA256=` — the forms `openssl x509
-     * -fingerprint -sha256` and RFC 8122 print. Null for none.
+     * either case, colons and spaces among them ignored, bare or after
+     * `sha256 Fingerprint=` (what `openssl x509 -fingerprint -sha256`
+     * prints, 3.x and 1.1), `sha-256 ` (RFC 8122) or `SHA256=`, each
+     * prefix in any case (ABI 0.35 for the first and the spaces).
+     * Anything else is `SIPRAL_STATUS_INVALID_ARGUMENT`. Null for none.
      *
      * TLS is the application's, so this is what its certificate
      * verifier asks, with `sipral_account_check_certificate`: with a
@@ -6412,6 +6464,39 @@ class SipralAccountConfig(
      * Zero.
      */
     val reserved: Long = 0,
+    /**
+     * A SipralTransport: the protocol
+     * of a connection of this account's own to its server, which the
+     * stack asks the application to open, or zero for none (ABI 0.35).
+     *
+     * For an account on TCP or TLS to one server beside an account on
+     * the stack's UDP transport to another, in one stack with one audio
+     * engine. With `SIPRAL_TRANSPORT_TCP`, `_TLS`, `_WS` or `_WSS` the
+     * stack raises `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` naming the
+     * protocol and the server's address — `request_bytes` and
+     * `limit_bytes` zero, since no request outgrew anything — and the
+     * account's requests go over whichever transport of that protocol
+     * the application binds to that address with
+     * `sipral_stack_transport_bind`, under any number; one bound before
+     * the account is added is used as it stands. Until then its
+     * REGISTER waits; ten seconds after the question it fails as
+     * unreachable and its retry, after the usual back-off, asks again.
+     * An account that never registers asks when it is added, and any
+     * account asks again at once when its connection fails or closes —
+     * a registered one by registering again. A call placed before the
+     * connection is bound is `SIPRAL_STATUS_TRANSPORT_DOWN`. Every
+     * request inside the account's calls keeps the connection their
+     * INVITE went over, and a request arriving over it is matched to
+     * this account before any other with the same user. `transport` is
+     * then where the account starts, and is replaced by the connection
+     * once there is one. `SIPRAL_TRANSPORT_UDP` only says what
+     * `transport` speaks.
+     */
+    val streamProtocol: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved35: Long = 0,
 )
 
 /**
@@ -9279,7 +9364,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 34)
+        agree(0, 35)
     }
 
     /**
@@ -9303,7 +9388,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, configSystemEchoCancellation: Long, configReserved35: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -9322,7 +9407,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, configStreamProtocol: Long, configReserved35: Long, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -9478,6 +9563,12 @@ internal object SipralNative {
     external fun sipral_account_check_certificate(stack: Long, account: Long, certificate: ByteArray, unixSeconds: Long, pinned: LongArray): Int
     external fun sipral_advertised_address(bound: ByteArray, peer: ByteArray, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_stack_diagnostic_trace(stack: Long, on: Long): Int
+    external fun sipral_stack_srtp_suite_order(stack: Long, outSuites: IntArray, count: LongArray): Int
+    external fun sipral_audio_call_set_gain(stack: Long, call: Long, direction: Long, gain: Long): Int
+    external fun sipral_audio_call_gain(stack: Long, call: Long, direction: Long, gain: LongArray): Int
+    external fun sipral_audio_call_set_muted(stack: Long, call: Long, direction: Long, muted: Long): Int
+    external fun sipral_audio_call_muted(stack: Long, call: Long, direction: Long, muted: LongArray): Int
+    external fun sipral_audio_call_level(stack: Long, call: Long, direction: Long, peak: LongArray): Int
 }
 
 /** Everything the library does, with the C conventions read off it. */
@@ -9501,7 +9592,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 34
+    const val ABI_VERSION_MINOR: Long = 35
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -9957,11 +10048,11 @@ object Sipral {
         "sipral_abi_version_t" to intArrayOf(24, 20, 20),
         "sipral_capabilities_t" to intArrayOf(24, 16, 16),
         "sipral_counters_t" to intArrayOf(232, 228, 232),
-        "sipral_stack_config_t" to intArrayOf(416, 280, 288),
+        "sipral_stack_config_t" to intArrayOf(424, 288, 296),
         "sipral_poll_result_t" to intArrayOf(48, 28, 32),
-        "sipral_stack_settings_t" to intArrayOf(120, 112, 120),
+        "sipral_stack_settings_t" to intArrayOf(136, 128, 136),
         "sipral_header_t" to intArrayOf(32, 16, 16),
-        "sipral_account_config_t" to intArrayOf(440, 240, 248),
+        "sipral_account_config_t" to intArrayOf(448, 248, 256),
         "sipral_call_config_t" to intArrayOf(152, 84, 84),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
@@ -10195,7 +10286,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, config.systemEchoCancellation, config.reserved35, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -10731,7 +10822,7 @@ object Sipral {
         val configServerUri = config.serverUri?.toByteArray(Charsets.UTF_8)
         val configTlsPinSha256 = config.tlsPinSha256?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, config.streamProtocol, config.reserved35, accountSlot))
         return accountSlot[0]
     }
 
@@ -13615,6 +13706,12 @@ object Sipral {
     /**
      * How many devices the list holds, present or not.
      *
+     * The first read of a stack's list, here or through
+     * `sipral_audio_device_at`, asks the platform when nothing has yet, so
+     * a new stack lists every device without `sipral_audio_refresh`
+     * (ABI 0.35); `SIPRAL_STATUS_DEVICE_TIMED_OUT` when the platform did not
+     * answer within `audio_probe_ms`, and the next read asks again.
+     *
      * Safety
      *
      * `out_count` must point at one `size_t`.
@@ -14445,6 +14542,107 @@ object Sipral {
      */
     fun stackDiagnosticTrace(stack: Long, on: Long) {
         check(SipralNative.sipral_stack_diagnostic_trace(stack, on))
+    }
+
+    /**
+     * The SRTP suites this stack's calls offer and accept unless their
+     * account names its own, in the order they are offered, as
+     * `sipral_srtp_suite_t` numbers: the ones `srtp_suites` named at
+     * creation, or this build's own (ABI 0.35). `out_count` always receives
+     * how many there are — `sipral_stack_settings_t::srtp_suite_count` — so a
+     * caller that passes a capacity of zero and a null buffer learns how
+     * much room to bring and gets `SIPRAL_STATUS_BUFFER_TOO_SMALL`, as
+     * `sipral_stack_codec_order` does.
+     *
+     * Safety
+     *
+     * `out_suites` must be writable for `capacity` `uint32_t` or null with a
+     * capacity of zero, and `out_count` must point at one `size_t` or be null.
+     */
+    fun stackSrtpSuiteOrder(stack: Long, outSuites: IntArray): Long {
+        val countSlot = LongArray(1)
+        check(SipralNative.sipral_stack_srtp_suite_order(stack, outSuites, countSlot))
+        return countSlot[0]
+    }
+
+    /**
+     * Set one call's own gain in one direction, on top of the stack's
+     * (`sipral_audio_set_gain`), in the same steps: the input direction is
+     * what the microphone sends that call alone, the output how loud that
+     * call is in the loudspeaker beside the others (ABI 0.35). Applied in
+     * the engine's mix from the next frame; kept while the call is held or
+     * moved into a conference and back, and gone when it ends.
+     * `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
+     * carrying — before its media starts, after it ends, or in application
+     * mode, where the frames are the application's own.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioCallSetGain(stack: Long, call: Long, direction: Long, gain: Long) {
+        check(SipralNative.sipral_audio_call_set_gain(stack, call, direction, gain))
+    }
+
+    /**
+     * One call's own gain in one direction, in the steps
+     * `sipral_audio_call_set_gain` takes (ABI 0.35).
+     *
+     * Safety
+     *
+     * `out_gain` must point at one `uint32_t`.
+     */
+    fun audioCallGain(stack: Long, call: Long, direction: Long): Long {
+        val gainSlot = LongArray(1)
+        check(SipralNative.sipral_audio_call_gain(stack, call, direction, gainSlot))
+        return gainSlot[0]
+    }
+
+    /**
+     * Mute one call in one direction, or unmute it (ABI 0.35): the far end
+     * of that call alone hears silence, or that call alone is silent in the
+     * loudspeaker, while every other call goes on — the other half of a
+     * consultation, a conference member being spoken about. A muted
+     * direction still runs and sends silence. Kept and dropped as
+     * `sipral_audio_call_set_gain` is, and refused the same way.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioCallSetMuted(stack: Long, call: Long, direction: Long, muted: Long) {
+        check(SipralNative.sipral_audio_call_set_muted(stack, call, direction, muted))
+    }
+
+    /**
+     * Whether one call is muted in one direction: one or zero into
+     * `out_muted` (ABI 0.35).
+     *
+     * Safety
+     *
+     * `out_muted` must point at one `uint32_t`.
+     */
+    fun audioCallMuted(stack: Long, call: Long, direction: Long): Long {
+        val mutedSlot = LongArray(1)
+        check(SipralNative.sipral_audio_call_muted(stack, call, direction, mutedSlot))
+        return mutedSlot[0]
+    }
+
+    /**
+     * One call's meter in one direction (ABI 0.35): the loudest sample of
+     * the last tenth of a second of what the microphone sent that call, or
+     * of what the call played, after its own gain and mute, 0 to 32767 —
+     * `sipral_audio_level`'s reading for one call of several. Cheap enough
+     * to poll at a window's frame rate.
+     *
+     * Safety
+     *
+     * `out_peak` must point at one `uint32_t`.
+     */
+    fun audioCallLevel(stack: Long, call: Long, direction: Long): Long {
+        val peakSlot = LongArray(1)
+        check(SipralNative.sipral_audio_call_level(stack, call, direction, peakSlot))
+        return peakSlot[0]
     }
 
 }

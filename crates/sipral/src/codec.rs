@@ -721,6 +721,19 @@ impl CodecCatalog {
         self.srtp_suites.as_deref()
     }
 
+    /// The SRTP transforms this catalogue's calls run, in order: the ones it
+    /// named ([`CodecCatalog::with_srtp_suites`]), or this build's own when
+    /// it named none.
+    #[must_use]
+    pub fn srtp_suites_in_force(&self) -> Vec<Suite> {
+        self.srtp_suites.clone().unwrap_or_else(|| {
+            keying::OFFERED
+                .iter()
+                .map(|suite| keying::transform(*suite))
+                .collect()
+        })
+    }
+
     /// The suites an SDES offer from this catalogue names, in order.
     pub(crate) fn sdes_offered(&self) -> Vec<sipral_core::sdp::CryptoSuite> {
         keying::sdes_suites(self.srtp_suites())

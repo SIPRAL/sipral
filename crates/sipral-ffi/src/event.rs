@@ -26,7 +26,6 @@ use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "dtls")]
 use sipral::SrtpSuite;
 use sipral::{AmdReason, AmdVerdict, CallProgress, DigitSource, MediaEvent, ProgressTone};
 use sipral_core::endpoint::Event;
@@ -3069,8 +3068,7 @@ fn recovery_failure(reason: RecoveryFailure) -> SipralRecoveryFailure {
 /// The transform a call is running, on this side of the boundary: every
 /// suite the stack implements has a word of its own (ABI 0.29), and `Unknown`
 /// is left for an event that is not about one.
-#[cfg(feature = "dtls")]
-const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
+pub(crate) const fn suite_of(suite: SrtpSuite) -> crate::media::SipralSrtpSuite {
     use crate::media::SipralSrtpSuite;
     match suite {
         SrtpSuite::AesCm80 => SipralSrtpSuite::AesCm80,

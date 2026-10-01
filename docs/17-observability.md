@@ -260,10 +260,15 @@ again across the C ABI in `crates/sipral-ffi/src/log.rs`:
   runs, and prose lines lose only their credentials. Secrets never appear in
   either mode: `sipral_diag::strip_secrets` takes every `Authorization` and
   `Proxy-Authorization` value (a folded second line included), every
-  `a=crypto` `inline:` key however many one line lists, every `k=` key and
-  every `a=key-mgmt` payload, and the password of any `sip:user:password@`
-  URI, out of each message, by line, so bytes the
-  parser refuses are stripped and written rather than withheld. It is off
+  `a=crypto` `inline:` key however many one line lists, every `k=` key,
+  every `a=key-mgmt` payload and every `a=ice-pwd` (the password every ICE
+  connectivity check is authenticated with; the pseudonymised mode drops it
+  too), and the password of any `sip:user:password@` URI, out of each
+  message, by line, so bytes the parser refuses are stripped and written
+  rather than withheld. A line ends at CRLF, at LF or at a bare CR, as a
+  lenient reader ends one, and white space and control bytes before a field
+  name's colon are not counted, so `Authorization\0:` loses its value like
+  any other; a test sweeps 720 such shapes through every strip. It is off
   by default and nothing but that call turns it on.
 
 The level is set at run time, as often as wanted: `Log::enable`,

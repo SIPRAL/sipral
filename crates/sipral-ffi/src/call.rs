@@ -2304,6 +2304,8 @@ a=recvonly\r\n";
             tls_pin_sha256_len: 0,
             server_naptr: 0,
             reserved: 0,
+            stream_protocol: 0,
+            reserved_35: 0,
         }
     }
 

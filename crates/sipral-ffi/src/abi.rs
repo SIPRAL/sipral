@@ -1002,6 +1002,12 @@ pub const SURFACE: Surface = Surface {
         crate::pin::sipral_account_check_certificate::ABI,
         crate::advertise::sipral_advertised_address::ABI,
         crate::log::sipral_stack_diagnostic_trace::ABI,
+        crate::stack::sipral_stack_srtp_suite_order::ABI,
+        crate::audio::sipral_audio_call_set_gain::ABI,
+        crate::audio::sipral_audio_call_gain::ABI,
+        crate::audio::sipral_audio_call_set_muted::ABI,
+        crate::audio::sipral_audio_call_muted::ABI,
+        crate::audio::sipral_audio_call_level::ABI,
     ],
 };
 
