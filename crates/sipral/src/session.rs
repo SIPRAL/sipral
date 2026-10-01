@@ -1799,11 +1799,16 @@ impl MediaSession {
             self.dialling.is_busy() && self.plan.dtmf.is_some(),
         );
         let samples = if tone { shaped.as_slice() } else { samples };
-        if let Some(error) = self
-            .recorder
-            .as_mut()
-            .and_then(|recorder| recorder.captured(samples).err())
-        {
+        // on hold, whichever end holds, the conversation has nothing of this
+        // end, and neither does its recording: silence, in its place
+        let on_hold = self.direction() != Direction::SendRecv;
+        if let Some(error) = self.recorder.as_mut().and_then(|recorder| {
+            if on_hold {
+                recorder.captured_on_hold(samples.len()).err()
+            } else {
+                recorder.captured(samples).err()
+            }
+        }) {
             self.recording_stopped(error);
         }
         if !self.is_sending() {

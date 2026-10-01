@@ -32,7 +32,8 @@
 //! against the fingerprint the signalling carried. That fingerprint is the
 //! only thing a certificate is checked against; when the signalling carried
 //! several, RFC 8122 §5.1 picks the ones under the most preferred hash —
-//! SHA-256 over SHA-1 — and the certificate has to match one of those.
+//! SHA-512, then SHA-384, SHA-256 and SHA-1 — and the certificate has to
+//! match one of those.
 //!
 //! No renegotiation: RFC 8827 §6.5 has it refused with `no_renegotiation`,
 //! and so it is. No session resumption. No MKI: a server answers a client's
@@ -59,7 +60,9 @@
 //! timer, so a flight that arrives duplicated, or spread over several
 //! datagrams, is answered once and not once per datagram. The end that sends
 //! the last flight, the server, goes on answering a retransmitted last flight
-//! from the client for as long as the connection lives.
+//! from the client for as long as the connection lives, but only once its
+//! Finished, which travels protected, has authenticated: after the handshake
+//! an epoch-0 fragment proves nothing about who sent it.
 //!
 //! # Epochs
 //!
@@ -67,6 +70,17 @@
 //! the only one sent protected: a Finished fragment in epoch 0, or any other
 //! handshake fragment in epoch 1, is discarded before the reassembler sees
 //! it. A Finished can then only come from someone holding the keys.
+//!
+//! Once the peer's Finished is the only message left to come — a client that
+//! has sent flight 5, a server that has verified CertificateVerify — every
+//! epoch-0 handshake fragment numbered at or past it is discarded as well:
+//! nothing the peer could still send there is unprotected, and anyone who can
+//! spoof its address could otherwise end the handshake with a message out of
+//! place, or have one take the Finished's number so that the genuine Finished
+//! is read as a retransmission and the handshake waits until it times out.
+//! A HelloRequest is discarded before reassembly at any point of a
+//! handshake, for the second of those reasons (RFC 5246 §7.4.1.1 has a
+//! client that is negotiating ignore it).
 //!
 //! ChangeCipherSpec itself changes nothing here. The read keys exist from the
 //! moment the master secret does, and an epoch-1 record is opened with them
@@ -138,7 +152,7 @@ use crate::handshake::{
 use crate::keys::{CertifiedKey, EcdsaKey};
 use crate::prf::MasterSecret;
 use crate::record::{self, ContentType, GcmProtection, ProtocolVersion, Record, ReplayWindow};
-use crate::x509::{Certificate, Fingerprint, HashFunction, SubjectPublicKeyInfo};
+use crate::x509::{Certificate, Fingerprint, SubjectPublicKeyInfo};
 use crate::{Error, Random, Role};
 
 use client::Client;
@@ -535,14 +549,13 @@ impl Settings {
     /// preferred hash function (out of those offered by the peer) and verify
     /// that each certificate used matches one fingerprint out of that set".
     fn fingerprint_matches(&self, certificate: &[u8]) -> bool {
-        let preferred = if self
+        let Some(preferred) = self
             .peer_fingerprints
             .iter()
-            .any(|fingerprint| fingerprint.hash() == HashFunction::Sha256)
-        {
-            HashFunction::Sha256
-        } else {
-            HashFunction::Sha1
+            .map(Fingerprint::hash)
+            .max_by_key(|hash| hash.preference())
+        else {
+            return false;
         };
         self.peer_fingerprints
             .iter()
@@ -930,6 +943,16 @@ impl Connection {
         }
     }
 
+    /// Whether the one message left for the peer to send is its Finished: a
+    /// client that has sent flight 5, a server that has verified the
+    /// client's CertificateVerify.
+    fn awaits_finished(&self) -> bool {
+        match &self.handshake {
+            Handshake::Client(client) => client.awaits_finished(),
+            Handshake::Server(server) => server.awaits_finished(),
+        }
+    }
+
     /// Whether this is a server that has accepted no ClientHello yet, and so
     /// reads nothing but one.
     fn is_listening(&self) -> bool {
@@ -1034,12 +1057,32 @@ impl Connection {
                 // alert"; the connection carries on
                 self.core
                     .send_alert(Alert::warning(AlertDescription::NO_RENEGOTIATION));
-            } else if seq < self.core.flight_start {
+            } else if epoch == 1 && seq < self.core.flight_start {
+                // only the client's Finished, which authenticated, says its
+                // last flight is being sent again: an epoch-0 fragment
+                // anyone can forge, and answered it would have this end send
+                // its flight to whoever spoofs the peer for as long as the
+                // connection lives
                 self.core.on_peer_retransmission(now);
             }
             return;
         }
         if epoch != epoch_of(header.msg_type) {
+            return;
+        }
+        // RFC 5246 §7.4.1.1: a client that is negotiating ignores a
+        // HelloRequest, and a server never takes one. Dropped before
+        // reassembly, so that it never takes the `message_seq` of the genuine
+        // message that is due under it
+        if header.msg_type == HandshakeType::HELLO_REQUEST {
+            return;
+        }
+        // RFC 6347 §4.1.2.7: once all that is left is the peer's Finished,
+        // which travels protected, nothing in epoch 0 can be the next message;
+        // one at or past it is forged and would otherwise end the handshake
+        // or take the Finished's place. What comes before it is still read,
+        // as the retransmission it is
+        if epoch == 0 && seq >= self.core.reassembler.next_message_seq() && self.awaits_finished() {
             return;
         }
         match self.core.reassembler.offer(fragment) {

@@ -10,6 +10,7 @@
 
 use zeroize::{Zeroize, Zeroizing};
 
+use super::Suite;
 use super::cipher::{self, Counter};
 
 /// Master and session encryption key length, `n_e` (§5.1), for the suite
@@ -116,12 +117,37 @@ impl Master {
     /// the suite calls for. For SDES that is the base64 payload of an
     /// `inline:` parameter, split at the suite's own key length (RFC 4568
     /// §6.1, RFC 7714 §14.1).
+    ///
+    /// Nothing is checked here, since a master key does not know its suite;
+    /// [`Master::fits`] says whether it is the width a suite calls for, and a
+    /// context made from one that is not refuses every packet with
+    /// [`super::SrtpError::KeyLength`] rather than derive anything from it.
     #[must_use]
     pub fn new(key: &[u8], salt: &[u8]) -> Self {
         Self {
             key: Zeroizing::new(key.to_vec()),
             salt: Zeroizing::new(salt.to_vec()),
         }
+    }
+
+    /// Whether the key and the salt are each exactly the width `suite` calls
+    /// for: sixteen or thirty-two octets of key, fourteen or twelve of salt
+    /// (RFC 3711 §8.2, RFC 6188 §3, RFC 7714 §8.1). A shorter key would be
+    /// padded into an AES key that is mostly zeros, and a longer one cut.
+    #[must_use]
+    pub fn fits(&self, suite: Suite) -> bool {
+        self.fits_lengths(suite.lengths())
+    }
+
+    pub(crate) fn fits_lengths(&self, lengths: Lengths) -> bool {
+        self.key.len() == lengths.key && self.salt.len() == lengths.salt
+    }
+
+    /// Whether `other` is this very key and salt, compared without stopping
+    /// at the first difference.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        super::session::equal(&self.key, &other.key)
+            & super::session::equal(&self.salt, &other.salt)
     }
 
     /// The three SRTP session values for the packet index `index`.

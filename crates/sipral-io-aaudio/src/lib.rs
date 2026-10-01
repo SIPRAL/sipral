@@ -78,7 +78,12 @@ mod bridge;
 mod stream;
 
 #[cfg(target_os = "android")]
+mod priority;
+
+#[cfg(target_os = "android")]
 pub use bridge::JniPlatform;
+#[cfg(target_os = "android")]
+pub use priority::{URGENT_AUDIO, thread_priority, urgent_audio_thread};
 #[cfg(target_os = "android")]
 pub use stream::{Error, Stream, StreamConfig, Usage};
 

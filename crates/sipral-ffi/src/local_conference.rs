@@ -386,14 +386,14 @@ impl CallAudio for Carried {
         _own: CallId,
         frame: &[i16],
         now: Instant,
-        send: &mut dyn FnMut(CallId, Outgoing),
+        send: &mut dyn FnMut(CallId, &Outgoing),
     ) -> Result<(), CallGone> {
         let _inside = crate::media::Inside::enter(self.handle);
         let mut held = lock(&self.shared);
         let _ = held.inner.tick(frame, now);
         while let Some(packet) = held.inner.poll_transmit() {
             let call = held.name_of(Member::Call(packet.call));
-            send(call, outgoing(packet));
+            send(call, &outgoing(packet));
         }
         Ok(())
     }

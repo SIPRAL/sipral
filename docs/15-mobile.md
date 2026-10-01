@@ -821,6 +821,18 @@ on every open. Three things feed it:
 | `CXSetMutedCallAction` | `CallKitBridge.handleMute` | Silence sent in the microphone's place |
 | `providerDidReset` | `CallKitBridge.providerDidReset` | Every call hung up and its device let go: the system's call service no longer knows them |
 
+In device mode the library's engine runs the voice-processing unit, and
+**nothing that ends a call waits for the main thread**: the stack's poll
+thread never opens or tears down a device — the engine opens them on a
+thread of its own and lets them go on its pump's, after the poll that ended
+the call has returned — so the BYE and an un-REGISTER queued from the main
+thread go out while that thread waits, as an application shutting down
+does; the teardown itself, which has been seen to wait for the main thread,
+finishes once it is free (`docs/08-ffi.md`, "The built-in audio engine").
+`AudioDevices.deactivate()` waits for it at most the probe wait. What an
+account reads while its un-REGISTER is unanswered is `.unregistered`
+already; the registrar's answer is the `.registrationChanged` event.
+
 `CallKitAdapter` also sets the session's category to `.playAndRecord` in
 `.voiceChat` mode when CallKit answers, and leaves activating it to the
 system; an application without CallKit builds its device with

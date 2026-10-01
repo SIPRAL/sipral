@@ -18,16 +18,16 @@
 //! platform, and nothing the engine does waits for a tick.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use sipral_io_common::level::{Channel, window_samples};
 use sipral_media::resample::Resampler;
 
-use crate::backend::{CaptureStream, Format, PlaybackStream};
-use crate::call::{CallAudio, CallGone, CallId, Outgoing};
+use crate::backend::{CaptureStream, Format, PlaybackStream, Promote, Scheduling};
+use crate::call::{CallAudio, CallGone, CallId, Transmit};
 use crate::device::Role;
 
 /// One frame's worth of time, which is the tick.
@@ -76,9 +76,10 @@ pub(crate) struct Ring {
 /// hands back, and what the engine keeps while no pump runs.
 pub(crate) type Carried = Vec<(CallId, Box<dyn CallAudio>)>;
 
-/// What a pump's thread returns: the transmit function it was given and the
-/// calls it was still carrying.
-pub(crate) type Finished = (Box<dyn FnMut(CallId, Outgoing) + Send>, Carried);
+/// What a pump's thread hands back when it finishes, before it lets go of
+/// its devices: the transmit function it was given and the calls it was
+/// still carrying.
+pub(crate) type Finished = (Transmit, Carried);
 
 /// One call's own gain, mute and meter, per direction, applied in the
 /// mixer: `up` to what the microphone sends the call, `down` to what the
@@ -185,9 +186,60 @@ pub(crate) struct Report {
     ticks: AtomicU64,
     /// Whether the ring finished by itself.
     ring_done: AtomicBool,
+    /// Frames carried with no device under them while calls were up: the
+    /// silence sent for a microphone that is not open yet, and the far
+    /// end's audio pulled and let go of for a loudspeaker that is not, in
+    /// [`Direction`](crate::Direction)'s order, input first.
+    stand_in: [AtomicU64; 2],
+    /// What the pump's thread got from the scheduler: nothing reported yet,
+    /// then one of [`Scheduling`]'s answers.
+    scheduling: AtomicU8,
+    /// What the loudspeaker running now has played silence for, for want
+    /// of anything queued, as of the last tick.
+    starved: AtomicU64,
 }
 
 impl Report {
+    /// Frames the pump stood in for a device that was not there, while it
+    /// carried calls: `input` for the microphone's, otherwise the
+    /// loudspeaker's.
+    pub(crate) fn stand_in(&self, input: bool) -> u64 {
+        self.stand_in
+            .get(usize::from(!input))
+            .map_or(0, |count| count.load(Ordering::Acquire))
+    }
+
+    fn count_stand_in(&self, input: bool) {
+        if let Some(count) = self.stand_in.get(usize::from(!input)) {
+            count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// What the loudspeaker running now has starved for, as of the last
+    /// tick.
+    pub(crate) fn starved(&self) -> u64 {
+        self.starved.load(Ordering::Acquire)
+    }
+
+    /// What the pump's thread got from the scheduler, once it has asked.
+    pub(crate) fn scheduling(&self) -> Option<Scheduling> {
+        match self.scheduling.load(Ordering::Acquire) {
+            1 => Some(Scheduling::Ordinary),
+            2 => Some(Scheduling::Granted),
+            3 => Some(Scheduling::Refused),
+            _ => None,
+        }
+    }
+
+    fn note_scheduling(&self, answer: Scheduling) {
+        let code = match answer {
+            Scheduling::Ordinary => 1,
+            Scheduling::Granted => 2,
+            Scheduling::Refused => 3,
+        };
+        self.scheduling.store(code, Ordering::Release);
+    }
+
     /// Whether a role's device went, cleared by asking.
     pub(crate) fn take_lost(&self, role: Role) -> bool {
         self.lost
@@ -208,6 +260,35 @@ impl Report {
     /// How many ticks have run.
     pub(crate) fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::Acquire)
+    }
+}
+
+/// Set once, by the thread that has finished letting go of devices; waited
+/// on, a bounded time, by whoever must not open the next ones before then.
+#[derive(Default)]
+pub(crate) struct Done {
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Done {
+    pub(crate) fn set(&self) {
+        *self.done.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        *self.done.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether it was set within `within`.
+    pub(crate) fn wait(&self, within: Duration) -> bool {
+        let done = self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        let (done, _) = self
+            .changed
+            .wait_timeout_while(done, within, |done| !*done)
+            .unwrap_or_else(PoisonError::into_inner);
+        *done
     }
 }
 
@@ -428,7 +509,7 @@ pub(crate) struct Pump {
     ringer: Option<Box<dyn PlaybackStream>>,
     calls: Vec<Call>,
     ringing: Option<Ringing>,
-    transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
+    transmit: Transmit,
     now: Arc<dyn Fn() -> Instant + Send + Sync>,
     device_hz: u32,
     /// The microphone's frame, at its rate.
@@ -439,15 +520,18 @@ pub(crate) struct Pump {
     /// The ring tone's frame.
     ring_frame: Vec<i16>,
     quit: bool,
+    /// How this thread asks for the scheduling class audio runs in.
+    promote: Option<Promote>,
 }
 
 impl Pump {
     pub(crate) fn new(
         commands: Receiver<Command>,
         report: Arc<Report>,
-        transmit: Box<dyn FnMut(CallId, Outgoing) + Send>,
+        transmit: Transmit,
         now: Arc<dyn Fn() -> Instant + Send + Sync>,
         device_hz: u32,
+        promote: Option<Promote>,
     ) -> Self {
         Self {
             commands,
@@ -465,12 +549,30 @@ impl Pump {
             out: Vec::new(),
             ring_frame: Vec::new(),
             quit: false,
+            promote,
         }
     }
 
     /// Run until told to quit, one tick a frame; then hand back the transmit
-    /// function and every call still carried, for the next pump to take up.
-    pub(crate) fn run(mut self) -> Finished {
+    /// function and every call still carried, for the next pump to take up,
+    /// through `finished`; and only after that let go of the devices, and
+    /// say so through `closed`.
+    ///
+    /// The order is the point. Taking a device down can take as long as
+    /// opening one, and on macOS the voice unit's teardown has been seen to
+    /// wait for the process's main thread: whoever stopped this pump has
+    /// what it needs the moment the last tick is over, and is not kept
+    /// waiting on a platform — or on a thread that is itself waiting for the
+    /// call this pump carried to be over.
+    pub(crate) fn run(mut self, finished: &Sender<Finished>, closed: &Done) {
+        // asked from this thread, which is the one it applies to, and held
+        // for as long as the thread runs
+        let held = self.promote.take().map(|ask| ask());
+        self.report.note_scheduling(match held {
+            None => Scheduling::Ordinary,
+            Some(Some(_)) => Scheduling::Granted,
+            Some(None) => Scheduling::Refused,
+        });
         let mut next = Instant::now();
         while !self.quit {
             self.tick();
@@ -484,12 +586,22 @@ impl Pump {
                 next = now;
             }
         }
+        let devices = (
+            self.microphone.take(),
+            self.speaker.take(),
+            self.ringer.take(),
+        );
         let calls = self
             .calls
             .into_iter()
             .map(|call| (call.id, call.audio))
             .collect();
-        (self.transmit, calls)
+        // an engine that stopped waiting is not this thread's concern: the
+        // devices go all the same
+        let _ = finished.send((self.transmit, calls));
+        drop(devices);
+        drop(held);
+        closed.set();
     }
 
     /// One frame's worth of work.
@@ -500,6 +612,8 @@ impl Pump {
         self.capture();
         self.play();
         self.ring();
+        let starved = self.speaker.as_ref().map_or(0, |stream| stream.starved());
+        self.report.starved.store(starved, Ordering::Release);
         self.report.ticks.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -638,9 +752,13 @@ impl Pump {
         loop {
             self.captured.clear();
             self.captured.resize(format.frame_samples, 0);
-            let got = match self.microphone.as_mut() {
-                Some(stream) => stream.read(&mut self.captured),
-                None => true,
+            let got = if let Some(stream) = self.microphone.as_mut() {
+                stream.read(&mut self.captured)
+            } else {
+                if !self.calls.is_empty() {
+                    self.report.count_stand_in(true);
+                }
+                true
             };
             if !got {
                 break;
@@ -745,6 +863,9 @@ impl Pump {
                     i16::try_from(*total).unwrap_or(if *total < 0 { i16::MIN } else { i16::MAX });
             }
             let Some(stream) = self.speaker.as_mut() else {
+                if !self.calls.is_empty() {
+                    self.report.count_stand_in(false);
+                }
                 break;
             };
             if !stream.write(&self.out) {

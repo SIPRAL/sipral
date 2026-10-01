@@ -16,6 +16,15 @@
 //! cnonce "MUST NOT be sent ... if no qop directive has been sent", so an
 //! algorithm that depends on one cannot be used without it.
 //!
+//! Without `qop` there is no client nonce and no counter, and the response
+//! is the RFC 2069 shape: the server's nonce alone is all that varies, so a
+//! server whose nonces repeat gets responses that repeat. That shape is kept
+//! for `MD5` only, the legacy path RFC 3261 §22.4 kept it for, for the
+//! registrars that still challenge that way. A SHA-2 challenge comes from a
+//! server that implements RFC 8760, which follows RFC 7616 in making `qop`
+//! part of every exchange, so one that names no `qop` is not a challenge this
+//! stack answers.
+//!
 //! Nothing here draws a client nonce. The core has no randomness, as it has no
 //! clock; the caller supplies both.
 
@@ -23,7 +32,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use super::md5::md5;
-use super::secret::{Credentials, Secret};
+use super::secret::{Credentials, Secret, wipe};
 use super::sha2::{sha256, sha512_256};
 use crate::msg::{ChallengeRef, HeaderName, Method};
 
@@ -94,6 +103,36 @@ impl DigestAlgorithm {
             Self::Sha512_256 | Self::Sha512_256Sess => hex(&sha512_256(data)),
         }
     }
+
+    /// As [`DigestAlgorithm::hash`], into a buffer that wipes itself: for
+    /// HA1, which answers any challenge in its realm as well as the password
+    /// does, and for what is hashed from it.
+    fn secret_hash(self, data: &[u8]) -> Secret {
+        let mut digest = [0_u8; 32];
+        let len = match self {
+            Self::Md5 | Self::Md5Sess => {
+                let mut raw = md5(data);
+                if let Some(slot) = digest.get_mut(..raw.len()) {
+                    slot.copy_from_slice(&raw);
+                }
+                wipe(&mut raw);
+                16
+            }
+            Self::Sha256 | Self::Sha256Sess | Self::Sha512_256 | Self::Sha512_256Sess => {
+                let mut raw = if matches!(self, Self::Sha256 | Self::Sha256Sess) {
+                    sha256(data)
+                } else {
+                    sha512_256(data)
+                };
+                digest.copy_from_slice(&raw);
+                wipe(&mut raw);
+                32
+            }
+        };
+        let secret = Secret::hex(digest.get(..len).unwrap_or_default());
+        wipe(&mut digest);
+        secret
+    }
 }
 
 impl fmt::Display for DigestAlgorithm {
@@ -142,8 +181,10 @@ impl Challenge {
             None => DigestAlgorithm::Md5,
         };
         let qop_auth = challenge.qop().any(|q| q.eq_ignore_ascii_case(b"auth"));
-        if algorithm.is_session() && !qop_auth {
-            // §22.4 rule 8: no qop, no cnonce, and no cnonce means no -sess
+        // §22.4 rule 8: no qop, no cnonce, and no cnonce means no -sess; and
+        // the RFC 2069 shape a qop-less challenge gets is kept for plain MD5
+        // alone (see the module documentation)
+        if !qop_auth && algorithm != DigestAlgorithm::Md5 {
             return None;
         }
         Some(Self {
@@ -196,18 +237,18 @@ impl Challenge {
             self.realm.as_bytes(),
             credentials.password(),
         ]);
-        // HA1 below is password-equivalent for answering a challenge and is a
-        // `String` that is not wiped. That is a scope decision rather than an
-        // oversight: wiping it needs `hash` to hand back raw bytes with the
-        // hexadecimal done at the edge, which is every caller of `hash`.
+        // HA1 answers any challenge in this realm as well as the password
+        // does, and so does the H(A1) a -sess HA1 is made from: each is hexed
+        // straight into a buffer that wipes itself, and every input built
+        // from one is joined in another
         let ha1 = if algorithm.is_session() {
-            algorithm.hash(&join(&[
-                algorithm.hash(a1.expose()).as_bytes(),
-                self.nonce.as_bytes(),
-                cnonce.as_bytes(),
-            ]))
+            let inner = algorithm.secret_hash(a1.expose());
+            algorithm.secret_hash(
+                Secret::joined(&[inner.expose(), self.nonce.as_bytes(), cnonce.as_bytes()])
+                    .expose(),
+            )
         } else {
-            algorithm.hash(a1.expose())
+            algorithm.secret_hash(a1.expose())
         };
 
         // A2 = method:digest-uri. The other form, with the body hashed in, is
@@ -217,21 +258,23 @@ impl Challenge {
         let ha2 = algorithm.hash(&join(&[method.as_str().as_bytes(), uri]));
 
         let response = if self.qop_auth {
-            algorithm.hash(&join(&[
-                ha1.as_bytes(),
-                self.nonce.as_bytes(),
-                nc.as_bytes(),
-                cnonce.as_bytes(),
-                b"auth",
-                ha2.as_bytes(),
-            ]))
+            algorithm.hash(
+                Secret::joined(&[
+                    ha1.expose(),
+                    self.nonce.as_bytes(),
+                    nc.as_bytes(),
+                    cnonce.as_bytes(),
+                    b"auth",
+                    ha2.as_bytes(),
+                ])
+                .expose(),
+            )
         } else {
-            // the RFC 2069 shape, which SIP keeps for servers that predate qop
-            algorithm.hash(&join(&[
-                ha1.as_bytes(),
-                self.nonce.as_bytes(),
-                ha2.as_bytes(),
-            ]))
+            // the RFC 2069 shape, which SIP keeps for MD5 servers that
+            // predate qop
+            algorithm.hash(
+                Secret::joined(&[ha1.expose(), self.nonce.as_bytes(), ha2.as_bytes()]).expose(),
+            )
         };
 
         let mut out = String::from("Digest ");
@@ -289,7 +332,7 @@ pub(crate) fn hex(digest: &[u8]) -> String {
     out
 }
 
-const fn nibble(value: u8) -> u8 {
+pub(super) const fn nibble(value: u8) -> u8 {
     match value {
         0..=9 => b'0' + value,
         _ => b'a' + value - 10,
@@ -355,6 +398,17 @@ mod tests {
             body.contains(&wiping),
             "A1 holds the password and is built with {wiping}"
         );
+        // HA1 is password-equivalent: hexed into a wiping buffer, and never
+        // read back out as a `String` to be joined in a plain one
+        let hashed = format!("{}{}", "secret_", "hash(");
+        assert!(body.contains(&hashed), "HA1 is made with {hashed}");
+        for leak in [
+            format!("{}{}", "ha1.", "as_bytes()"),
+            format!("{}{}", "algorithm.hash(a1", ".expose())"),
+            format!("{}{}", "&join(&[", "ha1"),
+        ] {
+            assert!(!body.contains(&leak), "HA1 must not pass through {leak}");
+        }
         for grown in [
             format!("{}::{}", "Vec", "new"),
             format!("{}::{}", "Vec", "with_capacity"),
@@ -467,6 +521,47 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             let value = format!("Digest realm=\"example.com\", nonce=\"abc\", algorithm={name}");
             let parsed = ChallengeRef::parse(value.as_bytes()).expect("a challenge");
             assert!(Challenge::read(&parsed, false).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_sha_2_challenge_without_qop_is_not_answered() {
+        // RFC 8760 follows RFC 7616 in making qop part of every exchange; the
+        // RFC 2069 shape, no client nonce and no counter, is MD5's legacy
+        for name in ["SHA-256", "sha-256", "SHA-512-256"] {
+            let bare = format!("Digest realm=\"example.com\", nonce=\"abc\", algorithm={name}");
+            let parsed = ChallengeRef::parse(bare.as_bytes()).expect("a challenge");
+            assert!(Challenge::read(&parsed, false).is_none(), "{name}");
+            let offered = format!("{bare}, qop=\"auth\"");
+            let parsed = ChallengeRef::parse(offered.as_bytes()).expect("a challenge");
+            assert!(Challenge::read(&parsed, false).is_some(), "{name}");
+        }
+        for md5 in [
+            "Digest realm=\"example.com\", nonce=\"abc\"",
+            "Digest realm=\"example.com\", nonce=\"abc\", algorithm=MD5",
+        ] {
+            let parsed = ChallengeRef::parse(md5.as_bytes()).expect("a challenge");
+            assert!(Challenge::read(&parsed, false).is_some(), "{md5}");
+        }
+    }
+
+    #[test]
+    fn the_wiped_digest_is_the_digest() {
+        for algorithm in [
+            DigestAlgorithm::Md5,
+            DigestAlgorithm::Md5Sess,
+            DigestAlgorithm::Sha256,
+            DigestAlgorithm::Sha256Sess,
+            DigestAlgorithm::Sha512_256,
+            DigestAlgorithm::Sha512_256Sess,
+        ] {
+            assert_eq!(
+                algorithm
+                    .secret_hash(b"Mufasa:realm:Circle Of Life")
+                    .expose(),
+                algorithm.hash(b"Mufasa:realm:Circle Of Life").as_bytes(),
+                "{algorithm}"
+            );
         }
     }
 

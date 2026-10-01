@@ -90,6 +90,8 @@ pub mod nat;
 pub mod pin;
 pub mod ports;
 pub mod presence;
+#[cfg(test)]
+mod realtime_tests;
 pub mod realtime_text;
 pub mod record;
 pub mod resolve;

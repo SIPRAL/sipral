@@ -497,7 +497,7 @@ pub(crate) unsafe fn configured(
     let engine = Engine::new(
         platform,
         settings,
-        Box::new(move |call, packet| transmit.send(call, &packet)),
+        Box::new(move |call, packet: &Outgoing| transmit.send(call, packet)),
         Arc::new(move || clock.now()),
     );
     Ok(Some(Arc::new(Mutex::new(engine))))
@@ -1353,6 +1353,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// Poll at `now_ms` until the devices the engine is opening in the
+    /// background are under the calls.
+    fn landed(stack: SipralHandle, now_ms: u64) {
+        let engine = crate::stack::audio_of(stack)
+            .expect("the stack")
+            .expect("device mode has an engine");
+        wait_until("the devices to open", || {
+            poll(stack, now_ms);
+            !engine.lock().unwrap().is_opening()
+        });
+    }
+
     /// One call's own gain, mute and meter, by its handle: set and read back
     /// while the engine carries it, refused before and after, and refused in
     /// application mode.
@@ -1467,6 +1479,105 @@ pub(crate) mod tests {
             SipralStatus::WrongState
         );
         assert!(last_error_text().contains("application mode"));
+    }
+
+    /// An application that hangs up and then holds the thread the
+    /// platform's teardown waits for — on macOS, the voice unit's has been
+    /// seen to wait for the main thread, and an application shutting down
+    /// waits there for its calls to be over — still gets its BYE out: no
+    /// poll waits for the devices to be let go of, so the transmit drain
+    /// that follows each one sends what the hangup queued.
+    #[test]
+    fn a_hangup_leaves_while_the_devices_are_still_being_let_go_of() {
+        use crate::call::sipral_call_hangup;
+        use crate::call::tests::{accepted, deliver, sent, start_line};
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        let (stack, call, _) = device_call(&mut observed, &fake, SipralAudioActivation::Automatic);
+        landed(stack, 2_500);
+        fake.hold_teardown();
+        let releaser = {
+            let fake = fake.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(3));
+                fake.release_teardown();
+            })
+        };
+        let timed_poll = |now_ms: u64| {
+            let started = Instant::now();
+            poll(stack, now_ms);
+            let took = started.elapsed();
+            assert!(
+                took < Duration::from_millis(500),
+                "the poll at {now_ms} waited {took:?} for the devices"
+            );
+        };
+        assert_eq!(
+            unsafe { sipral_call_hangup(stack, call, 3_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        timed_poll(3_000);
+        let out = sent(stack);
+        let bye = out
+            .iter()
+            .find(|message| start_line(message).starts_with("BYE"))
+            .expect("the BYE is queued");
+        deliver(stack, &accepted(bye, b"", false), 3_010);
+        timed_poll(3_010);
+        assert_eq!(info(stack).active, 0, "the devices still run the call");
+        releaser.join().unwrap();
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
+    }
+
+    /// A device that takes a second and a half to open does not hold the
+    /// poll that saw the call's media start: the poll returns at once, asks
+    /// to be called again soon, and the devices are under the call once a
+    /// later poll finds them open.
+    #[test]
+    fn a_slow_device_does_not_hold_the_poll_that_starts_the_call() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        fake.set_open_delay(Some(Duration::from_millis(1_500)));
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = Some(fake.clone()));
+        let packets: Packets = Arc::new(Mutex::new(Vec::new()));
+        let leaked: &'static Packets = Box::leak(Box::new(packets));
+        let started = Instant::now();
+        // the platform's default wait, which a headset opens well within
+        let (stack, _) = media_call_tuned(&mut observed, |config| {
+            config.audio = SipralAudio::Device as u32;
+            config.audio_activation = SipralAudioActivation::Automatic as u32;
+            config.audio_transmit_callback = Some(transmit);
+            config.audio_transmit_user_data = ptr::from_ref(leaked).cast_mut().cast::<c_void>();
+        });
+        let took = started.elapsed();
+        FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
+        assert!(
+            took < Duration::from_millis(800),
+            "bringing the call up waited {took:?} for its devices"
+        );
+        assert_eq!(info(stack).active, 1);
+        assert_eq!(info(stack).speaker, 0, "the loudspeaker answered too soon");
+        let mut result = crate::stack::tests::poll_result();
+        let status = unsafe { crate::stack::sipral_stack_poll(stack, 2_500, &raw mut result) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(result.has_deadline, 1);
+        assert!(
+            result.next_poll_in_ms <= 20,
+            "the poll is not asked back while the devices open: {}",
+            result.next_poll_in_ms
+        );
+        landed(stack, 2_500);
+        assert_ne!(info(stack).speaker, 0);
+        assert_eq!(info(stack).microphone_rate_hz, 48_000);
+        assert_eq!(
+            unsafe { crate::stack::sipral_stack_destroy(stack) },
+            SipralStatus::Ok
+        );
     }
 
     /// An audio call on another thread holds the engine for as long as the
@@ -1787,7 +1898,10 @@ pub(crate) mod tests {
         let fake = a_desk();
         let (stack, call, packets) =
             device_call(&mut observed, &fake, SipralAudioActivation::Automatic);
-        // the call came up with its media, so the engine is active already
+        // the call came up with its media, so the engine is active already,
+        // and its devices are under it once they have answered
+        assert_eq!(info(stack).active, 1);
+        landed(stack, 2_500);
         let now = info(stack);
         assert_eq!(now.active, 1);
         assert_eq!(now.microphone_rate_hz, 48_000);
@@ -1885,6 +1999,7 @@ pub(crate) mod tests {
         fake.unplug("headset");
         std::thread::sleep(Duration::from_millis(60));
         poll(stack, 3_200);
+        landed(stack, 3_200);
         let events = audio_events(&observed);
         assert!(
             events.contains(&(

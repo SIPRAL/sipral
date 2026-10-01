@@ -10,6 +10,14 @@
 //! got to [`Pending::verify`] together with its trust anchors and the time;
 //! or, if it got nothing, calls [`Pending::unavailable`]. Either way the
 //! result is a [`Verdict`].
+//!
+//! What a request's own time says is held to the same window as `iat`: the
+//! Date header field, given with [`Pending::dated`], has to be fresh and
+//! close to `iat` (RFC 8224 §6.2, Step 4). And a verifier that keeps a
+//! [`ReplayCache`] and finishes with [`Pending::verify_once`] refuses a
+//! PASSporT it has already verified inside its window (§12.1).
+
+use std::collections::VecDeque;
 
 use p256::ecdsa::Signature;
 use p256::ecdsa::signature::Verifier as _;
@@ -17,13 +25,17 @@ use p256::ecdsa::signature::Verifier as _;
 use crate::base64;
 use crate::cert::{self, TrustAnchors};
 use crate::identity::{Identity, Token};
-use crate::passport::{ALG, Claims, Header, PPT_SHAKEN, header_value};
-use crate::verdict::{Failure, InfoProblem, Malformed, Verdict, Verified};
+use crate::passport::{ALG, Claims, Dest, Header, PPT_SHAKEN, Tn, header_value};
+use crate::verdict::{Failure, InfoProblem, Malformed, Staleness, Verdict, Verified};
 
 /// How far `iat` may be from the time of verification, in seconds, unless
 /// configured otherwise: the sixty seconds RFC 8224 §6.2 (Step 4)
 /// recommends.
 pub const DEFAULT_FRESHNESS: u64 = 60;
+
+/// The schemes an `info` URI may name unless configured otherwise: `https`
+/// alone.
+pub const DEFAULT_INFO_SCHEMES: &[&str] = &["https"];
 
 /// A verifier's policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +53,16 @@ pub struct Config {
     /// SHAKEN deployment, which turns this on. On, a certificate carrying
     /// any code vouches for every number there is.
     pub accept_service_provider_codes: bool,
+    /// The schemes an `info` URI may name, compared without regard to case
+    /// (RFC 3986 §3.1): [`DEFAULT_INFO_SCHEMES`], `https` alone, by default.
+    ///
+    /// The hook for a deployment whose certificates are reached some other
+    /// way: one that fetches over plain `http` from a repository whose
+    /// content it authenticates by the chain alone, say, adds `"http"`
+    /// here. Anything else is refused with [`InfoProblem::Scheme`] before
+    /// the application is asked to fetch it, so that a request cannot have a
+    /// verifier reach for a `file:`, `ldap:` or `data:` URI of its choosing.
+    pub info_schemes: &'static [&'static str],
 }
 
 impl Default for Config {
@@ -48,6 +70,7 @@ impl Default for Config {
         Config {
             freshness: DEFAULT_FRESHNESS,
             accept_service_provider_codes: false,
+            info_schemes: DEFAULT_INFO_SCHEMES,
         }
     }
 }
@@ -85,6 +108,18 @@ impl Verifier {
     /// needed.
     pub fn start(&self, identity: &str, from_request: Option<&Claims>) -> Result<Pending, Failure> {
         let identity = Identity::parse(identity)?;
+        let scheme = identity
+            .info
+            .split_once(':')
+            .map_or("", |(scheme, _)| scheme);
+        if !self
+            .config
+            .info_schemes
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(scheme))
+        {
+            return Err(Failure::BadInfo(InfoProblem::Scheme));
+        }
         let (signing_input, claims) = match &identity.token {
             Token::Full { header, claims, .. } => full(&identity, header, claims)?,
             Token::Compact { .. } => compact(&identity, from_request)?,
@@ -105,6 +140,7 @@ impl Verifier {
             signing_input,
             signature,
             claims,
+            date: None,
         })
     }
 }
@@ -177,9 +213,22 @@ pub struct Pending {
     signing_input: Vec<u8>,
     signature: Signature,
     claims: Claims,
+    date: Option<u64>,
 }
 
 impl Pending {
+    /// The request's Date header field, in seconds since the Unix epoch:
+    /// held, when [`Pending::verify`] runs, to the freshness window around
+    /// the time of verification, and `iat` to the same window around it
+    /// (RFC 8224 §6.2, Step 4). A full-form PASSporT carries its own `iat`,
+    /// and without this nothing ties it to the time the request says it was
+    /// sent; for a compact form the Date is `iat` already.
+    #[must_use]
+    pub fn dated(mut self, date: u64) -> Self {
+        self.date = Some(date);
+        self
+    }
+
     /// The URI to fetch the signer's certificate chain from: the `info`
     /// parameter.
     #[must_use]
@@ -204,8 +253,9 @@ impl Pending {
     /// anchors, and `now` in seconds since the Unix epoch, which should be
     /// when the request arrived.
     ///
-    /// Freshness is checked first, then the chain, then the signature, then
-    /// the TNAuthList's authority over the originating number.
+    /// Freshness is checked first — `iat`, then the Date given with
+    /// [`Pending::dated`] — then the chain, then the signature, then the
+    /// TNAuthList's authority over the originating number.
     #[must_use]
     pub fn verify(&self, chain: &[u8], anchors: &TrustAnchors, now: u64) -> Verdict {
         match self.check(chain, anchors, now) {
@@ -214,10 +264,66 @@ impl Pending {
         }
     }
 
+    /// As [`Pending::verify`], and then, for a PASSporT that verifies, a
+    /// check against `seen` (RFC 8224 §12.1): one already verified there is
+    /// [`Failure::Stale`] with [`Staleness::Replayed`], and one that is not
+    /// is recorded. Only a PASSporT whose signature verifies is ever
+    /// recorded, so nothing forged takes room in `seen`.
+    #[must_use]
+    pub fn verify_once(
+        &self,
+        chain: &[u8],
+        anchors: &TrustAnchors,
+        now: u64,
+        seen: &mut ReplayCache,
+    ) -> Verdict {
+        match self.check(chain, anchors, now) {
+            Ok(verified) => {
+                let entry = Seen {
+                    orig: self.claims.orig.clone(),
+                    dest: self.claims.dest.clone(),
+                    iat: self.claims.iat,
+                    signature: self.signature.to_bytes().to_vec(),
+                };
+                if seen.admit(entry, now, self.config.freshness) {
+                    Verdict::Valid(verified)
+                } else {
+                    Verdict::Invalid(Failure::Stale {
+                        iat: self.claims.iat,
+                        now,
+                        what: Staleness::Replayed,
+                    })
+                }
+            }
+            Err(failure) => Verdict::Invalid(failure),
+        }
+    }
+
     fn check(&self, chain: &[u8], anchors: &TrustAnchors, now: u64) -> Result<Verified, Failure> {
         let iat = self.claims.iat;
-        if now.abs_diff(iat) > self.config.freshness {
-            return Err(Failure::Stale { iat, now });
+        let window = self.config.freshness;
+        if now.abs_diff(iat) > window {
+            return Err(Failure::Stale {
+                iat,
+                now,
+                what: Staleness::Iat,
+            });
+        }
+        if let Some(date) = self.date {
+            if now.abs_diff(date) > window {
+                return Err(Failure::Stale {
+                    iat,
+                    now,
+                    what: Staleness::Date { date },
+                });
+            }
+            if iat.abs_diff(date) > window {
+                return Err(Failure::Stale {
+                    iat,
+                    now,
+                    what: Staleness::DateMismatch { date },
+                });
+            }
         }
         let leaf = cert::validate(chain, anchors, now)?;
         leaf.key
@@ -238,5 +344,80 @@ impl Pending {
             x5u: self.x5u.clone(),
             coverage,
         })
+    }
+}
+
+/// The PASSporTs a verifier has found valid recently, so that one presented
+/// again inside its freshness window is refused as a replay (RFC 8224
+/// §12.1): see [`Pending::verify_once`].
+///
+/// Optional, and the application's to keep, one per verifier: a request is
+/// verified in two steps with a fetch between them, so the state cannot live
+/// in a [`Verifier`] that is made afresh for each. Bounded twice over: an
+/// entry goes once its `iat` has left the window, after which the PASSporT
+/// is refused as stale anyway, and when `capacity` entries are still inside
+/// it the oldest goes to make room. Only verified PASSporTs are recorded, so
+/// only a signer this verifier trusts can fill it, and it would have to sign
+/// `capacity` calls inside one window to push a recorded one out early.
+#[derive(Debug, Clone)]
+pub struct ReplayCache {
+    capacity: usize,
+    seen: VecDeque<Seen>,
+}
+
+/// What identifies one PASSporT to [`ReplayCache`]: `orig`, `dest`, `iat`
+/// and the signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seen {
+    orig: Tn,
+    dest: Dest,
+    iat: u64,
+    signature: Vec<u8>,
+}
+
+impl ReplayCache {
+    /// How many PASSporTs [`ReplayCache::default`] remembers.
+    pub const DEFAULT_CAPACITY: usize = 1024;
+
+    /// A cache remembering at most `capacity` PASSporTs, at least one.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        ReplayCache {
+            capacity: capacity.max(1),
+            seen: VecDeque::new(),
+        }
+    }
+
+    /// How many PASSporTs it holds now.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether it holds none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Record `entry` and say so, or say it was already there. What has left
+    /// the window around `now` is dropped first.
+    fn admit(&mut self, entry: Seen, now: u64, window: u64) -> bool {
+        self.seen
+            .retain(|seen| seen.iat.saturating_add(window) >= now);
+        if self.seen.contains(&entry) {
+            return false;
+        }
+        if self.seen.len() >= self.capacity {
+            self.seen.pop_front();
+        }
+        self.seen.push_back(entry);
+        true
+    }
+}
+
+impl Default for ReplayCache {
+    fn default() -> Self {
+        ReplayCache::new(Self::DEFAULT_CAPACITY)
     }
 }

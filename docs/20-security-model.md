@@ -255,6 +255,24 @@ counted from the moment an INVITE is let in, not from the dialog it eventually
 makes), past which a stranger's request is answered 503 statelessly — refusing
 costs nothing more than the response itself (`docs/03-core-signalling.md`).
 
+**What a STIR verifier holds a request to.** `crates/sipral-stir` checks a
+PASSporT's `iat` against a freshness window, sixty seconds by default (RFC
+8224 §6.2 Step 4), and the request's own Date header field against the same
+window and against `iat` (`Pending::dated`): a full-form PASSporT carries its
+own time, and without the Date nothing tied it to the request it arrived in.
+The agent hands the Date over on every INVITE it verifies. Inside the window a
+replayed request still verifies unless the verifier remembers what it has
+verified; `ReplayCache` and `Pending::verify_once` are that memory, keyed by
+`orig`, `dest`, `iat` and the signature and bounded both by the window and by
+a capacity, and refuse a second presentation as `Staleness::Replayed` (§12.1).
+It is the application's to keep, since verification is two steps with a fetch
+between them; the agent does not keep one yet. The certificate URI in `info`
+is only ever handed to the application to fetch when its scheme is `https`,
+unless `Config::info_schemes` names others, so a request cannot point a
+verifier at a `file:` or `ldap:` URI of its choosing. A number's canonical
+form beyond stripping (§8.3's conversion of a national number) is the
+deployment's dialling plan, given to `Tn::canonical_with`.
+
 ## The keys
 
 **Where an SRTP key comes from.** `MediaEngine::new` takes a 32-byte media
@@ -345,6 +363,26 @@ master key is still one key management event per master key (`Master::new`
 under one salt, never reused across a re-key), which is what keeps a fresh
 nonce space on every re-key rather than continuing an old one.
 
+**What an SRTP context refuses rather than trust its caller with.** The
+index and the key are the two things a nonce or a keystream is made of, and
+`crates/sipral-rtp/src/srtp/session.rs` holds both itself. A `Protector`
+refuses a sequence number that does not move the packet index forward — the
+one sent last again, or one behind it — with `SrtpError::IndexNotAdvancing`
+rather than count it as a rollover or encrypt under an index already spent
+(RFC 3711 §9.1); a refused packet moves nothing. A context made from a master
+key or salt that is not the width its suite calls for derives nothing and
+refuses every packet with `SrtpError::KeyLength`, where a short key used to
+become an AES key that was mostly zeros (`Master::fits` says so up front).
+`Security::rekey_local` and `rekey_remote` handed the key already in use as a
+new one keep every index and every replay list, as new terms do (§3.4 never
+resets the SRTCP index under one key). A source that gives way in the
+eight-source table leaves its highest index behind, so a recording of it is
+still refused when it is heard from again, and with a key derivation rate a
+packet's derivation replaces the cached session keys only once its tag has
+verified. The session keys, the authentication key and the HMAC pads are held
+in buffers that wipe themselves, and the GCM key is wiped from the buffer it
+is staged in.
+
 **The push token stays off every request but `REGISTER`.** RFC 8599 §4.1's own
 requirement. `Account::contact_value` (`crates/sipral-ua/src/account.rs`)
 builds a `Contact` with no push parameters at all and is what every in-dialog
@@ -366,6 +404,17 @@ the challenge a response would answer. That is a correct absence for what this
 crate is, not an oversight, but it has a real consequence stated in the
 tree's own words: "This stack answers challenges and issues none, so it has
 no authenticated peer to compare" (`crates/sipral-ua/src/transfer.rs`).
+
+**What it answers with.** A challenge with no `qop` gets the RFC 2069 shape,
+no client nonce and no counter, so the response varies only with the server's
+nonce. That shape is answered for plain `MD5` alone, the legacy RFC 3261
+§22.4 kept it for; a SHA-2 challenge without `qop` comes from a server that
+claims RFC 8760, which follows RFC 7616 in putting `qop` in every exchange,
+and is ignored as a challenge this stack does not understand (§2.4). The
+password, `A1`, `HA1` (which answers any challenge in its realm as well as
+the password does) and everything hashed from `HA1` are built in buffers that
+are overwritten on drop, best effort as `Secret` says, since this crate has
+neither `unsafe` nor a dependency to do better.
 
 **REFER.** `on_refer` (`crates/sipral-ua/src/transfer.rs`) requires a REFER to
 match an existing dialog and to carry exactly one `Refer-To`; it does not, and
@@ -482,6 +531,17 @@ this end directly rather than through the line's own proxy.
   the commercial licence still waits on. Until there is one, the honest
   statement is that this protocol is written from the RFCs, tested against
   itself and attacked by its own project — not by anyone independent of it.
+
+  A second internal review, of what the handshake still reads after the key
+  exchange, found that unprotected handshake fragments were read until the
+  last message arrived: one forged datagram could end a handshake, or take the
+  number of the peer's Finished so that the genuine one was discarded and the
+  handshake timed out. Once the peer's Finished is all that is left, an
+  epoch-0 fragment at or past its number is now discarded, a HelloRequest
+  never takes a number at all, and a finished server sends its last flight
+  again only for a retransmission whose Finished authenticates. Fingerprints
+  under SHA-384 and SHA-512 are read, and the longest hash the peer offered is
+  the one its certificate is checked under (RFC 8122 §5.1).
 
   One limit is known and is a property of the design rather than of the code.
   A DTLS connection ends on any fatal alert, and an alert arriving before the

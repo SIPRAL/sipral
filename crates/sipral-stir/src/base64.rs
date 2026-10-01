@@ -11,6 +11,8 @@
 //! allows a decoder to reject non-zero pad bits, and a signature check over a
 //! token that has several spellings is a check an attacker can play with.
 
+use zeroize::Zeroizing;
+
 /// The URL- and filename-safe alphabet of RFC 4648 §5.
 const URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -99,7 +101,9 @@ fn decode(input: &[u8], value: fn(u8) -> Option<u8>) -> Result<Vec<u8>, Invalid>
     if input.len() % 4 == 1 {
         return Err(Invalid);
     }
-    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 2);
+    // wiped if the input turns out not to be base64 part way through: what is
+    // decoded may be a private key
+    let mut out = Zeroizing::new(Vec::with_capacity(input.len() / 4 * 3 + 2));
     for chunk in input.chunks(4) {
         let mut word = 0u32;
         for &symbol in chunk {
@@ -129,7 +133,8 @@ fn decode(input: &[u8], value: fn(u8) -> Option<u8>) -> Result<Vec<u8>, Invalid>
             out.push(b2);
         }
     }
-    Ok(out)
+    // the buffer itself moves out; nothing is copied
+    Ok(core::mem::take(&mut *out))
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::backend::BackendError;
+use crate::backend::{BackendError, Scheduling};
 use crate::device::{Change, DeviceHandle, Direction, Origin, Role, SelectError, Selection};
 use crate::engine::{Activation, Config, Engine};
 use crate::fake::{FakeCallControl, FakeControl};
@@ -33,7 +33,7 @@ fn engine_with(activation: Activation, fake: &FakeControl) -> (Engine, Sent) {
             device_rate_hz: RATE,
             system_echo_cancellation: true,
         },
-        Box::new(move |id, packet| recorded.lock().unwrap().push((id, packet))),
+        Box::new(move |id, packet: &Outgoing| recorded.lock().unwrap().push((id, packet.clone()))),
         Arc::new(Instant::now),
     );
     (engine, sent)
@@ -82,6 +82,18 @@ fn wait_ticks(engine: &Engine, ticks: u64) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Service the engine, and put to work whatever that opened in the
+/// background.
+fn serviced(engine: &mut Engine) {
+    engine.service();
+    assert!(engine.finish_opening(), "the devices never answered");
+}
+
+/// Wait for the devices a call's attach opened in the background.
+fn opened(engine: &mut Engine) {
+    assert!(engine.finish_opening(), "the devices never answered");
 }
 
 // -- the list ---------------------------------------------------------------
@@ -257,7 +269,7 @@ fn a_selection_is_the_engines_change_and_the_default_moving_is_the_systems() {
     fake.make_default("dock", Direction::Output);
     fake.make_default("dock", Direction::Input);
     let opens_before = fake.opens();
-    engine.service();
+    serviced(&mut engine);
     let changes: Vec<_> = {
         let mut all = Vec::new();
         while let Some(event) = engine.poll_event() {
@@ -602,7 +614,7 @@ fn a_lost_device_is_reopened_on_the_system_route_and_reclaimed_when_it_returns()
 
     fake.unplug("headset");
     wait_ticks(&engine, 2);
-    engine.service();
+    serviced(&mut engine);
     let events: Vec<_> = std::iter::from_fn(|| engine.poll_event()).collect();
     let lost = events
         .iter()
@@ -624,7 +636,7 @@ fn a_lost_device_is_reopened_on_the_system_route_and_reclaimed_when_it_returns()
     );
 
     fake.plug("headset", "USB Headset", 1, 2);
-    engine.service();
+    serviced(&mut engine);
     assert_eq!(
         engine.running_on(Role::Speaker),
         Some(headset),
@@ -679,6 +691,7 @@ fn the_microphone_reaches_every_call_at_its_own_rate_and_the_packets_go_out() {
     let wide = FakeCallControl::new(16_000, 0, destination());
     engine.attach(1, narrow.call()).unwrap();
     engine.attach(2, wide.call()).unwrap();
+    opened(&mut engine);
     wait_ticks(&engine, 1);
     for _ in 0..10 {
         fake.speak_into("builtin-mic", &[3_000; 960]);
@@ -743,12 +756,12 @@ fn an_entry_that_carries_several_calls_names_each_packet_after_its_own() {
             _own: CallId,
             frame: &[i16],
             _now: Instant,
-            send: &mut dyn FnMut(CallId, Outgoing),
+            send: &mut dyn FnMut(CallId, &Outgoing),
         ) -> Result<(), crate::CallGone> {
             for member in [11, 12] {
                 send(
                     member,
-                    Outgoing {
+                    &Outgoing {
                         destination: destination(),
                         payload: vec![u8::try_from(frame.len() / 16).unwrap_or(0)],
                         transport: crate::Transport::Udp,
@@ -792,6 +805,7 @@ fn every_call_is_heard_on_the_speaker_at_once() {
     let two = FakeCallControl::new(48_000, 2_000, destination());
     engine.attach(1, one.call()).unwrap();
     engine.attach(2, two.call()).unwrap();
+    opened(&mut engine);
     wait_ticks(&engine, 6);
     let played = fake.played_by("builtin-out");
     assert!(played.len() >= 960 * 4);
@@ -812,6 +826,7 @@ fn the_level_meter_reads_per_direction() {
     assert_eq!(engine.level(Direction::Input).peak(), 0);
     let call = FakeCallControl::new(8_000, 9_000, destination());
     engine.attach(1, call.call()).unwrap();
+    opened(&mut engine);
     // the resampler overshoots the step from silence to the call's
     // constant, and the meter holds a peak for up to two windows of five
     // frames: wait until the step has left both
@@ -853,6 +868,7 @@ fn a_call_is_told_the_render_delay_of_the_devices_it_is_on() {
     let call = FakeCallControl::new(8_000, 0, destination());
     assert_eq!(call.render_delay(), None);
     engine.attach(1, call.call()).unwrap();
+    opened(&mut engine);
     wait_ticks(&engine, 2);
     assert_eq!(
         call.render_delay(),
@@ -928,6 +944,7 @@ fn one_calls_mute_gain_and_meter_are_its_own() {
     let open = FakeCallControl::new(8_000, 2_000, destination());
     engine.attach(1, muted.call()).unwrap();
     engine.attach(2, open.call()).unwrap();
+    opened(&mut engine);
     assert!(engine.set_call_muted(1, Direction::Input, true));
     assert!(engine.set_call_gain(2, Direction::Output, Gain::from_ratio(0.5)));
     assert_eq!(engine.call_muted(1, Direction::Input), Some(true));
@@ -1111,7 +1128,7 @@ fn a_duplex_platform_puts_the_microphone_on_a_device_of_its_own() {
     // the webcam goes and comes back: the microphone follows it home
     fake.unplug("webcam");
     for _ in 0..3 {
-        engine.service();
+        serviced(&mut engine);
         std::thread::sleep(Duration::from_millis(30));
     }
     assert_eq!(
@@ -1119,7 +1136,7 @@ fn a_duplex_platform_puts_the_microphone_on_a_device_of_its_own() {
         Some(handle_of(&engine, "builtin-mic"))
     );
     fake.plug("webcam", "Webcam", 2, 0);
-    engine.service();
+    serviced(&mut engine);
     assert_eq!(engine.running_on(Role::Microphone), Some(webcam));
     assert_eq!(fake.units_at_most(), 1);
     engine.deactivate();
@@ -1296,6 +1313,7 @@ fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
         Box::new(|_, _| {}),
         Arc::new(Instant::now),
         RATE,
+        None,
     );
     let state = Arc::new(Mutex::new(SliceState::default()));
     let speaker = SliceSpeaker {
@@ -1351,4 +1369,264 @@ fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
         idle_ticks <= 2,
         "the call was pulled in bursts: {idle_ticks} of {steady_ticks} ticks pulled nothing"
     );
+}
+
+// -- nothing the stack's poll does waits on a device -------------------------
+
+/// How long a USB headset under the voice unit was seen to take to open.
+const SLOW_OPEN: Duration = Duration::from_millis(1_500);
+
+/// The stack attaches a call from the poll that saw its media start. A
+/// device that takes a second and a half to open does not hold that poll:
+/// the attach returns at once, the pump carries the call on no device in
+/// the meantime — silence out, the far end's audio pulled at its own pace
+/// and let go of, each frame counted — and the next service after the
+/// device answers puts it under the call.
+#[test]
+fn an_attach_returns_at_once_and_the_call_is_carried_while_the_devices_open() {
+    let fake = a_desk();
+    let (mut engine, sent) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    fake.set_open_delay(Some(SLOW_OPEN));
+    let call = FakeCallControl::new(8_000, 1_000, destination());
+    let started = Instant::now();
+    engine.attach(1, call.call()).unwrap();
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(200),
+        "the attach waited {took:?}"
+    );
+    assert!(engine.is_active());
+    assert!(engine.is_opening());
+
+    wait_ticks(&engine, 10);
+    let started = Instant::now();
+    engine.service();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "a service waited for the open"
+    );
+    assert_eq!(engine.running_on(Role::Speaker), None, "landed too soon");
+    assert!(
+        call.pulls() >= 8,
+        "the far end's audio was not drained while the loudspeaker opened: {} pulls",
+        call.pulls()
+    );
+    assert!(engine.frames_without_device(Direction::Output) >= 8);
+    assert!(engine.frames_without_device(Direction::Input) >= 8);
+    assert!(
+        sent.lock().unwrap().len() >= 8,
+        "the far end heard nothing, not even silence"
+    );
+
+    let started = Instant::now();
+    while engine.running_on(Role::Speaker).is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the devices never landed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        engine.service();
+    }
+    assert!(!engine.is_opening());
+    assert_eq!(
+        engine.running_on(Role::Speaker),
+        Some(handle_of(&engine, "builtin-out"))
+    );
+    assert_eq!(
+        engine.running_on(Role::Microphone),
+        Some(handle_of(&engine, "builtin-mic"))
+    );
+    let changes = drain(&mut engine);
+    assert!(
+        changes.contains(&Change::Reopened(Role::Speaker)),
+        "{changes:?}"
+    );
+    assert!(
+        changes.contains(&Change::Reopened(Role::Microphone)),
+        "{changes:?}"
+    );
+    // a tick already under way when the loudspeaker landed still stood in
+    wait_ticks(&engine, 2);
+    let without = engine.frames_without_device(Direction::Output);
+    wait_ticks(&engine, 5);
+    assert_eq!(
+        engine.frames_without_device(Direction::Output),
+        without,
+        "still standing in for a loudspeaker that is open"
+    );
+    assert!(!fake.played_by("builtin-out").is_empty());
+}
+
+/// A device lost under a call is reopened in the background too: the
+/// service that heard of the loss returns without waiting for the
+/// fallback to open, and a later one puts it to work.
+#[test]
+fn a_device_lost_is_reopened_without_holding_the_service() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    engine.activate().unwrap();
+    wait_ticks(&engine, 2);
+    fake.set_open_delay(Some(SLOW_OPEN));
+    fake.unplug("headset");
+    wait_ticks(&engine, 2);
+    let started = Instant::now();
+    engine.service();
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(500),
+        "the service waited {took:?}"
+    );
+    assert!(engine.is_opening());
+    let started = Instant::now();
+    while engine.is_opening() {
+        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        std::thread::sleep(Duration::from_millis(20));
+        engine.service();
+    }
+    assert_eq!(
+        engine.running_on(Role::Speaker),
+        Some(handle_of(&engine, "builtin-out"))
+    );
+}
+
+/// Stopping the pump — the last call's media ending, from the stack's own
+/// poll — does not wait for the devices to be let go of: a platform whose
+/// teardown waits on another thread, as the voice unit's on macOS has been
+/// seen to wait on the main one, finishes on the pump's thread, after.
+#[test]
+fn a_detach_does_not_wait_for_the_devices_to_be_let_go_of() {
+    let fake = a_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let call = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, call.call()).unwrap();
+    opened(&mut engine);
+    wait_ticks(&engine, 2);
+    let before = fake.teardowns();
+    fake.hold_teardown();
+    // what releases it, as the thread the teardown waits for would once it
+    // is free; an engine that waited would be held until then
+    let releaser = {
+        let fake = fake.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            fake.release_teardown();
+        })
+    };
+    let started = Instant::now();
+    engine.detach(1);
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(500),
+        "the detach waited {took:?}"
+    );
+    assert!(!engine.is_active());
+    assert!(engine.is_closing(), "the devices were let go of already");
+    assert_eq!(fake.teardowns(), before);
+    releaser.join().unwrap();
+    let started = Instant::now();
+    while engine.is_closing() {
+        assert!(started.elapsed() < Duration::from_secs(5), "never closed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(fake.teardowns(), before + 2);
+}
+
+/// The next call's devices are not opened beside the last call's while
+/// those are still being let go of: the platform's one voice unit is free
+/// before the next is asked for.
+#[test]
+fn the_next_call_waits_for_the_last_ones_unit_to_be_gone() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let first = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, first.call()).unwrap();
+    opened(&mut engine);
+    fake.hold_teardown();
+    engine.detach(1);
+    let second = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(2, second.call()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    engine.service();
+    assert_eq!(fake.units_opened(), 1, "opened beside the unit still going");
+    fake.release_teardown();
+    opened(&mut engine);
+    assert_eq!(fake.units_opened(), 2);
+    assert_eq!(fake.units_at_most(), 1);
+    assert!(engine.running_on(Role::Speaker).is_some());
+}
+
+/// The pump's thread asks the platform for the scheduling class audio runs
+/// in, from itself, before its first tick, and the engine says what it got.
+#[test]
+fn the_pump_asks_for_the_audio_scheduling_class_from_its_own_thread() {
+    for (granted, answer) in [
+        (Some(true), Scheduling::Granted),
+        (Some(false), Scheduling::Refused),
+        (None, Scheduling::Ordinary),
+    ] {
+        let fake = a_desk();
+        fake.set_scheduling(granted);
+        let (mut engine, _) = engine_with(Activation::Manual, &fake);
+        assert_eq!(engine.pump_scheduling(), None, "no pump yet");
+        engine.activate().unwrap();
+        wait_ticks(&engine, 1);
+        assert_eq!(engine.pump_scheduling(), Some(answer));
+        let asked = fake.scheduled();
+        if granted.is_some() {
+            assert_eq!(asked, vec!["sipral-audio".to_owned()]);
+        } else {
+            assert!(asked.is_empty());
+        }
+        engine.deactivate();
+        assert_eq!(engine.pump_scheduling(), None);
+    }
+}
+
+/// Teardowns held by the fake let go when this does, however a test ends.
+struct Release(FakeControl);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release_teardown();
+    }
+}
+
+/// A call that ends before its devices have answered leaves the open to
+/// let go of them on its own thread, and the next call's open waits for
+/// that too: the platform's one voice unit is not opened beside one an
+/// abandoned open is still letting go of.
+#[test]
+fn the_next_call_waits_for_an_open_the_last_one_abandoned() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    fake.set_open_delay(Some(Duration::from_millis(50)));
+    // let go however the test ends, so that a failing one does not hang
+    let release = Release(fake.clone());
+    fake.hold_teardown();
+    let first = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, first.call()).unwrap();
+    engine.detach(1);
+    // the abandoned open has opened its unit and is held letting it go
+    let started = Instant::now();
+    while fake.units_opened() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never opened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let second = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(2, second.call()).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(fake.units_opened(), 1, "opened beside the unit still going");
+    drop(release);
+    opened(&mut engine);
+    assert_eq!(fake.units_opened(), 2);
+    assert_eq!(fake.units_at_most(), 1);
 }

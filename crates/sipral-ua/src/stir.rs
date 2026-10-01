@@ -405,9 +405,11 @@ impl UserAgent {
             freshness: config.map_or(sipral_stir::DEFAULT_FRESHNESS, |config| config.freshness),
             accept_service_provider_codes: config
                 .is_some_and(|config| config.accept_service_provider_codes),
+            ..Config::default()
         });
         let raw = held.request.as_raw();
         let unix = self.unix_at(now).unwrap_or(0);
+        let date = raw.header(HeaderName::Date).and_then(date_of);
         let rebuilt = held
             .numbers
             .orig
@@ -416,10 +418,7 @@ impl UserAgent {
             .map(|(orig, dest)| Claims {
                 orig,
                 dest,
-                iat: raw
-                    .header(HeaderName::Date)
-                    .and_then(date_of)
-                    .unwrap_or(unix),
+                iat: date.unwrap_or(unix),
                 shaken: None,
             });
         let mut seen = false;
@@ -429,7 +428,14 @@ impl UserAgent {
             seen = true;
             let text = std::str::from_utf8(value).unwrap_or("");
             match verifier.start(text.trim(), rebuilt.as_ref()) {
-                Ok(pending) => return Gate::Wait(Box::new(pending)),
+                // RFC 8224 §6.2 Step 4: the request's Date is held to the
+                // freshness window as `iat` is, and `iat` to it
+                Ok(pending) => {
+                    return Gate::Wait(Box::new(match date {
+                        Some(date) => pending.dated(date),
+                        None => pending,
+                    }));
+                }
                 Err(Failure::UnsupportedPpt) => unsupported = true,
                 Err(failure) => {
                     first.get_or_insert(failure);

@@ -162,8 +162,16 @@ const CLOCK_SLACK_MS: u64 = 50;
 
 /// How soon a poll that found the audio engine held by another thread asks
 /// to be called again, so that the engine's news waits one short beat
-/// rather than until whatever the stack's own next deadline is.
+/// rather than until whatever the stack's own next deadline is. The same
+/// while the engine is opening devices in the background, so that they are
+/// put under the call as soon as they answer.
 const AUDIO_BUSY_RETRY: Duration = Duration::from_millis(20);
+
+/// A call the audio engine is to take up, with its session, or let go of.
+enum AudioOp {
+    Attach(SipralHandle, sipral::SessionShare),
+    Detach(SipralHandle),
+}
 
 codes! {
     /// What a stack speaks. Names for `sipral_stack_config_t::transport`.
@@ -1204,6 +1212,10 @@ pub(crate) struct StackState {
     /// with the stack's entry so that the `sipral_audio_*` entry points
     /// reach it without this state's lock.
     pub(crate) audio: Option<crate::audio::Shared>,
+    /// Calls the audio engine is to take up or let go of, in the order their
+    /// media started and ended, waiting for a poll that finds the engine
+    /// free: a poll does not wait for an engine another thread holds.
+    audio_backlog: Vec<AudioOp>,
     /// The caller's clock as the engine's pump reads it: what
     /// `StackState::advance` writes on every poll.
     clock: Arc<crate::audio::Clock>,
@@ -1895,6 +1907,7 @@ pub(crate) unsafe fn create_on(
         #[cfg(feature = "stun")]
         nat: crate::nat::Nat::default(),
         audio: audio.clone(),
+        audio_backlog: Vec::new(),
         clock,
         #[cfg(feature = "stir")]
         media_clock: config.media_clock_unix_seconds != 0,
@@ -2318,13 +2331,18 @@ fn run(
         });
     }
     // the audio engine's own news: a device gone, a default moved, a role
-    // reopened. Its lock is only tried, after the engine's events above have
-    // been translated: a `sipral_audio_*` call on another thread holds it for
-    // as long as the platform takes to answer about its devices — up to
-    // `audio_probe_ms` — and a poll that waited for it would hold this
-    // stack's lock all that while, turning every signalling call on every
-    // other thread into SIPRAL_STATUS_BUSY. A busy engine is serviced by the
-    // next poll, which is asked for soon.
+    // reopened; and the calls whose media started or ended in this poll,
+    // taken up or let go of. Its lock is only tried, after the engine's
+    // events above have been translated: a `sipral_audio_*` call on another
+    // thread holds it for as long as the platform takes to answer about its
+    // devices — up to `audio_probe_ms` — and a poll that waited for it would
+    // hold this stack's lock all that while, turning every signalling call
+    // on every other thread into SIPRAL_STATUS_BUSY. A busy engine is
+    // serviced by the next poll, which is asked for soon. Nothing the engine
+    // does here waits on a device either: it opens them in the background
+    // and lets them go on its pump's thread, so that a BYE this poll queued
+    // leaves with the next transmit drain rather than after the voice unit
+    // is down, which on macOS has been seen to wait for the main thread.
     let mut audio_busy = false;
     if let Some(audio) = state.audio.clone() {
         let held = match audio.try_lock() {
@@ -2333,6 +2351,18 @@ fn run(
             Err(TryLockError::WouldBlock) => None,
         };
         if let Some(mut engine) = held {
+            for op in std::mem::take(&mut state.audio_backlog) {
+                match op {
+                    AudioOp::Attach(handle, share) => {
+                        let _ = engine.attach(handle, Box::new(share));
+                    }
+                    AudioOp::Detach(handle) => {
+                        engine.detach(handle);
+                        // its own gain, mute and meter go with it
+                        engine.forget_call(handle);
+                    }
+                }
+            }
             engine.service();
             while let Some(event) = engine.poll_event() {
                 raised.push(Delivery::bare(crate::event::audio_changed(
@@ -2340,6 +2370,7 @@ fn run(
                     crate::audio::event_of(event),
                 )));
             }
+            audio_busy = engine.is_opening();
         } else {
             audio_busy = true;
         }
@@ -2438,26 +2469,20 @@ fn drain(
             }
             Event::Media { call, event } => {
                 // in device mode a call's session is the engine's to pump
-                // from the moment its media starts to the moment it ends
-                if let Some(audio) = state.audio.clone() {
+                // from the moment its media starts to the moment it ends:
+                // handed over once this poll reaches the engine, below
+                if state.audio.is_some() {
                     match event {
                         MediaEvent::Started { .. } => {
                             if let (Some(share), Ok(handle)) =
                                 (state.engine.share(call), state.calls.name_of(call))
                             {
-                                let _ = audio
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .attach(handle, Box::new(share));
+                                state.audio_backlog.push(AudioOp::Attach(handle, share));
                             }
                         }
                         MediaEvent::Ended(_) => {
                             if let Ok(handle) = state.calls.name_of(call) {
-                                let mut engine =
-                                    audio.lock().unwrap_or_else(PoisonError::into_inner);
-                                engine.detach(handle);
-                                // its own gain, mute and meter go with it
-                                engine.forget_call(handle);
+                                state.audio_backlog.push(AudioOp::Detach(handle));
                             }
                         }
                         _ => {}

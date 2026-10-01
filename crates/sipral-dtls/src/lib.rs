@@ -47,7 +47,7 @@
 //!
 //! # What is not written here at all
 //!
-//! The primitives. P-256 (ECDH and ECDSA), AES-GCM, SHA-256 and HMAC are the
+//! The primitives. P-256 (ECDH and ECDSA), AES-GCM, SHA-2 and HMAC are the
 //! RustCrypto crates: constant-time elliptic curve arithmetic is the place
 //! where an implementation of one's own is a liability rather than a virtue.
 //! What is written here is the protocol around them.

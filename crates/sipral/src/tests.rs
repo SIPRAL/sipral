@@ -3902,6 +3902,108 @@ fn a_recording_takes_both_directions_of_a_live_call() {
     );
 }
 
+/// What a recording keeps of this end is what the far end heard of it:
+/// silence while the microphone is muted — the engine hands the call frames
+/// of silence then — and silence while the call is on hold, whichever end
+/// holds it, however loud the microphone; and every one of those frames is
+/// in the file, in its place, so the conversation stays on the call's own
+/// timeline.
+#[test]
+fn a_recording_keeps_silence_for_this_end_while_muted_and_on_hold() {
+    const FRAMES: usize = 10;
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let file = Buffer::new();
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .start_recording_with(
+            Box::new(file.clone()),
+            &crate::RecordingOptions {
+                layout: crate::RecordingLayout::Stereo,
+                ..crate::RecordingOptions::default()
+            },
+        )
+        .expect("the recording starts");
+    let loud = vec![8_000_i16; 160];
+    let muted = vec![0_i16; 160];
+    // ten frames of this end's microphone, and the earpiece's frame beside
+    // each, as the engine's pump runs them
+    let frames = |pair: &mut Pair, microphone: &[i16]| {
+        for _ in 0..FRAMES {
+            let mut session = pair.caller.engine.session(call).expect("media");
+            let _ = session.capture(microphone, pair.now).expect("no error");
+            let mut played = vec![0_i16; 160];
+            session.playback(&mut played);
+            drop(session);
+            pair.advance();
+        }
+    };
+    let settle = |pair: &mut Pair| {
+        pair.caller.drain(pair.now, false);
+        pair.callee.drain(pair.now, false);
+        pair.settle();
+    };
+
+    frames(&mut pair, &loud);
+    frames(&mut pair, &muted);
+    frames(&mut pair, &loud);
+    // this end holds the far end
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    pair.caller
+        .agent
+        .resume(call, pair.now)
+        .expect("the resume");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    // the far end holds this end
+    pair.callee.agent.hold(remote, pair.now).expect("the hold");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+    pair.callee
+        .agent
+        .resume(remote, pair.now)
+        .expect("the resume");
+    settle(&mut pair);
+    frames(&mut pair, &loud);
+
+    pair.caller
+        .engine
+        .session(call)
+        .expect("media")
+        .stop_recording()
+        .expect("the file is finished");
+    let wav = file.contents();
+    let samples: Vec<i16> = wav[sipral_media::formats::wav::HEADER_LEN..]
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let this_end: Vec<i16> = samples.iter().step_by(2).copied().collect();
+    let heard: Vec<bool> = this_end
+        .chunks(160)
+        .map(|frame| loudness(frame) > 1_000)
+        .collect();
+    let expected: Vec<bool> = [true, false, true, false, true, false, true]
+        .iter()
+        .flat_map(|loud| std::iter::repeat_n(*loud, FRAMES))
+        .collect();
+    assert_eq!(
+        heard.len(),
+        expected.len(),
+        "every frame is in the file, muted and held ones too"
+    );
+    assert_eq!(
+        heard, expected,
+        "this end's side, a frame at a time: loud, muted, loud, holding, \
+         loud, held, loud"
+    );
+}
+
 #[test]
 fn a_recording_cannot_be_started_twice_on_one_call() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
@@ -4396,6 +4498,19 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         receiver.set_dtmf_detection(crate::DtmfDetection::Always);
         let mut sequence = 1_u16;
         let mut timestamp = 0_u32;
+        let mut played = vec![0_i16; receiver.frame_samples()];
+        let mut keys = Vec::new();
+        // a frame played for each packet sent, as an earpiece does: a stream
+        // handed over whole before anything is played is a backlog, which the
+        // buffer skips rather than plays a second late
+        let mut play = |receiver: &mut MediaSession, keys: &mut Vec<_>| {
+            let _ = receiver.playback(&mut played);
+            while let Some(event) = receiver.poll_event() {
+                if let MediaEvent::DigitReceived { digit, source, .. } = event {
+                    keys.push((digit, source));
+                }
+            }
+        };
         let mut send = |receiver: &mut MediaSession, payload_type: u8, payload: &[u8], ticks| {
             let mut datagram = packet(sequence, timestamp, payload_type, payload);
             let _ = receiver.receive(&mut datagram, from, now);
@@ -4405,9 +4520,11 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         // RFC 3550 A.1's probation, then the key in the audio
         for _ in 0..6 {
             send(&mut receiver, 0, &silence, 160);
+            play(&mut receiver, &mut keys);
         }
         for frame in tone.chunks(160) {
             send(&mut receiver, 0, &audio(frame), 160);
+            play(&mut receiver, &mut keys);
         }
         // and the event of the same press, its closing packet three times
         // (RFC 4733 §2.5.1.4): event 5, end bit, 800 ticks held
@@ -4417,16 +4534,10 @@ fn a_key_a_gateway_sends_both_as_an_event_and_in_the_audio_is_reported_once() {
         }
         for _ in 0..30 {
             send(&mut receiver, 0, &silence, 160);
+            play(&mut receiver, &mut keys);
         }
-        let mut played = vec![0_i16; receiver.frame_samples()];
-        let mut keys = Vec::new();
-        for _ in 0..60 {
-            let _ = receiver.playback(&mut played);
-            while let Some(event) = receiver.poll_event() {
-                if let MediaEvent::DigitReceived { digit, source, .. } = event {
-                    keys.push((digit, source));
-                }
-            }
+        for _ in 0..30 {
+            play(&mut receiver, &mut keys);
         }
         keys
     };
@@ -10245,7 +10356,6 @@ fn last_described(stack: &Stack) -> Option<(SessionDescription, SessionDescripti
 /// Settle as [`Pair::settle`] does, with every description one side sends
 /// passed through `edit` on its way: a far end writing what this stack
 /// never would.
-#[cfg(feature = "dtls")]
 fn settle_editing(pair: &mut Pair, caller_writes: bool, edit: &dyn Fn(&str) -> String) {
     for _ in 0..12 {
         let mut dialled = pair.caller.outbound();
@@ -10427,6 +10537,298 @@ fn a_hold_from_the_far_end_of_an_sdes_call_is_answered_with_the_key_in_use() {
     assert_eq!(failures(&pair), []);
     let loud = tone_after(&mut pair, call, remote);
     assert!(loud > 4_000, "the tone came back at {loud}");
+}
+
+/// An SDES call whose answering end allows only `AES_CM_128_HMAC_SHA1_80`,
+/// so that it takes the second of the two lines the placing end offers
+/// (`AEAD_AES_256_GCM` is the first): the usual call against a PBX that does
+/// not do GCM.
+fn sdes_call_on_the_second_line() -> (Pair, CallHandle, CallHandle) {
+    let placing = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let answering = placing
+        .clone()
+        .with_srtp_suites(&[crate::SrtpSuite::AesCm80])
+        .expect("one suite");
+    let mut pair = Pair::asymmetric(placing, answering);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    assert_eq!(failures(&pair), []);
+    let answer = one_stream(&pair.caller.answer_received().expect("the answer"));
+    let taken = crypto_line(&answer).expect("the answer is keyed");
+    assert_eq!(
+        (taken.tag, taken.suite.as_str()),
+        (2, "AES_CM_128_HMAC_SHA1_80"),
+        "the far end took the second line"
+    );
+    (pair, call, remote)
+}
+
+/// The crypto line of a stream that carries `tag`.
+fn crypto_tagged(stream: &MediaDescription, tag: u32) -> Option<Crypto> {
+    stream
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "crypto")
+        .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
+        .find(|line| line.tag == tag)
+}
+
+/// How many octets of key and salt a line's key decodes to, read under the
+/// line's own suite: `None` for a line whose key is not that suite's width,
+/// which RFC 4568 §6.1 has the reader take as invalid.
+fn key_width(line: &Crypto) -> Option<usize> {
+    let policy = line.policy()?;
+    let inline = policy.keys.first()?;
+    Some(inline.keys.key().len() + inline.keys.salt().len())
+}
+
+/// Talk for eight frames from the callee to the caller, the other way from
+/// [`tone_after`], and say how loud what the caller played was.
+fn tone_back(pair: &mut Pair, call: CallHandle, remote: CallHandle) -> i64 {
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut played = Vec::new();
+    for _ in 0..8 {
+        tone(&mut samples, 8_000, &mut phase);
+        let sent = pair
+            .callee
+            .engine
+            .session(remote)
+            .expect("the callee's media")
+            .capture(&samples, pair.now)
+            .expect("the frame encodes")
+            .map(|datagram| datagram.payload.to_vec());
+        let mut session = pair
+            .caller
+            .engine
+            .session(call)
+            .expect("the caller's media");
+        if let Some(mut datagram) = sent {
+            let arrival = session.receive(&mut datagram, callee_media(), pair.now);
+            assert!(
+                matches!(
+                    arrival,
+                    Arrival::Queued | Arrival::Dropped(crate::Discard::Probation)
+                ),
+                "the caller refused a packet: {arrival:?}"
+            );
+        }
+        played = vec![0_i16; session.frame_samples()];
+        session.playback(&mut played);
+        drop(session);
+        pair.advance();
+    }
+    loudness(&played)
+}
+
+/// A re-offer one end of a call sends.
+#[derive(Clone, Copy, Debug)]
+enum ReOffer {
+    Hold,
+    Resume,
+    /// The description as it stands, offered again: what a session refresh
+    /// sends.
+    Refresh,
+}
+
+/// Send `what` from the caller or the callee, and settle it.
+fn re_offer(
+    pair: &mut Pair,
+    caller: bool,
+    (call, remote): (CallHandle, CallHandle),
+    what: ReOffer,
+) {
+    let now = pair.now;
+    let (stack, handle) = if caller {
+        (&mut pair.caller, call)
+    } else {
+        (&mut pair.callee, remote)
+    };
+    match what {
+        ReOffer::Hold => stack.agent.hold(handle, now).expect("the hold"),
+        ReOffer::Resume => stack.agent.resume(handle, now).expect("the resume"),
+        ReOffer::Refresh => stack
+            .engine
+            .change_codecs(&mut stack.agent, handle, &["PCMU"], now)
+            .expect("the refresh goes"),
+    }
+    stack.drain(now, false);
+    pair.settle();
+}
+
+/// That the answer to the re-offer `stack` sent last carried `key` under
+/// `AES_CM_128_HMAC_SHA1_80`: the suite and the key in force, unchanged.
+fn answered_with(stack: &Stack, key: &str, label: &str) {
+    let (_, answer) = last_described(stack).expect("the re-offer settled");
+    let line = crypto_line(&one_stream(&answer)).expect("the answer is keyed");
+    assert_eq!(
+        (line.tag, line.suite.as_str()),
+        (2, "AES_CM_128_HMAC_SHA1_80"),
+        "{label}"
+    );
+    assert_eq!(key_width(&line), Some(30), "{label}: {}", line.key_params);
+    assert_eq!(line.key_params, key, "{label}: the answer re-keyed");
+}
+
+#[test]
+fn a_far_end_that_took_the_second_crypto_line_holds_resumes_and_refreshes_with_media_both_ways() {
+    // the answer to a far-end re-offer used to repeat the key of the first
+    // line this end ever offered, AEAD_AES_256_GCM's forty-four octets, under
+    // the AES_CM_128_HMAC_SHA1_80 tag the far end had taken: a line neither
+    // end can read (RFC 4568 §6.1), and the media of both ends failed
+    let (mut pair, call, remote) = sdes_call_on_the_second_line();
+    let offered = one_stream(&pair.callee.offer_received().expect("the first offer"));
+    let in_force = crypto_tagged(&offered, 2)
+        .expect("the second line")
+        .key_params;
+
+    re_offer(&mut pair, false, (call, remote), ReOffer::Hold);
+    assert_eq!(failures(&pair), [], "held");
+    answered_with(&pair.callee, &in_force, "held");
+    assert_eq!(
+        pair.caller.engine.session(call).expect("media").direction(),
+        Direction::RecvOnly
+    );
+    let loud = tone_back(&mut pair, call, remote);
+    assert!(
+        loud > 4_000,
+        "held: the holding end's audio came through at {loud}"
+    );
+
+    for what in [ReOffer::Resume, ReOffer::Refresh] {
+        re_offer(&mut pair, false, (call, remote), what);
+        let label = format!("{what:?}");
+        assert_eq!(failures(&pair), [], "{label}");
+        answered_with(&pair.callee, &in_force, &label);
+        let there = tone_after(&mut pair, call, remote);
+        let back = tone_back(&mut pair, call, remote);
+        assert!(there > 4_000 && back > 4_000, "{label}: {there} and {back}");
+        for session in [
+            pair.caller.engine.session(call).expect("media"),
+            pair.callee.engine.session(remote).expect("media"),
+        ] {
+            assert_eq!(session.direction(), Direction::SendRecv, "{label}");
+            assert!(session.is_encrypted(), "{label}: the keys went");
+        }
+    }
+}
+
+#[test]
+fn this_end_re_offers_a_call_whose_far_end_took_the_second_crypto_line_and_media_keeps_flowing() {
+    let (mut pair, call, remote) = sdes_call_on_the_second_line();
+    let offered = one_stream(&pair.callee.offer_received().expect("the first offer"));
+    let in_force = crypto_tagged(&offered, 2)
+        .expect("the second line")
+        .key_params;
+    // every re-offer from this end carries the key it sends under, on the
+    // line the far end took, and every line it carries is one its own suite
+    // can read
+    let offers_in_force = |pair: &Pair, label: &str| {
+        let (offer, answer) = last_described(&pair.caller).expect("the re-offer settled");
+        let offer = one_stream(&offer);
+        assert_eq!(
+            crypto_tagged(&offer, 2).map(|line| line.key_params),
+            Some(in_force.clone()),
+            "{label}: {offer}"
+        );
+        for attribute in offer.attributes.iter().filter(|line| line.name == "crypto") {
+            let line = Crypto::parse(attribute.value.as_deref().unwrap_or_default())
+                .expect("a crypto line");
+            assert!(key_width(&line).is_some(), "{label}: {}", line.to_value());
+        }
+        let taken = crypto_line(&one_stream(&answer)).expect("the answer is keyed");
+        assert_eq!(taken.tag, 2, "{label}");
+    };
+
+    for what in [ReOffer::Hold, ReOffer::Resume, ReOffer::Refresh] {
+        re_offer(&mut pair, true, (call, remote), what);
+        let label = format!("{what:?}");
+        assert_eq!(failures(&pair), [], "{label}");
+        offers_in_force(&pair, &label);
+    }
+    let there = tone_after(&mut pair, call, remote);
+    let back = tone_back(&mut pair, call, remote);
+    assert!(there > 4_000 && back > 4_000, "{there} and {back}");
+
+    // the far end refreshes in between, and this end's description is its
+    // answer from then on: the re-offers after it carry that answer's line
+    re_offer(&mut pair, false, (call, remote), ReOffer::Refresh);
+    assert_eq!(failures(&pair), [], "the far end's refresh");
+    answered_with(&pair.callee, &in_force, "the far end's refresh");
+    for what in [ReOffer::Hold, ReOffer::Resume] {
+        re_offer(&mut pair, true, (call, remote), what);
+        let label = format!("{what:?} after the far end's refresh");
+        assert_eq!(failures(&pair), [], "{label}");
+        offers_in_force(&pair, &label);
+    }
+    let there = tone_after(&mut pair, call, remote);
+    let back = tone_back(&mut pair, call, remote);
+    assert!(there > 4_000 && back > 4_000, "{there} and {back}");
+}
+
+#[test]
+fn a_re_offer_that_moves_to_another_suite_is_answered_with_a_new_key_of_that_suites_width() {
+    // the answer used to repeat the key in force whatever suite it went
+    // under: thirty octets of AES_CM_128_HMAC_SHA1_80 written under
+    // AEAD_AES_256_GCM, which takes forty-four (RFC 7714 §14.1), and a line
+    // no end can read
+    let answering = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Offered);
+    let placing = answering
+        .clone()
+        .with_srtp_suites(&[crate::SrtpSuite::AesCm80])
+        .expect("one suite");
+    let mut pair = Pair::asymmetric(placing, answering);
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let first = crypto_line(&one_stream(
+        &pair.caller.answer_received().expect("the answer"),
+    ))
+    .expect("the answer is keyed");
+    assert_eq!(first.suite, "AES_CM_128_HMAC_SHA1_80");
+
+    // a far end that moves the call to AEAD_AES_256_GCM on a hold, with a
+    // key of that suite's own width
+    let theirs = sipral_core::sdp::CryptoPolicy::new(
+        1,
+        sipral_core::sdp::CryptoSuite::AeadAes256Gcm,
+        sipral_core::sdp::KeySalt::new(&[0x5a; 32], &[0x3c; 12]),
+    )
+    .to_crypto()
+    .to_value();
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    pair.caller.drain(pair.now, false);
+    settle_editing(&mut pair, true, &|body| {
+        body.lines()
+            .map(|line| {
+                if line.starts_with("a=crypto:") {
+                    format!("a=crypto:{theirs}\r\n")
+                } else {
+                    format!("{line}\r\n")
+                }
+            })
+            .collect()
+    });
+
+    let refused: Vec<_> = failures(&pair)
+        .into_iter()
+        .filter(|(side, _)| *side == "callee")
+        .collect();
+    assert_eq!(refused, []);
+    let (answer, _) = last_described(&pair.callee).expect("the hold settled");
+    let line = crypto_line(&one_stream(&answer)).expect("the answer is keyed");
+    assert_eq!((line.tag, line.suite.as_str()), (1, "AEAD_AES_256_GCM"));
+    assert_eq!(key_width(&line), Some(44), "{}", line.key_params);
+    assert_ne!(line.key_params, first.key_params, "the old key went across");
+    let report = pair.callee.engine.encryption(remote).expect("a session");
+    assert_eq!(
+        report.first().and_then(|stream| stream.suite),
+        Some(sipral_rtp::srtp::Suite::AeadAes256Gcm)
+    );
+    assert!(report.iter().all(|stream| stream.encrypted));
 }
 
 #[test]

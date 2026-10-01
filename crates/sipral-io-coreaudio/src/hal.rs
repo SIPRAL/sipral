@@ -17,11 +17,13 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::abi::hardware::{
-    ENCODING_UTF8, PROPERTY_BUFFER_FRAME_SIZE, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT,
+    AGGREGATE_PRIVATE_KEY, ENCODING_UTF8, NUMBER_SINT32, PROPERTY_AGGREGATE_COMPOSITION,
+    PROPERTY_BUFFER_FRAME_SIZE, PROPERTY_DEFAULT_INPUT, PROPERTY_DEFAULT_OUTPUT,
     PROPERTY_DEVICE_IS_ALIVE, PROPERTY_DEVICES, PROPERTY_LATENCY, PROPERTY_NAME,
-    PROPERTY_NOMINAL_SAMPLE_RATE, PROPERTY_SAFETY_OFFSET, PROPERTY_STREAM_CONFIGURATION,
-    PROPERTY_STREAM_LATENCY, PROPERTY_STREAMS, PROPERTY_UID, PropertyAddress, SCOPE_GLOBAL,
-    SCOPE_INPUT, SCOPE_OUTPUT, SYSTEM_OBJECT,
+    PROPERTY_NOMINAL_SAMPLE_RATE, PROPERTY_REFERENCE_STREAM_ENABLED, PROPERTY_SAFETY_OFFSET,
+    PROPERTY_STREAM_CONFIGURATION, PROPERTY_STREAM_LATENCY, PROPERTY_STREAMS,
+    PROPERTY_TRANSPORT_TYPE, PROPERTY_UID, PropertyAddress, SCOPE_GLOBAL, SCOPE_INPUT,
+    SCOPE_OUTPUT, SYSTEM_OBJECT, TRANSPORT_AGGREGATE,
 };
 use crate::abi::{BAD_PROPERTY_SIZE, BUFFERS_AT, Buffer};
 use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pending};
@@ -35,6 +37,14 @@ use crate::sys;
 /// The answer is a snapshot and it goes stale — that is what
 /// [`DeviceMonitor`] is for, and why a device is named by
 /// [`DeviceId`] rather than by an index into this list.
+///
+/// It is the machine's devices as a person would pick from them, whether or
+/// not a voice-processing unit is open in this process. Such a unit makes a
+/// private aggregate device, visible to this process alone, which is left
+/// out; and it has the output devices hand what they play back in as an
+/// extra input stream, the reference its echo canceller listens for, which
+/// is not counted among a device's inputs — the loudspeaker does not become
+/// a microphone because a call is up.
 ///
 /// # Errors
 /// [`Error::Call`] when the hardware layer refuses to answer, which on a
@@ -64,7 +74,7 @@ pub fn devices() -> Result<Vec<Device>, Error> {
     let Some(ids) = ids.get(..found.min(ids.len())) else {
         return Ok(Vec::new());
     };
-    Ok(ids.iter().copied().map(describe).collect())
+    Ok(ids.iter().copied().map(facts).filter_map(listed).collect())
 }
 
 /// What the system is routing a direction to right now, or `None` when it is
@@ -440,27 +450,157 @@ unsafe extern "C" fn changed(
     0
 }
 
-fn describe(id: u32) -> Device {
-    Device {
-        id: DeviceId::new(id),
+/// What the hardware layer says about one device, before anything is made
+/// of it: what [`listed`] decides from, so that the decision can be tested on
+/// a listing no machine has to produce.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Facts {
+    id: u32,
+    name: String,
+    uid: Option<String>,
+    /// An aggregate device only this process can see.
+    private_aggregate: bool,
+    /// Whether the device is handing what it plays back in as an input
+    /// stream of its own, the reference an echo canceller listens for.
+    reference: bool,
+    /// Channels per input stream, in the order the device lists them.
+    input: Vec<u32>,
+    /// The same for output.
+    output: Vec<u32>,
+}
+
+/// Ask the hardware layer about `id`.
+fn facts(id: u32) -> Facts {
+    let transport = property_value::<u32>(
+        id,
+        &PropertyAddress::new(PROPERTY_TRANSPORT_TYPE, SCOPE_GLOBAL),
+        "AudioObjectGetPropertyData (TransportType)",
+    );
+    let reference = property_value::<u32>(
+        id,
+        &PropertyAddress::new(PROPERTY_REFERENCE_STREAM_ENABLED, SCOPE_OUTPUT),
+        "AudioObjectGetPropertyData (ReferenceStreamEnabled)",
+    );
+    Facts {
+        id,
         // a device that will not say what it is called is still a device
         name: text(id, PROPERTY_NAME).unwrap_or_default(),
         uid: text(id, PROPERTY_UID).ok().filter(|uid| !uid.is_empty()),
-        input_channels: channels(id, SCOPE_INPUT),
-        output_channels: channels(id, SCOPE_OUTPUT),
+        private_aggregate: transport == Ok(TRANSPORT_AGGREGATE) && is_private(id),
+        reference: reference.is_ok_and(|enabled| enabled != 0),
+        input: buffers(id, SCOPE_INPUT),
+        output: buffers(id, SCOPE_OUTPUT),
     }
 }
 
-/// How many channels a device has on one side. Zero for a side it does not
-/// have, which is how an input-only device is told from an output-only one.
-fn channels(object: u32, scope: u32) -> u32 {
+/// The device a person picks from, or `None` for one that is not theirs to
+/// pick: the private aggregate a voice-processing unit makes. A device whose
+/// reference stream is on counts its inputs without it — the stream is
+/// appended after the device's own, and is the last one listed — so a
+/// loudspeaker shows no microphone and a duplex device shows the one it has.
+fn listed(facts: Facts) -> Option<Device> {
+    if facts.private_aggregate {
+        return None;
+    }
+    let inputs = match facts.input.split_last() {
+        Some((_, own)) if facts.reference => own,
+        _ => facts.input.as_slice(),
+    };
+    let total = |channels: &[u32]| {
+        channels
+            .iter()
+            .fold(0_u32, |sum, count| sum.saturating_add(*count))
+    };
+    Some(Device {
+        id: DeviceId::new(facts.id),
+        name: facts.name,
+        uid: facts.uid,
+        input_channels: total(inputs),
+        output_channels: total(&facts.output),
+    })
+}
+
+/// Whether an aggregate device says it is private: its composition's
+/// [`AGGREGATE_PRIVATE_KEY`] entry, a number or a boolean, non-zero. An
+/// aggregate that will not say is a person's, and listed.
+fn is_private(id: u32) -> bool {
+    let address = PropertyAddress::new(PROPERTY_AGGREGATE_COMPOSITION, SCOPE_GLOBAL);
+    let Ok(composition) = property_value::<sys::StringRef>(
+        id,
+        &address,
+        "AudioObjectGetPropertyData (AggregateComposition)",
+    ) else {
+        return false;
+    };
+    if composition.is_null() {
+        return false;
+    }
+    let length = isize::try_from(AGGREGATE_PRIVATE_KEY.len()).unwrap_or(0);
+    // SAFETY: the bytes are a live constant of that length; a null
+    // allocator is the default one.
+    let key = unsafe {
+        sys::string_from_bytes(
+            ptr::null(),
+            AGGREGATE_PRIVATE_KEY.as_ptr(),
+            length,
+            ENCODING_UTF8,
+            0,
+        )
+    };
+    let private = !key.is_null() && {
+        // SAFETY: both are live Core Foundation objects; what comes back is
+        // borrowed from the dictionary, which is released only below.
+        let value = unsafe { sys::dictionary_value(composition, key) };
+        // SAFETY: as above.
+        unsafe { flag(value) }
+    };
+    if !key.is_null() {
+        // SAFETY: created above and released once.
+        unsafe { sys::release(key) };
+    }
+    // SAFETY: the property handed it over, and it is released once.
+    unsafe { sys::release(composition) };
+    private
+}
+
+/// A Core Foundation number or boolean read as a flag; anything else, or
+/// nothing, is `false`.
+///
+/// # Safety
+/// `value` is null or a live Core Foundation object.
+unsafe fn flag(value: *const c_void) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's live object.
+    let kind = unsafe { sys::type_of(value) };
+    // SAFETY: no arguments, nothing read.
+    if kind == unsafe { sys::boolean_type() } {
+        // SAFETY: a live boolean, as its type says.
+        return unsafe { sys::boolean_value(value) } != 0;
+    }
+    // SAFETY: as above.
+    if kind == unsafe { sys::number_type() } {
+        let mut number: i32 = 0;
+        // SAFETY: a live number, and the out-parameter is the type asked for.
+        let read =
+            unsafe { sys::number_value(value, NUMBER_SINT32, (&raw mut number).cast::<c_void>()) };
+        return read != 0 && number != 0;
+    }
+    false
+}
+
+/// How many channels each stream on one side of a device has, in the order
+/// the device lists them. Empty for a side it does not have, which is how an
+/// input-only device is told from an output-only one.
+fn buffers(object: u32, scope: u32) -> Vec<u32> {
     let address = PropertyAddress::new(PROPERTY_STREAM_CONFIGURATION, scope);
     let Ok(words) = property_words(object, &address) else {
-        return 0;
+        return Vec::new();
     };
     let bytes = words.len() * size_of::<u64>();
     if bytes < size_of::<u32>() {
-        return 0;
+        return Vec::new();
     }
     // held as words, so the storage is eight-aligned and every offset the
     // list uses lands where the framework put it
@@ -469,7 +609,7 @@ fn channels(object: u32, scope: u32) -> u32 {
     // there, and eight-aligned storage is aligned for a `u32`.
     let count = usize::try_from(unsafe { ptr::read(base.cast::<u32>()) }).unwrap_or(0);
 
-    let mut total: u32 = 0;
+    let mut channels = Vec::new();
     for index in 0..count {
         let Some(offset) = index
             .checked_mul(size_of::<Buffer>())
@@ -484,9 +624,9 @@ fn channels(object: u32, scope: u32) -> u32 {
         // SAFETY: the offset and the whole buffer are inside the allocation,
         // which is aligned for `Buffer` because it is aligned for a pointer.
         let buffer = unsafe { ptr::read(base.byte_add(offset).cast::<Buffer>()) };
-        total = total.saturating_add(buffer.channels);
+        channels.push(buffer.channels);
     }
-    total
+    channels
 }
 
 /// A string property, converted out of Core Foundation and released.
@@ -859,5 +999,110 @@ mod tests {
         }
         println!("default input: {:?}", default_device(Direction::Input));
         println!("default output: {:?}", default_device(Direction::Output));
+    }
+
+    /// A machine as the hardware layer described it on a laptop with a
+    /// voice-processing unit running: the speaker on a virtual loopback
+    /// device, the microphone the built-in one. Each output device hands its
+    /// output back in as one more input stream, and the unit's own private
+    /// aggregate sits in the list beside them.
+    fn during_a_call() -> Vec<super::Facts> {
+        let device = |id, name: &str, reference, input: &[u32], output: &[u32]| super::Facts {
+            id,
+            name: name.to_owned(),
+            uid: Some(format!("uid-{id}")),
+            private_aggregate: false,
+            reference,
+            input: input.to_vec(),
+            output: output.to_vec(),
+        };
+        vec![
+            device(81, "BlackHole 2ch", true, &[2, 2], &[2]),
+            device(123, "MacBook Air Microphone", false, &[3], &[]),
+            device(116, "MacBook Air Speakers", true, &[6], &[2]),
+            device(159, "a headset's output half", true, &[2], &[2]),
+            device(164, "a headset's input half", false, &[2], &[]),
+            device(300, "an aggregate a person made", false, &[2], &[2]),
+            super::Facts {
+                private_aggregate: true,
+                ..device(216, "VPAUAggregateAudioDevice-0x1", false, &[3, 2, 2], &[2])
+            },
+        ]
+    }
+
+    #[test]
+    fn a_call_in_progress_neither_adds_a_device_nor_turns_a_speaker_into_a_microphone() {
+        let listed: Vec<_> = during_a_call()
+            .into_iter()
+            .filter_map(super::listed)
+            .map(|device| (device.name, device.input_channels, device.output_channels))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("BlackHole 2ch".to_owned(), 2, 2),
+                ("MacBook Air Microphone".to_owned(), 3, 0),
+                ("MacBook Air Speakers".to_owned(), 0, 2),
+                ("a headset's output half".to_owned(), 0, 2),
+                ("a headset's input half".to_owned(), 2, 0),
+                ("an aggregate a person made".to_owned(), 2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_reference_stream_every_input_is_the_devices_own() {
+        let facts = super::Facts {
+            id: 7,
+            name: "a duplex headset".to_owned(),
+            input: vec![1, 1],
+            output: vec![2],
+            ..super::Facts::default()
+        };
+        let device = super::listed(facts).expect("listed");
+        assert_eq!((device.input_channels, device.output_channels), (2, 2));
+    }
+
+    /// The same on this machine: with a voice unit running on the quiet
+    /// route, the list has no device it did not have before, no device
+    /// that had no input before has one now, and every output is what it
+    /// was. A microphone the unit switches into its own mode may report
+    /// more channels while it is in it; that is the device's own answer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "opens the real devices"]
+    fn a_running_voice_unit_leaves_the_device_list_as_it_was() {
+        use crate::{Stream, StreamConfig, StreamFormat};
+        use std::collections::HashMap;
+
+        let before: HashMap<_, _> = devices()
+            .expect("the list")
+            .into_iter()
+            .map(|device| (device.id, device))
+            .collect();
+        let (route, _) = crate::quiet::route().expect("the device list");
+        let format = StreamFormat::with_frame_millis(48_000, 20).expect("a twenty ms frame");
+        let mut stream = Stream::open(StreamConfig {
+            device: route,
+            ..StreamConfig::new(format)
+        })
+        .expect("open");
+        stream.start().expect("start");
+        std::thread::sleep(Duration::from_millis(300));
+        let during = devices().expect("the list");
+        stream.close().expect("close");
+
+        for device in &during {
+            println!(
+                "{device} in {} out {}",
+                device.input_channels, device.output_channels
+            );
+            let was = before
+                .get(&device.id)
+                .unwrap_or_else(|| panic!("{device} was not there before the call"));
+            assert_eq!(device.output_channels, was.output_channels, "{device}");
+            assert_eq!(device.is_input(), was.is_input(), "{device}");
+        }
+        assert_eq!(during.len(), before.len());
     }
 }

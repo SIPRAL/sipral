@@ -11,6 +11,8 @@
 //! rather than decrypted: the passphrase is the application's, and so is
 //! unlocking what it protects.
 
+use zeroize::Zeroizing;
+
 use crate::base64;
 use crate::der::{self, INTEGER, SEQUENCE};
 
@@ -44,12 +46,16 @@ pub(crate) fn scalar(input: &[u8]) -> Result<[u8; SCALAR_LEN], Unreadable> {
         return from_der(input);
     }
     let text = std::str::from_utf8(input).map_err(|_| Unreadable)?;
-    // the decoded block holds the key as much as the scalar does
-    from_der(&zeroize::Zeroizing::new(pem(text)?))
+    from_der(&pem(text)?)
 }
 
 /// The first PEM block labelled as a private key, decoded.
-fn pem(text: &str) -> Result<Vec<u8>, Unreadable> {
+///
+/// The base64 body and the block decoded from it hold the key as much as the
+/// scalar does, so both are in buffers that wipe themselves; the body's is
+/// as long as the whole text from the start, so it never grows and leaves a
+/// copy of what it held behind in memory it gave back.
+fn pem(text: &str) -> Result<Zeroizing<Vec<u8>>, Unreadable> {
     let mut lines = text.lines().map(str::trim);
     while let Some(line) = lines.next() {
         let Some(label) = line
@@ -58,7 +64,7 @@ fn pem(text: &str) -> Result<Vec<u8>, Unreadable> {
         else {
             continue;
         };
-        let mut body = String::new();
+        let mut body = Zeroizing::new(String::with_capacity(text.len()));
         let mut ended = false;
         for line in lines.by_ref() {
             if let Some(end) = line
@@ -80,7 +86,9 @@ fn pem(text: &str) -> Result<Vec<u8>, Unreadable> {
         // clear travels under; a certificate or parameters beside it are
         // skipped, and an encrypted key is the passphrase holder's to open
         if label == "EC PRIVATE KEY" || label == "PRIVATE KEY" {
-            return base64::decode_standard(body.as_bytes()).map_err(|_| Unreadable);
+            return base64::decode_standard(body.as_bytes())
+                .map(Zeroizing::new)
+                .map_err(|_| Unreadable);
         }
     }
     Err(Unreadable)
@@ -214,5 +222,16 @@ mod tests {
         assert_eq!(scalar(&[0u8; 31]), Err(Unreadable));
         let mismatched = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n";
         assert_eq!(scalar(mismatched.as_bytes()), Err(Unreadable));
+    }
+
+    // what wipes the PEM body and the block decoded from it is the type they
+    // are held in, since the wipe itself cannot be watched from safe code:
+    // held here, so that a change back to a plain Vec does not compile
+    #[test]
+    fn the_decoded_block_is_held_in_a_buffer_that_wipes_itself() {
+        let text = armoured("EC PRIVATE KEY", &sec1(&SECP256R1));
+        let decoded: Zeroizing<Vec<u8>> = pem(&text).expect("a key");
+        assert_eq!(*decoded, sec1(&SECP256R1));
+        assert_eq!(scalar(text.as_bytes()), Ok(SCALAR));
     }
 }

@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use sipral_io_common::level::{Channel, Controls, window_samples};
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, RawDevice,
-    StreamCommon,
+    Backend, BackendError, CaptureStream, Duplex, Format, Notice, PlaybackStream, Promote,
+    Promoted, RawDevice, StreamCommon,
 };
 use crate::call::{CallAudio, CallGone, Outgoing};
 
@@ -55,6 +55,37 @@ struct State {
     duplex_only: bool,
     chooses_every_role: bool,
     units: Arc<Units>,
+    /// How long each stream takes to open, as a USB headset's does.
+    open_delay: Option<Duration>,
+    teardown: Arc<Teardown>,
+    /// Whether the fake has a scheduling class to grant, and whether it
+    /// grants it: `None` for a platform with none.
+    scheduling: Option<bool>,
+    /// The names of the threads that asked for it.
+    scheduled: Arc<Mutex<Vec<String>>>,
+}
+
+/// Whether a stream being let go of is held there, as a platform whose
+/// teardown waits for another thread holds it, and how many have gone.
+#[derive(Default)]
+struct Teardown {
+    held: Mutex<bool>,
+    released: Condvar,
+    finished: AtomicUsize,
+}
+
+impl Teardown {
+    fn pass(&self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            held = self
+                .released
+                .wait(held)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(held);
+        self.finished.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// The duplex units a duplex fake has open, counted the way a platform with
@@ -115,6 +146,10 @@ impl FakeControl {
                     duplex_only: false,
                     chooses_every_role: false,
                     units: Arc::new(Units::default()),
+                    open_delay: None,
+                    teardown: Arc::new(Teardown::default()),
+                    scheduling: None,
+                    scheduled: Arc::new(Mutex::new(Vec::new())),
                 }),
                 Condvar::new(),
             )),
@@ -253,6 +288,49 @@ impl FakeControl {
         lock(&self.state).units.opened.load(Ordering::Acquire)
     }
 
+    /// Make every stream take `delay` to open from now on, or none for
+    /// `None`: what a USB headset under the voice unit takes.
+    pub fn set_open_delay(&self, delay: Option<Duration>) {
+        lock(&self.state).open_delay = delay;
+    }
+
+    /// Hold every stream being let go of until
+    /// [`FakeControl::release_teardown`], as a platform whose teardown
+    /// waits for a thread that is busy elsewhere does.
+    pub fn hold_teardown(&self) {
+        let teardown = Arc::clone(&lock(&self.state).teardown);
+        *teardown.held.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Let the streams held by [`FakeControl::hold_teardown`] go.
+    pub fn release_teardown(&self) {
+        let teardown = Arc::clone(&lock(&self.state).teardown);
+        *teardown.held.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        teardown.released.notify_all();
+    }
+
+    /// How many streams have been let go of so far.
+    #[must_use]
+    pub fn teardowns(&self) -> usize {
+        lock(&self.state).teardown.finished.load(Ordering::Acquire)
+    }
+
+    /// Give the fake a scheduling class for the pump's thread, granted or
+    /// refused, or take it away for `None`.
+    pub fn set_scheduling(&self, granted: Option<bool>) {
+        lock(&self.state).scheduling = granted;
+    }
+
+    /// The names of the threads that asked for the scheduling class.
+    #[must_use]
+    pub fn scheduled(&self) -> Vec<String> {
+        let scheduled = Arc::clone(&lock(&self.state).scheduled);
+        scheduled
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Make every platform call block until [`FakeControl::release`].
     pub fn hang(&self) {
         lock(&self.state).hung = true;
@@ -331,8 +409,9 @@ impl FakeControl {
 }
 
 /// What opening a fake device answers: its identity, its state, the format
-/// it delivers and whether it claims to cancel echo.
-type OpenedFake = (String, Arc<Mutex<FakeDevice>>, Format, bool);
+/// it delivers, whether it claims to cancel echo, and what holds its
+/// teardown.
+type OpenedFake = (String, Arc<Mutex<FakeDevice>>, Format, bool, Arc<Teardown>);
 
 /// The engine's side of the fake platform.
 pub struct FakeBackend {
@@ -359,6 +438,10 @@ impl FakeBackend {
         wanted: Format,
         input: bool,
     ) -> Result<OpenedFake, BackendError> {
+        let delay = lock(&self.state).open_delay;
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
         let mut state = self.ready();
         if let Some(error) = state.refuse.clone() {
             return Err(error);
@@ -405,7 +488,13 @@ impl FakeBackend {
         };
         state.opens += 1;
         let cancels = state.system_echo_cancellation && state.echo_asked;
-        Ok((identity, plugged, format, cancels))
+        Ok((
+            identity,
+            plugged,
+            format,
+            cancels,
+            Arc::clone(&state.teardown),
+        ))
     }
 }
 
@@ -488,6 +577,20 @@ impl Backend for FakeBackend {
     fn duplex_only(&self) -> bool {
         lock(&self.state).duplex_only
     }
+
+    fn pump_scheduling(&self) -> Option<Promote> {
+        let state = lock(&self.state);
+        let granted = state.scheduling?;
+        let scheduled = Arc::clone(&state.scheduled);
+        Some(Arc::new(move || -> Option<Promoted> {
+            let name = std::thread::current().name().unwrap_or_default().to_owned();
+            scheduled
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(name);
+            granted.then(|| Box::new(()) as Promoted)
+        }))
+    }
 }
 
 struct FakeStream {
@@ -499,10 +602,14 @@ struct FakeStream {
     /// The duplex unit this stream is half of, where it is half of one:
     /// held, never read, so that the unit goes when its last half does.
     _unit: Option<Arc<UnitHeld>>,
+    teardown: Arc<Teardown>,
 }
 
 impl FakeStream {
-    fn new((identity, device, format, aec): OpenedFake, unit: Option<Arc<UnitHeld>>) -> Self {
+    fn new(
+        (identity, device, format, aec, teardown): OpenedFake,
+        unit: Option<Arc<UnitHeld>>,
+    ) -> Self {
         Self {
             identity,
             device,
@@ -510,7 +617,14 @@ impl FakeStream {
             channel: Arc::new(Channel::new(window_samples(format.sample_rate_hz))),
             aec,
             _unit: unit,
+            teardown,
         }
+    }
+}
+
+impl Drop for FakeStream {
+    fn drop(&mut self) {
+        self.teardown.pass();
     }
 }
 

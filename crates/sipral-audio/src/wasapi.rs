@@ -26,7 +26,8 @@ use sipral_io_wasapi::{
 };
 
 use crate::backend::{
-    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, RawDevice, StreamCommon,
+    Backend, BackendError, CaptureStream, Format, Notice, PlaybackStream, Promote, Promoted,
+    RawDevice, StreamCommon,
 };
 
 /// How often the watcher asks the monitor what changed.
@@ -170,6 +171,15 @@ impl Backend for WasapiBackend {
 
     fn set_system_echo_cancellation(&mut self, on: bool) {
         self.processing = on;
+    }
+
+    fn pump_scheduling(&self) -> Option<Promote> {
+        // registered as Pro Audio for as long as the pump's thread holds
+        // what this answers, and given back when it drops it
+        Some(Arc::new(|| {
+            sipral_io_wasapi::pro_audio_thread()
+                .map(|registration| Box::new(registration) as Promoted)
+        }))
     }
 
     fn poll_notice(&mut self) -> Option<Notice> {

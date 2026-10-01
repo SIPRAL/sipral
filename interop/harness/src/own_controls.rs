@@ -185,7 +185,7 @@ impl Carried {
         fake.forget_notices();
         let sent: Arc<Mutex<HashMap<CallId, u32>>> = Arc::default();
         let counted = Arc::clone(&sent);
-        let transmit = Box::new(move |call: CallId, packet: Outgoing| {
+        let transmit = Box::new(move |call: CallId, packet: &Outgoing| {
             if let Some(socket) = sockets.get(&call)
                 && socket.send_to(&packet.payload, packet.destination).is_ok()
             {

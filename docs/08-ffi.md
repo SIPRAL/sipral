@@ -439,6 +439,18 @@ send nothing. It is a registration state rather than a status because it is a
 fact about the account for as long as the account exists, not about one
 request.
 
+**`SIPRAL_REGISTRATION_STATE_UNREGISTERED` is read from the moment
+`sipral_account_unregister` returns**, before the REGISTER that gives the
+binding up has been written, and stays so while the registrar has not
+answered: the state says what the account was asked to be, and this ABI has
+no state for a binding being given up. The registrar's 200 is the
+`SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` that follows, reading
+`UNREGISTERED`; a failure is one reading `RETRYING` or `FAILED`. An
+application that waits for the binding to be gone before it exits waits for
+that event — or for the stack's transmit drain to have sent the request,
+when the answer does not matter — not for the state, which has already
+changed.
+
 **A table of transports, and the main one still published.**
 `SIPRAL_TRANSPORT_MAIN` is the transport a stack is created with, and every
 call still names it by default — a caller that never binds a second one sees
@@ -1909,7 +1921,7 @@ Linux, where `sipral-io-pipewire` would link a library the packaged wheel
 must not require, and on an older Android phone, whose calls the Kotlin
 layer's own `CallAudio` carries over `AudioRecord` and `AudioTrack`.
 
-The engine keeps ten rules a softphone on another stack has been bitten by,
+The engine keeps eleven rules a softphone on another stack has been bitten by,
 each tested against a platform made of fakes (`crates/sipral-audio/src/tests.rs`)
 and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
 
@@ -1965,6 +1977,24 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   from a thread the engine can walk away from, bounded by
   `audio_probe_ms` (default three seconds):
   `SIPRAL_STATUS_DEVICE_TIMED_OUT` (15), and the entry point returns.
+- **Ending a call never waits on a device, nor on the application's main
+  thread.** `sipral_stack_poll` does not open or close a device: a call's
+  media starting starts the engine at once on no device — silence to the far
+  end, the far end's audio drained at its own pace — while the devices open
+  on a thread of their own, and a later poll puts them under the call with a
+  `SIPRAL_AUDIO_CHANGE_REOPENED` per role (`UNAVAILABLE` for one that did
+  not answer within `audio_probe_ms`, then `REOPENED` when it does); the
+  poll asks to be called again within twenty milliseconds meanwhile, and
+  `sipral_audio_info` reads `active` with no device under a role until then.
+  The last call's media ending lets the devices go on the engine's own
+  thread, after the poll has returned, so the BYE `sipral_call_hangup`
+  queued is in `sipral_stack_poll_transmit` as soon as that poll is over.
+  This is what an application that hangs up on its main thread and then
+  waits there needs: the voice unit's teardown on macOS has been seen to
+  wait for the main thread, and it now does so without holding the BYE, the
+  un-REGISTER, or the stack's lock. `sipral_audio_deactivate` waits for the
+  teardown at most `audio_probe_ms`, so even one made from the main thread
+  returns.
 - **No instruction beyond the baseline.** The resampler and the mixer are
   plain integer arithmetic; `scripts/check.sh` refuses a `target-cpu` or
   `target-feature` in any build configuration in the tree, so a packaged

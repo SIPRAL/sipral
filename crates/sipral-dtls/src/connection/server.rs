@@ -19,6 +19,10 @@ use crate::prf::{MasterSecret, RANDOM_LEN};
 use crate::record::{ProtocolVersion, WriteEpoch};
 use crate::{Error, Random, Role};
 
+/// The highest ClientHello record sequence number this server starts its own
+/// epoch 0 at: 2^47, leaving 2^47 numbers above it.
+const MAX_INITIAL_SEQUENCE: u64 = 1 << 47;
+
 /// The message the server is waiting for, with what it has learned so far.
 enum Step {
     /// A ClientHello, with nothing held for anyone.
@@ -78,6 +82,12 @@ impl Server {
         matches!(self.step, Step::Listening)
     }
 
+    /// Whether the client's CertificateVerify is verified and its Finished is
+    /// all that is left.
+    pub(super) const fn awaits_finished(&self) -> bool {
+        matches!(self.step, Step::Finished { .. })
+    }
+
     /// A fragment arriving before any ClientHello has been accepted.
     ///
     /// Nothing is kept for it unless it is a whole ClientHello that parses and,
@@ -116,7 +126,13 @@ impl Server {
         core.send_seq = header.message_seq;
         // §4.2.1: "the server MUST use the record sequence number in the
         // ClientHello as the record sequence number in its initial
-        // ServerHello"
+        // ServerHello". The client picks that number, and one near the top
+        // of the 48-bit space would leave this end's epoch 0 without the
+        // numbers its flights and their retransmissions need; refused above
+        // half of it, where no client counting up from zero ever gets
+        if record_sequence > MAX_INITIAL_SEQUENCE {
+            return Err(Failure::IllegalParameter);
+        }
         core.writer.epoch0 = WriteEpoch::starting_at(record_sequence).map_err(Failure::Internal)?;
         core.transcript = Transcript::new();
         core.transcript

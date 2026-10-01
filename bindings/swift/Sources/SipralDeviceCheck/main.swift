@@ -19,9 +19,15 @@
 // sequence runs with each role on a device of its own; SIPRAL_CHECK_SPEAKER
 // names the device each round puts the speaker on, in place of the system's
 // default output (a virtual loopback device keeps a desk quiet), and
-// SIPRAL_CHECK_GAIN scales what is played (0.1 is a tenth). It prints
-// one line per step and "PASS" at the end; anything thrown is printed and
-// exits 1.
+// SIPRAL_CHECK_GAIN scales what is played (0.1 is a tenth). With
+// SIPRAL_CHECK_RESELECT set, each round also moves the microphone to the
+// system's default input and back to the one SIPRAL_CHECK_MIC names, which
+// reopens the voice-processing unit twice in the middle of the round, the
+// way a person choosing a device during a call does, without a sound on the
+// loudspeaker. SIPRAL_CHECK_PROBE_MS gives the platform longer than the
+// stack's default to open a device, which the guard allocator can need. It
+// prints one line per step and "PASS" at the end; anything
+// thrown is printed and exits 1.
 
 import Foundation
 import Sipral
@@ -38,7 +44,9 @@ func named(_ variable: String, serving role: SipralAudioRole, in devices: [Sipra
 let rounds = Int(ProcessInfo.processInfo.environment["SIPRAL_CHECK_ROUNDS"] ?? "") ?? 3
 
 do {
-    let stack = try SipralStack(audio: .device(activation: .automatic), bindHost: "127.0.0.1")
+    let probeMs = UInt64(ProcessInfo.processInfo.environment["SIPRAL_CHECK_PROBE_MS"] ?? "") ?? 0
+    let stack = try SipralStack(
+        audio: .device(activation: .automatic), bindHost: "127.0.0.1", audioProbeMs: probeMs)
     guard let audio = stack.audio else {
         print("no device mode in this build of the library")
         exit(2)
@@ -63,6 +71,8 @@ do {
     }
     let speaker = named("SIPRAL_CHECK_SPEAKER", serving: .speaker, in: devices)
         ?? devices.first(where: { $0.isDefaultOutput })
+    let microphone = named("SIPRAL_CHECK_MIC", serving: .microphone, in: devices)
+    let reselect = !(ProcessInfo.processInfo.environment["SIPRAL_CHECK_RESELECT"] ?? "").isEmpty
     // one second of a 440 Hz tone at 8 kHz, which is what a ring is made of
     let tone = (0..<8000).map { Int16(3000 * sin(Double($0) * 2 * .pi * 440 / 8000)) }
     for round in 1...rounds {
@@ -75,6 +85,12 @@ do {
         if let speaker {
             try audio.select(speaker, for: .speaker)
             print("round \(round): speaker on \(speaker.name)")
+        }
+        if reselect, let microphone {
+            try audio.select(nil as AudioDevice?, for: .microphone)
+            Thread.sleep(forTimeInterval: 0.5)
+            try audio.select(microphone, for: .microphone)
+            print("round \(round): microphone on the system's default and back on \(microphone.name)")
         }
         Thread.sleep(forTimeInterval: 1.0)
         try audio.deactivate()

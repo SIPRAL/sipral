@@ -15,6 +15,7 @@ use super::cipher::{self, Counter, Exhausted, F8};
 use super::index::{Estimate, Receiving, Replay, Sending};
 use super::kdf::{self, Lengths, Master, Rate, Session};
 use super::sha1;
+use zeroize::Zeroizing;
 
 /// The RTP fixed header, before any CSRC list (RFC 3550 §5.1).
 const RTP_HEADER: usize = 12;
@@ -289,6 +290,15 @@ pub enum SrtpError {
     KeyExhausted,
     /// A packet so long that one keystream segment cannot cover it (§4.1.1).
     TooLong,
+    /// The sequence number does not move the packet index forward: it
+    /// repeats the last one sent, or is behind it. Sent, it would be
+    /// encrypted under a keystream already spent (§9.1) or read by the
+    /// receiver as a rollover it never saw. A new master key starts a new
+    /// index.
+    IndexNotAdvancing,
+    /// The master key or salt is not the width the suite calls for, so no
+    /// session key is derived from it at all.
+    KeyLength,
 }
 
 impl core::fmt::Display for SrtpError {
@@ -309,6 +319,12 @@ impl core::fmt::Display for SrtpError {
                 f.write_str("the master key has secured as many packets as it may")
             }
             Self::TooLong => f.write_str("the packet is longer than one keystream segment"),
+            Self::IndexNotAdvancing => {
+                f.write_str("the sequence number does not move the packet index forward")
+            }
+            Self::KeyLength => {
+                f.write_str("the master key or salt is not the width the suite calls for")
+            }
         }
     }
 }
@@ -364,7 +380,7 @@ impl Keystream {
 enum Cipher {
     Mac {
         keystream: Keystream,
-        authentication: [u8; kdf::AUTH],
+        authentication: Zeroizing<[u8; kdf::AUTH]>,
     },
     Aead(Gcm),
 }
@@ -373,7 +389,7 @@ enum Cipher {
 /// needs.
 struct Engine {
     cipher: Cipher,
-    salt: Vec<u8>,
+    salt: Zeroizing<Vec<u8>>,
 }
 
 impl Engine {
@@ -383,8 +399,8 @@ impl Engine {
         } else {
             Cipher::Mac {
                 keystream: Keystream::new(suite, keys),
-                authentication: match keys.authentication.as_deref() {
-                    Some(key) => *key,
+                authentication: match keys.authentication.as_ref() {
+                    Some(key) => key.clone(),
                     None => {
                         unreachable!(
                             "a MAC suite's key derivation always derives an authentication key"
@@ -395,7 +411,7 @@ impl Engine {
         };
         Self {
             cipher,
-            salt: keys.salt.to_vec(),
+            salt: keys.salt.clone(),
         }
     }
 
@@ -538,7 +554,7 @@ impl Engine {
             Cipher::Mac { authentication, .. } => authentication,
             Cipher::Aead(_) => unreachable!("an AEAD suite is never authenticated this way"),
         };
-        let full = sha1::hmac(authentication, parts);
+        let full = sha1::hmac(authentication.as_slice(), parts);
         if let Some(slot) = out.get_mut(..tag) {
             slot.copy_from_slice(full.get(..tag).unwrap_or_default());
         }
@@ -654,48 +670,105 @@ struct Derived {
     master: Master,
     suite: Suite,
     rate: Rate,
+    /// `None` when the master key or salt is not the suite's width: nothing
+    /// is derived from it, and every packet is refused.
+    current: Option<Current>,
+}
+
+/// The session keys of the current derivation, each with the phase it is for.
+struct Current {
     rtp: Engine,
     rtp_phase: u64,
     rtcp: Engine,
     rtcp_phase: u64,
 }
 
+/// A derivation for a packet that has not authenticated yet: kept only once
+/// it has.
+type Candidate = Option<(u64, Engine)>;
+
 impl Derived {
     fn new(policy: &Policy, master: Master) -> Self {
         let lengths = policy.suite.lengths();
-        Self {
-            suite: policy.suite,
-            rate: policy.rate,
+        let current = master.fits_lengths(lengths).then(|| Current {
             rtp: Engine::new(policy.suite, &master.rtp_session(policy.rate, 0, lengths)),
             rtp_phase: 0,
             rtcp: Engine::new(policy.suite, &master.rtcp_session(policy.rate, 0, lengths)),
             rtcp_phase: 0,
+        });
+        Self {
+            suite: policy.suite,
+            rate: policy.rate,
+            current,
             master,
         }
     }
 
-    fn rtp(&mut self, index: u64) -> &Engine {
+    fn current(&self) -> Result<&Current, SrtpError> {
+        self.current.as_ref().ok_or(SrtpError::KeyLength)
+    }
+
+    /// The SRTP engine for a packet this end sends, re-derived and kept when
+    /// the index has moved into a new phase.
+    fn rtp(&mut self, index: u64) -> Result<&Engine, SrtpError> {
+        let candidate = self.rtp_candidate(index)?;
+        self.commit_rtp(candidate);
+        Ok(&self.current()?.rtp)
+    }
+
+    /// The SRTCP engine for a packet this end sends.
+    fn rtcp(&mut self, index: u32) -> Result<&Engine, SrtpError> {
+        let candidate = self.rtcp_candidate(index)?;
+        self.commit_rtcp(candidate);
+        Ok(&self.current()?.rtcp)
+    }
+
+    /// A fresh SRTP derivation when `index` is in another phase than the one
+    /// kept, and `None` when the kept one serves. Nothing is replaced here:
+    /// an arriving packet's index is only a claim until its tag verifies, and
+    /// a forged one must not be able to make the receiver throw away the keys
+    /// the genuine stream is using.
+    fn rtp_candidate(&self, index: u64) -> Result<Candidate, SrtpError> {
+        let current = self.current()?;
         let phase = self.rate.phase_of(index);
-        if phase != self.rtp_phase {
+        Ok((phase != current.rtp_phase).then(|| {
             let session = self
                 .master
                 .rtp_session(self.rate, index, self.suite.lengths());
-            self.rtp = Engine::new(self.suite, &session);
-            self.rtp_phase = phase;
-        }
-        &self.rtp
+            (phase, Engine::new(self.suite, &session))
+        }))
     }
 
-    fn rtcp(&mut self, index: u32) -> &Engine {
+    /// As [`Derived::rtp_candidate`], for SRTCP.
+    fn rtcp_candidate(&self, index: u32) -> Result<Candidate, SrtpError> {
+        let current = self.current()?;
         let phase = self.rate.phase_of(u64::from(index));
-        if phase != self.rtcp_phase {
+        Ok((phase != current.rtcp_phase).then(|| {
             let session = self
                 .master
                 .rtcp_session(self.rate, index, self.suite.lengths());
-            self.rtcp = Engine::new(self.suite, &session);
-            self.rtcp_phase = phase;
+            (phase, Engine::new(self.suite, &session))
+        }))
+    }
+
+    /// The engine a packet is processed with: the candidate when there is
+    /// one, the kept one otherwise.
+    fn engine<'a>(current: &'a Engine, candidate: &'a Candidate) -> &'a Engine {
+        candidate.as_ref().map_or(current, |(_, engine)| engine)
+    }
+
+    fn commit_rtp(&mut self, candidate: Candidate) {
+        if let (Some(current), Some((phase, engine))) = (self.current.as_mut(), candidate) {
+            current.rtp = engine;
+            current.rtp_phase = phase;
         }
-        &self.rtcp
+    }
+
+    fn commit_rtcp(&mut self, candidate: Candidate) {
+        if let (Some(current), Some((phase, engine))) = (self.current.as_mut(), candidate) {
+            current.rtcp = engine;
+            current.rtcp_phase = phase;
+        }
     }
 }
 
@@ -762,10 +835,15 @@ impl Protector {
     ///
     /// # Errors
     ///
-    /// Refuses a malformed header, a buffer with no room, and — the one worth
-    /// handling rather than logging — a master key that has secured as many
-    /// packets as §9.2 allows.
+    /// Refuses a malformed header, a buffer with no room, a sequence number
+    /// that does not move the packet index forward
+    /// ([`SrtpError::IndexNotAdvancing`]: the same one again, or one behind
+    /// the last), a master key of the wrong width for the suite, and — the
+    /// one worth handling rather than logging — a master key that has
+    /// secured as many packets as §9.2 allows. Nothing refused moves the
+    /// index.
     pub fn protect_rtp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
+        self.keys.current()?;
         if self.rtp_packets >= RTP_LIMIT {
             return Err(SrtpError::KeyExhausted);
         }
@@ -781,8 +859,11 @@ impl Protector {
         let ssrc = read_u32(packet, 8);
         let sequence =
             u16::from_be_bytes([*packet.get(2).unwrap_or(&0), *packet.get(3).unwrap_or(&0)]);
-        let index = self.rtp.next(sequence);
-        let roc = self.rtp.rollover();
+        let (index, sent) = self
+            .rtp
+            .next(sequence)
+            .ok_or(SrtpError::IndexNotAdvancing)?;
+        let roc = sent.rollover();
 
         // RFC 7714 §8.2: every AEAD-protected SRTP packet is both encrypted
         // and authenticated, in the one call that does both; the cipher's
@@ -800,7 +881,7 @@ impl Protector {
                 })?
                 .split_at_mut(header);
             self.keys
-                .rtp(index)
+                .rtp(index)?
                 .aead_seal_rtp(head, ssrc, roc, sequence, buffer)?;
             sealed_end
         } else {
@@ -809,7 +890,7 @@ impl Protector {
                     .get_mut(..len)
                     .ok_or(SrtpError::Malformed)?
                     .split_at_mut(header);
-                self.keys.rtp(index).encrypt_rtp(
+                self.keys.rtp(index)?.encrypt_rtp(
                     self.policy.suite,
                     head,
                     ssrc,
@@ -828,7 +909,7 @@ impl Protector {
         if !self.policy.suite.is_aead() && self.policy.authenticate_rtp {
             let tag = self.policy.suite.tag();
             let mut bytes = [0_u8; sha1::DIGEST];
-            self.keys.rtp(index).tag(
+            self.keys.rtp(index)?.tag(
                 &[packet.get(..len).unwrap_or_default(), &roc.to_be_bytes()],
                 tag,
                 &mut bytes,
@@ -839,6 +920,7 @@ impl Protector {
             at += tag;
         }
 
+        self.rtp = sent;
         self.rtp_packets += 1;
         Ok(at)
     }
@@ -849,6 +931,7 @@ impl Protector {
     ///
     /// As `protect_rtp`, with §9.2's much lower SRTCP limit.
     pub fn protect_rtcp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
+        self.keys.current()?;
         if self.rtcp_packets >= RTCP_LIMIT {
             return Err(SrtpError::KeyExhausted);
         }
@@ -889,7 +972,7 @@ impl Protector {
                     got,
                 })?
                 .split_at_mut(RTCP_HEADER);
-            self.keys.rtcp(index).aead_seal_rtcp(
+            self.keys.rtcp(index)?.aead_seal_rtcp(
                 head,
                 ssrc,
                 index,
@@ -904,7 +987,7 @@ impl Protector {
                     .get_mut(..len)
                     .ok_or(SrtpError::Malformed)?
                     .split_at_mut(RTCP_HEADER);
-                self.keys.rtcp(index).encrypt_rtcp(
+                self.keys.rtcp(index)?.encrypt_rtcp(
                     self.policy.suite,
                     head,
                     ssrc,
@@ -927,7 +1010,7 @@ impl Protector {
             let tag = self.policy.suite.rtcp_tag();
             let mut bytes = [0_u8; sha1::DIGEST];
             self.keys
-                .rtcp(index)
+                .rtcp(index)?
                 .tag(&[packet.get(..at).unwrap_or_default()], tag, &mut bytes);
             if let Some(mki) = self.policy.mki {
                 mki.write(packet.get_mut(at..).unwrap_or_default());
@@ -971,9 +1054,63 @@ struct Stream {
 /// Only a packet that authenticates takes a slot, so nothing a forger sends
 /// can fill the table. A peer that has sent from more sources than this under
 /// one master key has the one heard from least recently give way, which is
-/// never the one carrying the call, and what that costs is the replay list of
-/// the source that gave way. Every new master key starts a table of its own.
+/// never the one carrying the call. What the source that gave way leaves
+/// behind is its highest index, in [`Forgotten`]: heard from again, it
+/// carries on from there, its rollover counter with it, and nothing at or
+/// below that index is taken as new. Every new master key starts a table of
+/// its own.
 const SOURCES: usize = 8;
+
+/// How many sources that gave way in [`Sources`] one receive context still
+/// remembers the highest index of.
+///
+/// Bounded like the table itself. A peer would have to send authenticated
+/// packets from this many more sources than [`SOURCES`] under one master key
+/// before the oldest of these is lost too, and with it the record that keeps
+/// a recording of that source from being taken as new.
+const FORGOTTEN: usize = 32;
+
+/// The highest index of each source that gave way in [`Sources`], most
+/// recent last, overwritten oldest first.
+#[derive(Debug, Clone, Copy)]
+struct Forgotten {
+    slots: [Option<(u32, u64)>; FORGOTTEN],
+    next: usize,
+}
+
+impl Forgotten {
+    const fn new() -> Self {
+        Self {
+            slots: [None; FORGOTTEN],
+            next: 0,
+        }
+    }
+
+    /// The highest index `ssrc` had reached when it gave way, if it did.
+    fn get(&self, ssrc: u32) -> Option<u64> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|(source, _)| *source == ssrc)
+            .map(|(_, highest)| *highest)
+    }
+
+    /// Remember where `ssrc` had got to: in its own entry when it gave way
+    /// before, otherwise in place of the oldest.
+    fn note(&mut self, ssrc: u32, highest: u64) {
+        let own = self
+            .slots
+            .iter()
+            .position(|slot| slot.is_some_and(|(source, _)| source == ssrc));
+        let at = own.unwrap_or(self.next);
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = Some((ssrc, highest));
+        }
+        if own.is_none() {
+            self.next = (self.next + 1) % FORGOTTEN;
+        }
+    }
+}
 
 /// One source's state, and when it last authenticated a packet.
 #[derive(Debug, Clone, Copy)]
@@ -1024,8 +1161,8 @@ impl<T: Copy> Sources<T> {
 
     /// Keep what an authenticated packet left `ssrc` as: in the slot it
     /// already has, in an empty one, or in place of the source heard from
-    /// least recently.
-    fn put(&mut self, ssrc: u32, state: T) {
+    /// least recently, which is handed back.
+    fn put(&mut self, ssrc: u32, state: T) -> Option<(u32, T)> {
         self.clock = self.clock.saturating_add(1);
         let own = self
             .slots
@@ -1038,17 +1175,17 @@ impl<T: Copy> Sources<T> {
             .enumerate()
             .min_by_key(|(_, slot)| slot.map_or(0, |heard| heard.last))
             .map(|(at, _)| at);
-        if let Some(slot) = own
+        let slot = own
             .or(empty)
             .or(stalest)
-            .and_then(|at| self.slots.get_mut(at))
-        {
-            *slot = Some(Heard {
-                ssrc,
-                state,
-                last: self.clock,
-            });
-        }
+            .and_then(|at| self.slots.get_mut(at))?;
+        slot.replace(Heard {
+            ssrc,
+            state,
+            last: self.clock,
+        })
+        .filter(|gone| gone.ssrc != ssrc)
+        .map(|gone| (gone.ssrc, gone.state))
     }
 }
 
@@ -1058,6 +1195,8 @@ pub struct Unprotector {
     keys: Derived,
     rtp: Sources<Stream>,
     rtcp: Sources<Replay>,
+    rtp_forgotten: Forgotten,
+    rtcp_forgotten: Forgotten,
     initial: u32,
 }
 
@@ -1070,6 +1209,8 @@ impl Unprotector {
             policy,
             rtp: Sources::new(),
             rtcp: Sources::new(),
+            rtp_forgotten: Forgotten::new(),
+            rtcp_forgotten: Forgotten::new(),
             initial: 0,
         }
     }
@@ -1104,7 +1245,9 @@ impl Unprotector {
     }
 
     /// The state a packet from `ssrc` is judged against: the source's own
-    /// when it has been heard from, a fresh one when it has not.
+    /// when it has been heard from, what it had reached when it has been
+    /// heard from and then gave way to other sources, a fresh one when it
+    /// has not been heard from at all.
     ///
     /// A copy either way, and nothing is written back until the tag verifies,
     /// so a forged packet naming an unused SSRC takes no slot and a forged
@@ -1115,14 +1258,48 @@ impl Unprotector {
     /// commences sending packets". Only the first source of a receiver that
     /// joined a session in progress starts from the counter it was given.
     fn stream_for(&self, ssrc: u32) -> Stream {
-        self.rtp.get(ssrc).unwrap_or_else(|| Stream {
+        if let Some(stream) = self.rtp.get(ssrc) {
+            return stream;
+        }
+        if let Some(highest) = self.rtp_forgotten.get(ssrc) {
+            return Stream {
+                index: Receiving::resumed(highest),
+                replay: Replay::resumed(highest),
+            };
+        }
+        Stream {
             index: if self.rtp.is_empty() {
                 Receiving::joining(self.initial)
             } else {
                 Receiving::default()
             },
             replay: Replay::default(),
-        })
+        }
+    }
+
+    /// The SRTCP replay list a packet from `ssrc` is judged against, on the
+    /// same terms as [`Unprotector::stream_for`].
+    fn rtcp_replay_for(&self, ssrc: u32) -> Replay {
+        self.rtcp
+            .get(ssrc)
+            .or_else(|| self.rtcp_forgotten.get(ssrc).map(Replay::resumed))
+            .unwrap_or_default()
+    }
+
+    fn keep_rtp(&mut self, ssrc: u32, stream: Stream) {
+        if let Some((gone, state)) = self.rtp.put(ssrc, stream)
+            && let Some(highest) = state.replay.highest()
+        {
+            self.rtp_forgotten.note(gone, highest);
+        }
+    }
+
+    fn keep_rtcp(&mut self, ssrc: u32, replay: Replay) {
+        if let Some((gone, state)) = self.rtcp.put(ssrc, replay)
+            && let Some(highest) = state.highest()
+        {
+            self.rtcp_forgotten.note(gone, highest);
+        }
     }
 
     /// Verify and decrypt an SRTP packet in place, returning the length of
@@ -1135,8 +1312,10 @@ impl Unprotector {
     ///
     /// # Errors
     ///
-    /// A short or malformed packet, a replay, or a tag that does not match.
+    /// A short or malformed packet, a replay, a tag that does not match, or
+    /// a master key of the wrong width for the suite.
     pub fn unprotect_rtp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
+        self.keys.current()?;
         let is_aead = self.policy.suite.is_aead();
         let tag = if is_aead {
             aead::TAG
@@ -1167,6 +1346,8 @@ impl Unprotector {
             return Err(SrtpError::Replayed);
         }
 
+        let candidate = self.keys.rtp_candidate(estimate.index)?;
+        let engine = Derived::engine(&self.keys.current()?.rtp, &candidate);
         if is_aead {
             let sealed_end = body + aead::TAG;
             self.check_mki(packet, sealed_end)?;
@@ -1174,15 +1355,14 @@ impl Unprotector {
                 .get_mut(..sealed_end)
                 .ok_or(SrtpError::Malformed)?
                 .split_at_mut(header);
-            self.keys
-                .rtp(estimate.index)
+            engine
                 .aead_open_rtp(head, ssrc, estimate.rollover(), sequence, cipher_and_tag)
                 .map_err(|TagMismatch| SrtpError::NotAuthentic)?;
         } else {
             self.check_mki(packet, body)?;
             if tag > 0 {
                 let mut expected = [0_u8; sha1::DIGEST];
-                self.keys.rtp(estimate.index).tag(
+                engine.tag(
                     &[
                         packet.get(..body).unwrap_or_default(),
                         &estimate.rollover().to_be_bytes(),
@@ -1203,7 +1383,7 @@ impl Unprotector {
                     .get_mut(..body)
                     .ok_or(SrtpError::Malformed)?
                     .split_at_mut(header);
-                self.keys.rtp(estimate.index).encrypt_rtp(
+                engine.encrypt_rtp(
                     self.policy.suite,
                     head,
                     ssrc,
@@ -1214,9 +1394,10 @@ impl Unprotector {
             }
         }
 
+        self.keys.commit_rtp(candidate);
         stream.index.accept(estimate);
         stream.replay.record(estimate.index);
-        self.rtp.put(ssrc, stream);
+        self.keep_rtp(ssrc, stream);
         Ok(body)
     }
 
@@ -1227,6 +1408,7 @@ impl Unprotector {
     ///
     /// As `unprotect_rtp`.
     pub fn unprotect_rtcp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
+        self.keys.current()?;
         let tag = self.policy.suite.rtcp_tag();
         if self.policy.suite.is_aead() {
             return self.unprotect_rtcp_aead(packet, tag);
@@ -1248,14 +1430,16 @@ impl Unprotector {
         // a copy, for the same reason as on the RTP side: the stored window
         // moves only once the tag has verified. One list per sending source,
         // since §3.4 keeps SRTCP's list beside the SRTP one of the same context
-        let mut replay = self.rtcp.get(ssrc).unwrap_or_default();
+        let mut replay = self.rtcp_replay_for(ssrc);
         if !replay.accepts(u64::from(index)) {
             return Err(SrtpError::Replayed);
         }
 
         self.check_mki(packet, with_index)?;
+        let candidate = self.keys.rtcp_candidate(index)?;
+        let engine = Derived::engine(&self.keys.current()?.rtcp, &candidate);
         let mut expected = [0_u8; sha1::DIGEST];
-        self.keys.rtcp(index).tag(
+        engine.tag(
             &[packet.get(..with_index).unwrap_or_default()],
             tag,
             &mut expected,
@@ -1272,18 +1456,12 @@ impl Unprotector {
                 .get_mut(..body)
                 .ok_or(SrtpError::Malformed)?
                 .split_at_mut(RTCP_HEADER);
-            self.keys.rtcp(index).encrypt_rtcp(
-                self.policy.suite,
-                head,
-                ssrc,
-                index,
-                word,
-                payload,
-            )?;
+            engine.encrypt_rtcp(self.policy.suite, head, ssrc, index, word, payload)?;
         }
 
+        self.keys.commit_rtcp(candidate);
         replay.record(u64::from(index));
-        self.rtcp.put(ssrc, replay);
+        self.keep_rtcp(ssrc, replay);
         Ok(body)
     }
 
@@ -1303,7 +1481,7 @@ impl Unprotector {
         let index = word & !RTCP_ENCRYPTED;
         let ssrc = read_u32(packet, 4);
 
-        let mut replay = self.rtcp.get(ssrc).unwrap_or_default();
+        let mut replay = self.rtcp_replay_for(ssrc);
         if !replay.accepts(u64::from(index)) {
             return Err(SrtpError::Replayed);
         }
@@ -1313,13 +1491,14 @@ impl Unprotector {
             .get_mut(..sealed_end)
             .ok_or(SrtpError::Malformed)?
             .split_at_mut(RTCP_HEADER);
-        self.keys
-            .rtcp(index)
+        let candidate = self.keys.rtcp_candidate(index)?;
+        Derived::engine(&self.keys.current()?.rtcp, &candidate)
             .aead_open_rtcp(head, ssrc, index, word, word & RTCP_ENCRYPTED != 0, buffer)
             .map_err(|TagMismatch| SrtpError::NotAuthentic)?;
 
+        self.keys.commit_rtcp(candidate);
         replay.record(u64::from(index));
-        self.rtcp.put(ssrc, replay);
+        self.keep_rtcp(ssrc, replay);
         Ok(body)
     }
 
@@ -1447,7 +1626,9 @@ impl Security {
     /// still has grace. Trying twice is sound because a failed attempt leaves
     /// the datagram byte-identical: [`Unprotector::unprotect_rtp`] checks the
     /// replay window against a copy and verifies the tag before it decrypts
-    /// anything. A refactor that decrypted first would break this silently.
+    /// anything, and so does the GCM open of the AEAD suites. A refactor or a
+    /// dependency that decrypted first would break this, and
+    /// `a_packet_that_does_not_open_is_left_as_it_arrived` would say so.
     ///
     /// # Errors
     /// As [`Unprotector::unprotect_rtp`], reported for the current key even
@@ -1501,7 +1682,16 @@ impl Security {
     /// There is no crossing to cover on this side. This endpoint decides when
     /// it starts stamping with what the negotiation settled on, and that is
     /// now.
+    ///
+    /// A master key that is the one already in use is new terms whatever
+    /// `what` says: under it the index must not start again (§9.1), and the
+    /// SRTCP index is never reset (§3.4).
     pub fn rekey_local(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        let what = if self.sending.keys.master.same_as(&master) {
+            Rekeyed::Terms
+        } else {
+            what
+        };
         match what {
             // the Protector going out of scope drops its derived session keys
             // and the master they came from, both of which zeroise
@@ -1521,7 +1711,16 @@ impl Security {
     /// On [`Rekeyed::Terms`] there is nothing to stage: every packet in
     /// flight is under the key we still hold, and only the tag length around
     /// it moved.
+    ///
+    /// A master key that is the one already in use is new terms here too,
+    /// whatever `what` says: a fresh context under it would have forgotten
+    /// every replay list, and taken a recording of the stream as new.
     pub fn rekey_remote(&mut self, policy: Policy, master: Master, what: Rekeyed) {
+        let what = if self.receiving.keys.master.same_as(&master) {
+            Rekeyed::Terms
+        } else {
+            what
+        };
         match what {
             Rekeyed::Key => {
                 let previous =
@@ -1586,7 +1785,7 @@ fn read_u32(packet: &[u8], at: usize) -> u32 {
 /// octet or the last. The lengths are public, so only the contents have to be
 /// hidden, and `black_box` is what stops the loop being turned back into an
 /// early return.
-fn equal(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -1599,6 +1798,8 @@ fn equal(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use zeroize::Zeroizing;
+
     use super::{
         GRACE, Master, Mki, Policy, Protector, RTCP_INDEX, Rate, Rekeyed, SOURCES, Security,
         SrtpError, Suite, Unprotector,
@@ -2266,6 +2467,9 @@ mod tests {
         };
 
         let before = tag_of(&mut protector, 100);
+        // forward to the wrap in steps a receiver can follow
+        tag_of(&mut protector, 30_000);
+        tag_of(&mut protector, 60_000);
         tag_of(&mut protector, 65_535);
         tag_of(&mut protector, 0);
         assert_eq!(protector.rollover(), 1);
@@ -2288,6 +2492,9 @@ mod tests {
         };
 
         let before = body_of(&mut protector, 100);
+        // forward to the wrap in steps a receiver can follow
+        body_of(&mut protector, 30_000);
+        body_of(&mut protector, 60_000);
         body_of(&mut protector, 65_535);
         body_of(&mut protector, 0);
         let after = body_of(&mut protector, 100);
@@ -2583,6 +2790,9 @@ mod tests {
         };
 
         let before = body(&mut security, 100);
+        // forward to the wrap in steps a receiver can follow
+        body(&mut security, 30_000);
+        body(&mut security, 60_000);
         body(&mut security, 65_535);
         body(&mut security, 0);
         assert_eq!(security.rollover(), 1, "the stream wrapped");
@@ -2661,5 +2871,308 @@ mod tests {
             Err(SrtpError::NotAuthentic),
             "the replaced key is still open after its grace ran out"
         );
+    }
+
+    /// A protected compound packet from `ssrc`, and the SRTCP index it went
+    /// under.
+    fn reported(protector: &mut Protector, ssrc: u32) -> (Vec<u8>, u32) {
+        let mut plain = compound();
+        if let Some(slot) = plain.get_mut(4..8) {
+            slot.copy_from_slice(&ssrc.to_be_bytes());
+        }
+        let mut buffer = room(&plain, protector.rtcp_overhead());
+        let len = protector
+            .protect_rtcp(&mut buffer, plain.len())
+            .expect("the report protects");
+        buffer.truncate(len);
+        let word = buffer
+            .get(plain.len()..plain.len() + RTCP_INDEX)
+            .and_then(|word| <[u8; 4]>::try_from(word).ok())
+            .map_or(0, u32::from_be_bytes);
+        (buffer, word & 0x7fff_ffff)
+    }
+
+    // §9.1: the same (key, SSRC, index) twice is the same keystream twice,
+    // and under GCM the same nonce twice
+    #[test]
+    fn a_sequence_number_that_does_not_move_the_index_forward_is_refused() {
+        for suite in Suite::STRENGTH {
+            let (mut protector, mut unprotector) = pair(Policy::new(suite));
+            let first = sent(&mut protector, 10);
+            for again in [10, 9, 10_u16.wrapping_add(0x8000)] {
+                let plain = packet(again, b"payload");
+                let mut buffer = room(&plain, protector.rtp_overhead());
+                assert_eq!(
+                    protector.protect_rtp(&mut buffer, plain.len()),
+                    Err(SrtpError::IndexNotAdvancing),
+                    "{suite:?}, sequence {again}"
+                );
+            }
+            assert_eq!(protector.rollover(), 0, "{suite:?}");
+            // nothing refused moved the index: the next number still follows
+            let mut next = sent(&mut protector, 11);
+            assert!(unprotector.unprotect_rtp(&mut first.clone()).is_ok());
+            assert!(unprotector.unprotect_rtp(&mut next).is_ok(), "{suite:?}");
+        }
+    }
+
+    #[test]
+    fn a_master_key_or_salt_of_the_wrong_width_keys_nothing() {
+        for suite in Suite::STRENGTH {
+            let (key, salt) = (suite.key_len(), suite.salt_len());
+            assert!(master_for(suite).fits(suite), "{suite:?}");
+            for (key, salt) in [
+                (key - 1, salt),
+                (key + 1, salt),
+                (5, salt),
+                (key, salt - 1),
+                (key, salt + 2),
+            ] {
+                let wrong = || Master::new(&vec![0x11; key], &vec![0x22; salt]);
+                assert!(!wrong().fits(suite), "{suite:?} {key}/{salt}");
+                let policy = Policy::new(suite);
+                let mut protector = Protector::new(policy, wrong());
+                let plain = packet(1, b"payload");
+                let mut buffer = room(&plain, protector.rtp_overhead());
+                assert_eq!(
+                    protector.protect_rtp(&mut buffer, plain.len()),
+                    Err(SrtpError::KeyLength),
+                    "{suite:?} {key}/{salt}"
+                );
+                assert_eq!(buffer.get(..plain.len()), plain.get(..));
+                let report = compound();
+                let mut buffer = room(&report, protector.rtcp_overhead());
+                assert_eq!(
+                    protector.protect_rtcp(&mut buffer, report.len()),
+                    Err(SrtpError::KeyLength)
+                );
+
+                let mut unprotector = Unprotector::new(policy, wrong());
+                let mut good = sent(&mut Protector::new(policy, master_for(suite)), 1);
+                assert_eq!(
+                    unprotector.unprotect_rtp(&mut good),
+                    Err(SrtpError::KeyLength)
+                );
+                let (mut good, _) = reported(&mut Protector::new(policy, master_for(suite)), SSRC);
+                assert_eq!(
+                    unprotector.unprotect_rtcp(&mut good),
+                    Err(SrtpError::KeyLength)
+                );
+            }
+        }
+    }
+
+    // §3.4: the SRTCP index is never reset under one key, and §9.1 holds the
+    // SRTP index to the same: a caller that names the key in use as a new
+    // one has not re-keyed anything
+    #[test]
+    fn the_key_in_use_named_as_a_new_one_carries_every_index_on() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut security = Security::new(policy, master(), policy, master());
+        issued(&mut security, 100);
+        for _ in 0..3 {
+            let plain = compound();
+            let mut buffer = room(&plain, security.rtcp_overhead());
+            security
+                .protect_rtcp(&mut buffer, plain.len())
+                .expect("the report protects");
+        }
+
+        security.rekey_local(policy, master(), Rekeyed::Key);
+        let plain = packet(100, b"payload");
+        let mut buffer = room(&plain, security.rtp_overhead());
+        assert_eq!(
+            security.protect_rtp(&mut buffer, plain.len()),
+            Err(SrtpError::IndexNotAdvancing),
+            "the packet index started again under the key it had spent"
+        );
+        let (_, index) = reported(&mut security.sending, SSRC);
+        assert_eq!(index, 3, "the SRTCP index started again under its key");
+
+        // and the receiving side keeps its replay lists
+        let mut far = Protector::new(policy, master());
+        let wire = sent(&mut far, 5);
+        let (report, _) = reported(&mut far, SSRC);
+        assert!(security.unprotect_rtp(&mut wire.clone()).is_ok());
+        assert!(security.unprotect_rtcp(&mut report.clone()).is_ok());
+        security.rekey_remote(policy, master(), Rekeyed::Key);
+        assert_eq!(
+            security.unprotect_rtp(&mut wire.clone()),
+            Err(SrtpError::Replayed)
+        );
+        assert_eq!(
+            security.unprotect_rtcp(&mut report.clone()),
+            Err(SrtpError::Replayed)
+        );
+
+        // a key that is new really does start again
+        security.rekey_local(policy, other_master(), Rekeyed::Key);
+        let (_, index) = reported(&mut security.sending, SSRC);
+        assert_eq!(index, 0);
+    }
+
+    // `Security`'s retired context is tried on the very datagram the current
+    // one refused, which is sound only if a refusal leaves it as it arrived:
+    // held here for every suite, for the tag check of the MAC suites and for
+    // the GCM open of the AEAD ones, on both protocols
+    #[test]
+    fn a_packet_that_does_not_open_is_left_as_it_arrived() {
+        for suite in Suite::STRENGTH {
+            let policy = Policy::new(suite);
+            let mut protector = Protector::new(policy, master_for(suite));
+            let other = Master::new(&vec![0x55; suite.key_len()], &vec![0x22; suite.salt_len()]);
+            let mut stranger = Unprotector::new(policy, other);
+
+            let wire = sent(&mut protector, 9);
+            let mut tried = wire.clone();
+            assert_eq!(
+                stranger.unprotect_rtp(&mut tried),
+                Err(SrtpError::NotAuthentic),
+                "{suite:?}"
+            );
+            assert_eq!(tried, wire, "{suite:?}");
+
+            let (report, _) = reported(&mut protector, SSRC);
+            let mut tried = report.clone();
+            assert_eq!(
+                stranger.unprotect_rtcp(&mut tried),
+                Err(SrtpError::NotAuthentic),
+                "{suite:?}"
+            );
+            assert_eq!(tried, report, "{suite:?}");
+        }
+    }
+
+    #[test]
+    fn a_peer_still_on_its_old_key_is_heard_under_every_suite() {
+        for suite in Suite::STRENGTH {
+            let policy = Policy::new(suite);
+            let other = || Master::new(&vec![0x55; suite.key_len()], &vec![0x66; suite.salt_len()]);
+            let mut before = Protector::new(policy, master_for(suite));
+            let mut security = Security::new(policy, master_for(suite), policy, master_for(suite));
+            security.rekey_remote(policy, other(), Rekeyed::Key);
+            let mut crossing = sent(&mut before, 100);
+            assert_eq!(
+                security.unprotect_rtp(&mut crossing).map(|_| ()),
+                Ok(()),
+                "{suite:?}"
+            );
+            let (mut report, _) = reported(&mut before, SSRC);
+            assert_eq!(
+                security.unprotect_rtcp(&mut report).map(|_| ()),
+                Ok(()),
+                "{suite:?}"
+            );
+        }
+    }
+
+    // a source that gave way to others keeps its replay list's floor and its
+    // rollover counter: heard from again, a recording of it is still old
+    #[test]
+    fn a_source_that_gave_way_is_held_to_where_it_had_got() {
+        let policy = Policy::new(Suite::AesCm80);
+        let mut talking = Protector::new(policy, master());
+        let mut unprotector = Unprotector::new(policy, master());
+
+        let mut recorded = Vec::new();
+        let mut sequence = 65_533_u16;
+        for _ in 0..5 {
+            let datagram = sent_from(&mut talking, SSRC, sequence);
+            assert!(unprotector.unprotect_rtp(&mut datagram.clone()).is_ok());
+            recorded.push(datagram);
+            sequence = sequence.wrapping_add(1);
+        }
+        let (report, _) = reported(&mut talking, SSRC);
+        assert!(unprotector.unprotect_rtcp(&mut report.clone()).is_ok());
+
+        // as many other sources as the table holds push it out
+        for source in 1..=u32::try_from(SOURCES).unwrap_or(u32::MAX) {
+            let mut other = Protector::new(policy, master());
+            let mut datagram = sent_from(&mut other, source, 10);
+            assert!(unprotector.unprotect_rtp(&mut datagram).is_ok());
+            let (mut report, _) = reported(&mut other, source);
+            assert!(unprotector.unprotect_rtcp(&mut report).is_ok());
+        }
+        assert!(unprotector.rtp.get(SSRC).is_none(), "the source gave way");
+        assert!(unprotector.rtcp.get(SSRC).is_none());
+
+        for datagram in &recorded {
+            assert_eq!(
+                unprotector.unprotect_rtp(&mut datagram.clone()),
+                Err(SrtpError::Replayed)
+            );
+        }
+        assert_eq!(
+            unprotector.unprotect_rtcp(&mut report.clone()),
+            Err(SrtpError::Replayed)
+        );
+
+        // and what it sends next, past its wrap, still opens
+        let mut next = sent_from(&mut talking, SSRC, sequence);
+        assert_eq!(unprotector.unprotect_rtp(&mut next).map(|_| ()), Ok(()));
+        let (mut report, _) = reported(&mut talking, SSRC);
+        assert_eq!(unprotector.unprotect_rtcp(&mut report).map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn the_record_of_sources_that_gave_way_is_bounded() {
+        let mut forgotten = super::Forgotten::new();
+        for ssrc in 0..u32::try_from(super::FORGOTTEN * 2).unwrap_or(u32::MAX) {
+            forgotten.note(ssrc, u64::from(ssrc));
+        }
+        assert_eq!(forgotten.get(0), None, "the oldest went first");
+        let last = u32::try_from(super::FORGOTTEN * 2 - 1).unwrap_or(u32::MAX);
+        assert_eq!(forgotten.get(last), Some(u64::from(last)));
+        forgotten.note(last, 7);
+        assert_eq!(forgotten.get(last), Some(7), "one entry per source");
+    }
+
+    // with a key derivation rate, an arriving index in another phase is
+    // derived for, but the derivation is kept only once the packet has
+    // authenticated: a forged one leaves the keys of the running stream
+    #[test]
+    fn a_forged_packet_in_another_phase_leaves_the_session_keys_in_place() {
+        for suite in [Suite::AesCm80, Suite::AeadAes128Gcm] {
+            let mut policy = Policy::new(suite);
+            policy.rate = Rate::from_exponent(4).expect("in range");
+            let (mut protector, mut unprotector) = pair(policy);
+            let mut datagram = sent(&mut protector, 3);
+            assert!(unprotector.unprotect_rtp(&mut datagram).is_ok());
+            let (mut report, _) = reported(&mut protector, SSRC);
+            assert!(unprotector.unprotect_rtcp(&mut report).is_ok());
+
+            // a packet numbered into the next phase, its tag corrupted
+            let mut forged = sent(&mut protector, 40);
+            if let Some(last) = forged.last_mut() {
+                *last ^= 1;
+            }
+            assert_eq!(
+                unprotector.unprotect_rtp(&mut forged),
+                Err(SrtpError::NotAuthentic)
+            );
+            let current = unprotector.keys.current().expect("keyed");
+            assert_eq!(current.rtp_phase, 0, "{suite:?}");
+
+            // a genuine one in that phase moves them
+            let mut genuine = sent(&mut protector, 41);
+            assert!(unprotector.unprotect_rtp(&mut genuine).is_ok());
+            let current = unprotector.keys.current().expect("keyed");
+            assert_eq!(current.rtp_phase, 41 >> 4, "{suite:?}");
+            assert_eq!(current.rtcp_phase, 0, "{suite:?}");
+        }
+    }
+
+    // what wipes each session key when it goes is its type, since the wipe
+    // itself cannot be watched from safe code: held here, so that a change to
+    // a plain copy does not compile
+    #[test]
+    fn the_session_keys_are_held_in_buffers_that_wipe_themselves() {
+        let (protector, _) = pair(Policy::new(Suite::AesCm80));
+        let current = protector.keys.current().expect("keyed");
+        let _: &Zeroizing<Vec<u8>> = &current.rtp.salt;
+        let super::Cipher::Mac { authentication, .. } = &current.rtcp.cipher else {
+            panic!("a MAC suite");
+        };
+        let _: &Zeroizing<[u8; super::kdf::AUTH]> = authentication;
     }
 }

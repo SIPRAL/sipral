@@ -161,6 +161,28 @@ pub use endpoint::{DeviceMonitor, default_device, devices};
 #[cfg(target_os = "windows")]
 pub use stream::{CaptureStream, PlaybackStream, StreamConfig, channels};
 
+/// The calling thread registered with the multimedia class scheduler as Pro
+/// Audio, for as long as this lives: what a stream's own audio thread does
+/// for itself, for a thread of the caller's that feeds the streams — a pump
+/// that encodes the microphone and mixes the calls once a frame. Dropped on
+/// the thread that took it, the registration is given back.
+#[cfg(target_os = "windows")]
+pub struct ProAudio {
+    _registration: com::Priority,
+}
+
+/// Register the calling thread as Pro Audio, or `None` when the scheduler
+/// would not: the audio service is not running, or the thread is in a
+/// session that has none. Survivable either way: the thread runs as any
+/// other.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub fn pro_audio_thread() -> Option<ProAudio> {
+    com::Priority::pro_audio().map(|registration| ProAudio {
+        _registration: registration,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

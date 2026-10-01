@@ -14,6 +14,8 @@
 //! is a different construction with a different security argument, and RFC
 //! 3711 §4.2 still names it as the only mandatory-to-implement transform.
 
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
 /// The block size in bytes, and so the key length HMAC pads to.
 const BLOCK: usize = 64;
 
@@ -113,6 +115,17 @@ impl Sha1 {
     }
 }
 
+/// Once a key is in it — HMAC's pads — the state is as good as that key, so
+/// it is wiped when the hash goes.
+impl Drop for Sha1 {
+    fn drop(&mut self) {
+        self.state.zeroize();
+        self.buffer.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for Sha1 {}
+
 #[expect(
     clippy::many_single_char_names,
     reason = "a through e and w are RFC 3174's own names, and this has to be readable against it"
@@ -169,8 +182,11 @@ fn compress(state: &mut [u32; 5], block: &[u8]) {
 ///
 /// RFC 2104: `H((K ^ opad) || H((K ^ ipad) || text))`, with a key longer than
 /// the block replaced by its own digest and a shorter one zero-padded.
+///
+/// The padded key and both pads are the key under another name, and so is the
+/// state of either hash once its pad is in: each is wiped when it goes.
 pub(crate) fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; DIGEST] {
-    let mut padded = [0_u8; BLOCK];
+    let mut padded = Zeroizing::new([0_u8; BLOCK]);
     if key.len() > BLOCK {
         let mut hash = Sha1::new();
         hash.update(key);
@@ -182,30 +198,45 @@ pub(crate) fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; DIGEST] {
     }
 
     let mut inner = Sha1::new();
-    let mut pad = padded;
-    for byte in &mut pad {
-        *byte ^= 0x36;
-    }
-    inner.update(&pad);
+    inner.update(&*pad(&padded, 0x36));
     for part in parts {
         inner.update(part);
     }
     let digest = inner.finish();
 
     let mut outer = Sha1::new();
-    let mut pad = padded;
-    for byte in &mut pad {
-        *byte ^= 0x5c;
-    }
-    outer.update(&pad);
+    outer.update(&*pad(&padded, 0x5c));
     outer.update(&digest);
     outer.finish()
 }
 
+/// The padded key with every octet exclusive-ORed with `with`: RFC 2104's
+/// `ipad` for 0x36, `opad` for 0x5c.
+fn pad(padded: &[u8; BLOCK], with: u8) -> Zeroizing<[u8; BLOCK]> {
+    let mut pad = Zeroizing::new(*padded);
+    for byte in pad.iter_mut() {
+        *byte ^= with;
+    }
+    pad
+}
+
 #[cfg(test)]
 mod tests {
+    use zeroize::{ZeroizeOnDrop, Zeroizing};
+
     use super::super::testing::hex;
-    use super::{Sha1, hmac};
+    use super::{BLOCK, Sha1, hmac, pad};
+
+    #[test]
+    fn the_pads_and_the_hash_state_are_wiped_when_they_go() {
+        fn wiped_on_drop<T: ZeroizeOnDrop>() {}
+        wiped_on_drop::<Sha1>();
+        let padded = [0x0b_u8; BLOCK];
+        let inner: Zeroizing<[u8; BLOCK]> = pad(&padded, 0x36);
+        let outer: Zeroizing<[u8; BLOCK]> = pad(&padded, 0x5c);
+        assert!(inner.iter().all(|&byte| byte == 0x0b ^ 0x36));
+        assert!(outer.iter().all(|&byte| byte == 0x0b ^ 0x5c));
+    }
 
     fn sha1(data: &[u8]) -> [u8; 20] {
         let mut hash = Sha1::new();

@@ -157,7 +157,7 @@ fn engine() -> (Engine, Arc<Mutex<usize>>) {
             activation: Activation::Manual,
             ..Config::default()
         },
-        Box::new(move |_, _| *counted.lock().unwrap() += 1),
+        Box::new(move |_, _: &Outgoing| *counted.lock().unwrap() += 1),
     );
     (engine, packets)
 }
@@ -446,4 +446,81 @@ fn echo_return_loss_through_the_loudspeaker_to_microphone_path() {
         out > 1_000.0,
         "the tone was played at a level worth measuring"
     );
+}
+
+/// The pump runs as audio: it asks the platform for the scheduling class
+/// audio runs in and gets it, and with eight threads that never sleep
+/// keeping the machine's cores busy, the loudspeaker never finds nothing
+/// queued. On BlackHole when the machine has it, so that nothing is heard.
+#[test]
+#[ignore = "opens the machine's real devices and keeps its cores busy"]
+fn the_loudspeaker_is_fed_while_eight_threads_spin() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (mut engine, _) = engine();
+    let listed = engine
+        .refresh()
+        .expect("the platform lists its devices")
+        .to_vec();
+    all_on_the_quiet_device(&mut engine, &listed);
+    engine.activate().expect("the devices open");
+    engine
+        .attach(
+            1,
+            Box::new(ToneCall {
+                rate_hz: 16_000,
+                phase: 0.0,
+                frequency_hz: 440.0,
+                amplitude: 0.05,
+                captured: Arc::new(Mutex::new(Vec::new())),
+                played: Arc::new(Mutex::new(Vec::new())),
+            }),
+        )
+        .expect("the call attaches");
+    let serviced = |engine: &mut Engine, for_how_long: Duration| {
+        let started = Instant::now();
+        while started.elapsed() < for_how_long {
+            engine.service();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // past the start, whose first callbacks can find the queue still filling
+    serviced(&mut engine, Duration::from_secs(1));
+    let scheduling = engine.pump_scheduling();
+    println!("the pump's thread: {scheduling:?}");
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )) {
+        assert_eq!(scheduling, Some(sipral_audio::backend::Scheduling::Granted));
+    }
+
+    let before = engine.speaker_starved();
+    let stop = Arc::new(AtomicBool::new(false));
+    let spinners: Vec<_> = (0..8)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut turns = 0_u64;
+                while !stop.load(Ordering::Relaxed) {
+                    turns = std::hint::black_box(turns.wrapping_add(1));
+                }
+                turns
+            })
+        })
+        .collect();
+    serviced(&mut engine, Duration::from_secs(5));
+    stop.store(true, Ordering::Relaxed);
+    for spinner in spinners {
+        let _ = spinner.join();
+    }
+    let starved = engine.speaker_starved() - before;
+    println!(
+        "starved {starved} samples in five seconds under load, {} ticks run",
+        engine.ticks()
+    );
+    engine.detach(1);
+    engine.deactivate();
+    assert_eq!(starved, 0, "the loudspeaker ran dry under load");
 }

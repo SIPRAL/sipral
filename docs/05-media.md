@@ -469,8 +469,20 @@ someone configured once. Design targets:
   gap and keeping it as delay. A packet stranded in front of such a gap, one
   that came too early to start on and is then older than anything after it
   by more than the target, is dropped unplayed for the same reason. Packets
-  held together with no such gap are all played, however many. Seen from
+  held together with no such gap are all played, however many — up to a
+  bound. Seen from
   Asterisk on a DTLS-SRTP call, at the start and again after a resume.
+- **A backlog is skipped, not kept.** Packets that pile up while nobody pulls
+  — a receive loop that waited for a device to open, early media nobody was
+  playing yet — are the far end talking, and left to the pauses they would
+  be given back a frame at a time. A far end that never pauses, or a
+  detector that never finds the pause, would keep them as delay for the rest
+  of the call: a 57 s call on a real PBX ended 1.56 s behind a 100 ms target.
+  So more than 200 ms over the top of its dead band, the buffer moves the
+  playout point up to the top of the band on the next pull, in speech or
+  not, and counts what it skipped as discarded for overflow; with the
+  longest delay jitter may ask for, that bounds the delay a listener can be
+  kept behind by.
 - **Reordering is normal**, not an error. Late packets that still fit the window
   are inserted.
 - **Duplicates are dropped** on sequence number, cheaply.
@@ -1262,7 +1274,14 @@ SDES that is a crypto line naming the tag it accepted, with this end's own key
 (§5.1.2), and the key is the one this end is already sending under: §7.1.4
 lets an answerer change its key and warns in the same breath that the offerer
 cannot read it until the answer arrives, and a hold is no reason to open that
-window. Under DTLS-SRTP it is this end's fingerprint and the role the running
+window. That key is read off the running plan, which holds the one line the
+two ends agreed on, and not off this end's last description: an offer this end
+wrote carries a line per suite, and the far end may have taken any of them. It
+is repeated only while the re-offer is answered under that line's suite; one
+that moves to another suite is answered with a key drawn for it, at its width
+(§6.1 fixes the width per suite, and a key belongs to its suite). An answer
+line whose key is not its suite's width is never written, since its reader
+must take it as invalid: the stream is refused instead. Under DTLS-SRTP it is this end's fingerprint and the role the running
 association gives it (RFC 8842 §5.3; see "The DTLS roles" below). The user
 agent's own answer used to carry neither. The end that asked for the hold then
 read a secured stream with no key on it: the hold never reached its media, and
@@ -1996,9 +2015,16 @@ call's rate. Every option is independent of the codec the call is on:
 
 What goes in is what went out and what was played: the captured frame after
 the application's processor, a digit and the consent beep, and the frame
-decoded for the earpiece. A direction that stops producing — a muted
-microphone, a stalled device — is written against silence, so the file
-stays on the call's timeline.
+decoded for the earpiece. A direction that stops producing — a stalled
+device — is written against silence, so the file stays on the call's
+timeline. **This end is silence while the microphone is muted and while the
+call is on hold**, and each of those frames is in the file, in its place: a
+muted microphone reaches the call as frames of silence (in device mode the
+engine's mute, the stack's or the call's own, zeroes them before the call
+encodes them), and while the stream is anything but two-way — a hold from
+either end — the recorder writes this end's frames as silence whatever the
+microphone hands it, since the conversation has nothing of this end then.
+The far end's side is what was played, as ever.
 
 **How a recording ends.** Stopped, the call ending, the engine dropped, or
 the recorder dropped for any other reason: each finishes the file the same
@@ -2415,7 +2441,19 @@ one lane per call and direction, with a queue on the far side because a
 resampler does not produce whole frames) and encoded, and the packet goes
 out through the application's transmit function; each call's playback is
 pulled at its own rate, resampled to the loudspeaker's and summed into the
-frame the loudspeaker is written, wide and then clamped. The devices are
+frame the loudspeaker is written, wide and then clamped. Each packet is
+lent to the transmit function rather than handed over, and a session's is
+copied out of its lock into one the pump's thread keeps, so carrying a call
+allocates nothing once it is running; nor does a tick of the pump. The
+pump's thread asks the platform for the class audio runs in before its
+first tick — the Mach time-constraint policy on macOS and iOS (a frame
+period, 6 ms of computation within 16 ms), Pro Audio with the multimedia
+class scheduler on Windows, and on Android the urgent-audio priority, the
+most an application's thread may take, `SCHED_FIFO` being for AAudio's own
+callback threads — and the engine says what it got
+(`Engine::pump_scheduling`). What it does not avoid is the call's own
+session lock, which the thread that receives the call's packets takes too;
+everything done under it is bounded (`sipral::share`). The devices are
 asked for 48 kHz and taken at whatever they answer. A ring tone — the
 application's own samples, looped or once — goes to the ringer's stream, or
 into the loudspeaker's sum when the ringer is that same device or the
@@ -2444,6 +2482,20 @@ against a backend made of fakes, with no device in the room:
 - the devices open with the first call or the first ring and close with
   the last, or only when the application says, for the platforms whose
   frameworks say when audio is the application's;
+- nothing the stack's poll does waits on a device. A call's media starting
+  starts the pump at once, on no device: silence to the far end, the far
+  end's audio pulled at its own pace and let go of, each frame counted
+  (`Engine::frames_without_device`), while the devices open on a thread of
+  their own — a USB headset under the voice unit was seen to take a second
+  and a half — and the next service after they answer puts them under the
+  call; a device lost or a default moved is reopened the same way. The
+  last call's media ending stops the pump, which hands back what the next
+  one needs and only then lets its devices go, on its own thread, so a BYE
+  the hangup queued leaves with the poll's transmit drain rather than after
+  the teardown, which on macOS has been seen to wait for the main thread.
+  The next open waits, a bounded time, for that teardown, so the platform's
+  one voice unit is never opened twice, and `deactivate` waits for it at
+  most the probe wait;
 - a platform call is made from a thread the engine can walk away from, and
   a driver that does not answer within the probe wait is a timeout, with the
   driver's thread left to finish when it likes and asked nothing more until
@@ -2464,7 +2516,15 @@ old unit is closed, and the pump confirms it let go, before the new one is
 opened on a device change: two alive at once is what blocks inside the
 framework, and `sipral-io-coreaudio` refuses a second one outright. A ring
 on a device other than the loudspeaker's plays through a plain output unit
-beside the call's, never a second voice-processing unit. The capture
+beside the call's, never a second voice-processing unit. Nor is the
+process's one unit made again for every call: a voice stream that closes
+leaves its unit stopped and uninitialised for the next one to configure
+again, because a new unit opened after an old one was taken down was seen,
+under the guard allocator, to read freed memory on the framework's own
+property-listener thread within a few rounds of activation, whatever the
+order or the spacing of stop, uninitialise and dispose. A unit whose device
+was lost, or that would not uninitialise, is disposed of, and so is the one a
+recovery replaces. The capture
 callback renders exactly the frames it is told of, into a buffer that holds
 a whole device slice converted to the stream's rate, or not at all. On iOS
 the route is the audio session's, so only the loudspeaker role is chosen.
