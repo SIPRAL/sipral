@@ -2015,9 +2015,16 @@ call's rate. Every option is independent of the codec the call is on:
 
 What goes in is what went out and what was played: the captured frame after
 the application's processor, a digit and the consent beep, and the frame
-decoded for the earpiece. A direction that stops producing — a muted
-microphone, a stalled device — is written against silence, so the file
-stays on the call's timeline.
+decoded for the earpiece. A direction that stops producing — a stalled
+device — is written against silence, so the file stays on the call's
+timeline. **This end is silence while the microphone is muted and while the
+call is on hold**, and each of those frames is in the file, in its place: a
+muted microphone reaches the call as frames of silence (in device mode the
+engine's mute, the stack's or the call's own, zeroes them before the call
+encodes them), and while the stream is anything but two-way — a hold from
+either end — the recorder writes this end's frames as silence whatever the
+microphone hands it, since the conversation has nothing of this end then.
+The far end's side is what was played, as ever.
 
 **How a recording ends.** Stopped, the call ending, the engine dropped, or
 the recorder dropped for any other reason: each finishes the file the same
@@ -2434,7 +2441,19 @@ one lane per call and direction, with a queue on the far side because a
 resampler does not produce whole frames) and encoded, and the packet goes
 out through the application's transmit function; each call's playback is
 pulled at its own rate, resampled to the loudspeaker's and summed into the
-frame the loudspeaker is written, wide and then clamped. The devices are
+frame the loudspeaker is written, wide and then clamped. Each packet is
+lent to the transmit function rather than handed over, and a session's is
+copied out of its lock into one the pump's thread keeps, so carrying a call
+allocates nothing once it is running; nor does a tick of the pump. The
+pump's thread asks the platform for the class audio runs in before its
+first tick — the Mach time-constraint policy on macOS and iOS (a frame
+period, 6 ms of computation within 16 ms), Pro Audio with the multimedia
+class scheduler on Windows, and on Android the urgent-audio priority, the
+most an application's thread may take, `SCHED_FIFO` being for AAudio's own
+callback threads — and the engine says what it got
+(`Engine::pump_scheduling`). What it does not avoid is the call's own
+session lock, which the thread that receives the call's packets takes too;
+everything done under it is bounded (`sipral::share`). The devices are
 asked for 48 kHz and taken at whatever they answer. A ring tone — the
 application's own samples, looped or once — goes to the ringer's stream, or
 into the loudspeaker's sum when the ringer is that same device or the
@@ -2463,6 +2482,20 @@ against a backend made of fakes, with no device in the room:
 - the devices open with the first call or the first ring and close with
   the last, or only when the application says, for the platforms whose
   frameworks say when audio is the application's;
+- nothing the stack's poll does waits on a device. A call's media starting
+  starts the pump at once, on no device: silence to the far end, the far
+  end's audio pulled at its own pace and let go of, each frame counted
+  (`Engine::frames_without_device`), while the devices open on a thread of
+  their own — a USB headset under the voice unit was seen to take a second
+  and a half — and the next service after they answer puts them under the
+  call; a device lost or a default moved is reopened the same way. The
+  last call's media ending stops the pump, which hands back what the next
+  one needs and only then lets its devices go, on its own thread, so a BYE
+  the hangup queued leaves with the poll's transmit drain rather than after
+  the teardown, which on macOS has been seen to wait for the main thread.
+  The next open waits, a bounded time, for that teardown, so the platform's
+  one voice unit is never opened twice, and `deactivate` waits for it at
+  most the probe wait;
 - a platform call is made from a thread the engine can walk away from, and
   a driver that does not answer within the probe wait is a timeout, with the
   driver's thread left to finish when it likes and asked nothing more until

@@ -226,6 +226,21 @@ and whether the system cancels the echo. `SipralEventKind.audioDevicesChanged`
 carries `event.audioData`: what changed, and whether the `.system` or the
 `.engine` changed it -- an application re-applies nothing on the second.
 
+**Ending a call never needs the main thread.** The engine opens the devices
+on a thread of its own when a call's media starts — the call is carried, on
+silence, until they answer — and lets them go on its own thread when the
+last call's media ends, after the poll that ended it has returned; so
+`call.hangup()` and `account.unregister()` called on the main thread, which
+then waits there while the application shuts down, still have their BYE
+and un-REGISTER sent within a poll, though the voice unit's teardown on
+macOS has been seen to wait for the main thread. `audio.deactivate()` waits
+for that teardown at most the probe wait. `account.registrationState` reads
+`.unregistered` from the moment `unregister()` returns, before the registrar
+has answered; the answer is the `.registrationChanged` event that follows,
+and an application that waits for the binding to be gone waits for that
+event rather than polling the state. `AudioDeviceModeTests` hangs up with
+the main thread held, on the real devices (`SIPRAL_AUDIO_DEVICES=1`).
+
 `.device(activation: .manual)` opens the devices only between
 `audio.activate()` and `audio.deactivate()`, which is CallKit's rule:
 `CallKitBridge.drive(stack.audio!)` opens them at `didActivate`, closes them
@@ -514,7 +529,11 @@ as `SipralEventKind.progressDetected` with `event.progressData` set.
 `call.setConsentTone(...)` beeps while the call is recorded.
 `media.record(to:format:layout:sampleRate:bitrate:checkpointMs:)` writes WAV
 or Ogg Opus, mixed or stereo with this end on the left, and `stopRecording()`
-/ `recording` stop it and say how far it got.
+/ `recording` stop it and say how far it got. This end is silence in the file
+while the microphone is muted (`audio.setMuted(true, for: .input)`, or the
+call's own mute) and while the call is on hold, either way, each such frame
+in its place on the call's timeline (`docs/05-media.md`, "Recording a
+call").
 `Tests/SipralTests/InBandTests.swift` proves each over two stacks on
 loopback.
 
