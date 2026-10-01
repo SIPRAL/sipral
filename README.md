@@ -123,7 +123,8 @@ so it needs their toolchains as well
 ([`docs/11-testing.md`, "Where the checks run"](docs/11-testing.md#where-the-checks-run));
 a tool it cannot find is reported as a skip, and a run with a skip has not
 checked that part. `./scripts/check.sh --hygiene-only` runs the tree checks
-without a build.
+without a build, `--only AREA` one part of the gate, and `--changed` the parts
+a change reaches (`./scripts/check.sh --help`).
 
 ## Licence
 

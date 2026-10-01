@@ -1213,7 +1213,74 @@ Objective-C++ module compiled for iOS against React Native's headers. What it
 needs and does not find -- `node_modules`, `gradle`, the Android SDK, a
 Gradle cache filled by one online build -- fails the step and says how to
 get it. It must exit zero before a commit
-exists. `--hygiene-only` skips the build for a fast pass.
+exists.
+
+### The area gates
+
+The checks are grouped into areas, and `scripts/check.sh --help` lists
+them: `hygiene` (the tree checks, the ABI's declarations against `abi.rs`,
+the interop matrix, the third-party licences and `gitleaks`, with no build
+of the workspace), `rust`, `abi`, one area per layer -- `swift`, `dotnet`,
+`kotlin`, `jvm`, `python`, `dart`, `rn` -- and `site`. An area is a list of
+the gate's own step functions, so `scripts/check.sh --only kotlin,jvm` runs
+exactly what the complete gate runs for those two and nothing else, and
+`--hygiene-only` is `--only hygiene`. `--only rust --crates
+sipral-core,sipral-ua` narrows fmt, clippy, the tests, rustdoc and the
+release build to those packages, and says in a `note` line what of the rust
+area it left out. A layer's area builds the C library it loads when the
+`abi` area is not in the same run.
+
+`scripts/check.sh --changed [BASE]` picks the areas from what differs from
+BASE -- by default the merge base with `origin/main` -- committed or not,
+and from the untracked files, prints each area with the first path that
+brought it in, and runs them; `--list` prints the choice and runs nothing.
+The mapping errs towards running more:
+
+| A change under | runs |
+|---|---|
+| `scripts/check.sh`, or a path nothing below names | every area |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | rust, abi and every layer |
+| `crates/sipral-ffi`, `bindings/c/include`, `tools/abi-gen` | rust, abi and every layer |
+| `crates/sipral`, the facade | rust, abi and every layer: their tests drive its behaviour |
+| a crate below the facade that the C library links | rust and abi |
+| any other crate, `tools/`, `fixtures/`, `fuzz/`, `interop/harness`, `deny.toml` | rust |
+| `bindings/fixtures` | rust and every layer |
+| `bindings/c`, `interop/harness-c` | abi (and swift, for `bindings/c/sipral.c`) |
+| `bindings/swift`, `bindings/Package.swift` | swift and rn |
+| `bindings/kotlin` | kotlin, jvm and rn |
+| `bindings/react-native`'s Android core and its JVM check | rn and kotlin |
+| any other layer's directory | that layer |
+| `scripts/package/` | the layers whose packages the script makes |
+| `docs/`, `site/`, `scripts/site.sh`, any Markdown | site |
+| `scripts/`, `interop/`, `assets/`, licence and Git files | hygiene |
+
+`hygiene` runs on every change. Whether a crate is linked into the C library
+is read from `cargo tree -p sipral-ffi`, not kept in a list.
+
+The complete gate, with no argument, runs every area, as many at once as
+the machine has CPUs; `SIPRAL_CHECK_JOBS` caps that, and `1` runs them one
+after another. `hygiene`, `abi` and `site` start at once and the rest wait
+for `abi`, because every layer loads the library `abi` builds and checks
+and the rust area's builds write beside it. What several areas need -- the
+library, the Kotlin layer's classes, the JNI shims, `sipral.aar` -- is made
+once, by whichever area asks first, while the others wait for it, and the
+three packaging scripts that build into the one Apple target directory take
+turns. Each area's output is kept in `target/check/AREA.log` and printed in
+the order above once every area is done, with a line per area of what it
+counted and how long it took, the total of `ok` lines, and still `all
+checks passed` or `checks failed` last. An area gate is for the work in
+between; a commit is ready when the complete gate exits zero with no FAIL
+and no skip.
+
+On the 8-core Mac the gate is developed on, with the build caches warm and
+other work on the machine, the complete gate took 616 seconds one area
+after another (load average 5 to 10 at the start) and 247 seconds in
+parallel (5 at the start, 30 by the end); the rust area, at about four
+minutes, is the whole of the difference that is left. A machine that busy
+makes a test that waits on a timer more likely to miss it, and a step that
+fails in the parallel gate and passes alone under `--only` is that, until
+it is not: `SIPRAL_CHECK_JOBS=1` runs the areas one at a time to tell the
+two apart.
 
 The linux-arm64 native cross-compiles in an unprivileged Docker container
 (`scripts/package/aarch64-cross.sh`), so what the gate proves of it depends
