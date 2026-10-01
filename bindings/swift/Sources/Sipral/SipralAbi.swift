@@ -5223,12 +5223,14 @@ public enum Sipral {
     /// whole one is what a peer hears as a stutter.
     ///
     /// A `len` of zero in the packet means the frame was deliberately not sent:
-    /// this end is holding the far end, silence suppression swallowed it, or
+    /// the far end is holding this end, silence suppression swallowed it, or
     /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
     /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
     /// measure of time rather than of packets; in the third nothing is
     /// encoded at all, since there is no packet for the timestamp to belong
     /// to and a codec that carries state would have moved it for nothing.
+    /// While this end holds the far end the frame goes out as silence, never
+    /// as the microphone.
     ///
     /// `now_ms` is read as the stack reads it and moves nothing, as with every
     /// media entry point. It is what tells ICE that traffic went out on the
@@ -7005,9 +7007,14 @@ public enum Sipral {
     }
 
     /// Start recording the signalling this stack is fed from here on
-    /// (`docs/18-replay.md`), with the same seed `sipral_stack_create` built
-    /// it with. Read `docs/18-replay.md` before reaching for this: it records
-    /// what arrives, exactly as it arrived, and never what this end sent.
+    /// (`docs/18-replay.md`), on a seed of its own. Starting moves every
+    /// branch, tag and `Call-ID` the stack draws from here on onto a fresh
+    /// seed, derived one way from the `entropy` `sipral_stack_create` was
+    /// given; the recording carries that seed and never `entropy`, and
+    /// stopping moves the stack on again, so nothing drawn after the stop
+    /// can be worked out from the file. Read `docs/18-replay.md` before
+    /// reaching for this: it records what arrives, exactly as it arrived,
+    /// and never what this end sent.
     ///
     /// `note` is one line of prose for whoever opens the file later, or null
     /// for none.

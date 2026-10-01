@@ -156,6 +156,8 @@ const TOLERATED: &[SipralStatus] = &[
 /// destroy is refused as a handle that names nothing.
 #[test]
 fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
+    /// How many calls each worker makes once the destroy has returned.
+    const AFTER_DESTROY: usize = 32;
     let mut observed = Observed::default();
     let (stack, account) = crate::call::tests::media_line(&mut observed, |_| {});
     let destroyed = Arc::new(AtomicBool::new(false));
@@ -169,7 +171,13 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
             let mut after_destroy = Vec::new();
             let mut round = 0_u64;
             let started = Instant::now();
-            while started.elapsed() < Duration::from_millis(1_500) {
+            // a second and a half at the least, and then on until some calls
+            // have been made after the destroy returned, however long a
+            // loaded machine keeps the destroy waiting for its turn
+            while started.elapsed() < Duration::from_millis(1_500)
+                || (after_destroy.len() < AFTER_DESTROY
+                    && started.elapsed() < Duration::from_secs(30))
+            {
                 round += 1;
                 let gone = destroyed.load(Ordering::SeqCst);
                 let now = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -183,7 +191,6 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
         }));
     }
     thread::sleep(Duration::from_millis(700));
-    destroyed.store(true, Ordering::SeqCst);
     let destroy = unsafe { sipral_stack_destroy(stack) };
     assert!(
         destroy == SipralStatus::Ok || destroy == SipralStatus::Busy,
@@ -197,6 +204,11 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
         }
         assert_eq!(again, SipralStatus::Ok);
     }
+    // only once the destroy has returned: a call that began before that
+    // could still find the stack there, and answered as it would any other
+    // time, however many of them a loaded machine fits in before the destroy
+    // gets its turn
+    destroyed.store(true, Ordering::SeqCst);
     let mut calls = 0_usize;
     for worker in workers {
         let (answered, after) = worker.join().expect("no thread died");
@@ -208,9 +220,14 @@ fn threads_nobody_registered_calling_under_load_get_a_status_never_a_crash() {
                 last_error_text()
             );
         }
-        // a call already inside when the flag moved may still have been
-        // served; everything after it names a stack that is gone
-        let refused = after.iter().skip(8).all(|status| {
+        // every call that began after the destroy returned names a stack
+        // that is gone
+        assert!(
+            after.len() >= AFTER_DESTROY,
+            "a worker made {} calls after the destroy",
+            after.len()
+        );
+        let refused = after.iter().all(|status| {
             matches!(
                 status,
                 SipralStatus::InvalidHandle | SipralStatus::StaleHandle

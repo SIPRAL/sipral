@@ -982,7 +982,7 @@ record! {
     /// The caller fills in `size`, the two pointers and the two capacities; the
     /// library fills in the two lengths and the bytes. A `len` of zero means there
     /// was nothing to send, which on a capture is an ordinary answer: this end may
-    /// be holding the far end, or silence suppression may have swallowed the frame.
+    /// be held by the far end, or silence suppression may have swallowed the frame.
     ///
     /// Both buffers are checked before anything is produced. A packet that was
     /// built and then had nowhere to go would be a packet missing from a stream
@@ -2299,12 +2299,14 @@ entry! {
     /// whole one is what a peer hears as a stutter.
     ///
     /// A `len` of zero in the packet means the frame was deliberately not sent:
-    /// this end is holding the far end, silence suppression swallowed it, or
+    /// the far end is holding this end, silence suppression swallowed it, or
     /// ICE has not chosen a path for this call yet. The RTP timestamp moves by
     /// a frame in the first two cases, because RFC 3550 §5.1 makes it a
     /// measure of time rather than of packets; in the third nothing is
     /// encoded at all, since there is no packet for the timestamp to belong
     /// to and a codec that carries state would have moved it for nothing.
+    /// While this end holds the far end the frame goes out as silence, never
+    /// as the microphone.
     ///
     /// `now_ms` is read as the stack reads it and moves nothing, as with every
     /// media entry point. It is what tells ICE that traffic went out on the

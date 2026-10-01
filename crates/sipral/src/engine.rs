@@ -3574,10 +3574,19 @@ impl MediaEngine {
             }
             UaEvent::SessionChanged {
                 call,
+                hold,
                 local,
                 remote,
-                ..
-            } => self.redescribed(*call, local.as_deref(), remote.as_deref(), now),
+            } => {
+                self.redescribed(*call, local.as_deref(), remote.as_deref(), now);
+                // the stream the plan above left running learns whether this
+                // end now holds the far end, which no direction attribute
+                // says alone: a `sendonly` this end answered to the far end's
+                // `recvonly` is not a hold, and sends the microphone
+                if let Some(held) = self.sessions.get(call) {
+                    share::lock(held).session.set_holding(hold.local);
+                }
+            }
             UaEvent::Reoffer { call, request } => self.answer_reoffer(*call, request, agent, now),
             // §14.1: the session stands exactly as it was, so the list it
             // stands on is the one it had. A 491 is going out again by

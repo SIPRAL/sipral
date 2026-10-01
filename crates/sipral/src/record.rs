@@ -375,7 +375,10 @@ pub(crate) struct Recorder {
     /// The frame from one direction that is waiting for its opposite number.
     /// Only one at a time: a second one means the other direction has stopped
     /// producing, and waiting any longer would bend the timeline.
-    pending: Option<(Leg, Vec<i16>)>,
+    pending: Option<Leg>,
+    /// The samples of that frame, in a buffer kept from frame to frame so
+    /// that a recording allocates as it starts rather than per frame.
+    waiting: Vec<i16>,
     /// Each direction from the call's rate to the file's, when they differ.
     /// Two, fed the same lengths, so they give the same lengths back.
     convert: Option<(Resampler, Resampler)>,
@@ -437,6 +440,7 @@ impl Recorder {
             rate,
             heard_at,
             pending: None,
+            waiting: Vec::new(),
             convert: converters(heard_at, rate)?,
             silence: Vec::new(),
             held: Vec::new(),
@@ -538,37 +542,47 @@ impl Recorder {
     }
 
     fn flush_pending(&mut self) -> Result<(), MediaError> {
-        match self.pending.take() {
-            Some((Leg::Captured, frame)) => self.write_pair(&frame, &[]),
-            Some((Leg::Played, frame)) => self.write_pair(&[], &frame),
+        // lifted out for the length of the write, which borrows the rest of
+        // the recorder
+        let frame = core::mem::take(&mut self.waiting);
+        let flushed = match self.pending.take() {
+            Some(Leg::Captured) => self.write_pair(&frame, &[]),
+            Some(Leg::Played) => self.write_pair(&[], &frame),
             None => Ok(()),
-        }
+        };
+        self.waiting = frame;
+        flushed
     }
 
     /// Take one direction's frame, and write a pair as soon as there is
     /// something to pair it with — or as soon as it is clear there will not
     /// be.
     fn offer(&mut self, leg: Leg, samples: &[i16]) -> Result<(), MediaError> {
-        match self.pending.take() {
-            Some((held, frame)) if held != leg => match leg {
+        let mut frame = core::mem::take(&mut self.waiting);
+        let offered = match self.pending.take() {
+            Some(held) if held != leg => match leg {
                 Leg::Captured => self.write_pair(samples, &frame),
                 Leg::Played => self.write_pair(&frame, samples),
             },
-            Some((held, frame)) => {
+            Some(held) => {
                 // the same direction twice: the other one has stopped
                 // producing, so this frame's opposite number is silence
-                match held {
-                    Leg::Captured => self.write_pair(&frame, &[])?,
-                    Leg::Played => self.write_pair(&[], &frame)?,
+                let written = match held {
+                    Leg::Captured => self.write_pair(&frame, &[]),
+                    Leg::Played => self.write_pair(&[], &frame),
+                };
+                if written.is_ok() {
+                    wait_with(&mut self.pending, &mut frame, leg, samples);
                 }
-                self.pending = Some((leg, samples.to_vec()));
-                Ok(())
+                written
             }
             None => {
-                self.pending = Some((leg, samples.to_vec()));
+                wait_with(&mut self.pending, &mut frame, leg, samples);
                 Ok(())
             }
-        }
+        };
+        self.waiting = frame;
+        offered
     }
 
     /// One frame of each direction, either of them possibly missing, at the
@@ -649,6 +663,14 @@ impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.close();
     }
+}
+
+/// Keep `samples` as the frame of `leg` waiting for its opposite number, in
+/// the buffer `frame` already holds.
+fn wait_with(pending: &mut Option<Leg>, frame: &mut Vec<i16>, leg: Leg, samples: &[i16]) {
+    frame.clear();
+    frame.extend_from_slice(samples);
+    *pending = Some(leg);
 }
 
 /// The two converters from the call's rate to the file's, or none where the
