@@ -956,6 +956,18 @@ impl Endpoint {
     pub fn retry_with_credentials(&mut self, failed: AnyTransactionId, credentials: &Credentials, now: Instant)
         -> Result<AnyTransactionId, AuthRetryError>;
 
+    /// Who is asking, before anything answers: where the challenged request
+    /// went and the realms it was challenged for. A password answers its own
+    /// protection domain only (§22.1), and the endpoint does not know whose
+    /// server is whose, so this is for the caller to weigh.
+    pub fn challenge_origin(&self, failed: AnyTransactionId) -> Option<ChallengeOrigin>;
+
+    /// Answer nothing, ever: the challenge is dropped and its realms are closed
+    /// in the destination's cache, so `request_with_credentials` does not
+    /// answer them ahead of the next challenge either. Recorded as
+    /// `auth.challenge.declined`.
+    pub fn decline_challenge(&mut self, failed: AnyTransactionId) -> bool;
+
     /// The same as `request` and `invite`, carrying credentials for a
     /// challenge this destination has already made (§22.2). Nothing goes on
     /// the request unless it has, so these are safe for the first request as

@@ -1783,12 +1783,11 @@ impl UserAgent {
         transaction: AnyTransactionId,
         now: Instant,
     ) {
-        let credentials = self
+        let account = self
             .subscriptions
             .get(&subscription)
-            .and_then(|held| self.accounts.get(&held.account))
-            .and_then(|account| account.credentials.clone());
-        let Some(credentials) = credentials else {
+            .map(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, transaction) else {
             // nothing to answer with; the refusal stands, and it stands the
             // same way every time
             return;
@@ -1839,12 +1838,11 @@ impl UserAgent {
             .filter_map(|(handle, held)| held.waiting_for_stream.map(|failed| (*handle, failed)))
             .collect();
         for (subscription, failed) in waiting {
-            let credentials = self
+            let account = self
                 .subscriptions
                 .get(&subscription)
-                .and_then(|held| self.accounts.get(&held.account))
-                .and_then(|account| account.credentials.clone());
-            let Some(credentials) = credentials else {
+                .map(|held| held.account);
+            let Some(credentials) = self.credentials_for_challenge(account, failed) else {
                 self.stop_waiting_for_subscribe(subscription);
                 continue;
             };

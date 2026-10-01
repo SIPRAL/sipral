@@ -52,6 +52,7 @@ mod via;
 
 pub(crate) use table::Flow;
 
+pub use auth::ChallengeOrigin;
 pub use config::{Compaction, DatagramLimit, EndpointConfig};
 pub use driver::{DialogSnapshot, Endpoint, Retransmissions, StreamMessage};
 pub use error::{

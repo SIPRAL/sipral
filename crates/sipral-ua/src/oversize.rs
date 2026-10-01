@@ -229,13 +229,8 @@ impl UserAgent {
         let Some(call) = self.by_invite.get(&invite).copied() else {
             return false;
         };
-        let credentials = self
-            .calls
-            .get(&call)
-            .and_then(|held| held.account)
-            .and_then(|id| self.accounts.get(&id))
-            .and_then(|config| config.credentials.clone());
-        let Some(credentials) = credentials else {
+        let account = self.calls.get(&call).and_then(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, old) else {
             return false;
         };
         if !self.endpoint.reshape_challenged_body(old, one_suite_each) {

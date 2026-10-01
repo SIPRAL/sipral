@@ -91,6 +91,7 @@ parser took and whose fields could not be read.
 | `dialog.fork.dropped` | A 2xx to a forked INVITE found no room under `max_dialogs`, so it was silently neither reported nor acknowledged — the far end gives the call up with a `BYE` of its own. |
 | `auth.challenge.received` | A refusal arrived carrying a challenge this stack can answer. |
 | `auth.challenge.answered` | The request went again with credentials — the send that is certain to have grown, and the one that fragmented in the field. |
+| `auth.challenge.declined` | A challenge the account's password is not for — from an address that is not the account's server, or for a realm that is not the account's (RFC 3261 §22.1) — was not answered, and its realms are not answered ahead of a challenge either. Carries the address it came from. |
 | `dialog.created` | A dialog was created (§12.1). |
 | `dialog.destroyed` | A dialog is over and its handle is stale. |
 | `failure.refused` | A final response of 300 or above ended a request or a call. |

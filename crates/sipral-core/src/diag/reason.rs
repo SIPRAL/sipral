@@ -120,6 +120,11 @@ pub enum Reason {
     ChallengeReceived,
     /// The request went again carrying credentials.
     ChallengeAnswered,
+    /// A challenge was not answered because the password is not for
+    /// whoever asked: it came from somewhere other than the account's own
+    /// server, or for a realm that is not the account's (RFC 3261 §22.1).
+    /// The refusal stands. Carries the address the challenge came from.
+    ChallengeDeclined,
     /// A dialog was created (§12.1).
     DialogCreated,
     /// A dialog is over and its handle is stale.
@@ -170,6 +175,7 @@ impl Reason {
             Self::ForkDroppedAtLimit => "dialog.fork.dropped",
             Self::ChallengeReceived => "auth.challenge.received",
             Self::ChallengeAnswered => "auth.challenge.answered",
+            Self::ChallengeDeclined => "auth.challenge.declined",
             Self::DialogCreated => "dialog.created",
             Self::DialogDestroyed => "dialog.destroyed",
             Self::FailedRefused => "failure.refused",
@@ -194,7 +200,7 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 29] = [
+    const ALL: [Reason; 30] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
@@ -216,6 +222,7 @@ mod tests {
         Reason::ForkDroppedAtLimit,
         Reason::ChallengeReceived,
         Reason::ChallengeAnswered,
+        Reason::ChallengeDeclined,
         Reason::DialogCreated,
         Reason::DialogDestroyed,
         Reason::FailedRefused,
@@ -269,6 +276,10 @@ mod tests {
         assert_eq!(
             Reason::TransportCompactedBySize.as_str(),
             "transport.compacted.size"
+        );
+        assert_eq!(
+            Reason::ChallengeDeclined.as_str(),
+            "auth.challenge.declined"
         );
         assert_eq!(
             Reason::RequestAnsweredByTimeout.as_str(),

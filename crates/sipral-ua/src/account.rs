@@ -224,6 +224,12 @@ pub struct Account {
     /// Refcounted rather than copied: [`Credentials`] is deliberately not
     /// `Clone`, so that the password exists once however many places name it.
     pub(crate) credentials: Option<Arc<Credentials>>,
+    /// The realms the password answers, as configured. See
+    /// [`Account::realms`].
+    pub(crate) realms: Vec<Arc<str>>,
+    /// With none configured, the realms the account's server first
+    /// challenged with, taken then and kept.
+    pub(crate) pinned_realms: Vec<Arc<str>>,
     pub(crate) expires: Duration,
     /// The session interval to ask for on a call (RFC 4028). `None` asks for
     /// none, and takes one only if the far end insists.
@@ -338,6 +344,8 @@ impl Account {
             contact,
             display_name: None,
             credentials: None,
+            realms: Vec::new(),
+            pinned_realms: Vec::new(),
             expires: DEFAULT_EXPIRES,
             session_interval: Some(crate::timers::RECOMMENDED),
             instance_id: None,
@@ -476,9 +484,32 @@ impl Account {
     /// Left out, a challenge is reported and the registration stops there:
     /// there is nothing to answer with, and sending the request again would
     /// only earn the same refusal.
+    ///
+    /// The password answers the account's own server and nobody else (RFC
+    /// 3261 §22.1): a challenge to a request that went anywhere but the
+    /// account's registrar — or its outbound proxy, for an account that does
+    /// not register — is not answered, nor one for a realm that is not the
+    /// account's ([`Account::realms`]). Either is reported as
+    /// [`UaEvent::ChallengeDeclined`](crate::UaEvent::ChallengeDeclined) and
+    /// the refusal stands.
     #[must_use]
     pub fn credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(Arc::new(credentials));
+        self
+    }
+
+    /// The realms the password answers, when the account's server uses more
+    /// than one or the first it challenges with is not one to keep.
+    ///
+    /// Named none — the default — the account takes the realms its own
+    /// server first challenges it with, and from then on answers those and
+    /// no others: a proxy passing on a far end's own 401, under a realm of
+    /// its choosing, gets nothing. An outbound proxy and a registrar that
+    /// challenge under different realms need both named here, since only
+    /// the first one met would be taken.
+    #[must_use]
+    pub fn realms(mut self, realms: &[&str]) -> Self {
+        self.realms = realms.iter().map(|realm| Arc::from(*realm)).collect();
         self
     }
 

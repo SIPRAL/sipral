@@ -2384,9 +2384,7 @@ impl UserAgent {
             return;
         };
         let account = self.account_of.get(&transaction).copied();
-        let credentials = account
-            .and_then(|account| self.accounts.get(&account))
-            .and_then(|config| config.credentials.clone());
+        let credentials = self.credentials_for_challenge(account, transaction);
         // With no password the request is unsent for good, so a REFER that
         // took the call's seat has to give it back on the way past. RFC 3515
         // §2.4.2 obliges the far end to open a subscription on a 2xx and on
@@ -2569,13 +2567,8 @@ impl UserAgent {
         transaction: AnyTransactionId,
         now: Instant,
     ) {
-        let credentials = self
-            .calls
-            .get(&call)
-            .and_then(|held| held.account)
-            .and_then(|id| self.accounts.get(&id))
-            .and_then(|config| config.credentials.clone());
-        let Some(credentials) = credentials else {
+        let account = self.calls.get(&call).and_then(|held| held.account);
+        let Some(credentials) = self.credentials_for_challenge(account, transaction) else {
             return;
         };
         match self
@@ -2637,13 +2630,8 @@ impl UserAgent {
                 self.stop_waiting_for_call(invite);
                 continue;
             };
-            let credentials = self
-                .calls
-                .get(&call)
-                .and_then(|held| held.account)
-                .and_then(|id| self.accounts.get(&id))
-                .and_then(|config| config.credentials.clone());
-            let Some(credentials) = credentials else {
+            let account = self.calls.get(&call).and_then(|held| held.account);
+            let Some(credentials) = self.credentials_for_challenge(account, old) else {
                 self.stop_waiting_for_call(invite);
                 continue;
             };
@@ -2668,10 +2656,7 @@ impl UserAgent {
             .collect();
         for (id, call, method) in waiting {
             let account = self.account_of.get(&id).copied();
-            let credentials = account
-                .and_then(|account| self.accounts.get(&account))
-                .and_then(|config| config.credentials.clone());
-            let Some(credentials) = credentials else {
+            let Some(credentials) = self.credentials_for_challenge(account, id) else {
                 self.stop_waiting_for_request(id);
                 continue;
             };

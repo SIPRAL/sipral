@@ -49,6 +49,8 @@ mod announce;
 mod answering;
 #[cfg(test)]
 mod audit_tests;
+#[cfg(test)]
+mod auth_scope_tests;
 mod call;
 mod calls;
 /// The conference event package (RFC 4575): the document a focus notifies,
@@ -136,7 +138,7 @@ pub use dialoginfo::{
 };
 pub use dtmf::{DtmfError, DtmfInfo, DtmfInfoForm, InfoRefusal};
 pub use error::UaError;
-pub use event::{RegistrationFailure, RegistrationState, UaEvent};
+pub use event::{ChallengeRefusal, RegistrationFailure, RegistrationState, UaEvent};
 pub use headers::{HeaderRefused, HeadersFor};
 pub use identity::{
     CallerIdentity, Diversion, HistoryEntry, Party, Privacy, RemoteParty, Retarget, Verstat,
