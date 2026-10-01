@@ -13,7 +13,7 @@
 
 use core::fmt;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use super::sha1;
 use crate::prf::HASH_LEN;
@@ -27,6 +27,10 @@ pub enum HashFunction {
     /// `sha-256`: RFC 8122 §5 "with 'SHA-256' preferred", and the hash of the
     /// certificates this crate signs, which §5.1 asks a fingerprint to use.
     Sha256,
+    /// `sha-384`: accepted when reading, never written.
+    Sha384,
+    /// `sha-512`: accepted when reading, never written.
+    Sha512,
 }
 
 impl HashFunction {
@@ -36,6 +40,8 @@ impl HashFunction {
         match self {
             Self::Sha1 => "sha-1",
             Self::Sha256 => "sha-256",
+            Self::Sha384 => "sha-384",
+            Self::Sha512 => "sha-512",
         }
     }
 
@@ -45,6 +51,8 @@ impl HashFunction {
         match self {
             Self::Sha1 => sha1::DIGEST_LEN,
             Self::Sha256 => HASH_LEN,
+            Self::Sha384 => 48,
+            Self::Sha512 => 64,
         }
     }
 
@@ -52,6 +60,24 @@ impl HashFunction {
         match self {
             Self::Sha1 => sha1::digest(data).to_vec(),
             Self::Sha256 => Sha256::digest(data).to_vec(),
+            Self::Sha384 => Sha384::digest(data).to_vec(),
+            Self::Sha512 => Sha512::digest(data).to_vec(),
+        }
+    }
+
+    /// Where this function stands in this end's order of preference, highest
+    /// first: SHA-512, SHA-384, SHA-256, SHA-1. RFC 8122 §5.1 has an endpoint
+    /// check a certificate against the fingerprints under "its most preferred
+    /// hash function (out of those offered by the peer)", and leaves the order
+    /// to the endpoint; the longer digest of the same family is the one an
+    /// attacker would have to find a second preimage for.
+    #[must_use]
+    pub(crate) const fn preference(self) -> u8 {
+        match self {
+            Self::Sha1 => 0,
+            Self::Sha256 => 1,
+            Self::Sha384 => 2,
+            Self::Sha512 => 3,
         }
     }
 
@@ -61,15 +87,11 @@ impl HashFunction {
         if name.is_empty() {
             return Err(Error::IllegalValue);
         }
-        if name.eq_ignore_ascii_case("sha-256") {
-            Ok(Self::Sha256)
-        } else if name.eq_ignore_ascii_case("sha-1") {
-            Ok(Self::Sha1)
-        } else {
-            // sha-224, sha-384, sha-512, and md5 and md2, which §5 forbids
-            // using at all
-            Err(Error::UnsupportedHash)
-        }
+        [Self::Sha1, Self::Sha256, Self::Sha384, Self::Sha512]
+            .into_iter()
+            .find(|hash| name.eq_ignore_ascii_case(hash.name()))
+            // sha-224, and md5 and md2, which §5 forbids using at all
+            .ok_or(Error::UnsupportedHash)
     }
 }
 
@@ -99,7 +121,8 @@ impl Fingerprint {
     ///
     /// # Errors
     ///
-    /// [`Error::UnsupportedHash`] for any hash but `sha-1` and `sha-256`;
+    /// [`Error::UnsupportedHash`] for any hash but `sha-1`, `sha-256`,
+    /// `sha-384` and `sha-512`;
     /// [`Error::IllegalValue`] for a value that is not `name SP hex:hex...`
     /// with two hexadecimal digits in every group; [`Error::Length`] when the
     /// number of octets is not the hash's.
@@ -192,6 +215,10 @@ b1da597e232f3b4bb88034bbd7db798309539e88301f0603551d23041830168014b1da597e232f3b
 334648a64cf56a0102203d45e714e275d22240951a58fbe673b0ed326aef511223b9ba5a09bbfb5b17fe";
     pub(crate) const OPENSSL_SHA256: &str = "sha-256 52:E1:C6:A0:74:62:7A:A4:78:0E:87:93:3B:6B:66:E9:65:26:7C:90:96:94:45:F2:DE:01:4A:32:BE:A4:46:07";
     const OPENSSL_SHA1: &str = "sha-1 69:0B:AC:43:8B:49:3F:71:07:F0:3B:CD:CA:A1:FF:B7:4B:19:55:E9";
+    /// What OpenSSL 3.0.13 reports for the same certificate under
+    /// `x509 -fingerprint -sha384` and `-sha512`.
+    const OPENSSL_SHA384: &str = "sha-384 83:50:03:6C:8C:A6:67:6B:90:F3:6B:38:76:F7:F0:1D:4A:2A:8F:E9:DD:A5:4F:29:84:28:5E:FE:BB:97:FD:6C:85:27:F5:12:4E:48:64:4C:18:00:FD:BF:8B:8A:82:F0";
+    const OPENSSL_SHA512: &str = "sha-512 9D:4F:FC:5D:D3:55:83:31:00:C9:D7:99:6E:4C:CD:4D:99:67:4D:C9:BD:0A:3E:79:63:DD:2E:60:78:27:6B:45:CC:15:DC:63:AB:19:72:04:40:77:7F:D7:5C:7D:19:14:F8:B9:E7:BC:AE:09:7C:F1:08:7E:DA:F7:A0:7F:FB:CE";
 
     pub(crate) fn openssl_certificate() -> Vec<u8> {
         let s: String = OPENSSL_CERTIFICATE.split_whitespace().collect();
@@ -205,7 +232,7 @@ b1da597e232f3b4bb88034bbd7db798309539e88301f0603551d23041830168014b1da597e232f3b
     fn fingerprints_agree_with_another_implementation() {
         let certificate = openssl_certificate();
         assert_eq!(certificate.len(), 381);
-        for printed in [OPENSSL_SHA256, OPENSSL_SHA1] {
+        for printed in [OPENSSL_SHA512, OPENSSL_SHA384, OPENSSL_SHA256, OPENSSL_SHA1] {
             let fingerprint = Fingerprint::parse(printed).unwrap();
             assert!(fingerprint.matches(&certificate), "{printed}");
             assert_eq!(
@@ -219,6 +246,29 @@ b1da597e232f3b4bb88034bbd7db798309539e88301f0603551d23041830168014b1da597e232f3b
             HashFunction::Sha256
         );
         assert_eq!(Fingerprint::parse(OPENSSL_SHA1).unwrap().value().len(), 20);
+        assert_eq!(
+            Fingerprint::parse(OPENSSL_SHA384).unwrap().hash(),
+            HashFunction::Sha384
+        );
+        assert_eq!(
+            Fingerprint::parse(OPENSSL_SHA512).unwrap().value().len(),
+            64
+        );
+    }
+
+    #[test]
+    fn the_longer_digest_is_preferred() {
+        let order = [
+            HashFunction::Sha1,
+            HashFunction::Sha256,
+            HashFunction::Sha384,
+            HashFunction::Sha512,
+        ];
+        assert!(
+            order
+                .windows(2)
+                .all(|pair| pair[0].preference() < pair[1].preference())
+        );
     }
 
     #[test]
@@ -253,7 +303,7 @@ b1da597e232f3b4bb88034bbd7db798309539e88301f0603551d23041830168014b1da597e232f3b
         let two = "AB:CD";
         let cases: [(&str, String, Error); 11] = [
             ("md5", format!("md5 {two}"), Error::UnsupportedHash),
-            ("sha-512", format!("sha-512 {two}"), Error::UnsupportedHash),
+            ("sha-224", format!("sha-224 {two}"), Error::UnsupportedHash),
             (
                 "no space",
                 OPENSSL_SHA256.replacen(' ', "", 1),

@@ -86,13 +86,18 @@ pub enum Failure {
     /// such a header field, so a request carrying only these is answered
     /// as one carrying none, with 428.
     UnsupportedPpt,
-    /// `iat` is further from the time of verification than the freshness
-    /// window allows (RFC 8224 §6.2, Step 4).
+    /// The request is not fresh (RFC 8224 §6.2, Step 4): `iat`, or the
+    /// request's Date header field, is further from the time of
+    /// verification than the freshness window allows, the two are further
+    /// from each other than that, or the same PASSporT was already verified
+    /// inside its window (§12.1). [`Staleness`] says which.
     Stale {
         /// When the PASSporT says it was signed.
         iat: u64,
         /// The time it was verified at.
         now: u64,
+        /// What is out of place.
+        what: Staleness,
     },
     /// The certificate the `info` parameter points at cannot be had or
     /// cannot be read.
@@ -117,6 +122,30 @@ pub enum Failure {
     /// The certificate has no authority over the originating number: its
     /// TNAuthList (RFC 8226 §9) is missing or covers other numbers.
     TnNotCovered,
+}
+
+/// What about a request's time made it [`Failure::Stale`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Staleness {
+    /// `iat` is outside the window around the time of verification.
+    Iat,
+    /// The Date header field, at `date`, is outside the window around the
+    /// time of verification.
+    Date {
+        /// The Date header field's time, in seconds since the Unix epoch.
+        date: u64,
+    },
+    /// `iat` is further from the Date header field, at `date`, than the
+    /// window: the PASSporT was not signed for this request's time.
+    DateMismatch {
+        /// The Date header field's time, in seconds since the Unix epoch.
+        date: u64,
+    },
+    /// A PASSporT with the same `orig`, `dest`, `iat` and signature was
+    /// already verified inside its window: a replay. RFC 8224 §6.2.2 has no
+    /// response of its own for one, and this is the response of the
+    /// freshness check that exists to bound replay.
+    Replayed,
 }
 
 impl Failure {
@@ -157,7 +186,26 @@ impl fmt::Display for Failure {
             Failure::Malformed(what) => write!(f, "malformed Identity header field: {what}"),
             Failure::UnsupportedAlgorithm => f.write_str("the PASSporT is not signed with ES256"),
             Failure::UnsupportedPpt => f.write_str("unsupported PASSporT extension"),
-            Failure::Stale { iat, now } => write!(f, "iat {iat} is stale at {now}"),
+            Failure::Stale {
+                iat,
+                now,
+                what: Staleness::Iat,
+            } => write!(f, "iat {iat} is stale at {now}"),
+            Failure::Stale {
+                now,
+                what: Staleness::Date { date },
+                ..
+            } => write!(f, "the Date {date} is stale at {now}"),
+            Failure::Stale {
+                iat,
+                what: Staleness::DateMismatch { date },
+                ..
+            } => write!(f, "iat {iat} is too far from the Date {date}"),
+            Failure::Stale {
+                iat,
+                what: Staleness::Replayed,
+                ..
+            } => write!(f, "the PASSporT of iat {iat} was already verified"),
             Failure::BadInfo(what) => write!(f, "bad identity info: {what}"),
             Failure::Untrusted => f.write_str("the certificate chains to no trust anchor"),
             Failure::Expired { depth } => write!(f, "the certificate at depth {depth} expired"),
@@ -235,6 +283,9 @@ pub enum InfoProblem {
     Missing,
     /// It is not an absolute URI in angle brackets.
     InvalidUri,
+    /// Its scheme is not one [`crate::Config::info_schemes`] accepts:
+    /// anything but `https` by default.
+    Scheme,
     /// The PASSporT's `x5u` names a different URI.
     Mismatch,
     /// The application could not fetch it.
@@ -256,6 +307,7 @@ impl fmt::Display for InfoProblem {
         f.write_str(match self {
             InfoProblem::Missing => "no info parameter",
             InfoProblem::InvalidUri => "info is not an absolute URI",
+            InfoProblem::Scheme => "info names a scheme this verifier does not fetch from",
             InfoProblem::Mismatch => "x5u and info disagree",
             InfoProblem::Unavailable => "the certificate could not be fetched",
             InfoProblem::Empty => "no certificate",
@@ -426,7 +478,15 @@ mod tests {
     #[test]
     fn each_failure_maps_to_its_response() {
         let cases = [
-            (Failure::Stale { iat: 0, now: 61 }, 403, "Stale Date"),
+            (
+                Failure::Stale {
+                    iat: 0,
+                    now: 61,
+                    what: Staleness::Iat,
+                },
+                403,
+                "Stale Date",
+            ),
             (Failure::MissingIdentity, 428, "Use Identity Header"),
             (
                 Failure::BadInfo(InfoProblem::Unavailable),
@@ -494,7 +554,12 @@ mod tests {
             "TN-Validation-Failed"
         );
         assert_eq!(
-            Verdict::Invalid(Failure::Stale { iat: 0, now: 100 }).verstat(),
+            Verdict::Invalid(Failure::Stale {
+                iat: 0,
+                now: 100,
+                what: Staleness::Iat,
+            })
+            .verstat(),
             Verstat::TnValidationFailed
         );
         assert_eq!(Verstat::TnValidationPassed.as_str(), "TN-Validation-Passed");

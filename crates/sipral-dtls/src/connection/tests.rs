@@ -12,8 +12,8 @@ use crate::handshake::{
     HelloVerifyRequest, ServerHello, SignatureAndHash, UseSrtp, encode_message, fragments,
 };
 use crate::random::testing::Counter;
-use crate::record::{RecordHeader, encode_plaintext, records};
-use crate::x509::CertificateParams;
+use crate::record::{MAX_SEQUENCE, RecordHeader, encode_plaintext, records};
+use crate::x509::{CertificateParams, HashFunction};
 
 const PARAMS: CertificateParams<'static> = CertificateParams {
     common_name: "sipral",
@@ -813,6 +813,10 @@ fn the_fingerprints_under_the_most_preferred_hash_are_the_ones_the_certificate_m
     let right_1 = Fingerprint::of(HashFunction::Sha1, der);
     let wrong_256 = Fingerprint::of(HashFunction::Sha256, stranger.certificate.der());
     let wrong_1 = Fingerprint::of(HashFunction::Sha1, stranger.certificate.der());
+    let right_384 = Fingerprint::of(HashFunction::Sha384, der);
+    let right_512 = Fingerprint::of(HashFunction::Sha512, der);
+    let wrong_384 = Fingerprint::of(HashFunction::Sha384, stranger.certificate.der());
+    let wrong_512 = Fingerprint::of(HashFunction::Sha512, stranger.certificate.der());
     let cases = [
         (vec![right_256.clone()], true),
         (vec![right_1.clone()], true),
@@ -820,9 +824,20 @@ fn the_fingerprints_under_the_most_preferred_hash_are_the_ones_the_certificate_m
         (vec![wrong_1.clone(), right_1.clone()], true),
         // SHA-256 is offered, so the SHA-1 one is not looked at
         (vec![wrong_256.clone(), right_1.clone()], false),
-        (vec![right_1, wrong_256], false),
-        (vec![right_256, wrong_1.clone()], true),
+        (vec![right_1, wrong_256.clone()], false),
+        (vec![right_256.clone(), wrong_1.clone()], true),
         (vec![wrong_1], false),
+        // SHA-512 over SHA-384 over SHA-256 (RFC 8122 §5.1 leaves the order
+        // to this end)
+        (vec![right_512.clone()], true),
+        (vec![right_384.clone()], true),
+        (vec![wrong_512.clone(), right_256.clone()], false),
+        (vec![right_512.clone(), wrong_256.clone()], true),
+        (vec![wrong_384.clone(), right_256], false),
+        (vec![right_384.clone(), wrong_256], true),
+        (vec![wrong_512.clone(), right_384.clone()], false),
+        (vec![right_512, wrong_384, right_384], true),
+        (vec![wrong_512], false),
     ];
     for (fingerprints, matches) in cases {
         let mut config = config(Role::Client, &one, &other);
@@ -1463,26 +1478,9 @@ fn a_finished_in_the_clear_is_discarded_and_the_protected_one_still_counts() {
     deliver(&mut hand.client, &flight4, hand.now);
     let flight5 = drain(&mut hand.client);
     // everything of flight 5 but the protected Finished
-    let clear: Vec<Vec<u8>> = flight5
-        .iter()
-        .map(|datagram| {
-            let mut out = Vec::new();
-            for record in records(datagram).map(Result::unwrap) {
-                if record.header.epoch == 0 {
-                    record.header.encode(&mut out).unwrap();
-                    out.extend_from_slice(record.fragment);
-                }
-            }
-            out
-        })
-        .collect();
+    let clear = epoch_zero_only(&flight5);
     deliver(&mut hand.server, &clear, hand.now);
-    let finished_seq = plaintext_fragments(&clear.concat())
-        .iter()
-        .map(|(_, header, _)| header.message_seq)
-        .max()
-        .unwrap()
-        + 1;
+    let finished_seq = numbered_after(&clear);
     let mut forged = Vec::new();
     encode_message(
         HandshakeType::FINISHED,
@@ -1508,6 +1506,223 @@ fn a_finished_in_the_clear_is_discarded_and_the_protected_one_still_counts() {
 
     deliver(&mut hand.server, &flight5, hand.now);
     keyed(&events(&mut hand.server));
+}
+
+/// Every datagram with its epoch-1 records taken out: a flight as it would
+/// arrive had everything protected in it been lost.
+fn epoch_zero_only(datagrams: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    datagrams
+        .iter()
+        .map(|datagram| {
+            let mut out = Vec::new();
+            for record in records(datagram).map(Result::unwrap) {
+                if record.header.epoch == 0 {
+                    record.header.encode(&mut out).unwrap();
+                    out.extend_from_slice(record.fragment);
+                }
+            }
+            out
+        })
+        .filter(|datagram| !datagram.is_empty())
+        .collect()
+}
+
+/// The `message_seq` after the last epoch-0 handshake message of a flight:
+/// the number its Finished carries.
+fn numbered_after(datagrams: &[Vec<u8>]) -> u16 {
+    datagrams
+        .iter()
+        .flat_map(|datagram| plaintext_fragments(datagram))
+        .map(|(_, header, _)| header.message_seq)
+        .max()
+        .unwrap()
+        + 1
+}
+
+#[test]
+fn a_forged_hello_request_takes_no_number_from_the_genuine_flight() {
+    // before the keys: a HelloRequest under the ServerHello's number, then
+    // the genuine flight 4, which is still read from its first message
+    let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+    let flight4 = hand.flight4();
+    deliver(
+        &mut hand.client,
+        &[forged_retransmission(HandshakeType::HELLO_REQUEST, 0)],
+        hand.now,
+    );
+    deliver(&mut hand.client, &flight4, hand.now);
+    let flight5 = drain(&mut hand.client);
+    assert!(carries(
+        &flight5.concat(),
+        HandshakeType::CLIENT_KEY_EXCHANGE
+    ));
+    assert!(events(&mut hand.client).is_empty());
+
+    // after flight 5: a HelloRequest under the number the server's Finished
+    // will carry, which would make the genuine Finished look like a
+    // retransmission and leave the handshake to time out
+    let finished_seq = numbered_after(&flight4);
+    deliver(
+        &mut hand.client,
+        &[forged_retransmission(
+            HandshakeType::HELLO_REQUEST,
+            finished_seq,
+        )],
+        hand.now,
+    );
+    deliver(&mut hand.server, &flight5, hand.now);
+    keyed(&events(&mut hand.server));
+    deliver(&mut hand.client, &drain(&mut hand.server), hand.now);
+    keyed(&events(&mut hand.client));
+    assert_eq!(hand.client.state(), State::Connected);
+}
+
+#[test]
+fn once_only_the_finished_is_due_an_epoch_zero_message_at_or_past_it_is_discarded() {
+    // the client, after flight 5: a ServerHelloDone under the Finished's
+    // number, and one past it, would end the handshake as out of place
+    let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+    let flight4 = hand.flight4();
+    deliver(&mut hand.client, &flight4, hand.now);
+    let flight5 = drain(&mut hand.client);
+    let finished_seq = numbered_after(&flight4);
+    for seq in [finished_seq, finished_seq + 1] {
+        deliver(
+            &mut hand.client,
+            &[forged_retransmission(HandshakeType::SERVER_HELLO_DONE, seq)],
+            hand.now,
+        );
+    }
+    assert!(events(&mut hand.client).is_empty());
+    assert_eq!(hand.client.state(), State::Handshaking);
+    // what came before the Finished is still a retransmission, and answered
+    let now = hand.later(Duration::from_secs(1));
+    deliver(&mut hand.client, &flight4, now);
+    assert!(carries(
+        &drain(&mut hand.client).concat(),
+        HandshakeType::CLIENT_KEY_EXCHANGE
+    ));
+
+    // the server, once CertificateVerify is in: the same, under the number
+    // of the client's Finished
+    let clear = epoch_zero_only(&flight5);
+    deliver(&mut hand.server, &clear, now);
+    assert_eq!(hand.server.state(), State::Handshaking);
+    let finished_seq = numbered_after(&clear);
+    for (msg_type, seq) in [
+        (HandshakeType::CERTIFICATE_VERIFY, finished_seq),
+        (HandshakeType::CLIENT_KEY_EXCHANGE, finished_seq + 1),
+        (HandshakeType::HELLO_REQUEST, finished_seq),
+    ] {
+        deliver(
+            &mut hand.server,
+            &[forged_retransmission(msg_type, seq)],
+            now,
+        );
+    }
+    assert!(events(&mut hand.server).is_empty());
+    assert!(drain(&mut hand.server).is_empty());
+    assert_eq!(hand.server.state(), State::Handshaking);
+
+    deliver(&mut hand.server, &flight5, now);
+    keyed(&events(&mut hand.server));
+    deliver(&mut hand.client, &drain(&mut hand.server), now);
+    keyed(&events(&mut hand.client));
+}
+
+#[test]
+fn a_connected_server_answers_only_an_authenticated_retransmission_of_the_last_flight() {
+    let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+    let flight4 = hand.flight4();
+    deliver(&mut hand.client, &flight4, hand.now);
+    let flight5 = drain(&mut hand.client);
+    deliver(&mut hand.server, &flight5, hand.now);
+    keyed(&events(&mut hand.server));
+    assert!(!drain(&mut hand.server).is_empty(), "flight 6");
+
+    // epoch-0 fragments from before flight 6, forged or not, are answered by
+    // nothing: one well past the quiet gap each time
+    let now = hand.later(Duration::from_secs(1));
+    for (msg_type, seq) in [
+        (HandshakeType::CLIENT_HELLO, 0),
+        (HandshakeType::CERTIFICATE, 1),
+    ] {
+        deliver(
+            &mut hand.server,
+            &[forged_retransmission(msg_type, seq)],
+            now,
+        );
+        assert!(drain(&mut hand.server).is_empty(), "{msg_type:?}");
+    }
+    let now = hand.later(Duration::from_secs(1));
+    deliver(&mut hand.server, &epoch_zero_only(&flight5), now);
+    assert!(drain(&mut hand.server).is_empty());
+
+    // the client's own retransmission carries its Finished, protected under
+    // a new record number, and is answered with flight 6
+    hand.client.handle_timeout(hand.now);
+    let again = drain(&mut hand.client);
+    assert!(!again.is_empty());
+    let now = hand.later(Duration::from_secs(1));
+    deliver(&mut hand.server, &again, now);
+    let flight6 = drain(&mut hand.server);
+    assert!(!flight6.is_empty());
+    assert!(events(&mut hand.server).is_empty());
+    deliver(&mut hand.client, &flight6, now);
+    keyed(&events(&mut hand.client));
+}
+
+/// The ClientHello of `hello` under another record sequence number.
+fn renumbered(hello: &[Vec<u8>], sequence: u64) -> Vec<Vec<u8>> {
+    hello
+        .iter()
+        .map(|datagram| {
+            let mut out = Vec::new();
+            for record in records(datagram).map(Result::unwrap) {
+                let header = RecordHeader {
+                    sequence,
+                    ..record.header
+                };
+                header.encode(&mut out).unwrap();
+                out.extend_from_slice(record.fragment);
+            }
+            out
+        })
+        .collect()
+}
+
+#[test]
+fn a_server_does_not_start_its_epoch_zero_above_two_to_the_forty_seventh() {
+    for (sequence, accepted) in [
+        (1 << 47, true),
+        ((1 << 47) + 1, false),
+        (MAX_SEQUENCE, false),
+    ] {
+        let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+        let hello = renumbered(&drain(&mut hand.client), sequence);
+        deliver(&mut hand.server, &hello, hand.now);
+        let answer = drain(&mut hand.server);
+        if accepted {
+            assert!(carries(&answer.concat(), HandshakeType::SERVER_HELLO));
+            let (record, _, _) = plaintext_fragments(&answer[0])
+                .into_iter()
+                .find(|(_, header, _)| header.msg_type == HandshakeType::SERVER_HELLO)
+                .unwrap();
+            assert_eq!(
+                record, sequence,
+                "the ServerHello goes under the ClientHello's number"
+            );
+            assert!(events(&mut hand.server).is_empty());
+        } else {
+            assert_eq!(
+                refused(&events(&mut hand.server)),
+                Failure::IllegalParameter,
+                "{sequence}"
+            );
+            assert!(!carries(&answer.concat(), HandshakeType::SERVER_HELLO));
+            assert_eq!(hand.server.state(), State::Failed);
+        }
+    }
 }
 
 #[test]

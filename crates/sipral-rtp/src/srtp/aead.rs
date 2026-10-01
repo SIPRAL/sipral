@@ -13,6 +13,8 @@
 use aes_gcm::aead::{AeadInOut, Nonce, Tag};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit};
 
+use zeroize::Zeroize;
+
 use super::cipher::Exhausted;
 
 /// The AEAD authentication tag length RFC 7714 §10 and §13.2 fix at sixteen
@@ -42,17 +44,24 @@ impl Gcm {
     /// A key of sixteen or thirty-two octets, exactly as
     /// [`super::cipher::Counter::new`] takes one — every caller sizes the key
     /// from a [`super::Suite`] first.
+    ///
+    /// The key is staged in a buffer of the cipher's own key type, which is
+    /// wiped once the key schedule is made from it.
     pub(crate) fn new(key: &[u8]) -> Self {
         if key.len() == 32 {
-            let mut array = [0_u8; 32];
-            array.copy_from_slice(key);
-            Self::Aes256(Aes256Gcm::new(&aes_gcm::Key::<Aes256Gcm>::from(array)))
+            let mut staged = aes_gcm::Key::<Aes256Gcm>::default();
+            staged.copy_from_slice(key);
+            let cipher = Self::Aes256(Aes256Gcm::new(&staged));
+            staged.zeroize();
+            cipher
         } else {
-            let mut array = [0_u8; 16];
-            if let Some(head) = array.get_mut(..key.len().min(16)) {
+            let mut staged = aes_gcm::Key::<Aes128Gcm>::default();
+            if let Some(head) = staged.get_mut(..key.len().min(16)) {
                 head.copy_from_slice(key.get(..key.len().min(16)).unwrap_or_default());
             }
-            Self::Aes128(Aes128Gcm::new(&aes_gcm::Key::<Aes128Gcm>::from(array)))
+            let cipher = Self::Aes128(Aes128Gcm::new(&staged));
+            staged.zeroize();
+            cipher
         }
     }
 
@@ -86,9 +95,12 @@ impl Gcm {
     /// Verify `tag` and open `buffer` in place under `iv` and `aad`.
     ///
     /// # Errors
-    /// [`TagMismatch`] when the tag does not match; `buffer` may still have
-    /// been modified, exactly as `sipral-dtls`'s own use of this primitive
-    /// documents, so a caller only ever reads it back on [`Ok`].
+    /// [`TagMismatch`] when the tag does not match. `aes-gcm` 0.11 checks the
+    /// tag before it decrypts, so `buffer` is then left as it was; `Security`
+    /// offers the same datagram to a retired context after a refusal and
+    /// relies on that, which `a_packet_that_does_not_open_is_left_as_it_arrived`
+    /// in `session.rs` holds for every suite. A caller reads `buffer` back as
+    /// plaintext only on [`Ok`].
     pub(crate) fn open(
         &self,
         iv: &[u8; SALT],
