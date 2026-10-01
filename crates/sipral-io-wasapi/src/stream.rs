@@ -2127,7 +2127,11 @@ mod tests {
         let session = detached(&channel);
         let depth = 1_000;
         assert!(
-            session.shared.ring.set(crate::ring::Ring::new(depth)).is_ok(),
+            session
+                .shared
+                .ring
+                .set(crate::ring::Ring::new(depth))
+                .is_ok(),
             "a detached session has no ring yet"
         );
         let mut speaker = PlaybackStream { session };
