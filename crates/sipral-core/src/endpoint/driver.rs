@@ -471,11 +471,26 @@ impl Endpoint {
     ///
     /// This is the stream for everything that goes on the wire in clear, and
     /// only for that. Media keys come from a generator of their own, seeded
-    /// separately, because this seed is written into every replay recording
-    /// and a recording must not carry the means to decrypt what it recorded.
+    /// separately, because a replay recording carries the seed this stream
+    /// runs on while it records ([`Endpoint::reseed`]) and a recording must
+    /// not carry the means to decrypt what it recorded.
     #[must_use]
     pub fn token(&mut self) -> Box<[u8]> {
         self.tokens.token()
+    }
+
+    /// Move the stream every branch, tag, `Call-ID` and client nonce comes
+    /// from onto a seed of its own, and return that seed.
+    ///
+    /// The seed comes from a second stream derived one way from the one
+    /// [`Endpoint::new`] was given, so it says nothing about that seed and
+    /// nothing about the seed the next call here moves to. It is what a
+    /// replay recording started now carries (`docs/18-replay.md`): a replay
+    /// built with it draws exactly what this endpoint draws from here on,
+    /// and once the recording ends, calling this again leaves the recording
+    /// unable to predict any identifier drawn after it.
+    pub fn reseed(&mut self) -> [u8; 32] {
+        self.tokens.reseed()
     }
 
     /// What a bound transport speaks and the address it was bound at — the
@@ -615,6 +630,30 @@ impl Endpoint {
     #[must_use]
     pub const fn retransmissions(&self) -> Retransmissions {
         self.retransmissions
+    }
+
+    /// What a call's signalling travels over: the flow of `dialog` while it
+    /// lasts, and otherwise the flow of `transaction` — the INVITE that is
+    /// opening it, sent or received — while that is live. `None` when
+    /// neither is.
+    ///
+    /// For a layer above that decides what may go in a message by how it
+    /// will travel: an SDES key in a body is as well protected as the
+    /// transport under it (RFC 4568 §8.3).
+    #[must_use]
+    pub fn signalling_protocol(
+        &self,
+        dialog: Option<DialogId>,
+        transaction: Option<AnyTransactionId>,
+    ) -> Option<TransportProtocol> {
+        dialog
+            .and_then(|dialog| self.dialogs.flow(dialog))
+            .or_else(|| {
+                transaction
+                    .filter(|id| self.transactions.retransmissions(*id).is_some())
+                    .map(|id| self.flow_of(id))
+            })
+            .map(|flow| flow.protocol)
     }
 
     /// How many times one transaction has sent its request or its response
@@ -1400,6 +1439,14 @@ impl Endpoint {
             .transports
             .get(request.transport)
             .ok_or(SendError::UnknownTransport)?;
+        // §26.2.2: a SIPS request goes over TLS on every hop, from here on.
+        // Asked before anything is drawn or assembled, so a refusal leaves
+        // no trace; and only once, because the one flow it could be moved
+        // to afterwards — a stream for a request too big for a datagram —
+        // is moved to from a datagram flow, which this already refused
+        if !bound.protocol.is_secure() && asks_for_tls(request) {
+            return Err(SendError::SipsNeedsTls);
+        }
         let mut flow = Flow {
             transport: request.transport,
             destination: request.remote,
@@ -1936,6 +1983,22 @@ struct Minted<'a> {
     /// `Authorization` and `Proxy-Authorization`, when a challenge from this
     /// destination is remembered and the caller handed over a password.
     credentials: &'a [(HeaderName<'static>, String)],
+}
+
+/// Whether a request outside a dialog names a `sips:` URI where RFC 3261
+/// §26.2.2 makes that a demand for TLS: the Request-URI, the first `Route`
+/// (the hop it is sent to), the `Contact` (§8.1.1.8: a SIPS Contact says this
+/// end is reached securely), and a REGISTER's `To`, the address of record a
+/// binding is made for (§10.2: a SIPS AOR is reached over TLS only).
+fn asks_for_tls(request: &OutgoingRequest) -> bool {
+    let sips = |value: &[u8]| {
+        crate::msg::NameAddrRef::parse(value).is_ok_and(|addr| addr.uri().scheme().is_secure())
+    };
+    request.request_uri.is_secure()
+        || request.route.first().is_some_and(|hop| sips(hop))
+        || request.contact.as_deref().is_some_and(sips)
+        || (request.method.as_ref() == Method::Register.as_str().as_bytes()
+            && request.to.as_deref().is_some_and(sips))
 }
 
 /// Whether a `From` or `To` value already carries a tag.

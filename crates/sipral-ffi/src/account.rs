@@ -611,6 +611,38 @@ unsafe fn with_reach(
     Ok(account)
 }
 
+/// The account's password, held to what [`text`] holds any other member to —
+/// UTF-8, one line — but refused without saying where it went wrong.
+///
+/// [`text`]'s refusal names the offset of the byte it refused, which is right
+/// for a header field and wrong for a secret: the shape of a password is not
+/// something an error text an application may log should describe. The TURN
+/// password is read the same way (`crate::nat`).
+///
+/// # Safety
+///
+/// `config.auth_password` must be readable for `config.auth_password_len`
+/// bytes, or be null with a length of zero.
+unsafe fn password_of(config: &SipralAccountConfig) -> Result<Option<&str>, Fail> {
+    let raw = unsafe {
+        crate::text::bytes(
+            config.auth_password.cast::<u8>(),
+            config.auth_password_len,
+            "auth_password",
+        )
+    }?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match std::str::from_utf8(raw) {
+        Ok(password) if !password.bytes().any(crate::text::is_field_ending) => Ok(Some(password)),
+        _ => Err(fail(
+            SipralStatus::InvalidArgument,
+            "auth_password is not usable text: it must be UTF-8 on one line",
+        )),
+    }
+}
+
 /// Turn what crossed the boundary into an account, or say what was wrong.
 ///
 /// # Safety
@@ -624,13 +656,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
     let (remote, server) = unsafe { destination_of(config, registrar.is_some()) }?;
     let display = unsafe { text(config.display_name, config.display_name_len, "display_name") }?;
     let user = unsafe { text(config.auth_user, config.auth_user_len, "auth_user") }?;
-    let password = unsafe {
-        text(
-            config.auth_password,
-            config.auth_password_len,
-            "auth_password",
-        )
-    }?;
+    let password = unsafe { password_of(config) }?;
     let instance = unsafe { text(config.instance_id, config.instance_id_len, "instance_id") }?;
     let quality_report_uri = unsafe {
         text(
@@ -753,6 +779,9 @@ entry! {
                 "recording_in_clear",
                 false,
             )?,
+            // the C ABI names no switch for it: the stack's own answer, the
+            // default, which takes SDES on any transport and says so
+            sdes_signalling: None,
         };
         let handle = with_stack(stack, |state| {
             let account = unsafe { account_from(state, &config) }?;
@@ -1365,6 +1394,27 @@ pub(crate) mod tests {
         (config.auth_user, config.auth_user_len) = text("alice");
         (config.auth_password, config.auth_password_len) = text("hunter2");
         assert_eq!(add(handle, &config).0, SipralStatus::Ok);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A password that is not usable text is refused without the error
+    /// saying where: a control byte at offset 5 leaves neither the 5 nor the
+    /// word "offset" in the last error, and neither does a byte that is not
+    /// UTF-8.
+    #[test]
+    fn a_password_refused_is_refused_without_describing_it() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        for password in [&b"hunte\x01r2"[..], &b"hunte\xffr2"[..]] {
+            let mut config = account_config();
+            (config.auth_user, config.auth_user_len) = text("alice");
+            config.auth_password = password.as_ptr().cast();
+            config.auth_password_len = password.len();
+            assert_eq!(add(handle, &config).0, SipralStatus::InvalidArgument);
+            let said = last_error_text();
+            assert!(said.contains("auth_password"), "{said}");
+            assert!(!said.contains('5') && !said.contains("offset"), "{said}");
+        }
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use sipral_diag::{Mode, Redactor, redact_message, redact_text, strip_secrets, strip_secrets_text};
+use zeroize::Zeroizing;
 
 /// How many lines the bucket lets through at once, before the rate below
 /// applies.
@@ -111,15 +112,43 @@ impl std::error::Error for SaltTooShort {}
 /// against a pseudonym — and it must not be a seed that is written anywhere
 /// in clear.
 ///
+/// The key comes back in a buffer that wipes itself when dropped, sized once
+/// so that no copy of the salt is left behind by a buffer growing.
+///
 /// # Errors
 /// [`SaltTooShort`] for a salt under [`MIN_SALT`] bytes.
-pub fn pseudonym_key(salt: &[u8]) -> Result<Vec<u8>, SaltTooShort> {
+pub fn pseudonym_key(salt: &[u8]) -> Result<PseudonymKey, SaltTooShort> {
     if salt.len() < MIN_SALT {
         return Err(SaltTooShort { len: salt.len() });
     }
-    let mut key = salt.to_vec();
-    key.extend_from_slice(b"sipral log and state pseudonyms");
+    let mut key = Zeroizing::new(Vec::with_capacity(salt.len() + SALTED_LABEL.len()));
+    key.extend_from_slice(salt);
+    key.extend_from_slice(SALTED_LABEL);
     Ok(key)
+}
+
+/// A pseudonym key, in a buffer that is wiped when it is dropped.
+pub type PseudonymKey = Zeroizing<Vec<u8>>;
+
+/// What [`pseudonym_key`] appends to an installation's salt.
+const SALTED_LABEL: &[u8] = b"sipral log and state pseudonyms";
+
+/// The label [`derived_pseudonym_key`] derives under. Its own, so that the
+/// key it gives is unrelated to anything else made from the same secret.
+const DERIVED_LABEL: &[u8] = b"sipral log and state pseudonym key, derived";
+
+/// A pseudonym key derived from a secret the application already keeps for
+/// another purpose, for a log given no salt of its own: HMAC-SHA256 keyed
+/// with `secret`, over a label of the log's own.
+///
+/// One way: the key, and every pseudonym made with it, says nothing about
+/// `secret`. That is the point of deriving rather than reusing it. A media
+/// seed every SRTP master key is drawn from must not also be the key a
+/// log's pseudonyms are made with, held in the log's memory for as long as
+/// the log lives and fed values an attacker can choose.
+#[must_use]
+pub fn derived_pseudonym_key(secret: &[u8]) -> PseudonymKey {
+    Zeroizing::new(sipral_diag::derive_key(secret, DERIVED_LABEL).to_vec())
 }
 
 /// How loud a line is. Higher is more detailed: a sink set to
@@ -226,7 +255,9 @@ struct Inner {
     pending_suppressed: u64,
     /// Turned away over the log's whole life.
     suppressed_ever: u64,
-    key: Vec<u8>,
+    /// The pseudonym key, kept to key each fresh redactor with; wiped, like
+    /// the copy inside the redactor's [`Mode`], when the log goes.
+    key: PseudonymKey,
     redactor: Redactor,
     redactor_uses: u32,
     /// Whether SIP messages are written whole, secrets aside
@@ -301,7 +332,7 @@ impl Log {
                 bucket: Bucket::full(),
                 pending_suppressed: 0,
                 suppressed_ever: 0,
-                key: key.to_vec(),
+                key: Zeroizing::new(key.to_vec()),
                 redactor: Redactor::new(Mode::Hash(key.to_vec())),
                 redactor_uses: 0,
                 diagnostic: false,
@@ -485,7 +516,7 @@ impl Log {
         }
         inner.redactor_uses += 1;
         if inner.redactor_uses > REDACTOR_REUSE {
-            inner.redactor = Redactor::new(Mode::Hash(inner.key.clone()));
+            inner.redactor = Redactor::new(Mode::Hash(inner.key.to_vec()));
             inner.redactor_uses = 1;
         }
         let diagnostic = inner.diagnostic;
@@ -558,8 +589,8 @@ impl Drop for Delivering<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BURST, Log, LogLevel, LogRecord, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort, Travel,
-        pseudonym_key,
+        BURST, Log, LogLevel, LogRecord, MIN_SALT, PER_SECOND, PseudonymKey, QUEUE_CEILING,
+        SaltTooShort, Travel, derived_pseudonym_key, pseudonym_key,
     };
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -973,5 +1004,23 @@ Content-Length: {}\r\n\r\n{sdp}",
             Log::from_salt(&[7_u8; MIN_SALT - 1]).err(),
             Some(SaltTooShort { len: MIN_SALT - 1 })
         );
+    }
+
+    /// A key derived from a secret is one way and the secret's own: it holds
+    /// none of the secret's bytes, another secret gives another key, and the
+    /// log keeps it, like the salted one, in a buffer that wipes itself.
+    #[test]
+    fn a_derived_pseudonym_key_holds_nothing_of_its_secret() {
+        let secret = [0xa7_u8; 32];
+        let key = derived_pseudonym_key(&secret);
+        assert_eq!(key.len(), 32);
+        assert!(!key.windows(4).any(|run| run == [0xa7; 4]), "{:?}", *key);
+        assert_ne!(*key, derived_pseudonym_key(&[0xa8_u8; 32]).to_vec());
+        assert_eq!(*key, derived_pseudonym_key(&secret).to_vec());
+        let log = Log::new(&key);
+        let held: &PseudonymKey = &log.inner().key;
+        assert_eq!(held.as_slice(), key.as_slice());
+        let salted: PseudonymKey = pseudonym_key(&[7_u8; MIN_SALT]).unwrap();
+        assert!(salted.starts_with(&[7_u8; MIN_SALT]));
     }
 }

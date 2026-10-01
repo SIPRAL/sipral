@@ -10,8 +10,10 @@
 //!
 //! Two of these exist in a running stack and they are deliberately separate.
 //! The endpoint's drives everything that goes on the wire in clear — branches,
-//! tags, `Call-ID`s, the client nonce — and is written into a replay recording
-//! so that a recorded session can be replayed byte for byte. The media
+//! tags, `Call-ID`s, the client nonce — and a replay recording carries the
+//! seed it runs on while it records, one derived for the recording
+//! ([`KeySource::derived`]), so that a recorded session can be replayed byte
+//! for byte without the file holding the seed the stack was built with. The media
 //! engine's derives SRTP master keys, and is written nowhere. Sharing one
 //! between them would put every key this stack will ever offer into every
 //! recording it makes.
@@ -28,6 +30,8 @@ use super::sha2::sha256;
 pub struct KeySource {
     seed: [u8; 32],
     counter: u64,
+    /// Whether each block also replaces the seed ([`KeySource::forward_secure`]).
+    ratchet: bool,
 }
 
 impl KeySource {
@@ -37,10 +41,36 @@ impl KeySource {
     /// stack's media seed must not be its endpoint seed.
     #[must_use]
     pub const fn new(seed: [u8; 32]) -> Self {
-        Self { seed, counter: 0 }
+        Self {
+            seed,
+            counter: 0,
+            ratchet: false,
+        }
     }
 
-    /// `SHA-256(seed || counter)`, and the counter moves on.
+    /// Start from the caller's seed, and let no state held later say
+    /// anything about a block handed out earlier.
+    ///
+    /// Each block is `SHA-256(0x00 || seed || counter)`, and the seed is then
+    /// replaced by `SHA-256(0x01 || seed || counter)`, the old one
+    /// overwritten. Whoever reads this source's memory learns the blocks it
+    /// has still to hand out, and none it has handed out already (RFC 4086
+    /// §6.2): for a media engine, not the SRTP keys of the calls before.
+    /// What the media engine draws from, which nothing replays; the
+    /// endpoint's stream, which a replay recording reproduces from its seed,
+    /// stays on [`KeySource::new`].
+    #[must_use]
+    pub const fn forward_secure(seed: [u8; 32]) -> Self {
+        Self {
+            seed,
+            counter: 0,
+            ratchet: true,
+        }
+    }
+
+    /// `SHA-256(seed || counter)`, and the counter moves on — or, made
+    /// [`KeySource::forward_secure`], the block and the next seed as it
+    /// says.
     ///
     /// The counter is read before it is incremented, so the first block is
     /// drawn at zero. That ordering is load-bearing: every branch, tag,
@@ -49,6 +79,9 @@ impl KeySource {
     pub fn block(&mut self) -> [u8; 32] {
         let counter = self.counter.to_be_bytes();
         self.counter = self.counter.wrapping_add(1);
+        if self.ratchet {
+            return self.turn(counter);
+        }
         let mut input = [0_u8; 40];
         for (slot, byte) in input.iter_mut().zip(self.seed.iter().chain(counter.iter())) {
             *slot = *byte;
@@ -56,6 +89,50 @@ impl KeySource {
         let digest = sha256(&input);
         wipe(&mut input);
         digest
+    }
+
+    /// One turn of the ratchet: the block for `counter`, and the seed moved
+    /// on past it.
+    fn turn(&mut self, counter: [u8; 8]) -> [u8; 32] {
+        let mut input = [0_u8; 41];
+        for (slot, byte) in input
+            .iter_mut()
+            .skip(1)
+            .zip(self.seed.iter().chain(counter.iter()))
+        {
+            *slot = *byte;
+        }
+        let block = sha256(&input);
+        if let Some(label) = input.first_mut() {
+            *label = 1;
+        }
+        let mut next = sha256(&input);
+        wipe(&mut input);
+        self.seed.copy_from_slice(&next);
+        wipe(&mut next);
+        block
+    }
+
+    /// The seed as it stands, for the tests that hold the ratchet to what it
+    /// promises.
+    #[cfg(test)]
+    pub(crate) const fn state(&self) -> [u8; 32] {
+        self.seed
+    }
+
+    /// A stream of its own, seeded with `SHA-256(label || seed)`.
+    ///
+    /// One way: neither stream's blocks say anything about the other's, and
+    /// a different `label` gives an unrelated stream. What the endpoint
+    /// draws the seed of each replay recording from, so that a recording
+    /// carries a seed of its own and never this one.
+    pub(crate) fn derived(&self, label: &[u8]) -> Self {
+        let mut input = Vec::with_capacity(label.len() + self.seed.len());
+        input.extend_from_slice(label);
+        input.extend_from_slice(&self.seed);
+        let seed = sha256(&input);
+        wipe(&mut input);
+        Self::new(seed)
     }
 }
 
@@ -101,6 +178,37 @@ mod tests {
             assert!(!seen.contains(&block), "the counter repeated");
             seen.push(block);
         }
+    }
+
+    /// G2: a forward-secure source is still a stream (the same seed, the
+    /// same blocks; no block twice), but what it holds after a draw is not
+    /// the seed it started from and cannot draw that block again: neither a
+    /// plain source nor a forward-secure one started from the state that is
+    /// left hands out anything already handed out.
+    #[test]
+    fn a_forward_secure_source_keeps_nothing_that_draws_its_past_blocks() {
+        let mut one = KeySource::forward_secure([7; 32]);
+        let mut again = KeySource::forward_secure([7; 32]);
+        let mut drawn = Vec::new();
+        for _ in 0..64 {
+            let block = one.block();
+            assert_eq!(block, again.block());
+            assert!(!drawn.contains(&block), "a block repeated");
+            drawn.push(block);
+        }
+        let left = one.state();
+        assert_ne!(left, [7; 32], "the seed it started from is still there");
+        let mut plain = KeySource::new(left);
+        let mut turned = KeySource::forward_secure(left);
+        for _ in 0..64 {
+            assert!(!drawn.contains(&plain.block()));
+            assert!(!drawn.contains(&turned.block()));
+        }
+        assert_ne!(
+            KeySource::forward_secure([7; 32]).block(),
+            KeySource::new([7; 32]).block(),
+            "the two kinds of stream share a block"
+        );
     }
 
     #[test]

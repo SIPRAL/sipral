@@ -228,15 +228,15 @@ pub use inband::{AmdConfig, AmdReason, AmdVerdict, BeepConfig, CallProgress, Con
 pub use inband::{DtmfDetection, IN_BAND_DIGIT_HOLD, ProgressConfig, ProgressDetection};
 pub use inband::{ProgressTone, ToneRegion};
 pub use join::{MixOutcome, mix_two};
-pub use keying::{AccountSrtp, SrtpPolicy};
+pub use keying::{AccountSrtp, SdesSignalling, SrtpPolicy};
 pub use local_conference::{
     ConferenceChange, ConferenceDirection, ConferencePacket, Departure, Gain, LocalConference,
     LocalConferenceConfig, MAX_CONFERENCE_MEMBERS, Member, MemberFilter,
 };
 #[cfg(feature = "redaction")]
 pub use log::{
-    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, QUEUE_CEILING, SaltTooShort,
-    Travel, pseudonym_key,
+    BURST, Log, LogLevel, LogRecord, LogSink, MIN_SALT, PER_SECOND, PseudonymKey, QUEUE_CEILING,
+    SaltTooShort, Travel, derived_pseudonym_key, pseudonym_key,
 };
 #[cfg(feature = "stun")]
 pub use nat::{DEFAULT_REFRESH, Keep, MappingEvent, MappingState, Mappings, StunDatagram};

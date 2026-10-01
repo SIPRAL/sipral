@@ -5131,6 +5131,94 @@ fn a_re_offer_that_shortens_the_tag_is_followed_without_a_new_key() {
     );
 }
 
+/// D6: the same thirty octets under `F8_128_HMAC_SHA1_80` are the same key
+/// under AES in another mode, one key under two transforms (RFC 3711 §8.1).
+/// A re-negotiation that carries a key across modes is refused, in either
+/// direction, rather than adopted as new terms, and the session stands.
+#[test]
+fn the_same_key_is_not_carried_into_a_suite_that_runs_the_cipher_in_another_mode() {
+    let now = Instant::now();
+    let (ours, theirs) = savp_pair(OURS, THEIRS);
+    let mut sender = session(&ours, &theirs, now);
+    let (ours_f8, theirs_f8) = savp_pair_of("F8_128_HMAC_SHA1_80", OURS, THEIRS);
+    assert_eq!(
+        sender
+            .adopt(&plan_of(&ours_f8, &theirs_f8), Vec::new(), false, now)
+            .err(),
+        Some(MediaError::UnusableKeying)
+    );
+    // and the stream goes on as it was, under the terms it had
+    let mut receiver = session(&theirs, &ours, now);
+    let mut datagram = one_packet(&mut sender);
+    assert!(!matches!(
+        receiver.receive(&mut datagram, ours_address(), now),
+        Arrival::Dropped(crate::Discard::Insecure(_))
+    ));
+}
+
+/// D6 through the engine: a far end that re-offers its running key under a
+/// suite in another mode is answered 488, told as `UnusableKeying`.
+#[test]
+fn a_far_end_re_offering_its_key_under_another_mode_is_refused() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    // the far end takes the one suite every implementation has, and this
+    // end would take F8 as readily
+    let mut pair = Pair::asymmetric(
+        catalog.clone(),
+        catalog
+            .with_srtp_suites(&[sipral_rtp::srtp::Suite::AesCm80])
+            .expect("one suite"),
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee's call");
+    let mut answered = pair.caller.answer_received().expect("the callee's answer");
+    answered.origin.version += 1;
+    for attribute in &mut answered.media[0].attributes {
+        if attribute.name == "crypto" {
+            attribute.value = attribute
+                .value
+                .as_deref()
+                .map(|line| line.replace("AES_CM_128_HMAC_SHA1_80", "F8_128_HMAC_SHA1_80"));
+        }
+    }
+    let reoffer = String::from_utf8(answered.to_bytes()).expect("text");
+    assert!(reoffer.contains("F8_128_HMAC_SHA1_80"), "{reoffer}");
+    pair.callee
+        .agent
+        .reoffer(remote, reoffer.as_bytes(), pair.now)
+        .expect("the re-INVITE goes");
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let sent = pair.caller.outbound();
+    assert!(
+        sent.iter()
+            .any(|datagram| datagram.starts_with(b"SIP/2.0 488")),
+        "the re-offer was not refused"
+    );
+    for datagram in sent {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.settle();
+    assert!(
+        pair.caller
+            .media_events()
+            .iter()
+            .any(|event| matches!(event, MediaEvent::Failed(MediaError::UnusableKeying))),
+        "{:?}",
+        pair.caller.media_events()
+    );
+    assert!(
+        pair.caller
+            .engine
+            .encryption(call)
+            .is_some_and(|streams| streams[0].encrypted)
+    );
+}
+
 // -- a re-negotiation that moves the codec -----------------------------------
 
 fn re_offer_onto(pair: &mut Pair, remote: CallHandle, payload: u8, rtpmap: &str) {
@@ -6121,7 +6209,7 @@ fn offered_with_seeds(
 
 /// The other half of 8.2.4: the media seed, not the endpoint seed, is what a
 /// negotiated key follows. Two calls placed from user agents that share one
-/// endpoint seed — which is what a replay recording carries in clear — offer
+/// endpoint seed — whose draws go on the wire in clear — offer
 /// two different keys as long as their media seeds differ.
 ///
 /// `key_source_tests::the_media_key_follows_the_media_seed_and_nothing_else`
@@ -7644,6 +7732,131 @@ fn from_another_branch(response: &[u8]) -> Vec<u8> {
         }
     }
     lines.join("\r\n").into_bytes()
+}
+
+/// RFC 4568 §7.3 and RFC 3711 §9.1: a call whose INVITE forked offers the
+/// branch that answered a key of its own as soon as it is up, so that the
+/// key every branch of the INVITE was handed protects nothing this end sends
+/// from then on. The re-offer carries one crypto line, under the tag and
+/// suite the call agreed; media goes on flowing; and what this end sends
+/// opens under the new key and not under the one in the INVITE.
+#[test]
+fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
+    let catalog = CodecCatalog::with_order(&["PCMU"])
+        .expect("an order")
+        .with_srtp(SrtpPolicy::Required);
+    let mut pair = Pair::new(catalog);
+    let (call, incoming, invite) = rung_by_two_phones(&mut pair);
+
+    pair.callee
+        .engine
+        .answer(&mut pair.callee.agent, incoming, callee_media(), pair.now)
+        .expect("the 200 goes");
+    for datagram in pair.callee.outbound() {
+        pair.caller.deliver(&datagram, callee_sip(), pair.now);
+    }
+    pair.caller.drain(pair.now, false);
+    let sent = pair.caller.outbound();
+    let reinvite = sent
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("a re-offer once the branch answered");
+    let offer_of = |datagram: &[u8]| {
+        let mut scratch = ParseScratch::new();
+        let message =
+            sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient).expect("a message");
+        parse(message.body()).expect("a description")
+    };
+    let (first, again) = (offer_of(&invite), offer_of(reinvite));
+    let lines = |description: &SessionDescription| {
+        description.media[0]
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.name == "crypto")
+            .count()
+    };
+    assert_eq!(lines(&again), 1, "one line, the one the call agreed");
+    assert_ne!(
+        offered_key(&invite),
+        offered_key(reinvite),
+        "a key of its own"
+    );
+    for datagram in sent {
+        pair.callee.deliver(&datagram, caller_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.settle();
+
+    let mut phase = 0_u32;
+    let (far, near) = heard_both_ways(&mut pair, (call, incoming), caller_media(), &mut phase);
+    assert!(far > 10 && near > 10, "heard {far} and {near} frames of 25");
+    let mut samples = vec![0_i16; 160];
+    tone(&mut samples, 8_000, &mut phase);
+    let (protected, _) = pair.speak(call, incoming, &samples);
+    let mut under_new = protected.clone();
+    assert!(
+        copy_opener(&again, 0).unprotect_rtp(&mut under_new).is_ok(),
+        "what this end sends is not under the key it re-offered"
+    );
+    let mut under_old = protected;
+    assert!(
+        copy_opener(&first, 0)
+            .unprotect_rtp(&mut under_old)
+            .is_err(),
+        "the key every branch of the INVITE holds still opens what this end sends"
+    );
+}
+
+/// A call placed by the caller and rung by the callee, the 180 also arriving
+/// from a second phone a proxy forked the INVITE to: the caller's call, the
+/// callee's, and the INVITE as it went.
+fn rung_by_two_phones(pair: &mut Pair) -> (CallHandle, CallHandle, Vec<u8>) {
+    let account = pair.caller.account("alice", callee_sip());
+    let _ = pair.callee.account("bob", caller_sip());
+    let call = pair
+        .caller
+        .engine
+        .place(
+            &mut pair.caller.agent,
+            account,
+            OutgoingCall::new(uri("sip:bob@example.com")).to_address(UDP, callee_sip()),
+            caller_media(),
+            pair.now,
+        )
+        .expect("the INVITE goes");
+    pair.caller.drain(pair.now, false);
+    let invite = pair
+        .caller
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("the INVITE");
+    pair.callee.deliver(&invite, caller_sip(), pair.now);
+    pair.callee.drain(pair.now, false);
+    let incoming = pair.callee.call().expect("the callee heard the INVITE");
+    pair.callee
+        .agent
+        .ring(incoming, None, pair.now)
+        .expect("a 180");
+    let ringing = pair
+        .callee
+        .outbound()
+        .into_iter()
+        .find(|datagram| datagram.starts_with(b"SIP/2.0 180"))
+        .expect("the 180");
+    // a second phone the proxy forked the INVITE to rings as well
+    pair.caller.deliver(&ringing, callee_sip(), pair.now);
+    pair.caller
+        .deliver(&from_another_branch(&ringing), callee_sip(), pair.now);
+    pair.caller.drain(pair.now, false);
+    assert!(
+        pair.caller
+            .heard
+            .iter()
+            .any(|event| matches!(event, Event::Signalling(UaEvent::CallForked { .. }))),
+        "the INVITE was not seen to fork"
+    );
+    (call, incoming, invite)
 }
 
 /// A call placed with a relay, rung plainly by the callee (a 180 with no
@@ -12787,6 +13000,72 @@ fn a_call_whose_network_changed_offers_its_new_address_and_is_heard_both_ways_af
     assert!(near > 10, "this end heard {near} frames");
 }
 
+/// D4, RFC 4568 §7.1.4: an SDES call moved to another address offers a new
+/// master key with it, one line under the suite the call agreed, and both
+/// ends go on hearing each other under it.
+#[test]
+fn an_sdes_call_moved_to_another_address_offers_a_new_key() {
+    let mut pair = Pair::new(
+        CodecCatalog::with_order(&["PCMU"])
+            .expect("an order")
+            .with_srtp(SrtpPolicy::Required),
+    );
+    let (account, call, remote) = connect_on_account(&mut pair);
+    let first = pair.callee.offer_received().expect("the first offer");
+    let _ = move_the_caller(&mut pair);
+    pair.caller
+        .agent
+        .rebind(
+            account,
+            UDP,
+            callee_sip(),
+            &uri("sip:alice@198.51.100.7"),
+            pair.now,
+        )
+        .expect("the account is repointed");
+    pair.caller
+        .engine
+        .readdress(&mut pair.caller.agent, call, moved_media(), None, pair.now)
+        .expect("the re-offer goes");
+    let written = pair.caller.outbound();
+    let reinvite = written
+        .iter()
+        .find(|datagram| datagram.starts_with(b"INVITE "))
+        .expect("a re-INVITE went out")
+        .clone();
+    let offer = parse(&wire_message_body(&reinvite)).expect("an offer that reads");
+    let lines: Vec<_> = one_stream(&offer)
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == "crypto")
+        .map(|attribute| attribute.value.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("1 AEAD_AES_256_GCM "), "{lines:?}");
+    let key_of = |line: &str| {
+        line.split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let before = crypto_line(&one_stream(&first)).expect("a crypto line");
+    assert_ne!(
+        key_of(&lines[0]),
+        before.key_params,
+        "the same key at a new address"
+    );
+
+    for datagram in written {
+        pair.callee.deliver(&datagram, moved_sip(), pair.now);
+    }
+    pair.callee.drain(pair.now, true);
+    pair.caller.drain(pair.now, false);
+    settle_from(&mut pair, moved_sip());
+    let mut phase = 0;
+    let (far, near) = heard_both_ways(&mut pair, (call, remote), moved_media(), &mut phase);
+    assert!(far > 10 && near > 10, "heard {far} and {near} frames of 25");
+}
+
 /// Twenty-five frames of the tone each way between the caller's `call` and
 /// the callee's `remote`, the caller's arriving from `caller_at`, and how
 /// many frames each end then played that were loud enough to be it: the far
@@ -14031,6 +14310,56 @@ fn an_encrypted_call_is_recorded_to_the_server_as_srtp() {
     copy_opener(&offer, 1)
         .unprotect_rtp(&mut copy)
         .expect("SRTP under the key offered for the stream labelled 2");
+}
+
+/// RFC 4568 §8.3 for the recording session: its SDES keys went to the
+/// server over TCP, which the recording says by its own handle; and an
+/// account that takes SDES over TLS only does not record that way at all,
+/// with nothing sent to the server.
+#[test]
+fn a_recording_whose_keys_go_in_clear_says_so_or_is_refused() {
+    let (pair, _server, _call, _, recording) =
+        recorded_call_with(encrypted_catalog(), srtp_server, |_, _| {});
+    assert_eq!(pair.caller.engine.keys_in_clear(recording), Some(true));
+
+    let mut pair = Pair::new(encrypted_catalog());
+    let call = pair.connect();
+    let account = pair.caller.agent.call_account(call).expect("the account");
+    pair.caller
+        .engine
+        .set_account_srtp(
+            account,
+            crate::AccountSrtp {
+                sdes_signalling: Some(crate::SdesSignalling::SecureOnly),
+                ..crate::AccountSrtp::default()
+            },
+        )
+        .expect("the account's policy");
+    pair.caller
+        .agent
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: caller_sip(),
+                remote: Some(server_sip()),
+            },
+            pair.now,
+        )
+        .expect("binding TCP");
+    let _ = pair.caller.outbound();
+    let refused = pair.caller.engine.record_to(
+        &mut pair.caller.agent,
+        call,
+        crate::RecordTo::new(uri("sip:srs@example.com"), this_end_copy(), far_end_copy())
+            .to_address(TCP, server_sip()),
+        pair.now,
+    );
+    assert_eq!(refused, Err(MediaError::KeysWouldTravelInClear));
+    assert!(
+        pair.caller.outbound().is_empty(),
+        "the recording's offer went"
+    );
 }
 
 /// A server that answers an encrypted call's recording session in the clear

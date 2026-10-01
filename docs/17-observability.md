@@ -245,9 +245,13 @@ again across the C ABI in `crates/sipral-ffi/src/log.rs`:
   a digest and an SDES `inline:` key are dropped outright. The pseudonyms are
   keyed HMAC-SHA256, so one value reads as one pseudonym for the life of the
   log and a call can be followed through the file. Across the C ABI the key
-  is derived from the stack's `media_seed` under a label of its own — never
-  from `entropy`, which a replay recording carries in clear, so an address
-  pseudonym could otherwise be reversed by trying every address. Bytes the
+  is derived one way from the stack's `media_seed`
+  (`sipral::derived_pseudonym_key`: HMAC-SHA256 keyed with the seed, over a
+  label of the log's own), so the log never holds the seed every SRTP key is
+  drawn from — and never from `entropy`, the signalling seed a replay
+  recording's own seed comes from, which would let an address pseudonym be
+  reversed by trying every address. The log, its redactor and the stack hold the key in buffers that
+  are wiped when they go. Bytes the
   parser cannot read are logged by their size only. That key is drawn fresh
   per start, so the same address — `127.0.0.1` most visibly — reads as a
   different pseudonym in every run. `Log::from_salt` keys the pseudonyms

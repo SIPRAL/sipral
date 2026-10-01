@@ -50,12 +50,15 @@ impl Recording {
     /// never resolved.
     pub const VERSION: u32 = 3;
 
-    /// The signalling seed the recorded stack was built with.
+    /// The signalling seed the recorded stack drew from while it recorded.
     ///
     /// Every branch, tag, `Call-ID` and `cnonce` is derived from it
     /// ([`Endpoint::new`](crate::endpoint::Endpoint::new)), so a replay built
     /// with a different one writes different messages and the answers in the
-    /// recording no longer belong to them.
+    /// recording no longer belong to them. A recording a user agent makes
+    /// carries a seed drawn for it ([`Endpoint::reseed`](crate::endpoint::Endpoint::reseed)),
+    /// not the one the stack was built with, and the stack moves off it when
+    /// the recording stops: the file predicts nothing drawn outside it.
     ///
     /// **And nothing else is derived from it.** Media keys come from a second
     /// seed this format has no field for, which is why a recording can be

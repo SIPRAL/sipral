@@ -34,6 +34,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use sipral_core::diag::Record;
 use sipral_core::msg::{
@@ -92,6 +93,29 @@ impl core::fmt::Debug for Mode {
     }
 }
 
+// the same key, for the same reason, is not left behind in freed memory:
+// whoever reads it can test a guessed address against every pseudonym made
+// with it
+impl Drop for Mode {
+    fn drop(&mut self) {
+        if let Mode::Hash(key) = self {
+            key.zeroize();
+        }
+    }
+}
+
+/// A key of `secret`'s for one purpose: HMAC-SHA256 keyed with `secret`, over
+/// `label`.
+///
+/// One way, so nothing made with the result says anything about `secret`,
+/// and a different label gives a key unrelated to this one. What a stack
+/// keys its log's pseudonyms with when it is given no salt of their own: a
+/// key derived from a secret it already holds, never that secret itself.
+#[must_use]
+pub fn derive_key(secret: &[u8], label: &[u8]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hmac(secret, label))
+}
+
 /// Rewrites identifiers as a recording's messages are redacted, remembering
 /// every value it has already replaced so the same input keeps the same
 /// output within one export — required for [`Mode::Hash`] to correlate at
@@ -128,8 +152,7 @@ impl Redactor {
             return existing.clone();
         }
         let token = if let Mode::Hash(key) = &self.mode {
-            let key = key.clone();
-            hex(&hmac(&key, value)[..8])
+            hex(&hmac(key, value)[..8])
         } else {
             self.next_identifier += 1;
             format!("anon{}", self.next_identifier)
@@ -145,8 +168,7 @@ impl Redactor {
             return *existing;
         }
         let mapped = if let Mode::Hash(key) = &self.mode {
-            let key = key.clone();
-            let mac = hmac(&key, &addr.octets());
+            let mac = hmac(key, &addr.octets());
             Ipv4Addr::new(mac[0], mac[1], mac[2], mac[3])
         } else {
             self.next_v4 += 1;
@@ -162,8 +184,7 @@ impl Redactor {
             return *existing;
         }
         let mapped = if let Mode::Hash(key) = &self.mode {
-            let key = key.clone();
-            let mac = hmac(&key, &addr.octets());
+            let mac = hmac(key, &addr.octets());
             let mut segments = [0u8; 16];
             segments.copy_from_slice(&mac[..16]);
             Ipv6Addr::from(segments)
@@ -202,12 +223,15 @@ fn placeholder_ipv4(n: u32) -> Ipv4Addr {
 /// block; doing both here by hand hands the primitive a block-sized key, the
 /// one form of keying it offers that cannot fail on a key of arbitrary
 /// length (`crates/sipral-dtls/src/prf.rs` keys HMAC the same way).
+///
+/// The block-sized copy of the key and the hash a long key is replaced with
+/// are wiped before this returns; the HMAC state wipes itself.
 fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut block_key = hmac::digest::Key::<HmacSha256>::default();
-    let hashed: [u8; 32];
+    let mut hashed = Zeroizing::new([0_u8; 32]);
     let material: &[u8] = if key.len() > block_key.len() {
-        hashed = Sha256::digest(key).into();
-        &hashed
+        hashed.copy_from_slice(&Sha256::digest(key));
+        hashed.as_slice()
     } else {
         key
     };
@@ -215,6 +239,7 @@ fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
         *slot = *byte;
     }
     let mut mac = <HmacSha256 as KeyInit>::new(&block_key);
+    block_key.as_mut_slice().zeroize();
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -954,12 +979,30 @@ fn scan_ip_literals_str(text: &str, red: &mut Redactor) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Mode, Redactor, redact_message, redact_record_json, redact_text, strip_secrets,
-        strip_secrets_text,
+        Mode, Redactor, derive_key, hmac, redact_message, redact_record_json, redact_text,
+        strip_secrets, strip_secrets_text,
     };
 
     fn hash_redactor() -> Redactor {
         Redactor::new(Mode::Hash(b"organisation-secret".to_vec()))
+    }
+
+    /// A derived key is HMAC-SHA256 under the secret over the label: the
+    /// same pair gives the same key, another label or another secret another
+    /// one, and a long secret is hashed to the block as RFC 2104 has it.
+    #[test]
+    fn a_key_is_derived_per_label_and_per_secret() {
+        let secret = [3_u8; 32];
+        assert_eq!(*derive_key(&secret, b"one"), *derive_key(&secret, b"one"));
+        assert_ne!(*derive_key(&secret, b"one"), *derive_key(&secret, b"two"));
+        assert_ne!(
+            *derive_key(&secret, b"one"),
+            *derive_key(&[4_u8; 32], b"one")
+        );
+        assert_eq!(*derive_key(&secret, b"one"), hmac(&secret, b"one"));
+        let long = [5_u8; 100];
+        assert_eq!(*derive_key(&long, b"one"), hmac(&long, b"one"));
+        assert_ne!(*derive_key(&long, b"one"), *derive_key(&long[..64], b"one"));
     }
 
     fn redact(msg: &[u8], red: &mut Redactor) -> String {

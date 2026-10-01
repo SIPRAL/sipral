@@ -67,7 +67,7 @@ use sipral_core::msg::OwnedMessage;
 #[cfg(any(feature = "dtls", feature = "ice"))]
 use sipral_core::sdp::RtcpPlan;
 use sipral_core::sdp::{
-    AcceptedStream, Attribute, Connection, CryptoSuite, Direction, KeySalt, Keying,
+    AcceptedStream, Attribute, Connection, CryptoPolicy, CryptoSuite, Direction, KeySalt, Keying,
     MediaDescription, MediaPlan, NegotiatedCodec, Origin, SdpError, SessionDescription,
     StreamAnswer, parse, static_rtpmap,
 };
@@ -89,7 +89,7 @@ use crate::error::MediaError;
 use crate::event::{DigitSource, Event, MediaEvent};
 #[cfg(feature = "dtls")]
 use crate::keying::SrtpPolicy;
-use crate::keying::{self, AccountSrtp, Shape};
+use crate::keying::{self, AccountSrtp, SdesSignalling, Shape};
 use crate::payloads::Payloads;
 use crate::ports::{PortsExhausted, RtpPorts};
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
@@ -253,9 +253,26 @@ struct Managed {
     /// here that is to be hung up, with a `Reason` saying why, once its 2xx
     /// has been acknowledged.
     refused_keying: bool,
+    /// Who besides the far end may hold the SDES key this end wrote.
+    exposure: Exposure,
     /// Where this call's real-time text arrives, when it was given a socket
     /// for it ([`CallMedia::text`]).
     text: Option<SocketAddr>,
+}
+
+/// Who besides the far end may hold the SDES key this end wrote for a call.
+#[derive(Clone, Copy, Debug, Default)]
+struct Exposure {
+    /// Whether it went out in signalling that is not encrypted
+    /// ([`MediaEngine::keys_in_clear`]). Decided when the call's first
+    /// description leaves, since the transport under a dialog does not
+    /// change after that.
+    in_clear: bool,
+    /// Whether the call's INVITE was seen to fork, and so reached user
+    /// agents that are not the one that answers: every one of them holds the
+    /// key its offer carried. Cleared once the answered branch has been
+    /// offered a key of its own ([`MediaEngine::rekey_after_fork`]).
+    forked: bool,
 }
 
 /// A codec change on its way to the far end.
@@ -495,8 +512,9 @@ pub struct MediaEngine {
     /// Where every SRTP master key comes from, and every DTLS secret with
     /// them, and nothing else does.
     ///
-    /// Its own stream, separate from the endpoint's, because the endpoint's
-    /// seed is written in clear into every replay recording. A recording must
+    /// Its own stream, separate from the endpoint's, because a replay
+    /// recording carries in clear the seed the endpoint's stream runs on
+    /// while it records. A recording must
     /// be able to reproduce a session byte for byte without carrying the
     /// means to decrypt any of the media that went with it — nor, since the
     /// certificate key is drawn from the same stream, the means to be
@@ -602,6 +620,9 @@ struct Recording {
     /// Whether the recorded call's account lets an encrypted call be copied
     /// in the clear ([`AccountSrtp::recording_in_clear`]).
     in_clear: bool,
+    /// Whether `keys` went to the server in signalling that is not
+    /// encrypted ([`MediaEngine::keys_in_clear`]).
+    keys_in_clear: bool,
     /// The server's last answer, which says which offered line keys each
     /// stream.
     answer: Option<SessionDescription>,
@@ -724,7 +745,9 @@ impl MediaEngine {
             farewells: VecDeque::new(),
             joins: BTreeMap::new(),
             counters: Counters::default(),
-            keys: KeySource::new(media_seed),
+            // forward secure: a later read of this engine's memory gives
+            // away no SDES key, ICE password or DTLS seed already drawn
+            keys: KeySource::forward_secure(media_seed),
             #[cfg(feature = "dtls")]
             identity: None,
             #[cfg(feature = "ice")]
@@ -2103,6 +2126,8 @@ impl MediaEngine {
             text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
+        let keys_in_clear =
+            sdes_in_clear(&catalog, &offer, agent.placing_securely(account, &outgoing))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let placing = outgoing.offer(Arc::from(offer.to_bytes()));
         let call = agent.call(account, &placing, now)?;
@@ -2131,10 +2156,60 @@ impl MediaEngine {
                 payloads: Payloads::default(),
                 pending: None,
                 refused_keying: false,
+                exposure: Exposure::default(),
                 text,
             },
         );
+        if keys_in_clear {
+            self.mark_keys_in_clear(call, now);
+        }
         Ok(call)
+    }
+
+    /// Mark `call` as one whose SDES keys went out in signalling that is not
+    /// encrypted ([`MediaEngine::keys_in_clear`]), and say so in the log at
+    /// warning level, once.
+    fn mark_keys_in_clear(&mut self, call: CallHandle, now: Instant) {
+        let Some(managed) = self.calls.get_mut(&call) else {
+            return;
+        };
+        if core::mem::replace(&mut managed.exposure.in_clear, true) {
+            return;
+        }
+        #[cfg(feature = "redaction")]
+        self.log_line(crate::LogLevel::Warn, "media", now, || {
+            format!(
+                "call {}: its SDES keys travel in signalling that is not encrypted, readable on \
+                 every hop that carries it (RFC 4568 8.3)",
+                number(call)
+            )
+        });
+        #[cfg(not(feature = "redaction"))]
+        let _ = now;
+    }
+
+    /// Whether an SDES key this end wrote for `call` — in its offer, or in
+    /// its answer to the far end's — went out in signalling that is not
+    /// encrypted, readable on every hop that carried the message (RFC 4568
+    /// §8.3). `Some(false)` for a call whose keys travelled over TLS or
+    /// secure WebSocket, and for one that wrote no SDES key; `None` for a
+    /// call this engine does not hold.
+    ///
+    /// What a user interface reads before showing a call as encrypted the
+    /// same way whatever carried its keys: [`StreamEncryption`] says the
+    /// media is encrypted, and this says who else could have read the key.
+    /// [`CodecCatalog::with_sdes_signalling`] refuses such calls instead.
+    ///
+    /// [`StreamEncryption`]: crate::StreamEncryption
+    ///
+    /// A recording session ([`MediaEngine::record_to`]) is asked the same
+    /// way, by its own handle: its offer carries keys of its own.
+    #[must_use]
+    pub fn keys_in_clear(&self, call: CallHandle) -> Option<bool> {
+        self.calls
+            .get(&call)
+            .map(|managed| managed.exposure.in_clear)
+            .or_else(|| self.recordings.get(&call).map(|held| held.keys_in_clear))
     }
 
     /// Take a transfer that was asked for, and place the call it names the
@@ -2234,6 +2309,9 @@ impl MediaEngine {
             text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
+        // the new call leaves from the transferred call's account, and is
+        // held to how that call's own signalling travels
+        let keys_in_clear = sdes_in_clear(&catalog, &offer, agent.call_signalling_secure(call))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
         self.keep(new, handed, now);
@@ -2261,9 +2339,13 @@ impl MediaEngine {
                 payloads: Payloads::default(),
                 pending: None,
                 refused_keying: false,
+                exposure: Exposure::default(),
                 text,
             },
         );
+        if keys_in_clear {
+            self.mark_keys_in_clear(new, now);
+        }
         Ok(new)
     }
 
@@ -2398,9 +2480,14 @@ impl MediaEngine {
             text,
         )?;
         describe_ice(&mut description, ice.as_ref(), Some(&offer));
+        let keys_in_clear =
+            sdes_in_clear(&catalog, &description, agent.call_signalling_secure(call))?;
         let bytes = description.to_bytes();
         agent.ring(call, Some(Arc::from(bytes)), now)?;
         self.keep(call, handed, now);
+        if keys_in_clear {
+            self.mark_keys_in_clear(call, now);
+        }
         #[cfg(feature = "dtls")]
         let named = self.named(dtls.is_some());
         if let Some(managed) = self.calls.get_mut(&call) {
@@ -2580,9 +2667,14 @@ impl MediaEngine {
             )
         };
         describe_ice(&mut description, ice.as_ref(), offered.as_ref());
+        let keys_in_clear =
+            sdes_in_clear(&catalog, &description, agent.call_signalling_secure(call))?;
         let bytes = description.to_bytes();
         agent.answer(call, Some(Arc::from(bytes)), now)?;
         self.keep(call, handed, now);
+        if keys_in_clear {
+            self.mark_keys_in_clear(call, now);
+        }
         #[cfg(feature = "dtls")]
         let named = self.named(dtls.is_some());
         if let Some(managed) = self.calls.get_mut(&call) {
@@ -2831,8 +2923,11 @@ impl MediaEngine {
     ///
     /// The offer is the description this end last wrote with only the
     /// address moved: `c=` wherever it appears and the port on `m=`, with
-    /// the codecs, the direction, the key or the fingerprint carried across
-    /// the way [`MediaEngine::change_codecs`] carries them. The `o=` line
+    /// the codecs, the direction and the fingerprint carried across the way
+    /// [`MediaEngine::change_codecs`] carries them. An SDES key is not: a
+    /// stream received at another address or port is offered a new master
+    /// key, one line under the tag and suite the call agreed (RFC 4568
+    /// §7.1.4), so both ends start a fresh context. The `o=` line
     /// keeps its address, since §8 wants it identical but for the version.
     /// A DTLS association outlives the move — a datagram transport lets one
     /// span several 5-tuples (RFC 8842 §3.2) — so `a=setup` is offered
@@ -2886,10 +2981,17 @@ impl MediaEngine {
         let mut offer = managed.local.clone().ok_or(MediaError::NoDescription)?;
         let version = managed.version.saturating_add(1);
         let described = public.unwrap_or(local);
+        let moved = managed.public.or(managed.address) != Some(described);
 
         #[cfg(feature = "ice")]
         if offered_ice {
             withdraw_ice(&mut offer);
+        }
+        // RFC 4568 §7.1.4: an offer that moves the address or port a stream
+        // is received at carries a new master key, and so a new context with
+        // its rollover counter at zero, on both ends
+        if moved {
+            let _ = self.fresh_key_line(call, &mut offer);
         }
         let connection = Connection::new(described.ip());
         if offer.connection.is_some() {
@@ -3467,6 +3569,7 @@ impl MediaEngine {
                 // confirms with an ACK and no response
                 if response.is_some() {
                     self.answered(*call);
+                    self.rekey_after_fork(*call, agent, now);
                 }
             }
             UaEvent::SessionChanged {
@@ -3505,6 +3608,105 @@ impl MediaEngine {
             } => self.dtmf_received(*call, *digit, *held_ms),
             _ => {}
         }
+    }
+
+    /// RFC 4568 §7.3 for a call whose INVITE forked: every user agent the
+    /// offer reached knows the SDES key it carried, the ones that never
+    /// answered and the ones whose answer lost included, and RFC 3711 §9.1
+    /// forbids one master key to two sessions. Once a branch has answered
+    /// and been acknowledged, it is offered again with the description this
+    /// end last wrote and one crypto line: the tag and suite the call
+    /// agreed, with a key drawn fresh. The far end's answer keys this end's
+    /// sending context anew (`Rekey::between`, a new key), and the key in
+    /// the INVITE protects nothing from then on.
+    ///
+    /// Once per call, and only for a call this engine describes and keys by
+    /// SDES. A re-offer the user agent will not send now — another change
+    /// already on its way — leaves the call as it is, and says so in the log.
+    fn rekey_after_fork(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
+        let Some(managed) = self.calls.get_mut(&call) else {
+            return;
+        };
+        if !core::mem::take(&mut managed.exposure.forked) || managed.address.is_none() {
+            return;
+        }
+        let Some(managed) = self.calls.get(&call) else {
+            return;
+        };
+        let Some(mut offer) = managed.local.clone() else {
+            return;
+        };
+        let version = managed.version.saturating_add(1);
+        if !self.fresh_key_line(call, &mut offer) {
+            return;
+        }
+        for stream in &mut offer.media {
+            stream.offer_roles_again();
+        }
+        offer.origin.version = version;
+        let sent = agent.change_formats(call, &offer.to_bytes(), now);
+        #[cfg(feature = "redaction")]
+        self.log_line(
+            if sent.is_ok() {
+                crate::LogLevel::Info
+            } else {
+                crate::LogLevel::Warn
+            },
+            "media",
+            now,
+            || match &sent {
+                Ok(()) => format!(
+                    "call {}: its INVITE forked; offering the branch that answered a key of \
+                     its own (RFC 4568 7.3)",
+                    number(call)
+                ),
+                Err(error) => format!(
+                    "call {}: its INVITE forked, and the re-offer with a key of its own did \
+                     not go: {error}",
+                    number(call)
+                ),
+            },
+        );
+        #[cfg(not(feature = "redaction"))]
+        let _ = sent;
+    }
+
+    /// Replace the crypto lines of `offer`'s audio stream with one: the tag
+    /// and suite `call` runs under by SDES, with a key drawn fresh. `false`,
+    /// with `offer` untouched, for a call not keyed by SDES or with no live
+    /// audio stream.
+    fn fresh_key_line(&mut self, call: CallHandle, offer: &mut SessionDescription) -> bool {
+        let agreed = self.sessions.get(&call).and_then(|held| {
+            match share::lock(held).session.plan().keying {
+                Some(Keying::Sdes { ref local, .. }) => Some((local.tag, local.suite)),
+                _ => None,
+            }
+        });
+        let Some((tag, suite)) = agreed else {
+            return false;
+        };
+        let Some(stream) = offer
+            .media
+            .iter_mut()
+            .find(|stream| stream.media == AUDIO && !stream.is_rejected())
+        else {
+            return false;
+        };
+        let line = CryptoPolicy::new(tag, suite, draw_key_for(suite, &mut self.keys))
+            .to_crypto()
+            .attribute();
+        let at = stream
+            .attributes
+            .iter()
+            .position(|attribute| attribute.name == "crypto")
+            .unwrap_or(stream.attributes.len());
+        stream
+            .attributes
+            .retain(|attribute| attribute.name != "crypto");
+        stream
+            .attributes
+            .insert(at.min(stream.attributes.len()), line);
+        true
     }
 
     /// A call this end placed whose answer the call's SRTP policy refused:
@@ -3597,6 +3799,8 @@ impl MediaEngine {
                 payloads: Payloads::default(),
                 pending: None,
                 refused_keying: false,
+                // decided when it is rung or answered, as the rest is
+                exposure: Exposure::default(),
                 // a text socket is the application's to give, when it rings
                 // or answers
                 text: None,
@@ -3624,9 +3828,13 @@ impl MediaEngine {
         agent: &mut UserAgent,
         now: Instant,
     ) {
-        let Some(parent) = self.calls.get(&call).cloned() else {
+        let Some(parent) = self.calls.get_mut(&call) else {
             return;
         };
+        // every branch the offer reached holds its key, so whichever of the
+        // two answers is offered one of its own once it has
+        parent.exposure.forked = true;
+        let parent = parent.clone();
         let (identity, session_id) = draw(agent);
         self.calls.insert(
             sibling,
@@ -3711,6 +3919,36 @@ impl MediaEngine {
             managed.remote = Some(described);
         }
         self.settle(call, now);
+    }
+
+    /// Whether `offer` would have this end take the far end's running SDES
+    /// key under a suite whose cipher runs in another mode
+    /// ([`keying::key_carries_over`]).
+    fn moves_key_across_modes(
+        &self,
+        call: CallHandle,
+        catalog: &CodecCatalog,
+        offer: &SessionDescription,
+    ) -> bool {
+        let Some(running) = self.sessions.get(&call).and_then(|held| {
+            match share::lock(held).session.plan().keying {
+                Some(Keying::Sdes { ref remote, .. }) => Some(remote.clone()),
+                _ => None,
+            }
+        }) else {
+            return false;
+        };
+        let Some(taken) =
+            live_stream(offer).and_then(|stream| keying::acceptable(stream, catalog.srtp_suites()))
+        else {
+            return false;
+        };
+        let same_key = running
+            .keys
+            .iter()
+            .map(|inline| &inline.keys)
+            .eq(taken.keys.iter().map(|inline| &inline.keys));
+        same_key && !keying::key_carries_over(running.suite, taken.suite)
     }
 
     /// The key the answer to a re-offer carries: the key of `in_force`
@@ -3845,6 +4083,15 @@ impl MediaEngine {
         // refusal has to be
         if let Some(error) = keying_refusal(&catalog, &offer) {
             self.events.push_back((call, MediaEvent::Failed(error)));
+            let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
+            return;
+        }
+        // the far end's own key carried into a suite that runs the cipher in
+        // another mode is one key under two transforms: refused with the
+        // session standing, as `Rekey::between` would refuse it after
+        if self.moves_key_across_modes(call, &catalog, &offer) {
+            self.events
+                .push_back((call, MediaEvent::Failed(MediaError::UnusableKeying)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
@@ -4405,6 +4652,13 @@ impl MediaEngine {
         if let Some((transport, remote)) = to.destination {
             outgoing = outgoing.to_address(transport, remote);
         }
+        // the recording's keys are held to RFC 4568 §8.3 as the call's own
+        // are: the server's link is a call like any other
+        let keys_in_clear = sdes_in_clear(
+            &self.account_catalog(account),
+            &offer,
+            agent.placing_securely(account, &outgoing),
+        )?;
         let recording = agent.call(account, &outgoing, now)?;
         self.recordings.insert(
             recording,
@@ -4421,12 +4675,24 @@ impl MediaEngine {
                 destinations: None,
                 keys,
                 in_clear,
+                keys_in_clear,
                 answer: None,
                 parked: None,
                 told: Some(direction),
                 owed: false,
             },
         );
+        if keys_in_clear {
+            #[cfg(feature = "redaction")]
+            self.log_line(crate::LogLevel::Warn, "media", now, || {
+                format!(
+                    "recording {} of call {}: its SDES keys travel in signalling that is not \
+                     encrypted, readable on every hop that carries it (RFC 4568 8.3)",
+                    number(recording),
+                    number(call)
+                )
+            });
+        }
         Ok(recording)
     }
 
@@ -5198,6 +5464,34 @@ fn refuse_insecure(agent: &mut UserAgent, call: CallHandle, now: Instant) -> Med
     // error still says why it was not answered here
     let _ = agent.reject(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
     MediaError::SrtpRequired
+}
+
+/// RFC 4568 §8.3 for a description this end is about to send on a call
+/// whose signalling `secure` says how it travels (`None`: not known, and so
+/// not known to be encrypted): `Ok(true)` when it carries an SDES key in
+/// clear, which the call is then marked with; `Ok(false)` when it carries
+/// none, or travels encrypted; and [`MediaError::KeysWouldTravelInClear`]
+/// when it would carry one in clear and `catalog` takes SDES over encrypted
+/// signalling only.
+fn sdes_in_clear(
+    catalog: &CodecCatalog,
+    description: &SessionDescription,
+    secure: Option<bool>,
+) -> Result<bool, MediaError> {
+    let keyed = description.media.iter().any(|stream| {
+        !stream.is_rejected()
+            && stream
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name.eq_ignore_ascii_case("crypto"))
+    });
+    if !keyed || secure == Some(true) {
+        return Ok(false);
+    }
+    match catalog.sdes_signalling() {
+        SdesSignalling::SecureOnly => Err(MediaError::KeysWouldTravelInClear),
+        _ => Ok(true),
+    }
 }
 
 /// Whether a call on `catalog` offers real-time text: only on plain RTP and
@@ -6962,7 +7256,7 @@ mod key_source_tests {
     #[test]
     fn the_media_key_follows_the_media_seed_and_nothing_else() {
         // The whole of the fix, in three lines: two stacks given the same
-        // signalling entropy — which a replay recording carries in clear —
+        // signalling entropy — whose draws go on the wire in clear —
         // must not be derivable from it to the same media keys.
         let mut one = KeySource::new([1; 32]);
         let mut other = KeySource::new([2; 32]);
@@ -6979,6 +7273,26 @@ mod key_source_tests {
             draw(&mut same_again).key(),
             "and a seed is a stream, so the same one still reproduces"
         );
+    }
+
+    /// G2: the engine draws its keys from a forward-secure source, so the
+    /// key it hands out first is the forward-secure stream's and not the
+    /// plain one's: what the engine holds after a call cannot draw it again.
+    #[test]
+    fn the_engine_draws_from_a_forward_secure_source() {
+        let now = std::time::Instant::now();
+        let mut engine = super::MediaEngine::new(
+            crate::CodecCatalog::new(),
+            crate::MediaConfig::default(),
+            crate::WallClock::from_unix(now, 1_700_000_000, 0),
+            [5; 32],
+        );
+        let drawn = draw(&mut engine.keys);
+        assert_eq!(
+            drawn.key(),
+            draw(&mut KeySource::forward_secure([5; 32])).key()
+        );
+        assert_ne!(drawn.key(), draw(&mut KeySource::new([5; 32])).key());
     }
 
     #[test]

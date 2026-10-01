@@ -115,6 +115,14 @@ pub enum SendError {
         /// The ceiling in force.
         limit: usize,
     },
+    /// The request names a `sips:` URI — as its Request-URI, its first
+    /// `Route`, its `Contact`, or a REGISTER's address of record — and the
+    /// transport it was given is not TLS or secure WebSocket. RFC 3261
+    /// §26.2.2: a SIPS request is carried over TLS on every hop, and a UAC
+    /// that cannot do that for the first one does not send it. Nothing went
+    /// out; the same request on a TLS transport, or to a `sip:` target, is
+    /// sent.
+    SipsNeedsTls,
 }
 
 impl fmt::Display for SendError {
@@ -139,6 +147,9 @@ impl fmt::Display for SendError {
                     "this end is at its limit on calls held at once ({limit})"
                 )
             }
+            Self::SipsNeedsTls => f.write_str(
+                "a sips: request goes over TLS only, and the transport it was given is not TLS",
+            ),
         }
     }
 }

@@ -55,6 +55,6 @@ pub mod redact;
 
 pub use export::{ExportError, Replayed, export, export_replayed};
 pub use redact::{
-    Mode, RedactError, Redactor, redact_message, redact_record, redact_record_json, redact_text,
-    strip_secrets, strip_secrets_text,
+    Mode, RedactError, Redactor, derive_key, redact_message, redact_record, redact_record_json,
+    redact_text, strip_secrets, strip_secrets_text,
 };

@@ -45,6 +45,18 @@ Two things follow from the table that are easy to miss:
   With roots handed over, those roots replace the platform's rather than
   joining them (`20-security-model.md`, "A TURN server reached over TLS is
   checked by the application's TLS").
+- **A `sips:` request goes over TLS or not at all.** RFC 3261 §26.2.2 has
+  every hop of a SIPS request secured with TLS, so the endpoint refuses,
+  before anything is drawn or written, a request outside a dialog whose
+  Request-URI, first `Route` or `Contact` is `sips:`, or a REGISTER whose
+  address of record is, when the transport it was given is not TLS or
+  secure WebSocket: `SendError::SipsNeedsTls`, which a call or a
+  registration reports as `UaError::Send` and the C ABI as
+  `SIPRAL_STATUS_NOT_SENT` with the reason in the last error. A
+  subscription that cannot be sent for it ends as unreachable. A dialog
+  keeps the flow it was made on, so one that a SIPS request opened stays
+  on TLS. What the stack does not check is a `sips:` Request-URI arriving
+  over a transport that is not TLS; that request is answered as any other.
 
 ## What the platform checks, and what RFC 5922 adds
 

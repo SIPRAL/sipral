@@ -89,6 +89,10 @@ sipral-ua = { path = "../sipral-ua", version = "0.0.1" }
 # asks. Its `ice` follows this crate's, so that what the pump captures says
 # how it leaves a media socket the way `sipral_media_capture` does.
 sipral-audio = { path = "../sipral-audio", version = "0.0.1" }
+# the two seeds a stack is created with, wiped once the engine and the agent
+# hold their own copies; the version `sipral` names, so nothing new enters
+# the build
+zeroize = "=1.9.0"
 
 [dev-dependencies]
 # the engine's fake platform, for this crate's own tests of device mode:

@@ -121,7 +121,7 @@ pub(crate) unsafe fn required_text<'a>(
 /// value the caller supplied. The rest of the C0 range and DEL are refused
 /// with them: none of them is `TEXT-UTF8char`, and a value that carries one is
 /// a value some receiver on the path will read differently.
-const fn is_field_ending(byte: u8) -> bool {
+pub(crate) const fn is_field_ending(byte: u8) -> bool {
     byte < 0x20 || byte == 0x7f
 }
 

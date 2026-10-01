@@ -278,16 +278,23 @@ deployment's dialling plan, given to `Tn::canonical_with`.
 **Where an SRTP key comes from.** `MediaEngine::new` takes a 32-byte media
 seed of its own, entirely apart from whatever entropy the rest of the
 endpoint runs on. `draw_key` (`crates/sipral/src/engine.rs`) turns one block of
-`SHA-256(media_seed || counter)` into a `KeySalt`, copied byte by byte into
+a forward-secure stream into a `KeySalt`, copied byte by byte into
 buffers that zeroise themselves rather than through a bulk copy that could
-leave a duplicate in a stack slot the compiler does not clear. The counter
-never repeats, which is also what RFC 4568 §7.1.2 needs when it requires an
-answer's key to differ from the offer's.
+leave a duplicate in a stack slot the compiler does not clear. Each block is
+`SHA-256(0x00 || seed || counter)`, and the seed is then replaced by
+`SHA-256(0x01 || seed || counter)` (`KeySource::forward_secure`), so what the
+engine holds at any moment draws the keys still to come and none already
+handed out: a later read of its memory does not give away the calls before.
+The counter never repeats, which is also what RFC 4568 §7.1.2 needs when it
+requires an answer's key to differ from the offer's.
 
 **Why a second seed rather than a slice of the first.** The endpoint's own
-seed is written in clear into every replay recording
-(`crates/sipral-core/src/replay/recording.rs`; `docs/18-replay.md` says so in
-as many words: a recording is meant to reproduce a session, not decrypt one).
+stream is reproduced by every replay recording from the seed the recording
+carries (`crates/sipral-core/src/replay/recording.rs`; `docs/18-replay.md`
+says so in as many words: a recording is meant to reproduce a session, not
+decrypt one). That seed is one drawn for the recording, never the one the
+stack was built with, and the endpoint moves off it when the recording
+stops.
 One generator for both would have put every SRTP key this stack will ever
 offer into every recording it makes — including one taken to diagnose
 something unrelated, by somebody told the file holds only what a capture
@@ -331,10 +338,30 @@ covered whether or not anything has parsed it into a `RemoteIce` yet.
 
 **What SDES does and does not protect.** `a=crypto` (RFC 4568) carries the
 master key inside the SDP body, in the SIP message, in the clear as far as
-this layer is concerned — RFC 4568 §7 makes the whole mechanism depend on the
-signalling itself being protected, and whether it is, this crate cannot see:
-`sipral-ua` offers no way to ask which protocol a bound transport speaks, and
-only the application, which bound it, knows. That is why `SrtpPolicy::NotOffered`
+this layer is concerned — RFC 4568 §8.3 makes the whole mechanism depend on
+the signalling itself being encrypted. The engine asks the user agent what a
+call's signalling travels over (`UserAgent::call_signalling_secure`, and
+before a call is placed `UserAgent::placing_securely`): TLS or secure
+WebSocket, or anything else. What it does with the answer is the catalogue's
+`SdesSignalling`. By default (`AnyTransport`) an SDES key is written and
+taken over any transport, because most PBXs offer SDES over UDP only, and a
+call whose key went in clear is marked: `MediaEngine::keys_in_clear` reads
+`Some(true)` for it, a recording session's by its own handle, and the
+engine's log says so at warning level, so a user interface does not show the
+same padlock for a key that crossed TLS and one that crossed UDP.
+`SecureOnly` (on the catalogue, or per account in `AccountSrtp`) refuses
+instead: a call whose offer or answer would carry an `a=crypto` key over
+signalling that is not encrypted is not placed or not answered, with
+`MediaError::KeysWouldTravelInClear` and nothing sent, and a recording
+session to a server reached that way is not started. The C ABI keeps the
+default. A forked INVITE hands its key to every user agent it reaches, so a
+call this end placed that was seen to fork (`UaEvent::CallForked`) offers
+the branch that answered a key of its own as soon as it is confirmed: a
+re-INVITE with one crypto line under the tag and suite agreed, a freshly
+drawn key, and the sending context keyed anew when it is answered (RFC 4568
+§7.3, RFC 3711 §9.1). A fork a proxy hides, and early media from several
+branches at once, are not covered: each branch of early media is answered
+under the INVITE's key. That is why `SrtpPolicy::NotOffered`
 is the default (`crates/sipral/src/keying.rs`, table in `docs/05-media.md`):
 an offer with a key on a transport this stack cannot verify is protected would
 be a plaintext key sent believing it is not one. `Offered` and `Required` both
