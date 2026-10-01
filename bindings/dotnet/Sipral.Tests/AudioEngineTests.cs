@@ -320,6 +320,75 @@ public sealed class AudioEngineTests
         }
     }
 
+    /// <summary>A call's own gain and mute: held by the engine from the
+    /// moment its media starts — the devices left closed under manual
+    /// activation — to the moment it ends, beside the stack's own, and
+    /// refused outside that and in application mode.</summary>
+    [Fact]
+    public async Task ACallsOwnGainAndMuteLastFromItsMediaToItsEnd()
+    {
+        if (!HasDevices)
+        {
+            return;
+        }
+        using var alice = Manual();
+        using var bob = new SipralStack(audio: SipralAudio.Application);
+        var account = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+        bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
+        var call = alice.PlaceCall(account, $"sip:bob@{bob.BindAddress}");
+        var early = Assert.Throws<SipralException>(() => alice.Audio.SetGain(call, SipralAudioDirection.Output, 0.5));
+        Assert.Equal(SipralStatus.WrongState, early.Status);
+        using var cts = new CancellationTokenSource(Timeout);
+        Call? answered = null;
+        await foreach (var e in bob.Events.WithCancellation(cts.Token))
+        {
+            if (e.Kind == SipralEventKind.IncomingCall)
+            {
+                answered = bob.AnswerCall(e);
+                break;
+            }
+        }
+        Assert.NotNull(answered);
+        try
+        {
+            Assert.NotNull(await call.WaitForMediaAsync(cts.Token));
+            var audio = alice.Audio;
+            audio.SetGain(call, SipralAudioDirection.Output, 0.5);
+            audio.SetMuted(call, SipralAudioDirection.Input, true);
+            Assert.Equal(0.5, audio.Gain(call, SipralAudioDirection.Output));
+            Assert.Equal(1.0, audio.Gain(call, SipralAudioDirection.Input));
+            Assert.True(audio.Muted(call, SipralAudioDirection.Input));
+            Assert.False(audio.Muted(call, SipralAudioDirection.Output));
+            Assert.False(audio.Muted(SipralAudioDirection.Input), "the stack's own mute is another");
+            Assert.Equal(0u, audio.Level(call, SipralAudioDirection.Output));
+            var application = Assert.Throws<SipralException>(
+                () => bob.Audio.SetMuted(answered!, SipralAudioDirection.Input, true));
+            Assert.Equal(SipralStatus.WrongState, application.Status);
+
+            call.Hangup();
+            var deadline = DateTime.UtcNow + Timeout;
+            SipralException? after = null;
+            while (after is null && DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    audio.Gain(call, SipralAudioDirection.Output);
+                    await Task.Delay(20);
+                }
+                catch (SipralException ended)
+                {
+                    after = ended;
+                }
+            }
+            Assert.Equal(SipralStatus.WrongState, after?.Status);
+        }
+        finally
+        {
+            answered!.Close();
+            call.Close();
+        }
+    }
+
     /// <summary>A call whose one end runs on the machine's real devices:
     /// activated, the engine opens them, the far end's audio reaches the
     /// loudspeaker's meter and the microphone's packets reach the far end.

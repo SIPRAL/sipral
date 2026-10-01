@@ -389,6 +389,14 @@ public sealed partial class SipralStack : IDisposable
     /// taken out, for a diagnosis; <see cref="SetDiagnosticTrace"/> turns it
     /// on and off later.
     ///
+    /// <paramref name="systemEchoCancellation"/> <see langword="false"/>
+    /// opens the devices of a stack in device mode past the platform's echo
+    /// cancellation, gain control and noise suppression — on Windows a
+    /// communications stream opened raw — for a headset, which has no echo to
+    /// cancel, or an application that cancels it on each call itself;
+    /// <see cref="SipralAudioSnapshot.SystemEchoCancellation"/> says what the
+    /// platform did.
+    ///
     /// <paramref name="resolver"/> answers
     /// <see cref="SipralEventKind.LookupWanted"/> for the accounts added with
     /// <c>serverUri</c>, on a thread of its own per lookup;
@@ -438,7 +446,8 @@ public sealed partial class SipralStack : IDisposable
         uint datagramWithoutStreamBytes = 0,
         byte[]? pseudonymSalt = null,
         bool? diagnosticTrace = null,
-        SipralResolver? resolver = null)
+        SipralResolver? resolver = null,
+        bool? systemEchoCancellation = null)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _chosenPort = bindPort;
@@ -576,6 +585,7 @@ public sealed partial class SipralStack : IDisposable
             config.PseudonymSalt = saltPin.Pointer;
             config.PseudonymSaltLen = (nuint)(pseudonymSalt?.Length ?? 0);
             config.DiagnosticTrace = ToggleOf(diagnosticTrace);
+            config.SystemEchoCancellation = ToggleOf(systemEchoCancellation);
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -926,7 +936,21 @@ public sealed partial class SipralStack : IDisposable
     /// <c>0</c> for never. <paramref name="tlsPin"/> is the SHA-256
     /// fingerprint of the one TLS certificate the account trusts, for an
     /// application that runs the account's TLS itself:
-    /// <see cref="Account.CheckCertificate"/> is its verdict.</summary>
+    /// <see cref="Account.CheckCertificate"/> is its verdict.
+    ///
+    /// <paramref name="streamProtocol"/> (<see cref="SipralTransport.Tcp"/> or
+    /// <see cref="SipralTransport.Tls"/>) puts the account on a connection of
+    /// its own to its server, beside accounts on this stack's UDP socket to
+    /// other servers, in one stack with one audio engine: the stack asks for
+    /// the connection (<see cref="SipralEventKind.TransportWanted"/>, nothing
+    /// outgrown), this class opens it to the account's server whatever
+    /// <c>streamFallback</c> says and binds it, and the REGISTER and every call
+    /// of the account go over it. A TLS one is held to
+    /// <paramref name="tlsPin"/> when the account has one, to the stack's
+    /// <c>tlsTrust</c> otherwise, under <c>tlsServerName</c> or the server's
+    /// host. One that closes is opened again. Until it is open a call the
+    /// account places throws with <see cref="SipralStatus.TransportDown"/>.
+    /// Only on a stack that signals over UDP.</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -944,11 +968,16 @@ public sealed partial class SipralStack : IDisposable
         string? serverUri = null,
         bool serverNaptr = false,
         ulong keepaliveMs = 0,
-        string? tlsPin = null)
+        string? tlsPin = null,
+        SipralTransport streamProtocol = 0)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
             throw new ArgumentException("an account names its server by registrarAddress or by serverUri, one of the two");
+        }
+        if (streamProtocol != 0 && (streamProtocol is not (SipralTransport.Tcp or SipralTransport.Tls) || Streamed))
+        {
+            throw new ArgumentException("streamProtocol is Tcp or Tls, on a stack that signals over UDP", nameof(streamProtocol));
         }
         var advertised = contact is null && registrarAddress is not null && PicksAddress
             ? AdvertiseToward(registrarAddress)
@@ -956,7 +985,7 @@ public sealed partial class SipralStack : IDisposable
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
-            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised));
+            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol));
         lock (_accounts)
         {
             _accounts.Add(account);

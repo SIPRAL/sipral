@@ -623,6 +623,20 @@ public sealed partial class SipralStack
             "sipral_stack_diagnostic_trace");
     }
 
+    /// <summary>What the stack runs with, every default filled in
+    /// (<c>sipral_stack_settings</c>), with the SRTP suites its calls offer in
+    /// order (<c>sipral_stack_srtp_suite_order</c>).</summary>
+    public SipralSettings Settings()
+    {
+        var raw = SipralStackSettings.Sized();
+        SipralErrors.Call(() => NativeMethods.sipral_stack_settings(Handle, ref raw), "sipral_stack_settings");
+        var suites = new uint[raw.SrtpSuiteCount];
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_srtp_suite_order(Handle, suites, (nuint)suites.Length, out _),
+            "sipral_stack_srtp_suite_order");
+        return SipralSettings.Of(raw, suites);
+    }
+
     /// <summary>The diagnostic record of every call the stack keeps, as JSON
     /// (<c>sipral_stack_diagnostics_json</c>): each decision the stack made
     /// and why — <c>transport.kept.datagram</c> among them for a request that

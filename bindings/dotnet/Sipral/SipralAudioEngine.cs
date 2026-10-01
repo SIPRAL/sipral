@@ -186,7 +186,7 @@ public sealed class SipralAudioEngine
     }
 
     /// <summary><paramref name="direction"/>'s gain, as the ratio
-    /// <see cref="SetGain"/> takes.</summary>
+    /// <see cref="SetGain(SipralAudioDirection, double)"/> takes.</summary>
     public double Gain(SipralAudioDirection direction)
     {
         uint steps = 0;
@@ -235,12 +235,80 @@ public sealed class SipralAudioEngine
         return peak;
     }
 
-    /// <summary><see cref="Level"/> in decibels below full scale:
+    /// <summary><see cref="Level(SipralAudioDirection)"/> in decibels below full scale:
     /// <see cref="double.NegativeInfinity"/> for silence.</summary>
     public double LevelDbfs(SipralAudioDirection direction)
     {
         var peak = Level(direction);
         return peak == 0 ? double.NegativeInfinity : 20 * Math.Log10(peak / 32767.0);
+    }
+
+    // -- one call's own gain, mute and meter ----------------------------------
+
+    /// <summary>Sets <paramref name="call"/>'s own gain in
+    /// <paramref name="direction"/>, as the ratio <see cref="SetGain(SipralAudioDirection, double)"/>
+    /// takes, on top of the direction's: the input direction is what the
+    /// microphone sends that call alone, the output how loud that call is in
+    /// the loudspeaker beside the others. Kept while the call is held or in a
+    /// local conference and back, and gone when it ends; throws with
+    /// <see cref="SipralStatus.WrongState"/> before the call's media starts
+    /// and after it ends.</summary>
+    public void SetGain(Call call, SipralAudioDirection direction, double gain)
+    {
+        if (gain < 0 || double.IsNaN(gain))
+        {
+            throw new ArgumentOutOfRangeException(nameof(gain), gain, "a gain is a ratio of zero or more");
+        }
+        var steps = (uint)Math.Round(Math.Min(gain, GainMost) * GainSteps);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_call_set_gain(Handle, call.Handle, (uint)direction, steps),
+            "sipral_audio_call_set_gain");
+    }
+
+    /// <summary><paramref name="call"/>'s own gain in
+    /// <paramref name="direction"/>.</summary>
+    public double Gain(Call call, SipralAudioDirection direction)
+    {
+        uint steps = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_call_gain(Handle, call.Handle, (uint)direction, out steps),
+            "sipral_audio_call_gain");
+        return steps / GainSteps;
+    }
+
+    /// <summary>Mutes <paramref name="call"/> alone in
+    /// <paramref name="direction"/>, or unmutes it, while every other call
+    /// goes on: the far end of that call hears silence, or that call is
+    /// silent in the loudspeaker. Kept and refused as
+    /// <see cref="SetGain(Call, SipralAudioDirection, double)"/> is.</summary>
+    public void SetMuted(Call call, SipralAudioDirection direction, bool muted)
+    {
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_call_set_muted(Handle, call.Handle, (uint)direction, muted ? 1u : 0u),
+            "sipral_audio_call_set_muted");
+    }
+
+    /// <summary>Whether <paramref name="call"/> is muted in
+    /// <paramref name="direction"/>.</summary>
+    public bool Muted(Call call, SipralAudioDirection direction)
+    {
+        uint muted = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_call_muted(Handle, call.Handle, (uint)direction, out muted),
+            "sipral_audio_call_muted");
+        return muted != 0;
+    }
+
+    /// <summary><paramref name="call"/>'s own meter in
+    /// <paramref name="direction"/>, 0 to 32767, after its own gain and
+    /// mute.</summary>
+    public uint Level(Call call, SipralAudioDirection direction)
+    {
+        uint peak = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_call_level(Handle, call.Handle, (uint)direction, out peak),
+            "sipral_audio_call_level");
+        return peak;
     }
 
     // -- activation ---------------------------------------------------------

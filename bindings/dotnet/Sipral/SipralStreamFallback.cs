@@ -7,8 +7,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Text;
 using System.Threading;
 using Sipral.Interop;
@@ -43,7 +45,12 @@ public sealed partial class SipralStack
     /// <summary>Where <see cref="SipralEventKind.TransportWanted"/> asked for
     /// a stream, during the poll that raised it, acted on right after that
     /// poll.</summary>
-    private readonly ConcurrentQueue<string> _streamsAsked = new();
+    private readonly ConcurrentQueue<SipralTransportWantedEventInfo> _streamsAsked = new();
+
+    /// <summary>The <c>tlsServerName</c> the application gave, which a TLS
+    /// connection of an account's own is opened under; <see langword="null"/>
+    /// for the address's host.</summary>
+    private string? _givenTlsServerName;
 
     /// <summary>The transport numbers <see cref="SipralEventKind.TransportFailed"/>
     /// named during that same poll, acted on at the same moment.</summary>
@@ -58,13 +65,14 @@ public sealed partial class SipralStack
     private uint _nextStream = FirstStream;
 
     /// <summary>One TCP connection opened because a request was too large
-    /// for a datagram.</summary>
+    /// for a datagram, or a TCP or TLS one an account on a connection of its
+    /// own asked for.</summary>
     private sealed class SipStream
     {
         public required uint Transport { get; init; }
         public required string Destination { get; init; }
         public required TcpClient Client { get; init; }
-        public required NetworkStream Stream { get; init; }
+        public required Stream Stream { get; init; }
         public object WriteLock { get; } = new();
     }
 
@@ -73,9 +81,9 @@ public sealed partial class SipralStack
     /// from inside its own callback here.</summary>
     private void NoteStreamWanted(SipralEventArgs args)
     {
-        if (!Streamed && args.TransportWanted?.Destination is { } destination)
+        if (!Streamed && args.TransportWanted is { Destination: not null } wanted)
         {
-            _streamsAsked.Enqueue(destination);
+            _streamsAsked.Enqueue(wanted);
         }
         if (!Streamed && args.Kind == SipralEventKind.TransportFailed && args.TransportFailed is { } lost)
         {
@@ -109,12 +117,17 @@ public sealed partial class SipralStack
             LoseSipStream(letGo, tell: false);
         }
         var seen = new HashSet<string>();
-        while (_streamsAsked.TryDequeue(out var destination))
+        while (_streamsAsked.TryDequeue(out var wanted))
         {
+            var destination = wanted.Destination!;
             if (!seen.Add(destination))
             {
                 continue;
             }
+            // an account on a connection of its own asks with nothing
+            // outgrown; that one is opened whatever streamFallback says
+            var opens = _streamFallback || (wanted.RequestBytes == 0 && wanted.LimitBytes == 0);
+            var over = wanted.Protocol == SipralTransport.Tls ? SipralTransport.Tls : SipralTransport.Tcp;
             uint transport;
             lock (_streamLock)
             {
@@ -124,18 +137,18 @@ public sealed partial class SipralStack
                     continue;
                 }
                 transport = _nextStream++;
-                if (_streamFallback)
+                if (opens)
                 {
                     _streamsOpening.Add(destination);
                 }
             }
-            if (!_streamFallback)
+            if (!opens)
             {
                 SayNoStream(transport, SipralTransportError.ConnectionRefused,
                     $"to {destination} not tried: streamFallback is off");
                 continue;
             }
-            new Thread(() => OpenSipStream(transport, destination))
+            new Thread(() => OpenSipStream(transport, destination, over))
             {
                 IsBackground = true,
                 Name = "sipral-stream",
@@ -143,18 +156,34 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Connects over TCP to <paramref name="destination"/> — or to
-    /// <c>streamServer</c> when one was given — binds the connection at
-    /// <paramref name="transport"/> as the stream to
+    /// <summary>What a TLS connection to <paramref name="destination"/>
+    /// trusts: the pin of an account on a connection of its own to that
+    /// server when it has one, the stack's <c>tlsTrust</c> otherwise.</summary>
+    private SipralTlsTrust StreamTrust(string destination)
+    {
+        Account? pinned;
+        lock (_accounts)
+        {
+            pinned = _accounts.FirstOrDefault(account => account.StreamProtocol == SipralTransport.Tls
+                && account.RegistrarAddress == destination && account.TlsPin is not null);
+        }
+        return pinned?.TlsPin is { } pin ? SipralTlsTrust.Pinned(pin) : _tlsTrust;
+    }
+
+    /// <summary>Connects over TCP — or TLS, for an account whose connection
+    /// speaks it — to <paramref name="destination"/>, or to
+    /// <c>streamServer</c> when one was given for TCP, binds the connection
+    /// at <paramref name="transport"/> as the stream to
     /// <paramref name="destination"/> and reads it until it closes; a
     /// connection that cannot be made is told to the stack on that same
     /// number, which ends what was waiting for it.</summary>
-    private void OpenSipStream(uint transport, string destination)
+    private void OpenSipStream(uint transport, string destination, SipralTransport over = SipralTransport.Tcp)
     {
         SipStream stream;
+        var server = over == SipralTransport.Tcp ? _streamServer ?? destination : destination;
         try
         {
-            var (host, port) = ParseAddress(_streamServer ?? destination);
+            var (host, port) = ParseAddress(server);
             var address = IPAddress.Parse(host);
             var client = new TcpClient(address.AddressFamily) { NoDelay = true };
             try
@@ -169,29 +198,48 @@ public sealed partial class SipralStack
                 client.Dispose();
                 throw;
             }
+            Stream carried = client.GetStream();
+            if (over == SipralTransport.Tls)
+            {
+                var tls = new SslStream(carried, leaveInnerStreamOpen: false);
+                var verdict = new SipralTlsTrust.Verdict();
+                var options = new SslClientAuthenticationOptions { TargetHost = _givenTlsServerName ?? host };
+                StreamTrust(destination).Apply(options, verdict);
+                try
+                {
+                    tls.AuthenticateAsClient(options);
+                }
+                catch (Exception handshake) when (handshake is AuthenticationException or IOException)
+                {
+                    tls.Dispose();
+                    client.Dispose();
+                    throw Refused(verdict, handshake);
+                }
+                carried = tls;
+            }
             stream = new SipStream
             {
                 Transport = transport,
                 Destination = destination,
                 Client = client,
-                Stream = client.GetStream(),
+                Stream = carried,
             };
         }
         catch (Exception ex) when (ex is SocketException or AggregateException or FormatException
-                                       or ArgumentException or IOException)
+                                       or ArgumentException or IOException or SignallingRefusedException)
         {
             lock (_streamLock)
             {
                 _streamsOpening.Remove(destination);
             }
             var socket = ex as SocketException ?? ex.InnerException as SocketException;
-            var refused = socket is not null ? Refused(socket) : null;
+            var refused = ex as SignallingRefusedException ?? (socket is not null ? Refused(socket) : null);
             var error = refused?.Error ?? SipralTransportError.Other;
-            var server = _streamServer ?? destination;
             var target = server == destination ? destination : $"{server} (for {destination})";
             var said = refused?.Message ?? ex.Message;
             SayNoStream(transport, error,
-                $"to {target} {Verdict(error)}{(said.Length == 0 ? "" : ": " + said)}");
+                $"to {target} {Verdict(error)}{(said.Length == 0 ? "" : ": " + said)}", over,
+                refused?.Tls ?? SipralTlsFailure.None);
             return;
         }
         lock (_streamLock)
@@ -211,7 +259,7 @@ public sealed partial class SipralStack
         {
             SipralErrors.Call(
                 () => NativeMethods.sipral_stack_transport_bind(
-                    Handle, transport, (uint)SipralTransport.Tcp, local, (nuint)local.Length,
+                    Handle, transport, (uint)over, local, (nuint)local.Length,
                     remote, (nuint)remote.Length, NowMs, out _),
                 "sipral_stack_transport_bind");
         }
@@ -331,18 +379,20 @@ public sealed partial class SipralStack
 
     /// <summary><c>sipral_stack_transport_failed_with</c> for a connection that
     /// was not made; never throwing on the way out. <paramref name="what"/>
-    /// finishes a sentence that begins "TCP" — where the connection was going
-    /// and what became of it — carried to the event's detail.</summary>
-    private void SayNoStream(uint transport, SipralTransportError error, string what)
+    /// finishes a sentence that begins with the protocol, "TCP" or "TLS" —
+    /// where the connection was going and what became of it — carried to the
+    /// event's detail.</summary>
+    private void SayNoStream(uint transport, SipralTransportError error, string what,
+        SipralTransport over = SipralTransport.Tcp, SipralTlsFailure tls = SipralTlsFailure.None)
     {
-        var detail = Encoding.UTF8.GetBytes(Sentence("TCP " + what));
+        var detail = Encoding.UTF8.GetBytes(Sentence((over == SipralTransport.Tls ? "TLS " : "TCP ") + what));
         var pinned = GCHandle.Alloc(detail, GCHandleType.Pinned);
         try
         {
             var failure = SipralTransportFailure.Sized();
             failure.Transport = transport;
             failure.Error = (uint)error;
-            failure.Tls = (uint)SipralTlsFailure.None;
+            failure.Tls = (uint)tls;
             failure.Detail = pinned.AddrOfPinnedObject();
             failure.DetailLen = (nuint)detail.Length;
             SipralErrors.Call(() => NativeMethods.sipral_stack_transport_failed_with(Handle, in failure, NowMs),

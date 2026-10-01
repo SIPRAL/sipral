@@ -155,6 +155,20 @@ device mode `CallMedia.Pumped` is true, `Frames` stays empty and `SendAudio`
 throws; the packets the engine encodes are handed back to this package,
 which sends them from the call's own media socket.
 
+Each call has a gain, a mute and a meter of its own on top of the
+direction's: `SetGain(call, direction, ratio)`, `Gain(call, direction)`,
+`SetMuted(call, direction, muted)`, `Muted(call, direction)` and
+`Level(call, direction)`. The input direction is what the microphone sends
+that call alone and the output how loud it is in the loudspeaker beside the
+others — mute the call being spoken about in a consultation, turn one
+conference member down. They hold from the moment the call's media starts to
+its end, through a hold or a local conference and back, and throw with
+`SipralStatus.WrongState` outside that. `systemEchoCancellation: false` on
+the stack opens the devices past the platform's echo cancellation — on
+Windows a communications stream opened raw — for a headset, which has no
+echo to cancel, or an application that cancels it on each call itself;
+`Info().SystemEchoCancellation` says what the platform did.
+
 ### Who is calling, why a call ended, where it went
 
 Every call event's `args.CallInfo` carries `Identity`
@@ -487,6 +501,33 @@ stack connects again, one second later and up to thirty seconds apart,
 registering every account again once it is back. `stack.Connected` says
 whether it is up; `Account.Register()` asked meanwhile is kept for then.
 `docs/22-tls.md` has the whole mapping.
+
+An account can have a connection of its own on a stack that signals over
+UDP, so that one stack and one audio engine hold an account on UDP with one
+PBX and another on TCP or TLS with a second:
+
+```csharp
+using var stack = new SipralStack();
+var office = stack.AddAccount("sip:alice@office.example", "192.0.2.10:5060", registrar: "sip:office.example");
+var carrier = stack.AddAccount("sip:+15550100@carrier.example", "198.51.100.20:5061",
+    registrar: "sip:carrier.example", tlsPin: "sha256 Fingerprint=AB:CD:...",
+    streamProtocol: SipralTransport.Tls);
+```
+
+The stack asks for the connection with `SipralEventKind.TransportWanted`,
+nothing outgrown, and this package opens it to the account's server
+whatever `streamFallback` says: a TLS one held to the account's `tlsPin`
+when it has one, to `tlsTrust` under `tlsServerName` otherwise. The
+account's REGISTER and every request of its calls go over it, its `Contact`
+names the protocol, and a connection that closes is opened again and the
+account registered again. Until it is open a call the account places throws
+with `SipralStatus.TransportDown`.
+
+`stack.Settings()` reads back what the stack runs with, every default
+filled in (`SipralSettings`): the timers, the codecs' count, the SRTP suites
+its calls offer in order, whether a pseudonym salt was given, whether the
+diagnostic trace is whole now, and whether the platform's echo cancellation
+is asked for.
 
 `inviteLimit` is how fast one address may ring the stack: every stack
 starts at `SipralInviteLimit.Default`, ten INVITEs at once and one every

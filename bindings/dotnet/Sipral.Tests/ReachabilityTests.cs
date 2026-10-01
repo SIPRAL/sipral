@@ -37,7 +37,7 @@ public sealed class ReachabilityTests
     /// <summary>A registrar on a loopback UDP port: every REGISTER is
     /// answered 200, and every datagram is kept as text, keep-alives
     /// included.</summary>
-    private sealed class Registrar : IDisposable
+    internal sealed class Registrar : IDisposable
     {
         private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
         private readonly ConcurrentQueue<string> _received = new();

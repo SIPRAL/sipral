@@ -20,7 +20,8 @@ public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter
 /// <c>sipral_account_config_t</c>, and the address this layer chose for its
 /// <c>Contact</c>.</summary>
 internal sealed record AccountLocation(
-    string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised);
+    string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
+    SipralTransport StreamProtocol = 0);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle, and the entry points that take
@@ -50,6 +51,27 @@ public sealed class Account
     /// <see langword="null"/>.</summary>
     public string? ServerUri { get; }
 
+    /// <summary>The protocol of the connection of its own the account's
+    /// requests go over, <see cref="SipralTransport.Tcp"/> or
+    /// <see cref="SipralTransport.Tls"/>, or zero for the stack's own
+    /// transport (<see cref="SipralStack.AddAccount"/>'s
+    /// <c>streamProtocol</c>).</summary>
+    public SipralTransport StreamProtocol { get; }
+
+    /// <summary>The certificate pin it was added with, which a TLS connection
+    /// of its own is held to.</summary>
+    internal string? TlsPin { get; }
+
+    /// <summary>What goes after the address in the <c>Contact</c> this layer
+    /// derives for it: the parameter naming its own connection's protocol
+    /// (RFC 3261 §19.1.1), or the stack's.</summary>
+    private static string ContactParametersOf(SipralStack stack, SipralTransport streamProtocol) => streamProtocol switch
+    {
+        SipralTransport.Tcp => ";transport=tcp",
+        SipralTransport.Tls => ";transport=tls",
+        _ => stack.ContactParameters,
+    };
+
     /// <summary>The <c>host:port</c> its <c>Contact</c> names, when this layer
     /// chose it.</summary>
     public string? Advertised { get; private set; }
@@ -62,8 +84,10 @@ public sealed class Account
 
     private Account(
         SipralStack stack, ulong handle, string aor, string registrarAddress, bool contactGiven, string? serverUri,
-        string? advertised)
+        string? advertised, SipralTransport streamProtocol, string? tlsPin)
     {
+        StreamProtocol = streamProtocol;
+        TlsPin = tlsPin;
         _stack = stack;
         _handle = new AccountSafeHandle();
         _handle.Attach(stack.Handle, handle);
@@ -87,7 +111,7 @@ public sealed class Account
         {
             return;
         }
-        Rebind(remote, DefaultContact(Aor, advertised, _stack.ContactParameters));
+        Rebind(remote, DefaultContact(Aor, advertised, ContactParametersOf(_stack, StreamProtocol)));
         Advertised = advertised;
     }
 
@@ -140,7 +164,8 @@ public sealed class Account
         var registrarAddressBytes = registrarAddress is null ? null : Encoding.UTF8.GetBytes(registrarAddress);
         var registrarBytes = registrar is null ? null : Encoding.UTF8.GetBytes(registrar);
         var contactBytes = Encoding.UTF8.GetBytes(
-            contact ?? DefaultContact(aor, location.Advertised ?? stack.BindAddress, stack.ContactParameters));
+            contact ?? DefaultContact(aor, location.Advertised ?? stack.BindAddress,
+                ContactParametersOf(stack, location.StreamProtocol)));
         var serverUriBytes = location.ServerUri is null ? null : Encoding.UTF8.GetBytes(location.ServerUri);
         var pinBytes = location.TlsPin is null ? null : Encoding.UTF8.GetBytes(location.TlsPin);
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
@@ -178,6 +203,7 @@ public sealed class Account
             config.ServerUriLen = (nuint)(serverUriBytes?.Length ?? 0);
             config.ServerNaptr = location.ServerNaptr ? (uint)SipralToggle.On : 0;
             config.KeepaliveMs = location.KeepaliveMs;
+            config.StreamProtocol = (uint)location.StreamProtocol;
             config.TlsPinSha256 = pinPin.Pointer;
             config.TlsPinSha256Len = (nuint)(pinBytes?.Length ?? 0);
             config.Contact = contactPin.Pointer;
@@ -241,7 +267,7 @@ public sealed class Account
 
         return new Account(
             stack, accountHandle, aor, registrarAddress ?? string.Empty, contact is not null, location.ServerUri,
-            location.Advertised);
+            location.Advertised, location.StreamProtocol, location.TlsPin);
     }
 
     /// <summary><c>sipral_account_rebind</c>: points this account at
@@ -254,7 +280,8 @@ public sealed class Account
     public void Rebind(string? remote = null, string? contact = null)
     {
         var remoteBytes = Interop.NativeText.ToSBytes(remote ?? RegistrarAddress);
-        var contactBytes = Interop.NativeText.ToSBytes(contact ?? DefaultContact(Aor, _stack.BindAddress, _stack.ContactParameters));
+        var contactBytes = Interop.NativeText.ToSBytes(
+            contact ?? DefaultContact(Aor, _stack.BindAddress, ContactParametersOf(_stack, StreamProtocol)));
         SipralErrors.Call(
             () => NativeMethods.sipral_account_rebind(
                 _stack.Handle, Handle, global::Sipral.Sipral.TransportMain, remoteBytes, (nuint)remoteBytes.Length,

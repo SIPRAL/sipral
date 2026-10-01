@@ -295,6 +295,8 @@ public sealed partial class SipralStack
             throw new ArgumentException("signalling is Udp, Tcp or Tls", nameof(signalling));
         }
         _bindHost = bindHost;
+        _givenTlsServerName = tlsServerName;
+        _tlsTrust = tlsTrust ?? SipralTlsTrust.Platform;
         if (!Streamed)
         {
             return (null, null);

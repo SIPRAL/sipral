@@ -34,9 +34,9 @@ namespace Sipral.Tests;
 public sealed class SignallingTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
-    private const string ServerName = "registrar.sipral.test";
+    internal const string ServerName = "registrar.sipral.test";
 
-    private static string? Header(string name, string message) =>
+    internal static string? Header(string name, string message) =>
         message.Split("\r\n")
             .FirstOrDefault(line => line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
             ?.Split(':', 2)[1].Trim();
@@ -54,12 +54,12 @@ public sealed class SignallingTests
         return new X509Certificate2(made.Export(X509ContentType.Pfx));
     }
 
-    private static X509Certificate2 Good() => Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+    internal static X509Certificate2 Good() => Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
 
     /// <summary>A registrar on a TCP port of this machine's loopback, over
     /// TLS when given a certificate, answering every REGISTER 200, or one
     /// that answers a TLS client in plain text.</summary>
-    private sealed class Registrar : IDisposable
+    internal sealed class Registrar : IDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
         private readonly X509Certificate2? _certificate;
@@ -78,6 +78,14 @@ public sealed class SignallingTests
         }
 
         public string Address => $"127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
+
+        public List<(int Connection, string Message)> Requests()
+        {
+            lock (_lock)
+            {
+                return _requests.ToList();
+            }
+        }
 
         public List<(int Connection, string Message)> Registers()
         {
