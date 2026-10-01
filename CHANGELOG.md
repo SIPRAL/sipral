@@ -6048,6 +6048,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **A key's declared lifetime is held to.** An `a=crypto` line's `|2^n` lifetime was parsed and then dropped, so a peer's key opened packets past the count its owner declared (RFC 4568 §6.1). `sipral_rtp::srtp::Policy` has a `lifetime`, which the facade fills from the line, and a `Protector` or `Unprotector` under it protects or opens fewer than that many SRTP and SRTCP packets each, refusing the next with `SrtpError::KeyExhausted`.
+
 - **SDES keys follow RFC 4568 §7.1.4 and RFC 3711 §8.1 on a live call, and are compared and decoded as secrets.** `MediaEngine::readdress` offers a new master key with the new address instead of repeating the old one. A re-offer, from either end, that keeps a key but moves it to a suite running AES in another mode (counter, f8, GCM) is refused, with 488 to a far end's (`MediaError::UnusableKeying`), rather than adopted as new terms. `KeySalt` equality reads every octet, and a decoded `inline:` key is held in a buffer sized once and wiped when it is dropped, a key of the wrong width included.
 
 - **A forked SDES call is re-keyed once a branch answers.** The master key in a forked INVITE reached every branch, and went on protecting what this end sent for the life of the call (RFC 4568 §7.3, RFC 3711 §9.1). A call seen to fork now sends, once confirmed, a re-INVITE with one crypto line under the agreed tag and suite and a freshly drawn key; the answer keys the sending context anew, and the INVITE's key opens nothing sent after it.

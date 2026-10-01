@@ -220,11 +220,17 @@ pub struct Policy {
     pub authenticate_rtp: bool,
     /// The master key identifier, when the peer asked for one.
     pub mki: Option<Mki>,
+    /// The lifetime the key's owner declared for it (RFC 4568 §6.1): "the
+    /// number of SRTP packets and the number of SRTCP packets each have to
+    /// be less than the lifetime". `None` leaves §9.2's own limits, which
+    /// hold either way.
+    pub lifetime: Option<u64>,
 }
 
 impl Policy {
     /// The defaults of RFC 4568: encrypt and authenticate everything, derive
-    /// the session keys once, no master key identifier.
+    /// the session keys once, no master key identifier, no lifetime but
+    /// RFC 3711's.
     #[must_use]
     pub const fn new(suite: Suite) -> Self {
         Self {
@@ -234,6 +240,16 @@ impl Policy {
             encrypt_rtcp: true,
             authenticate_rtp: true,
             mki: None,
+            lifetime: None,
+        }
+    }
+
+    /// How many packets of one kind this key may protect, or open, at most:
+    /// §9.2's `limit`, or fewer than the declared lifetime.
+    const fn allowance(&self, limit: u64) -> u64 {
+        match self.lifetime {
+            Some(lifetime) if lifetime.saturating_sub(1) < limit => lifetime.saturating_sub(1),
+            _ => limit,
         }
     }
 
@@ -844,7 +860,7 @@ impl Protector {
     /// index.
     pub fn protect_rtp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
         self.keys.current()?;
-        if self.rtp_packets >= RTP_LIMIT {
+        if self.rtp_packets >= self.policy.allowance(RTP_LIMIT) {
             return Err(SrtpError::KeyExhausted);
         }
         let header = rtp_header_len(packet.get(..len).ok_or(SrtpError::TooShort { got: len })?)?;
@@ -932,7 +948,7 @@ impl Protector {
     /// As `protect_rtp`, with §9.2's much lower SRTCP limit.
     pub fn protect_rtcp(&mut self, packet: &mut [u8], len: usize) -> Result<usize, SrtpError> {
         self.keys.current()?;
-        if self.rtcp_packets >= RTCP_LIMIT {
+        if self.rtcp_packets >= self.policy.allowance(RTCP_LIMIT) {
             return Err(SrtpError::KeyExhausted);
         }
         // a length past the end of the buffer is refused before anything is
@@ -1198,6 +1214,10 @@ pub struct Unprotector {
     rtp_forgotten: Forgotten,
     rtcp_forgotten: Forgotten,
     initial: u32,
+    /// The SRTP and SRTCP packets opened under this master key, held to the
+    /// lifetime its owner declared ([`Policy::lifetime`]).
+    rtp_opened: u64,
+    rtcp_opened: u64,
 }
 
 impl Unprotector {
@@ -1212,6 +1232,8 @@ impl Unprotector {
             rtp_forgotten: Forgotten::new(),
             rtcp_forgotten: Forgotten::new(),
             initial: 0,
+            rtp_opened: 0,
+            rtcp_opened: 0,
         }
     }
 
@@ -1312,10 +1334,15 @@ impl Unprotector {
     ///
     /// # Errors
     ///
-    /// A short or malformed packet, a replay, a tag that does not match, or
-    /// a master key of the wrong width for the suite.
+    /// A short or malformed packet, a replay, a tag that does not match, a
+    /// master key of the wrong width for the suite, and
+    /// [`SrtpError::KeyExhausted`] once the key has opened as many packets
+    /// as the lifetime its owner declared allows.
     pub fn unprotect_rtp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
         self.keys.current()?;
+        if self.rtp_opened >= self.policy.allowance(RTP_LIMIT) {
+            return Err(SrtpError::KeyExhausted);
+        }
         let is_aead = self.policy.suite.is_aead();
         let tag = if is_aead {
             aead::TAG
@@ -1398,6 +1425,7 @@ impl Unprotector {
         stream.index.accept(estimate);
         stream.replay.record(estimate.index);
         self.keep_rtp(ssrc, stream);
+        self.rtp_opened += 1;
         Ok(body)
     }
 
@@ -1409,9 +1437,14 @@ impl Unprotector {
     /// As `unprotect_rtp`.
     pub fn unprotect_rtcp(&mut self, packet: &mut [u8]) -> Result<usize, SrtpError> {
         self.keys.current()?;
+        if self.rtcp_opened >= self.policy.allowance(RTCP_LIMIT) {
+            return Err(SrtpError::KeyExhausted);
+        }
         let tag = self.policy.suite.rtcp_tag();
         if self.policy.suite.is_aead() {
-            return self.unprotect_rtcp_aead(packet, tag);
+            let opened = self.unprotect_rtcp_aead(packet, tag)?;
+            self.rtcp_opened += 1;
+            return Ok(opened);
         }
         let trailer = tag + self.policy.mki_len();
         let with_index = packet
@@ -1462,6 +1495,7 @@ impl Unprotector {
         self.keys.commit_rtcp(candidate);
         replay.record(u64::from(index));
         self.keep_rtcp(ssrc, replay);
+        self.rtcp_opened += 1;
         Ok(body)
     }
 
@@ -2959,6 +2993,57 @@ mod tests {
                     Err(SrtpError::KeyLength)
                 );
             }
+        }
+    }
+
+    // RFC 4568 §6.1: a key declared with `|2^4` protects, and opens, fewer
+    // than sixteen SRTP packets and fewer than sixteen SRTCP packets; the
+    // sixteenth of each is refused in both directions, and nothing about it
+    // moves the context
+    #[test]
+    fn a_declared_lifetime_is_held_to_in_both_directions() {
+        for suite in [Suite::AesCm80, Suite::AeadAes256Gcm] {
+            let bounded = Policy {
+                lifetime: Some(16),
+                ..Policy::new(suite)
+            };
+            let mut protector = Protector::new(bounded, master_for(suite));
+            let mut unbounded = Protector::new(Policy::new(suite), master_for(suite));
+            let mut unprotector = Unprotector::new(bounded, master_for(suite));
+            for sequence in 1..16 {
+                let _ = sent(&mut protector, sequence);
+                let mut arriving = sent(&mut unbounded, sequence);
+                assert!(unprotector.unprotect_rtp(&mut arriving).is_ok(), "{suite:?}");
+                let _ = reported(&mut protector, SSRC);
+                let (mut report, _) = reported(&mut unbounded, SSRC);
+                assert!(unprotector.unprotect_rtcp(&mut report).is_ok(), "{suite:?}");
+            }
+            let plain = packet(16, b"payload");
+            let mut buffer = room(&plain, protector.rtp_overhead());
+            assert_eq!(
+                protector.protect_rtp(&mut buffer, plain.len()),
+                Err(SrtpError::KeyExhausted),
+                "{suite:?}"
+            );
+            let report = compound();
+            let mut buffer = room(&report, protector.rtcp_overhead());
+            assert_eq!(
+                protector.protect_rtcp(&mut buffer, report.len()),
+                Err(SrtpError::KeyExhausted),
+                "{suite:?}"
+            );
+            let mut arriving = sent(&mut unbounded, 16);
+            assert_eq!(
+                unprotector.unprotect_rtp(&mut arriving),
+                Err(SrtpError::KeyExhausted),
+                "{suite:?}"
+            );
+            let (mut report, _) = reported(&mut unbounded, SSRC);
+            assert_eq!(
+                unprotector.unprotect_rtcp(&mut report),
+                Err(SrtpError::KeyExhausted),
+                "{suite:?}"
+            );
         }
     }
 

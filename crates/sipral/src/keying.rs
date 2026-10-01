@@ -580,8 +580,11 @@ pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), Med
             Some(Mki::new(mki.value, usize::from(mki.length)).ok_or(MediaError::UnusableKeying)?)
         }
     };
+    // the lifetime the key's owner wrote (§6.1) is held to as well, in the
+    // direction that key protects
     let policy = Policy {
         mki: identifier,
+        lifetime: inline.lifetime,
         ..Policy::new(transform(negotiated.suite))
     };
     Ok((policy, Master::new(inline.keys.key(), inline.keys.salt())))
@@ -1035,5 +1038,19 @@ mod tests {
             Some((CryptoSuite::AesCm80, keys(1)))
         );
         assert_eq!(key_in_force(None), None);
+    }
+
+    /// D5: the lifetime a line declares reaches the context it opens, and a
+    /// line with none leaves RFC 3711's own limits.
+    #[test]
+    fn a_declared_lifetime_reaches_the_context() {
+        let mut line = sipral_core::sdp::CryptoPolicy::new(1, CryptoSuite::AesCm80, keys(3));
+        let (policy, _) = super::context(&line).expect("a context");
+        assert_eq!(policy.lifetime, None);
+        if let Some(inline) = line.keys.first_mut() {
+            inline.lifetime = Some(1 << 4);
+        }
+        let (policy, _) = super::context(&line).expect("a context");
+        assert_eq!(policy.lifetime, Some(16));
     }
 }
