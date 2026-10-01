@@ -6048,6 +6048,8 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 
 ### Security
 
+- **The media engine's key stream is forward secure.** Every SDES key, ICE password and DTLS seed came from `SHA-256(media_seed || counter)` with the seed held unchanged, so one read of the engine's memory gave away the keys of every call it had placed (RFC 4086 §6.2). The engine now draws from `KeySource::forward_secure`, which replaces its seed with a one-way step at every block; the endpoint's stream, which replay recordings reproduce, is unchanged.
+
 - **A key's declared lifetime is held to.** An `a=crypto` line's `|2^n` lifetime was parsed and then dropped, so a peer's key opened packets past the count its owner declared (RFC 4568 §6.1). `sipral_rtp::srtp::Policy` has a `lifetime`, which the facade fills from the line, and a `Protector` or `Unprotector` under it protects or opens fewer than that many SRTP and SRTCP packets each, refusing the next with `SrtpError::KeyExhausted`.
 
 - **SDES keys follow RFC 4568 §7.1.4 and RFC 3711 §8.1 on a live call, and are compared and decoded as secrets.** `MediaEngine::readdress` offers a new master key with the new address instead of repeating the old one. A re-offer, from either end, that keeps a key but moves it to a suite running AES in another mode (counter, f8, GCM) is refused, with 488 to a far end's (`MediaError::UnusableKeying`), rather than adopted as new terms. `KeySalt` equality reads every octet, and a decoded `inline:` key is held in a buffer sized once and wiped when it is dropped, a key of the wrong width included.

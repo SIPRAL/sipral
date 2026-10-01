@@ -278,16 +278,23 @@ deployment's dialling plan, given to `Tn::canonical_with`.
 **Where an SRTP key comes from.** `MediaEngine::new` takes a 32-byte media
 seed of its own, entirely apart from whatever entropy the rest of the
 endpoint runs on. `draw_key` (`crates/sipral/src/engine.rs`) turns one block of
-`SHA-256(media_seed || counter)` into a `KeySalt`, copied byte by byte into
+a forward-secure stream into a `KeySalt`, copied byte by byte into
 buffers that zeroise themselves rather than through a bulk copy that could
-leave a duplicate in a stack slot the compiler does not clear. The counter
-never repeats, which is also what RFC 4568 §7.1.2 needs when it requires an
-answer's key to differ from the offer's.
+leave a duplicate in a stack slot the compiler does not clear. Each block is
+`SHA-256(0x00 || seed || counter)`, and the seed is then replaced by
+`SHA-256(0x01 || seed || counter)` (`KeySource::forward_secure`), so what the
+engine holds at any moment draws the keys still to come and none already
+handed out: a later read of its memory does not give away the calls before.
+The counter never repeats, which is also what RFC 4568 §7.1.2 needs when it
+requires an answer's key to differ from the offer's.
 
 **Why a second seed rather than a slice of the first.** The endpoint's own
-seed is written in clear into every replay recording
-(`crates/sipral-core/src/replay/recording.rs`; `docs/18-replay.md` says so in
-as many words: a recording is meant to reproduce a session, not decrypt one).
+stream is reproduced by every replay recording from the seed the recording
+carries (`crates/sipral-core/src/replay/recording.rs`; `docs/18-replay.md`
+says so in as many words: a recording is meant to reproduce a session, not
+decrypt one). That seed is one drawn for the recording, never the one the
+stack was built with, and the endpoint moves off it when the recording
+stops.
 One generator for both would have put every SRTP key this stack will ever
 offer into every recording it makes — including one taken to diagnose
 something unrelated, by somebody told the file holds only what a capture

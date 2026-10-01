@@ -512,8 +512,9 @@ pub struct MediaEngine {
     /// Where every SRTP master key comes from, and every DTLS secret with
     /// them, and nothing else does.
     ///
-    /// Its own stream, separate from the endpoint's, because the endpoint's
-    /// seed is written in clear into every replay recording. A recording must
+    /// Its own stream, separate from the endpoint's, because a replay
+    /// recording carries in clear the seed the endpoint's stream runs on
+    /// while it records. A recording must
     /// be able to reproduce a session byte for byte without carrying the
     /// means to decrypt any of the media that went with it — nor, since the
     /// certificate key is drawn from the same stream, the means to be
@@ -744,7 +745,9 @@ impl MediaEngine {
             farewells: VecDeque::new(),
             joins: BTreeMap::new(),
             counters: Counters::default(),
-            keys: KeySource::new(media_seed),
+            // forward secure: a later read of this engine's memory gives
+            // away no SDES key, ICE password or DTLS seed already drawn
+            keys: KeySource::forward_secure(media_seed),
             #[cfg(feature = "dtls")]
             identity: None,
             #[cfg(feature = "ice")]
@@ -7268,6 +7271,26 @@ mod key_source_tests {
             draw(&mut same_again).key(),
             "and a seed is a stream, so the same one still reproduces"
         );
+    }
+
+    /// G2: the engine draws its keys from a forward-secure source, so the
+    /// key it hands out first is the forward-secure stream's and not the
+    /// plain one's: what the engine holds after a call cannot draw it again.
+    #[test]
+    fn the_engine_draws_from_a_forward_secure_source() {
+        let now = std::time::Instant::now();
+        let mut engine = super::MediaEngine::new(
+            crate::CodecCatalog::new(),
+            crate::MediaConfig::default(),
+            crate::WallClock::from_unix(now, 1_700_000_000, 0),
+            [5; 32],
+        );
+        let drawn = draw(&mut engine.keys);
+        assert_eq!(
+            drawn.key(),
+            draw(&mut KeySource::forward_secure([5; 32])).key()
+        );
+        assert_ne!(drawn.key(), draw(&mut KeySource::new([5; 32])).key());
     }
 
     #[test]
