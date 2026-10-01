@@ -37,7 +37,10 @@ or else the URI the server was named by, places the call once registered,
 and takes the binding back at the end; ``SIPRAL_KEEPALIVE_MS`` is the account's own keep-alive
 interval. ``SIPRAL_SIGNALLING=tls`` signals over TLS to ``SIPRAL_SERVER``,
 trusting the one certificate whose SHA-256 fingerprint is
-``SIPRAL_TLS_PIN``.
+``SIPRAL_TLS_PIN``. ``SIPRAL_CODECS`` is the codecs to offer, in order
+(``opus,PCMU,PCMA``); ``SIPRAL_DTMF`` digits sent as named events two
+seconds after the call is confirmed, and every digit that comes back is
+printed.
 
 Lines, one each, flushed as they happen, for the step to read:
 
@@ -48,6 +51,9 @@ Lines, one each, flushed as they happen, for the step to read:
     transport failed <transport> <error>
     tls refused <failure>
     confirmed
+    sent dtmf <digits>
+    dtmf <digit>
+    codec <codec>
     protection <key exchange> <encrypted|plain> <suite>
     media sent <packets> received <packets>
     held
@@ -68,6 +74,7 @@ from sipral._sipral_cffi import lib
 from sipral.enums import (
     AudioMode,
     CallEndReason,
+    Codec,
     EventKind,
     LocateFailure,
     RegistrationState,
@@ -130,15 +137,24 @@ def say_media(call: Call) -> None:
     print(f"media sent {stats['packets_sent']} received {stats['packets_received']}", flush=True)
 
 
+async def listen(call: Call) -> None:
+    """Every digit the far end sends, as it arrives."""
+    while True:
+        digit = await call.dtmf.get()
+        print(f"dtmf {digit}", flush=True)
+
+
 def say_protection(call: Call) -> None:
-    """How the call's audio is protected, now: the key exchange, whether it
-    is encrypted, and the suite that runs."""
+    """The codec the call settled on, and how its audio is protected, now:
+    the key exchange, whether it is encrypted, and the suite that runs."""
     if call.media is None:
         return
     try:
+        codec = Codec(call.media.statistics()["codec"]).name
         report = call.media.encryption()
     except SipralError:
         return
+    print(f"codec {codec}", flush=True)
     for stream in report:
         suite = SrtpSuite(stream.suite).name if stream.suite else "-"
         state = "encrypted" if stream.encrypted else "plain"
@@ -172,6 +188,7 @@ async def main() -> None:
         loop=asyncio.get_running_loop(),
         bind_host=route_to(server),
         audio=AudioMode.APPLICATION,
+        codecs=os.environ.get("SIPRAL_CODECS") or None,
         stream_fallback=os.environ.get("SIPRAL_STREAM_FALLBACK", "1") != "0",
         stream_server=os.environ.get("SIPRAL_STREAM_SERVER") or None,
         datagram_without_stream_bytes=int(os.environ.get("SIPRAL_UDP_ANYWAY_BYTES", "0")),
@@ -183,8 +200,16 @@ async def main() -> None:
     policy = os.environ.get("SIPRAL_SRTP", "required")
     plain = policy == "off"
     register = os.environ.get("SIPRAL_REGISTER") == "1"
-    talking = None
+    digits = os.environ.get("SIPRAL_DTMF") or ""
+    tasks: list[asyncio.Task] = []
     account = None
+
+    def dial() -> Call:
+        placed = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+        tasks.append(asyncio.create_task(talk(placed)))
+        tasks.append(asyncio.create_task(listen(placed)))
+        return placed
+
     try:
         account = stack.add_account(
             os.environ["SIPRAL_AOR"],
@@ -202,8 +227,7 @@ async def main() -> None:
             account.register()
         call = None
         if not register and not server_uri:
-            call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
-            talking = asyncio.create_task(talk(call))
+            call = dial()
         async with asyncio.timeout(patience + hold_after + dwell):
             while True:
                 event = await stack.events.get()
@@ -211,8 +235,7 @@ async def main() -> None:
                 if event.kind == EventKind.LOCATED:
                     print(f"located {fields['targets']}", flush=True)
                     if call is None and not register:
-                        call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
-                        talking = asyncio.create_task(talk(call))
+                        call = dial()
                 elif event.kind == EventKind.LOCATE_FAILED:
                     print(f"locate failed {LocateFailure(fields['failure']).name}", flush=True)
                     return
@@ -220,8 +243,7 @@ async def main() -> None:
                     state = RegistrationState(fields["state"])
                     print(f"registration {state.name}", flush=True)
                     if call is None and state == RegistrationState.REGISTERED:
-                        call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
-                        talking = asyncio.create_task(talk(call))
+                        call = dial()
                     elif call is None and state == RegistrationState.FAILED:
                         return
                 elif event.kind == EventKind.TRANSPORT_WANTED:
@@ -238,6 +260,10 @@ async def main() -> None:
                     continue
                 elif event.kind == EventKind.CALL_CONFIRMED and event.call == call.handle:
                     print("confirmed", flush=True)
+                    if digits:
+                        await asyncio.sleep(2)
+                        call.send_dtmf(digits)
+                        print(f"sent dtmf {digits}", flush=True)
                     await asyncio.sleep(hold_after)
                     say_protection(call)
                     say_media(call)
@@ -263,8 +289,8 @@ async def main() -> None:
                     )
                     return
     finally:
-        if talking is not None:
-            talking.cancel()
+        for task in tasks:
+            task.cancel()
         if account is not None and register:
             await unregister(stack, account)
         await asyncio.to_thread(stack.close)
