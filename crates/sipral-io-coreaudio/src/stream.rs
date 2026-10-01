@@ -1697,6 +1697,19 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::device::{DeviceChoice, DeviceId};
 
+    /// Held by every test that opens or closes a real voice unit. The unit a
+    /// voice stream leaves behind is the process's (`SPARE`), and the tests
+    /// run on threads of one process: a refused open closing its unit there
+    /// while another test reads what is put aside gave that test a unit it
+    /// never kept, one run in a few.
+    static VOICE_UNITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn voice_units() -> std::sync::MutexGuard<'static, ()> {
+        VOICE_UNITS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn channels() -> (Arc<Channel>, Arc<Channel>) {
         let window = window_samples(StreamFormat::narrowband().sample_rate_hz());
         (
@@ -2921,6 +2934,7 @@ mod tests {
             device: DeviceChoice::Device(DeviceId::new(u32::MAX)),
             ..StreamConfig::default()
         };
+        let _units = voice_units();
         assert!(Stream::open(config).is_err(), "a device that is not there");
     }
 
@@ -3159,6 +3173,7 @@ mod tests {
     #[test]
     fn a_closed_voice_stream_leaves_its_unit_for_the_next_and_a_lost_one_does_not() {
         use super::{SPARE, StreamKind, new_unit};
+        let _units = voice_units();
         let Ok(unit) = new_unit(StreamKind::Voice) else {
             // a system with no voice-processing unit has nothing to keep
             return;
@@ -3205,6 +3220,7 @@ mod tests {
         use crate::device::Direction;
         use crate::hal::{default_device, devices};
 
+        let _units = voice_units();
         let rounds = std::env::var("SIPRAL_AUDIO_ROUNDS")
             .ok()
             .and_then(|rounds| rounds.parse::<usize>().ok())
