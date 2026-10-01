@@ -45,8 +45,9 @@
 //!   and addresses as they were sent — for an operator comparing two runs.
 //!   Even then [`sipral_diag::strip_secrets`] takes every `Authorization`
 //!   and `Proxy-Authorization` value and every SDP key (`a=crypto`, `k=`,
-//!   `a=key-mgmt`) out of each message first, bytes the parser refuses
-//!   included, and prose lines lose their credentials the same way. It is
+//!   `a=key-mgmt`) and every URI's password out of each message first,
+//!   bytes the parser refuses included, and prose lines lose their
+//!   credentials and URI passwords the same way. It is
 //!   off by default and is never turned on by anything but that call.
 
 use std::collections::VecDeque;
@@ -327,11 +328,11 @@ impl Log {
     /// hide the difference. What never appears, in either mode, is a
     /// credential or a key: [`sipral_diag::strip_secrets`] takes every
     /// `Authorization` and `Proxy-Authorization` value, every `a=crypto`
-    /// `inline:` key, every `k=` key and every `a=key-mgmt` payload out of
-    /// each message first — a message the parser refuses included, which is
-    /// then written stripped rather than withheld — and prose lines lose
-    /// their credentials with [`sipral_diag::strip_secrets_text`], without
-    /// pseudonyms either.
+    /// `inline:` key, every `k=` key, every `a=key-mgmt` payload and every
+    /// URI's password out of each message first — a message the parser
+    /// refuses included, which is then written stripped rather than
+    /// withheld — and prose lines lose their credentials and URI passwords
+    /// with [`sipral_diag::strip_secrets_text`], without pseudonyms either.
     pub fn set_diagnostic(&self, on: bool) {
         self.inner().diagnostic = on;
     }

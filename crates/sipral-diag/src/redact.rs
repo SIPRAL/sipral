@@ -519,6 +519,8 @@ fn strip_key_line(line: &str) -> Option<String> {
             let (before, marked) = rest.split_at(at + "inline:".len());
             out.push_str(before);
             out.push_str("REDACTED");
+            // a key written after a space is a key all the same
+            let marked = marked.trim_start();
             let end = marked
                 .find(|c: char| c.is_whitespace() || matches!(c, '|' | ';'))
                 .unwrap_or(marked.len());
@@ -547,7 +549,8 @@ fn strip_key_line(line: &str) -> Option<String> {
 /// the value of every `Authorization` and `Proxy-Authorization` field, folded
 /// continuation lines included, and every key a session description carries
 /// (`a=crypto` `inline:` keys, `k=`, `a=key-mgmt`; see [`redact_message`]'s
-/// body pass). Users, display names and addresses stay as they are.
+/// body pass), and the password of any `sip:` or `sips:` URI that carries
+/// one. Users, display names and addresses stay as they are.
 ///
 /// For a diagnostic trace an operator turned on to compare two runs of the
 /// same installation, where a pseudonym would hide exactly what is being
@@ -578,7 +581,7 @@ pub fn strip_secrets(message: &[u8]) -> Vec<u8> {
         }
         match std::str::from_utf8(line).ok().and_then(strip_key_line) {
             Some(stripped) => out.extend_from_slice(stripped.as_bytes()),
-            None => out.extend_from_slice(line),
+            None => strip_uri_passwords(line, &mut out),
         }
     }
     out
@@ -597,7 +600,11 @@ pub fn strip_secrets_text(text: &str) -> String {
         }
         let (kept, secret) = split_credentials(line);
         folding = secret.is_some();
-        out.push_str(kept);
+        let mut clean = Vec::with_capacity(kept.len());
+        strip_uri_passwords(kept.as_bytes(), &mut clean);
+        // only ASCII between an ASCII colon and an ASCII `@` was replaced, so
+        // what is left is as valid as what came in
+        out.push_str(&String::from_utf8_lossy(&clean));
         if let Some(tail) = secret {
             if kept.to_ascii_lowercase().ends_with("authorization:") {
                 out.push(' ');
@@ -607,6 +614,49 @@ pub fn strip_secrets_text(text: &str) -> String {
         }
     }
     out
+}
+
+/// `text` onto `out`, with the password of every `sip:` or `sips:` URI in it
+/// replaced: RFC 3261 §19.1.1's `user:password@host`, whose password the RFC
+/// calls "NOT RECOMMENDED" because carrying it "in clear text (such as URIs)
+/// has proven to be a security risk". The user is kept.
+///
+/// The user part ends at the `@` before any `>`, `<`, `"` or white space; a
+/// colon in it starts the password. A URI with no `@` there has no user
+/// part, and its colon is the port's.
+fn strip_uri_passwords(text: &[u8], out: &mut Vec<u8>) {
+    let mut at = 0;
+    while let Some(rest) = text.get(at..).filter(|rest| !rest.is_empty()) {
+        let scheme = [b"sips:".as_slice(), b"sip:"]
+            .into_iter()
+            .find(|scheme| {
+                rest.get(..scheme.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+            })
+            .map_or(0, <[u8]>::len);
+        if scheme == 0 {
+            out.extend_from_slice(rest.get(..1).unwrap_or_default());
+            at += 1;
+            continue;
+        }
+        out.extend_from_slice(rest.get(..scheme).unwrap_or_default());
+        at += scheme;
+        let after = rest.get(scheme..).unwrap_or_default();
+        let end = after
+            .iter()
+            .position(|byte| {
+                matches!(byte, b'@' | b'>' | b'<' | b'"') || byte.is_ascii_whitespace()
+            })
+            .unwrap_or(after.len());
+        let userinfo = after.get(..end).unwrap_or_default();
+        if after.get(end) == Some(&b'@')
+            && let Some(colon) = userinfo.iter().position(|byte| *byte == b':')
+        {
+            out.extend_from_slice(userinfo.get(..=colon).unwrap_or_default());
+            out.extend_from_slice(b"REDACTED@");
+            at += end + 1;
+        }
+    }
 }
 
 /// The name of an `Authorization` or `Proxy-Authorization` field starting
@@ -1130,6 +1180,41 @@ SDES inline:QUJD|2^20\nplain line";
             "refused sip:alice@192.0.2.7 with Authorization: REDACTED\nSDES inline:REDACTED\n\
 plain line"
         );
+    }
+
+    /// RFC 3261 §19.1.1's `sip:user:password@host`: the user stays, as
+    /// everything else in a diagnostic trace does, and the password goes.
+    #[test]
+    fn stripping_takes_a_password_out_of_a_uri_and_keeps_the_rest_of_it() {
+        let message = "REGISTER sips:alice:pw1SECRET@pbx.example SIP/2.0\r\n\
+From: \"Alice\" <SIP:alice:pw2SECRET@pbx.example>;tag=1\r\n\
+To: <sip:alice@pbx.example>\r\n\
+Contact: <sip:alice@192.0.2.1:5060;ob>\r\n\
+Route: <sip:pbx.example:5060;lr>\r\n\r\n";
+        let out = String::from_utf8(strip_secrets(message.as_bytes())).unwrap();
+        let prose = strip_secrets_text(message);
+        for out in [&out, &prose] {
+            assert!(!out.contains("SECRET"), "{out}");
+            for kept in [
+                "REGISTER sips:alice:REDACTED@pbx.example SIP/2.0\r\n",
+                "From: \"Alice\" <SIP:alice:REDACTED@pbx.example>;tag=1\r\n",
+                "To: <sip:alice@pbx.example>\r\n",
+                "Contact: <sip:alice@192.0.2.1:5060;ob>\r\n",
+                "Route: <sip:pbx.example:5060;lr>\r\n",
+            ] {
+                assert!(out.contains(kept), "{kept:?} not in {out}");
+            }
+        }
+    }
+
+    /// RFC 4568 §9.1 writes no space after `inline:`, and a key written with
+    /// one is a key all the same.
+    #[test]
+    fn a_key_after_a_space_is_still_a_key() {
+        let line = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:  S3CRETKEY|2^20\r\n";
+        let out = String::from_utf8(strip_secrets(line.as_bytes())).unwrap();
+        assert!(!out.contains("S3CRETKEY"), "{out}");
+        assert!(out.ends_with("inline:REDACTED|2^20\r\n"), "{out}");
     }
 
     #[test]

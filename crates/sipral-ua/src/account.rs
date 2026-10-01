@@ -628,14 +628,18 @@ impl Account {
 
     /// Keep this account's flow to its registrar — to its outbound proxy,
     /// for one that never registers — open with a CRLF keep-alive every
-    /// `every`, whether or not STUN ran or found a NAT (RFC 5626 §3.5.1,
-    /// §4.4.1).
+    /// `every`, whether or not STUN ran or found a NAT.
     ///
     /// For a network whose NAT forgets a UDP flow sooner than the REGISTER
     /// refresh comes round, with STUN off: without a keep-alive, a call the
     /// registrar forwards between two REGISTERs is dropped at the NAT. On a
     /// datagram transport a double CRLF goes out alone in a datagram, which
-    /// RFC 3261 §7.5 has a registrar ignore; on a stream the endpoint pings
+    /// RFC 3261 §7.5 has a registrar ignore. That is not RFC 5626's
+    /// mechanism: its CRLF keep-alive "MUST NOT be used with connection-less
+    /// transports such as UDP" (§4.4.1), which get STUN instead (§4.4.2), and
+    /// a registrar that is no STUN server does not answer one. The datagram
+    /// is sent for what it does to the NAT, which a request that gets no
+    /// answer does as well as one that does (RFC 4787 REQ-6); on a stream the endpoint pings
     /// the connection at this interval instead of its own (RFC 5626 §4.4.1's
     /// double CRLF, with its single-CRLF pong). Each interval is drawn
     /// between 80% and 100% of `every`, as §4.4 asks, so what the NAT

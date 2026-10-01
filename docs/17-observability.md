@@ -261,7 +261,8 @@ again across the C ABI in `crates/sipral-ffi/src/log.rs`:
   either mode: `sipral_diag::strip_secrets` takes every `Authorization` and
   `Proxy-Authorization` value (a folded second line included), every
   `a=crypto` `inline:` key however many one line lists, every `k=` key and
-  every `a=key-mgmt` payload out of each message, by line, so bytes the
+  every `a=key-mgmt` payload, and the password of any `sip:user:password@`
+  URI, out of each message, by line, so bytes the
   parser refuses are stripped and written rather than withheld. It is off
   by default and nothing but that call turns it on.
 
