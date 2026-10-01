@@ -1272,6 +1272,16 @@ checks passed` or `checks failed` last. An area gate is for the work in
 between; a commit is ready when the complete gate exits zero with no FAIL
 and no skip.
 
+On the 8-core Mac the gate is developed on, with the build caches warm and
+other work on the machine, the complete gate took 616 seconds one area
+after another (load average 5 to 10 at the start) and 247 seconds in
+parallel (5 at the start, 30 by the end); the rust area, at about four
+minutes, is the whole of the difference that is left. A machine that busy
+makes a test that waits on a timer more likely to miss it, and a step that
+fails in the parallel gate and passes alone under `--only` is that, until
+it is not: `SIPRAL_CHECK_JOBS=1` runs the areas one at a time to tell the
+two apart.
+
 The linux-arm64 native cross-compiles in an unprivileged Docker container
 (`scripts/package/aarch64-cross.sh`), so what the gate proves of it depends
 on the machine. On a host with Docker, `package --dry-run` runs
