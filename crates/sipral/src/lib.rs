@@ -183,6 +183,8 @@ mod payloads;
 mod pin_tests;
 mod pipeline;
 mod ports;
+#[cfg(test)]
+mod realtime_tests;
 mod record;
 #[cfg(feature = "ice")]
 mod relay;
