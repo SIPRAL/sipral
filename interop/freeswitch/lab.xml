@@ -83,4 +83,25 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
       <action application="hangup"/>
     </condition>
   </extension>
+  <!-- A far end that holds, resumes and refreshes a call keyed by SDES on
+       its own, for the harness's farhold flow. Only AES_CM_128_HMAC_SHA1_80
+       is taken, so an offer that lists AEAD_AES_256_GCM first is answered on
+       its second line. Two seconds after the answer FreeSWITCH holds the call
+       (a re-INVITE with a=sendonly), three seconds later resumes it, and
+       three seconds after that re-offers it as it stands; each re-INVITE
+       carries its own a=crypto lines, which this end answers with the key of
+       the line in force. The call itself is an echo, so audio coming back
+       after each re-offer is this end's own audio having made the round trip
+       under the keys both ends hold. No loopback leg here, unlike 9000: the
+       echo does not survive that bridge, and nothing is transferred. -->
+  <extension name="sipral_lab_far_hold">
+    <condition field="destination_number" expression="^9010$">
+      <action application="set" data="rtp_secure_media=mandatory:AES_CM_128_HMAC_SHA1_80"/>
+      <action application="answer"/>
+      <action application="sched_api" data="+2 none uuid_hold ${uuid}"/>
+      <action application="sched_api" data="+5 none uuid_hold off ${uuid}"/>
+      <action application="sched_api" data="+8 none uuid_media_reneg ${uuid}"/>
+      <action application="echo"/>
+    </condition>
+  </extension>
 </include>

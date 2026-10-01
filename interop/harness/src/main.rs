@@ -38,6 +38,7 @@
 )]
 
 mod audio;
+mod device_open;
 mod drift;
 mod fork;
 mod fork_ice;
@@ -73,11 +74,11 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
-    Account, AccountId, CallEndReason, CallHandle, CallMedia, CallState, Codec, CodecCatalog,
-    Credentials, DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig, Event, Input, MediaConfig,
-    MediaEngine, MediaEvent, OutgoingCall, Quality, SrtpPolicy, SrtpSuite, StreamStatistics,
-    Subscribe, TransportId, TransportProtocol, UNAVAILABLE, UaEvent, Uri, UserAgent,
-    VoipMetricsBlock, WallClock,
+    Account, AccountId, CallEndReason, CallHandle, CallMedia, CallState, ChallengeRefusal, Codec,
+    CodecCatalog, Compaction, Credentials, DEFAULT_DIGIT, Digit, DtmfInfoForm, EndpointConfig,
+    Event, Input, MediaConfig, MediaEngine, MediaEvent, OutgoingCall, Quality, SrtpPolicy,
+    SrtpSuite, StreamStatistics, Subscribe, TransportId, TransportProtocol, UNAVAILABLE, UaEvent,
+    Uri, UserAgent, VoipMetricsBlock, WallClock,
 };
 use sipral_core::msg::{HeaderName, OwnedMessage};
 
@@ -265,7 +266,8 @@ fn catalog() -> CodecCatalog {
 /// would pass having proved nothing about this one.
 fn catalog_for(flow: Flow) -> CodecCatalog {
     match flow {
-        Flow::Srtp | Flow::PeerSrtp => catalog().with_srtp(SrtpPolicy::Required),
+        // FarHold on this build's own two SDES lines, AEAD_AES_256_GCM first
+        Flow::Srtp | Flow::PeerSrtp | Flow::FarHold => catalog().with_srtp(SrtpPolicy::Required),
         Flow::Dtls | Flow::PeerDtls => catalog().with_srtp(SrtpPolicy::DtlsRequired),
         // this build always has G.729, so the fallback is never taken; it
         // keeps this a catalogue rather than a panic, like `catalog`'s own
@@ -394,6 +396,7 @@ fn main() -> ExitCode {
     }
     // DTLS-SRTP on both: interop/freeswitch/lab.xml answers 9005 too
     flows.push(Flow::Dtls);
+    flows.extend(signalling_flows(&server));
     // the phone-to-phone peer: gated on SIPRAL_PEER rather than on
     // `server`, because this run and the plain kamailio one above both name
     // "kamailio" as their server — that is the proxy's own address either
@@ -448,6 +451,23 @@ fn main() -> ExitCode {
     }
     println!("{failures} flow(s) failed");
     ExitCode::FAILURE
+}
+
+/// The flows about what this end writes and answers rather than what a
+/// server offers: the compact form on every server, and FreeSWITCH behind
+/// each proxy with it; FreeSWITCH's own re-offers
+/// (`interop/freeswitch/lab.xml`'s 9010) behind either proxy, since
+/// Asterisk never re-offers a call by itself; and
+/// `interop/kamailio/kamailio.cfg`'s challenge for another realm.
+fn signalling_flows(server: &str) -> Vec<Flow> {
+    let mut flows = vec![Flow::Compact];
+    if server == "kamailio" || server == "opensips" {
+        flows.push(Flow::FarHold);
+    }
+    if server == "kamailio" {
+        flows.push(Flow::ForeignRealm);
+    }
+    flows
 }
 
 /// Everything `main` runs beyond the `Flow` table: two calls on one account,
@@ -619,6 +639,21 @@ fn extra_flows(
             Ok(said) => println!("  pass  one call of two muted on its own{said}"),
             Err(why) => {
                 println!("  FAIL  one call of two muted on its own — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // a call hung up while its devices are still opening (see
+    // `device_open`): on Asterisk's echo in a run that names nothing, or
+    // wherever it is named with `SIPRAL_ECHO_EXTENSION` saying which
+    // extension echoes
+    if (server == "asterisk" && wanted.is_empty())
+        || wanted.split(',').any(|name| name.trim() == "devicehangup")
+    {
+        match device_open::run(server, remote, user, pass) {
+            Ok(said) => println!("  pass  a hangup while the devices open{said}"),
+            Err(why) => {
+                println!("  FAIL  a hangup while the devices open — {why}");
                 failures += 1;
             }
         }
@@ -810,6 +845,27 @@ enum Flow {
     /// end sent, handed back by `Echo()` on a channel that is G.729 at both
     /// ends.
     G729,
+    /// [`Flow::Hold`] with every request this end sends written in RFC 3261
+    /// §7.3.3's compact form (`Compaction::Always`), the form an oversize
+    /// request goes out in: the REGISTER and its answer to the challenge,
+    /// the INVITE, the ACK, both re-INVITEs and the BYE. Every server reads
+    /// it, or the call does not come up; and through a proxy, FreeSWITCH
+    /// behind it reads what the proxy passes on.
+    Compact,
+    /// A call keyed by SDES on the second of the two `a=crypto` lines this
+    /// end offers (`AES_CM_128_HMAC_SHA1_80` after `AEAD_AES_256_GCM`, the
+    /// only suite FreeSWITCH's 9010 takes), which the far end then holds,
+    /// resumes and re-offers unchanged on its own
+    /// (`interop/freeswitch/lab.xml`): every answer this end gives has to
+    /// carry the key of the line in force, and the far end's echo has to
+    /// come back after the resume and again after the refresh.
+    FarHold,
+    /// A call the account's own server challenges for a realm that is not
+    /// the one it registered under (`interop/kamailio/kamailio.cfg`'s
+    /// `realm-elsewhere`), the shape of a proxy passing on a far end's own
+    /// challenge: the password is not given, the challenge is reported
+    /// declined, and the call ends on the 407 with the INVITE sent once.
+    ForeignRealm,
 }
 
 impl Flow {
@@ -832,7 +888,29 @@ impl Flow {
             Self::PeerDtls => "DTLS-SRTP, phone to phone",
             Self::PeerHangup => "call, ended by the far end",
             Self::G729 => "G.729, echoed",
+            Self::Compact => "held and resumed, every request compact",
+            Self::FarHold => "SDES on the second line, held, resumed and refreshed by the far end",
+            Self::ForeignRealm => "a challenge for another realm, declined",
         }
+    }
+
+    /// The user agent's configuration for the flow: the default, but for
+    /// `Flow::Compact`, which writes every request compact.
+    fn endpoint_config(self) -> EndpointConfig {
+        let mut config = EndpointConfig::default();
+        if self == Self::Compact {
+            config.datagram_limit.compaction = Compaction::Always;
+        }
+        config
+    }
+
+    /// Whether the flow asks for the resume as soon as its hold is agreed,
+    /// rather than changing something while held first.
+    const fn resumes_once_held(self) -> bool {
+        matches!(
+            self,
+            Self::Hold | Self::Dtls | Self::PeerDtls | Self::Compact
+        )
     }
 
     /// The name `SIPRAL_FLOWS` selects it by.
@@ -855,6 +933,9 @@ impl Flow {
             Self::PeerDtls => "peerdtls",
             Self::PeerHangup => "peerhangup",
             Self::G729 => "g729",
+            Self::Compact => "compact",
+            Self::FarHold => "farhold",
+            Self::ForeignRealm => "foreignrealm",
         }
     }
 }
@@ -904,6 +985,17 @@ enum Fact {
     /// The mailbox's `new` count read higher after the voicemail was left
     /// than it did at the subscription's first notification.
     MailboxCounted,
+    /// `Flow::FarHold`: the far end's hold, its resume and its unchanged
+    /// re-offer after that, each agreed.
+    FarHeld,
+    FarResumed,
+    Refreshed,
+    /// `Flow::ForeignRealm`: the challenge was reported declined, as for a
+    /// realm that is not the account's.
+    ChallengeDeclined,
+    /// `Flow::ForeignRealm`: the call ended on the challenge itself, a 401
+    /// or a 407.
+    EndedChallenged,
 }
 
 /// What the run has seen. The conditions are read off this at the end, so that
@@ -951,6 +1043,72 @@ struct Endpoint {
     /// instead, the packets it then sends under `shown` written back as
     /// `answered` on the wire.
     renumber: Option<(u8, u8)>,
+    /// The requests this endpoint has written to the wire, tallied.
+    written: Written,
+}
+
+/// A tally of the requests an [`Endpoint`] wrote: how many, how many in
+/// RFC 3261 §7.3.3's compact form, how many INVITEs, and when the first BYE
+/// went.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Written {
+    pub(crate) requests: u32,
+    pub(crate) compact: u32,
+    pub(crate) invites: u32,
+    pub(crate) first_bye: Option<Instant>,
+    /// The `a=crypto` lines of the first INVITE, the suite and the key of
+    /// each, tags left out: the keys this end offered.
+    pub(crate) offered_keys: Vec<String>,
+}
+
+impl Written {
+    /// Note one message written; a response or a keep-alive is not a
+    /// request and is left out.
+    fn note(&mut self, payload: &[u8], now: Instant) {
+        let head = payload
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .and_then(|end| payload.get(..end))
+            .unwrap_or(payload);
+        let mut lines = head.split(|byte| *byte == b'\n');
+        let Some(first) = lines.next() else {
+            return;
+        };
+        if !first.trim_ascii_end().ends_with(b" SIP/2.0") {
+            return;
+        }
+        self.requests += 1;
+        if first.starts_with(b"INVITE ") {
+            self.invites += 1;
+            if self.invites == 1 {
+                self.offered_keys = crypto_keys(payload.get(head.len()..).unwrap_or_default());
+            }
+        }
+        if first.starts_with(b"BYE ") {
+            self.first_bye.get_or_insert(now);
+        }
+        // compact: its Via and Call-ID under their one-letter names, and no
+        // field of RFC 3261's own that has one written long
+        let names: Vec<Vec<u8>> = lines
+            .filter_map(|line| {
+                let colon = line.iter().position(|byte| *byte == b':')?;
+                Some(line.get(..colon)?.trim_ascii().to_ascii_lowercase())
+            })
+            .collect();
+        let has = |name: &[u8]| names.iter().any(|seen| seen == name);
+        let long = [
+            &b"via"[..],
+            b"from",
+            b"to",
+            b"call-id",
+            b"contact",
+            b"content-type",
+            b"content-length",
+        ];
+        if has(b"v") && has(b"i") && !long.iter().any(|name| has(name)) {
+            self.compact += 1;
+        }
+    }
 }
 
 impl Endpoint {
@@ -966,6 +1124,29 @@ impl Endpoint {
         catalog: CodecCatalog,
         now: Instant,
     ) -> Result<Self, String> {
+        Self::bind_with(
+            EndpointConfig::default(),
+            seed,
+            media_seed,
+            bind_addr,
+            catalog,
+            now,
+        )
+    }
+
+    /// [`Endpoint::bind`], with the user agent started on `config` rather
+    /// than the default one.
+    ///
+    /// # Errors
+    /// Whatever binding the socket or starting the user agent returns.
+    fn bind_with(
+        config: EndpointConfig,
+        seed: [u8; 32],
+        media_seed: [u8; 32],
+        bind_addr: SocketAddr,
+        catalog: CodecCatalog,
+        now: Instant,
+    ) -> Result<Self, String> {
         let sip = UdpSocket::bind(bind_addr).map_err(|error| format!("cannot bind: {error}"))?;
         sip.set_nonblocking(true)
             .map_err(|error| format!("cannot make the SIP socket non-blocking: {error}"))?;
@@ -973,7 +1154,7 @@ impl Endpoint {
             .local_addr()
             .map_err(|error| format!("the SIP socket has no address: {error}"))?;
         let transport = TransportId(1);
-        let mut agent = UserAgent::new(EndpointConfig::default(), seed)
+        let mut agent = UserAgent::new(config, seed)
             .map_err(|error| format!("cannot start a user agent: {error}"))?;
         agent
             .receive(
@@ -1004,6 +1185,7 @@ impl Endpoint {
             media: HashMap::new(),
             sip_inbox: vec![0_u8; 65_535],
             renumber: None,
+            written: Written::default(),
         })
     }
 
@@ -1088,6 +1270,7 @@ impl Endpoint {
     /// Write every SIP message the agent has queued.
     fn flush(&mut self) {
         while let Some(transmit) = self.agent.poll_transmit() {
+            self.written.note(&transmit.payload, Instant::now());
             let _ = self.sip.send_to(&transmit.payload, transmit.destination);
         }
     }
@@ -1271,6 +1454,18 @@ struct Script {
     /// run. The flow's claim is that a later notification reads higher than
     /// this, not that it starts at zero.
     mailbox_baseline: Option<u32>,
+    /// `Flow::FarHold`: how much audible audio had come back when the far
+    /// end's refresh was agreed, so the audio after it can be told from the
+    /// audio between the resume and it.
+    audible_at_refresh: Option<u32>,
+    /// `Flow::FarHold`: the `a=crypto` line of each answer this end gave to
+    /// the far end's re-offers, tag aside — the suite and the key, compared
+    /// with each other and never printed.
+    answered_keys: Vec<String>,
+    /// `Flow::ForeignRealm`: the realms the declined challenge named.
+    declined_realms: Vec<String>,
+    /// What the endpoint wrote, copied in before the verdict.
+    written: Written,
 }
 
 /// Where the script is. One value rather than a pile of flags, because the
@@ -1339,6 +1534,10 @@ impl Script {
             sent_message: None,
             subscription: None,
             mailbox_baseline: None,
+            audible_at_refresh: None,
+            answered_keys: Vec::new(),
+            declined_realms: Vec::new(),
+            written: Written::default(),
         }
     }
 
@@ -1417,6 +1616,17 @@ impl Script {
                 });
                 self.hang_up(endpoint, now);
             }
+            UaEvent::SessionChanged { hold, local, .. } if self.flow == Flow::FarHold => {
+                self.on_far_change(endpoint, hold.remote, local.as_deref(), now);
+            }
+            UaEvent::ChallengeDeclined { realms, why, .. } => {
+                if *why == ChallengeRefusal::NotTheAccountsRealm {
+                    self.seen.saw(Fact::ChallengeDeclined);
+                    self.declined_realms = realms.iter().map(ToString::to_string).collect();
+                } else {
+                    self.seen.refused = Some(format!("a challenge was declined: {why}"));
+                }
+            }
             UaEvent::SessionChanged { hold, .. } => {
                 if hold.local {
                     self.seen.saw(Fact::Held);
@@ -1433,29 +1643,39 @@ impl Script {
                 status,
                 response,
                 ..
-            } => {
-                self.seen.saw(Fact::Over);
-                if *reason == CallEndReason::RemoteHangup {
-                    self.seen.saw(Fact::RemoteEnded);
-                }
-                if !self.seen.has(Fact::Up) {
-                    self.seen.refused = Some(match status {
-                        // a refusal usually says why in the reason phrase or a
-                        // Warning, and the number alone sends you guessing
-                        Some(status) => {
-                            format!(
-                                "{reason} ({}{})",
-                                status.get(),
-                                explained(response.as_ref())
-                            )
-                        }
-                        None => reason.to_string(),
-                    });
-                }
-                self.finish_or_watch_mailbox(endpoint, now);
-            }
+            } => self.on_call_ended(endpoint, *reason, *status, response.as_ref(), now),
             other => self.on_message_or_mwi(endpoint, other, now),
         }
+    }
+
+    /// The primary call ended, however it did. Factored out of
+    /// `on_signalling` for the reason `send_dtmf_by_info` is factored out of
+    /// `advance`.
+    fn on_call_ended(
+        &mut self,
+        endpoint: &mut Endpoint,
+        reason: CallEndReason,
+        status: Option<sipral::StatusCode>,
+        response: Option<&OwnedMessage>,
+        now: Instant,
+    ) {
+        self.seen.saw(Fact::Over);
+        if reason == CallEndReason::RemoteHangup {
+            self.seen.saw(Fact::RemoteEnded);
+        }
+        if self.flow == Flow::ForeignRealm
+            && status.is_some_and(|status| matches!(status.get(), 401 | 407))
+        {
+            self.seen.saw(Fact::EndedChallenged);
+        } else if !self.seen.has(Fact::Up) {
+            self.seen.refused = Some(match status {
+                // a refusal usually says why in the reason phrase or a
+                // Warning, and the number alone sends you guessing
+                Some(status) => format!("{reason} ({}{})", status.get(), explained(response)),
+                None => reason.to_string(),
+            });
+        }
+        self.finish_or_watch_mailbox(endpoint, now);
     }
 
     /// `Flow::Message` and `Flow::Mwi`'s own events. Factored out of
@@ -1555,7 +1775,7 @@ impl Script {
         match *event {
             MediaEvent::Started { codec, .. } if Some(call) == self.call => {
                 self.original_codec.get_or_insert(codec);
-                if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp)
+                if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp | Flow::FarHold)
                     && endpoint
                         .engine
                         .session(call)
@@ -1640,7 +1860,7 @@ impl Script {
 
     /// The next thing this flow does, once the last one has happened.
     fn advance(&mut self, endpoint: &mut Endpoint, now: Instant) {
-        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls)
+        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls | Flow::Compact)
             && self.advance_keyed_hold(endpoint, now)
         {
             return;
@@ -1663,7 +1883,7 @@ impl Script {
                     self.tried("hold", asked);
                 }
             }
-            Step::Holding if matches!(self.flow, Flow::Hold | Flow::Dtls | Flow::PeerDtls) => {
+            Step::Holding if self.flow.resumes_once_held() => {
                 self.step = Step::Resuming;
                 if let Some(call) = self.call {
                     let asked = endpoint.agent.resume(call, now);
@@ -1743,8 +1963,9 @@ impl Script {
             // (`Fact::Ours`, `owed`'s own "the far end ended the call before
             // we asked" read backwards) -- `patience()` is the only bound,
             // and `scripts/lab.sh`'s own `baresip_ctrl_hangup` is what is
-            // expected to end it first
-            Step::Talking if self.flow == Flow::PeerHangup => {}
+            // expected to end it first. `FarHold`'s far end holds, resumes
+            // and refreshes on its own clock, and `on_far_change` follows it
+            Step::Talking if matches!(self.flow, Flow::PeerHangup | Flow::FarHold) => {}
             Step::Talking | Step::Resuming | Step::Dialling | Step::Transferring => {
                 self.hang_up(endpoint, now);
             }
@@ -1782,6 +2003,34 @@ impl Script {
             _ => return false,
         }
         true
+    }
+
+    /// `Flow::FarHold`'s own reading of a session change: the far end's
+    /// hold, then its resume, then the refresh it sends after, each noted
+    /// with how much audio had come back by then, and the call kept up a
+    /// dwell past the refresh to hear the echo again. `local` is the answer
+    /// this end gave, whose `a=crypto` line is kept for the verdict.
+    fn on_far_change(
+        &mut self,
+        endpoint: &Endpoint,
+        held: bool,
+        local: Option<&[u8]>,
+        now: Instant,
+    ) {
+        if let Some(line) = local.and_then(answered_key) {
+            self.answered_keys.push(line);
+        }
+        if held {
+            self.seen.saw(Fact::FarHeld);
+        } else if self.seen.has(Fact::FarHeld) && !self.seen.has(Fact::FarResumed) {
+            self.seen.saw(Fact::FarResumed);
+            self.audible_at_resume = Some(self.heard(endpoint).audible);
+        } else if self.seen.has(Fact::FarResumed) && !self.seen.has(Fact::Refreshed) {
+            self.seen.saw(Fact::Refreshed);
+            self.audible_at_refresh = Some(self.heard(endpoint).audible);
+            self.step = Step::Listening;
+            self.listen_until = Some(now + dwell());
+        }
     }
 
     /// `Flow::HoldCodecChange`'s own `Step::Holding`: a narrower list than
@@ -1925,6 +2174,8 @@ impl Script {
             Flow::PeerSrtp => "baresip-srtp".to_owned(),
             Flow::PeerDtls => "baresip-dtls".to_owned(),
             Flow::PeerHangup => "baresip-hangup".to_owned(),
+            Flow::FarHold => "9010".to_owned(),
+            Flow::ForeignRealm => "realm-elsewhere".to_owned(),
             _ => self.extension.clone(),
         }
     }
@@ -1989,7 +2240,7 @@ impl Script {
     /// primary call.
     fn note_suite(&mut self, call: CallHandle, response: Option<&OwnedMessage>) {
         if Some(call) == self.call
-            && matches!(self.flow, Flow::Srtp | Flow::PeerSrtp)
+            && matches!(self.flow, Flow::Srtp | Flow::PeerSrtp | Flow::FarHold)
             && let Some(response) = response
         {
             self.suite = answered_suite(response.as_raw().body());
@@ -2030,8 +2281,27 @@ impl Script {
                 return Err((*why).to_owned());
             }
         }
-        if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp) && !self.seen.has(Fact::Encrypted) {
+        if matches!(self.flow, Flow::Srtp | Flow::PeerSrtp | Flow::FarHold)
+            && !self.seen.has(Fact::Encrypted)
+        {
             return Err("the call connected but never ran under SDES".to_owned());
+        }
+        if self.flow == Flow::FarHold {
+            self.far_hold_verdict(heard, require_audio)?;
+        }
+        if self.flow == Flow::ForeignRealm && self.written.invites != 1 {
+            return Err(format!(
+                "the INVITE went {} times: the challenge was answered",
+                self.written.invites
+            ));
+        }
+        if self.flow == Flow::Compact
+            && (self.written.requests == 0 || self.written.compact != self.written.requests)
+        {
+            return Err(format!(
+                "{} of {} requests went compact",
+                self.written.compact, self.written.requests
+            ));
         }
         // Audio is asked for only when something is known to send it back, and
         // only of the calls that dwell on the tone: the others hang up as soon
@@ -2067,8 +2337,10 @@ impl Script {
             }
         }
         // and the DTLS call's claim is about after the re-offers, not before:
-        // audio before the hold only says the first handshake worked
-        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls)
+        // audio before the hold only says the first handshake worked. The
+        // compact call's too: the re-INVITEs and their ACKs are requests
+        // the far end had to read as well
+        if matches!(self.flow, Flow::Dtls | Flow::PeerDtls | Flow::Compact)
             && require_audio
             && heard.audible <= self.audible_at_resume.unwrap_or(heard.audible)
         {
@@ -2077,6 +2349,85 @@ impl Script {
                  {} received, {} refused",
                 heard.audible, heard.sent, heard.received, heard.refused
             ));
+        }
+        Ok(())
+    }
+
+    /// What the signalling flows add to the result line: how many requests
+    /// went compact, and what came back around the far end's re-offers.
+    fn note_signalling(&self, said: &mut String) {
+        if self.flow == Flow::Compact {
+            let _ = write!(
+                said,
+                "; {} of {} requests compact",
+                self.written.compact, self.written.requests
+            );
+        }
+        if self.flow == Flow::FarHold {
+            let _ = write!(
+                said,
+                "; audible {} by the far end's resume, {} by its refresh; {} answers, one key",
+                self.audible_at_resume.unwrap_or(0),
+                self.audible_at_refresh.unwrap_or(0),
+                self.answered_keys.len()
+            );
+        }
+    }
+
+    /// `Flow::FarHold`'s own claims beyond its facts: the far end took the
+    /// second line, every answer to its re-offers carried that line's suite
+    /// and the key this end offered on it, and its echo came back after the
+    /// resume and again after the refresh.
+    fn far_hold_verdict(&self, heard: audio::Heard, require_audio: bool) -> Result<(), String> {
+        const SECOND: &str = "AES_CM_128_HMAC_SHA1_80";
+        if self.suite != Some(SrtpSuite::AesCm80) {
+            return Err(format!(
+                "the far end took {}, not the second line's {SECOND}",
+                self.suite.map_or("no line", SrtpSuite::name)
+            ));
+        }
+        let offered = self
+            .written
+            .offered_keys
+            .iter()
+            .find(|line| line.starts_with(SECOND))
+            .ok_or("the offer carried no AES_CM_128_HMAC_SHA1_80 line")?;
+        if self.written.offered_keys.first() == Some(offered) {
+            return Err(format!(
+                "{SECOND} was the offer's first line, not its second"
+            ));
+        }
+        if self.answered_keys.len() < 3 {
+            return Err(format!(
+                "{} answers to the far end's re-offers were seen, not three",
+                self.answered_keys.len()
+            ));
+        }
+        if self
+            .answered_keys
+            .iter()
+            .any(|answered| answered != offered)
+        {
+            return Err(
+                "an answer to the far end's re-offer did not carry the key of the line in force"
+                    .to_owned(),
+            );
+        }
+        if require_audio {
+            let resumed = self.audible_at_resume.unwrap_or(0);
+            let refreshed = self.audible_at_refresh.unwrap_or(0);
+            if refreshed <= resumed {
+                return Err(format!(
+                    "nothing audible came back between the far end's resume and its refresh: \
+                     {resumed} audible at both"
+                ));
+            }
+            if heard.audible <= refreshed {
+                return Err(format!(
+                    "nothing audible came back after the far end's refresh: {refreshed} audible \
+                     at it and after"
+                ));
+            }
         }
         Ok(())
     }
@@ -2101,7 +2452,9 @@ impl Script {
                 ];
                 CALL
             }
-            Flow::Hold => &[
+            Flow::FarHold => owed_far_hold(),
+            Flow::ForeignRealm => owed_foreign_realm(),
+            Flow::Hold | Flow::Compact => &[
                 (Fact::Registered, "no binding was granted"),
                 (Fact::Up, "the call did not connect"),
                 (Fact::Held, "the hold was not agreed"),
@@ -2201,6 +2554,35 @@ const fn owed_message() -> &'static [(Fact, &'static str)] {
     ]
 }
 
+/// `Flow::FarHold`'s own [`Script::owed`].
+const fn owed_far_hold() -> &'static [(Fact, &'static str)] {
+    &[
+        (Fact::Registered, "no binding was granted"),
+        (Fact::Up, "the call did not connect"),
+        (Fact::FarHeld, "the far end's hold was never agreed"),
+        (Fact::FarResumed, "the far end's resume was never agreed"),
+        (Fact::Refreshed, "the far end's refresh was never agreed"),
+        (Fact::Ours, "the far end ended the call before we asked"),
+        (Fact::Over, "the call did not end"),
+    ]
+}
+
+/// `Flow::ForeignRealm`'s own [`Script::owed`].
+const fn owed_foreign_realm() -> &'static [(Fact, &'static str)] {
+    &[
+        (Fact::Registered, "no binding was granted"),
+        (
+            Fact::ChallengeDeclined,
+            "the challenge for another realm was not reported declined",
+        ),
+        (
+            Fact::EndedChallenged,
+            "the call did not end on the challenge",
+        ),
+        (Fact::Over, "the call did not end"),
+    ]
+}
+
 /// `Flow::Mwi`'s own [`Script::owed`].
 const fn owed_mwi() -> &'static [(Fact, &'static str)] {
     &[
@@ -2265,7 +2647,8 @@ fn run(
 ) -> Result<String, String> {
     let bind_addr = SocketAddr::new(route_to(remote), 0);
     let now = Instant::now();
-    let mut endpoint = Endpoint::bind(
+    let mut endpoint = Endpoint::bind_with(
+        flow.endpoint_config(),
         folded_seed(flow),
         folded_media_seed(flow),
         bind_addr,
@@ -2283,6 +2666,7 @@ fn run(
 
     drive(&mut endpoint, &mut script, now + patience());
     let heard = script.heard(&endpoint);
+    script.written = endpoint.written.clone();
     script.verdict(heard, env::var("SIPRAL_REQUIRE_AUDIO").is_ok())?;
     // the audio quality gate, when `SIPRAL_AUDIO_GATE` engaged one on the
     // primary call's media: a call that connected, dwelled and ended can
@@ -2312,6 +2696,12 @@ fn run(
         ));
     }
 
+    if flow == Flow::ForeignRealm {
+        return Ok(format!(
+            "   (challenged for {}, declined; the INVITE sent once, the call ended on the challenge)",
+            script.declined_realms.join(", ")
+        ));
+    }
     if heard.sent == 0 {
         return Ok(String::new());
     }
@@ -2356,32 +2746,60 @@ fn run(
     // "n/a" for a codec G.113 tabulates no Ie/Bpl for (SS4.7.5's own
     // sentinel, never a guess).
     if let Some(block) = script.voip_metrics(&mut endpoint, Instant::now()) {
-        use std::fmt::Write as _;
-        let mos = |value: u8| {
-            if value == UNAVAILABLE {
-                "n/a".to_string()
-            } else {
-                format!("{}.{}", value / 10, value % 10)
-            }
-        };
-        let r_factor = if block.r_factor == UNAVAILABLE {
-            "n/a".to_string()
-        } else {
-            block.r_factor.to_string()
-        };
-        let _ = write!(
-            said,
-            "; R {r_factor}, MOS-LQ {}, MOS-CQ {}",
-            mos(block.mos_lq),
-            mos(block.mos_cq)
-        );
+        note_voip_metrics(&mut said, &block);
     }
     if let Some(suite) = script.suite {
         use std::fmt::Write as _;
         let _ = write!(said, "; SRTP {}", suite.name());
     }
+    script.note_signalling(&mut said);
     said.push(')');
     Ok(said)
+}
+
+/// What a call's VoIP Metrics block rates it at, for the result line.
+fn note_voip_metrics(said: &mut String, block: &VoipMetricsBlock) {
+    let mos = |value: u8| {
+        if value == UNAVAILABLE {
+            "n/a".to_string()
+        } else {
+            format!("{}.{}", value / 10, value % 10)
+        }
+    };
+    let r_factor = if block.r_factor == UNAVAILABLE {
+        "n/a".to_string()
+    } else {
+        block.r_factor.to_string()
+    };
+    let _ = write!(
+        said,
+        "; R {r_factor}, MOS-LQ {}, MOS-CQ {}",
+        mos(block.mos_lq),
+        mos(block.mos_cq)
+    );
+}
+
+/// The suite and the key of the one `a=crypto` line an answer carries, its
+/// tag left out: what has to stay the same across the answers to a far
+/// end's re-offers while the line in force does.
+fn answered_key(body: &[u8]) -> Option<String> {
+    crypto_keys(body).into_iter().next()
+}
+
+/// The suite and the key of every `a=crypto` line in `body`, in order,
+/// tags left out.
+fn crypto_keys(body: &[u8]) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim_end().strip_prefix("a=crypto:")?;
+            let mut fields = rest.split_whitespace();
+            let _tag = fields.next()?;
+            Some(format!("{} {}", fields.next()?, fields.next()?))
+        })
+        .collect()
 }
 
 /// The SDES suite an answer accepted: the one `a=crypto` line RFC 4568
@@ -2480,6 +2898,9 @@ const fn seed(flow: Flow) -> [u8; 32] {
         Flow::PeerDtls => [137; 32],
         Flow::PeerHangup => [149; 32],
         Flow::G729 => [139; 32],
+        Flow::Compact => [43; 32],
+        Flow::FarHold => [47; 32],
+        Flow::ForeignRealm => [59; 32],
     }
 }
 
@@ -2508,6 +2929,9 @@ const fn media_seed(flow: Flow) -> [u8; 32] {
         Flow::PeerDtls => [229; 32],
         Flow::PeerHangup => [157; 32],
         Flow::G729 => [233; 32],
+        Flow::Compact => [143; 32],
+        Flow::FarHold => [147; 32],
+        Flow::ForeignRealm => [159; 32],
     }
 }
 
@@ -2935,6 +3359,9 @@ mod tests {
             Flow::PeerDtls,
             Flow::PeerHangup,
             Flow::G729,
+            Flow::Compact,
+            Flow::FarHold,
+            Flow::ForeignRealm,
         ];
         // name, value -- a step new to this list adds its own constants
         // here too, nothing discovers them on its own
@@ -2971,6 +3398,8 @@ mod tests {
             join::MEDIA_SEED => crate::join::MEDIA_SEED,
             own_controls::SEED => crate::own_controls::SEED,
             own_controls::MEDIA_SEED => crate::own_controls::MEDIA_SEED,
+            device_open::SEED => crate::device_open::SEED,
+            device_open::MEDIA_SEED => crate::device_open::MEDIA_SEED,
             pair::ANSWERING_SEED => crate::pair::ANSWERING_SEED,
             pair::ANSWERING_MEDIA_SEED => crate::pair::ANSWERING_MEDIA_SEED,
             pair::DIALLING_SEED => crate::pair::DIALLING_SEED,
@@ -3025,6 +3454,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The tally counts requests only, and as compact only a request whose
+    /// fields of RFC 3261's own are all in their one-letter form; it keeps
+    /// the first INVITE's offered keys and the moment the first BYE went.
+    #[test]
+    fn the_tally_of_what_was_written_tells_compact_requests_from_the_rest() {
+        let mut written = super::Written::default();
+        let now = Instant::now();
+        written.note(
+            b"INVITE sip:9010@kamailio SIP/2.0\r\nVia: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKa\r\n\
+              From: <sip:labuser@kamailio>;tag=1\r\nTo: <sip:9010@kamailio>\r\nCall-ID: a\r\n\
+              CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\nv=0\r\n\
+              a=crypto:1 AEAD_AES_256_GCM inline:GCMKEY\r\n\
+              a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:CMKEY\r\n",
+            now,
+        );
+        written.note(
+            b"BYE sip:9010@kamailio SIP/2.0\r\nv:SIP/2.0/UDP 10.0.0.1;branch=z9hG4bKb\r\n\
+              f:<sip:labuser@kamailio>;tag=1\r\nt:<sip:9010@kamailio>;tag=2\r\ni:a\r\n\
+              CSeq:2 BYE\r\nl:0\r\n\r\n",
+            now,
+        );
+        written.note(b"SIP/2.0 200 OK\r\nv:SIP/2.0/UDP x\r\ni:a\r\n\r\n", now);
+        written.note(b"\r\n\r\n", now);
+        assert_eq!(
+            (written.requests, written.compact, written.invites),
+            (2, 1, 1)
+        );
+        assert_eq!(written.first_bye, Some(now));
+        assert_eq!(
+            written.offered_keys,
+            [
+                "AEAD_AES_256_GCM inline:GCMKEY",
+                "AES_CM_128_HMAC_SHA1_80 inline:CMKEY"
+            ]
+        );
     }
 
     /// The result line names the suite the far end's SDES answer accepted,

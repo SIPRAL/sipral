@@ -365,9 +365,10 @@ LAB_START_DOTNET_S=240
 # and the PipeWire step, which compiles the facade inside its container
 # before its call
 LAB_START_BUILD_S=1800
-# The most calls one run of the harness's ordinary flows places: thirteen
-# flows against Asterisk, the transfers placing more than one call each.
-LAB_SUITE_CALLS=20
+# The most calls one run of the harness's ordinary flows places: nineteen
+# flows against Asterisk, the transfers, the local conference and the call
+# muted on its own placing more than one call each.
+LAB_SUITE_CALLS=24
 LAB_RUN_TIMED_OUT=124
 LAB_RUN_SEQ=0
 lab_run() {

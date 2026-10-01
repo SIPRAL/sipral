@@ -306,6 +306,30 @@ unit_tested = true
 flows = ["a registrar named by its host name, located by its A record through the lab's DNS", "a server named by a domain, located by an SRV record from the application's resolver"]
 
 [[feature]]
+name = "A call hung up while its devices open, with nothing waiting for the open"
+implemented = true
+unit_tested = true
+flows = ["a hangup while the devices open"]
+
+[[feature]]
+name = "Requests written in the compact form (RFC 3261 §7.3.3)"
+implemented = true
+unit_tested = true
+flows = ["held and resumed, every request compact"]
+
+[[feature]]
+name = "A far end's hold, resume and refresh answered on the SDES line in force"
+implemented = true
+unit_tested = true
+flows = ["SDES on the second line, held, resumed and refreshed by the far end"]
+
+[[feature]]
+name = "The password answers only its own server's realm"
+implemented = true
+unit_tested = true
+flows = ["a challenge for another realm, declined"]
+
+[[feature]]
 name = "Local conference of N calls, each on its own codec"
 implemented = true
 unit_tested = true
