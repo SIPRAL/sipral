@@ -1538,6 +1538,42 @@ fn a_detach_does_not_wait_for_the_devices_to_be_let_go_of() {
     assert_eq!(fake.teardowns(), before + 2);
 }
 
+/// A deactivate that finds the devices already stopping by themselves —
+/// the last call's media ended a moment before — waits for them within the
+/// probe wait all the same, as one that stops the pump itself does: an
+/// application that deactivates its audio session right after (CallKit's
+/// `didDeactivate`) finds no voice unit still running.
+#[test]
+fn a_deactivate_after_the_devices_stopped_by_themselves_waits_for_them_to_go() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    let call = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, call.call()).unwrap();
+    opened(&mut engine);
+    // let go however the test ends, so that a failing one does not hang
+    let release = Release(fake.clone());
+    fake.hold_teardown();
+    engine.detach(1);
+    assert!(!engine.is_active());
+    assert_eq!(fake.units_alive(), 1, "the unit was let go of already");
+    let releaser = {
+        let fake = fake.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fake.release_teardown();
+        })
+    };
+    engine.deactivate();
+    assert_eq!(
+        fake.units_alive(),
+        0,
+        "the deactivate came back with the unit still going"
+    );
+    releaser.join().unwrap();
+    drop(release);
+}
+
 /// The next call's devices are not opened beside the last call's while
 /// those are still being let go of: the platform's one voice unit is free
 /// before the next is asked for.

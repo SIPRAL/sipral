@@ -775,9 +775,15 @@ impl Engine {
     /// that at most [`Config::probe_wait`]: a teardown that waits on the
     /// thread this was called from — the voice unit's, on macOS, has been
     /// seen to wait for the main thread — finishes after this returns
-    /// rather than never.
+    /// rather than never. Devices that were already being let go of — the
+    /// last call's media ended, and the engine stopped them itself without
+    /// waiting — are waited for the same way.
     pub fn deactivate(&mut self) {
-        self.stop(Some(self.config.probe_wait));
+        if self.is_active() {
+            self.stop(Some(self.config.probe_wait));
+        } else {
+            self.wait_closed();
+        }
     }
 
     /// Whether the devices are open.
