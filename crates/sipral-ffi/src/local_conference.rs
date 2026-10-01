@@ -1082,7 +1082,7 @@ mod tests {
         sipral_local_conference_set_muted, sipral_local_conference_talker_at,
         sipral_local_conference_tick,
     };
-    use crate::audio::tests::{Packets, a_desk, transmit};
+    use crate::audio::tests::{Packets, a_desk, landed, transmit};
     use crate::audio::{
         FAKE_PLATFORM, SipralAudio, SipralAudioActivation, SipralAudioDirection,
         SipralAudioTransmit, sipral_audio_call_level, sipral_audio_call_set_muted,
@@ -1798,6 +1798,9 @@ mod tests {
         FAKE_PLATFORM.with_borrow_mut(|slot| *slot = None);
         let (_, call_a) = up(observed, stack, account, ANSWER);
         let call_b = second_media_call(observed, stack, account);
+        // the devices open in the background, and only a poll puts them
+        // under the calls: nothing below polls, so they have to be there now
+        landed(stack, 2_500);
         (stack, call_a, call_b, fake)
     }
 

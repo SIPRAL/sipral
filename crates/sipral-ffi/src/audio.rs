@@ -1355,7 +1355,7 @@ pub(crate) mod tests {
 
     /// Poll at `now_ms` until the devices the engine is opening in the
     /// background are under the calls.
-    fn landed(stack: SipralHandle, now_ms: u64) {
+    pub(crate) fn landed(stack: SipralHandle, now_ms: u64) {
         let engine = crate::stack::audio_of(stack)
             .expect("the stack")
             .expect("device mode has an engine");
