@@ -1630,3 +1630,47 @@ fn the_next_call_waits_for_an_open_the_last_one_abandoned() {
     assert_eq!(fake.units_opened(), 2);
     assert_eq!(fake.units_at_most(), 1);
 }
+
+/// A call that ends after its devices have answered but before a service
+/// has put them to work leaves them to be let go of off the caller's
+/// thread too: the answer waiting for that service is not torn down by
+/// the detach, which the stack reaches under its own lock.
+#[test]
+fn a_call_ending_between_the_open_answering_and_the_service_tears_nothing_down_itself() {
+    let fake = a_duplex_desk();
+    let (mut engine, _) = engine_with(Activation::Automatic, &fake);
+    engine.refresh().unwrap();
+    // let go however the test ends, so that a failing one does not hang
+    let release = Release(fake.clone());
+    let watchdog = {
+        let fake = fake.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            fake.release_teardown();
+        })
+    };
+    fake.hold_teardown();
+    let call = FakeCallControl::new(8_000, 0, destination());
+    engine.attach(1, call.call()).unwrap();
+    let started = Instant::now();
+    while fake.units_opened() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never opened");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // the open has handed its answer over and nothing has serviced it
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    engine.detach(1);
+    let took = started.elapsed();
+    drop(release);
+    watchdog.join().unwrap();
+    assert!(
+        took < Duration::from_millis(500),
+        "the detach tore the answered devices down itself: {took:?}"
+    );
+    let started = Instant::now();
+    while fake.units_alive() != 0 {
+        assert!(started.elapsed() < Duration::from_secs(5), "never let go");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

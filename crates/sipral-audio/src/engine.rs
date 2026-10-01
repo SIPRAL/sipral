@@ -921,9 +921,14 @@ impl Engine {
         self.closing.push(pump.closed);
         // an open still under way was for this pump: what it brings back
         // is let go of on its own thread, which the next open waits for as
-        // it waits for the pump's, and what was still to be opened is not
+        // it waits for the pump's, and what was still to be opened is not.
+        // An answer it has already handed over and nobody has landed goes
+        // with the way to it, on a thread of its own too: dropped here it
+        // would be torn down on this caller's thread, which the stack
+        // reaches under its own lock
         if let Some(opening) = self.opening.take() {
             self.closing.push(opening.done);
+            self.let_go(opening.answer);
         }
         self.wanted.clear();
         if let Some(within) = wait {
@@ -1146,14 +1151,15 @@ impl Engine {
         }
     }
 
-    /// Let devices nobody wants any more go, on a thread of their own.
-    fn let_go(&mut self, landing: Landing) {
+    /// Let devices nobody wants any more go, on a thread of their own: a
+    /// landing, or the way to one that may already be waiting in it.
+    fn let_go<T: Send + 'static>(&mut self, devices: T) {
         let closed = Arc::new(Done::default());
         let done = Arc::clone(&closed);
         let spawned = std::thread::Builder::new()
             .name("sipral-audio-close".to_owned())
             .spawn(move || {
-                drop(landing);
+                drop(devices);
                 done.set();
             });
         if spawned.is_ok() {
