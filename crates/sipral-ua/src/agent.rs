@@ -1347,7 +1347,8 @@ impl UserAgent {
     ///
     /// Every path that answers a challenge comes through here, so that the
     /// rule holds for all of them: the challenged request went to the
-    /// account's own server, and every realm it was challenged for is the
+    /// account's own server — its address, on whatever port — and every
+    /// realm it was challenged for is the
     /// account's — the ones [`Account::realms`](crate::Account::realms)
     /// names, or with none named, the ones the server first challenged with,
     /// taken here the first time and kept. A challenge that fails either is
@@ -1369,7 +1370,9 @@ impl UserAgent {
         let Some(origin) = self.endpoint.challenge_origin(transaction) else {
             return Some(credentials);
         };
-        let why = if origin.destination == config.remote {
+        // the host, not the port: a PBX that takes TCP on another port than
+        // UDP is the same server over the stream §18.1.1 moved a request to
+        let why = if origin.destination.ip() == config.remote.ip() {
             let known = if config.realms.is_empty() {
                 &config.pinned_realms
             } else {

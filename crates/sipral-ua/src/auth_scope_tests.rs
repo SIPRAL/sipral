@@ -343,3 +343,30 @@ fn a_declined_challenge_is_not_answered_ahead_of_the_next_request() {
         String::from_utf8_lossy(&message)
     );
 }
+
+/// The account's server on another port — the TCP listener of a PBX that
+/// takes UDP on 5060 — is the account's server.
+#[test]
+fn the_accounts_server_on_another_port_is_still_answered() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = with_password(&mut agent, &[]);
+    registered_under(&mut agent, id, "example.com", t0);
+
+    let other_port: SocketAddr = "192.0.2.9:5080".parse().expect("an address");
+    agent
+        .call(id, &outgoing().to_address(UDP, other_port), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &challenge(&invite, 401, &www("example.com", "server")),
+        t0,
+    );
+    let retry = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the retry");
+    assert!(!header(&retry, HeaderName::Authorization).is_empty());
+    assert!(declined(&events(&mut agent)).is_none());
+}
