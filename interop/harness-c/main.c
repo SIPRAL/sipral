@@ -5250,6 +5250,16 @@ static int robust_one_size(const struct sockaddr_in *peer, size_t want, size_t p
         robust_pump(&end);
         sleep_ms(2);
     }
+    if (end.invite_len != 0u && end.invite_len <= 1300u
+        && end.invite_transport == SIPRAL_TRANSPORT_MAIN && want - end.invite_len <= 2u) {
+        /* the second call's INVITE is not the first's: its own numbers are
+         * a byte or two wider or narrower, and this one came to the line or
+         * under it, so it went as a datagram, as it should. Not the size this
+         * attempt is about: the same padding is tried again on a fresh stack */
+        *came_to = want;
+        robust_close(&end);
+        return 0;
+    }
     if (end.invite_len <= 1300u || end.invite_transport != 1u) {
         (void)snprintf(trouble, sizeof trouble,
                        "the INVITE placed again was not written on the connection (%u bytes on "
