@@ -123,7 +123,7 @@ reason phrase names the field (`Bad <field>`, RFC 3261 §8.2.x), and the
 refusal is noted in the diagnostic record. An ACK that fails it is dropped,
 since nothing answers an ACK.
 
-**Fuzzing covers the doors an attacker's bytes come through.** Thirty
+**Fuzzing covers the doors an attacker's bytes come through.** Thirty-four
 `cargo fuzz` targets under `fuzz/fuzz_targets/` (`docs/11-testing.md`): four
 over SIP itself (`parse`, `framer`, `builder`, `sdp`), ten added once it was
 clear how much of the receive path the first four never reached (`crypto`,
@@ -137,10 +137,15 @@ one for the TURN client driven by a relay that answers anything
 (`turn_client`), nine over `sipral-media`'s DSP once it was the turn of the
 codec and audio layer downstream of RTP (`media_resample`, `media_plc`,
 `media_drift`, `media_comfort_noise`, `media_vad`, `media_g722`,
-`media_g729`, `media_mix`, `media_opus`), and one for what the headless
-socket's messages do to a bridged session (`headless_media`). The exit gate
-is 24 hours per target with no crash and no hang, and every target has had
-it run: the first eighteen on 21 and 22 September 2026, about 37 billion
+`media_g729`, `media_mix`, `media_opus`), one for what the headless
+socket's messages do to a bridged session (`headless_media`), and four for
+what came with caller verification, recording sessions, text and RTCP
+feedback: an `Identity` header and a certificate chain through the whole of
+STIR verification (`stir_identity`), multipart bodies with recording
+metadata (`multipart`), real-time text (`rtt`) and the RTCP feedback readers
+(`rtcp_fb`). The exit gate is 24 hours per target with no crash and no hang,
+and every target before those four has had it run (theirs is not recorded
+yet): the first eighteen on 21 and 22 September 2026, about 37 billion
 executions, the eight media ones before `media_g729` on 23 September, about
 24 billion, `headless_media`, `media_g729` and `turn_client` on 25
 September, about 273 million, and `ice_lite` on 27 September, about 254
@@ -149,7 +154,7 @@ G.729 decoder — speech frames, Annex B's SID frames, frames not sent and
 frames lost — the payload reader and an encoder with Annex B's DTX; it
 decodes and re-encodes every input, so its 24 hours came to about 0.67
 million executions, the thinnest coverage of any target. `scripts/check.sh`
-builds all thirty on every run so none of them rots uncompiled between
+builds all thirty-four on every run so none of them rots uncompiled between
 releases.
 
 `ice` covers the one seam that is open to anybody before a

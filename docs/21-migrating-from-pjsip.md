@@ -35,8 +35,9 @@ mapping further down follows from them.
    owns the sockets, the resolver and TLS"): the application reads a
    socket and hands the bytes in (`sipral_stack_receive_datagram`,
    `sipral_stack_receive_stream`), calls `sipral_stack_poll` with the time
-   now, and writes what `sipral_stack_poll_transmit` hands back. The four
-   idiomatic layers own one UDP socket and one poll thread for the
+   now, and writes what `sipral_stack_poll_transmit` hands back. The
+   idiomatic layers own the signalling socket — UDP, or one TCP or TLS
+   connection — and one poll thread for the
    application, so the Python sample below has no loop in it; the C sample
    shows the loop they hide.
 2. **There is no audio device in the core, unless the application asks for
@@ -74,7 +75,7 @@ mapping further down follows from them.
 | Concept | PJSIP (`pjsua` / `pjsua2`) | Sipral C ABI | Sipral Python |
 |---|---|---|---|
 | Library lifetime | create, init with UA, log and media config, add transports, start, destroy ("The Endpoint"; "PJSUA-API Basic API") | `sipral_stack_create` with a `sipral_stack_config_t`, `sipral_stack_destroy` | `Stack(...)`, `with` or `close()` |
-| Transport | a transport per protocol and port, created by the library | the application's socket; `transport` and `bind_address` in the config, further ones with `sipral_stack_transport_bind` | one UDP socket per `Stack` |
+| Transport | a transport per protocol and port, created by the library | the application's socket; `transport` and `bind_address` in the config, further ones with `sipral_stack_transport_bind` | one UDP socket per `Stack`, or one TCP or TLS connection (`signalling`) |
 | Event pump | worker threads, or the application polling the library's event handler | `sipral_stack_poll`, `sipral_stack_poll_transmit`, `sipral_stack_receive_*` | the `Stack`'s own poll thread |
 | Callbacks | a callback struct (`pjsua`), virtual methods (`pjsua2`) | `event_callback` in the config: one `sipral_event_t` with a kind and a payload | `stack.events`, `call.events` (asyncio queues) |
 | Account | account config with id URI, registrar and credentials; registration state callback ("Accounts") | `sipral_account_add`, `sipral_account_register`, `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` | `stack.add_account(...)`, `account.register()` |
@@ -82,14 +83,14 @@ mapping further down follows from them.
 | Incoming call | incoming call callback on the account, then answer ("Calls") | `SIPRAL_EVENT_KIND_INCOMING_CALL`, then `sipral_call_answer_media`, `sipral_call_reject` | `stack.answer_call(event)`, `stack.reject_call(event)` |
 | Call media | media state callback, then connect the call's audio port to the sound device ("Calls") | `SIPRAL_EVENT_KIND_MEDIA_STARTED`, `sipral_call_media` for the call's media handle | `call.media` (`frames`, `send_audio`) |
 | Sound device | port zero of the conference bridge; the null device for none | device mode, `sipral_audio_*` | `stack.audio` |
-| Conference bridge | connect any port to any port, mixed ("Working with Audio Media") | `sipral_call_join` and `sipral_media_mix`: two calls and this end | not in the idiomatic layers |
-| WAV player / recorder | file player and recorder ports | the application plays by handing PCM in; `sipral_media_record_start` records a call | `call.media.send_audio`; recording through the raw layer |
-| Buddy / presence | buddy objects, subscribe, buddy state callback, publish own status ("Presence and Instant Messaging") | `sipral_account_subscribe` with the `presence` package, `SIPRAL_EVENT_KIND_NOTIFIED` | the raw layer, below |
+| Conference bridge | connect any port to any port, mixed ("Working with Audio Media") | `sipral_call_join` and `sipral_media_mix` for two calls and this end; `sipral_local_conference_create` and its siblings for any number, each call on its own codec | `LocalConference` |
+| WAV player / recorder | file player and recorder ports | the application plays by handing PCM in; `sipral_media_record_start` records a call | `call.media.send_audio`; `call.media.record` |
+| Buddy / presence | buddy objects, subscribe, buddy state callback, publish own status ("Presence and Instant Messaging") | `sipral_account_subscribe` with the `presence` package, `SIPRAL_EVENT_KIND_NOTIFIED`; `sipral_account_publish_presence` | `account.watch_presence`, `account.publish_presence` |
 | Instant message | send and receive on an account or a buddy | `sipral_account_message`, `SIPRAL_EVENT_KIND_MESSAGE_SENT` / `_RECEIVED` | the raw layer |
 | Logging | log config: level, console level, file, callback ("The Endpoint") | no log stream: events, `sipral_last_error_message`, `sipral_stack_diagnostics_json`, `sipral_call_record_json` | `SipralError` carries the last error |
 | Threads | worker thread count, register external threads ("General Concepts") | none; any thread, one at a time per stack | one poll thread per `Stack`, and one per call's media |
-| DNS | the library's resolver | the application's: `registrar_address` is an address, and `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` asks about a dialog's next hop | the application's |
-| TLS | TLS settings on the transport: CA list, verify flags, backend choice ("SSL/TLS") | the application's TLS library; the stack is told `SIPRAL_TRANSPORT_TLS` | TURN over TLS only; `22-tls.md` |
+| DNS | the library's resolver | the procedure is the stack's, the lookups the application's: `server_uri` is located by RFC 3263, each query asked by `SIPRAL_EVENT_KIND_LOOKUP_WANTED` and answered with `sipral_account_looked_up`, or `registrar_address` names an address; `SIPRAL_EVENT_KIND_RESOLVE_NEEDED` asks about a dialog's next hop | `server_uri`, answered by the platform's resolver unless `resolver=` replaces it |
+| TLS | TLS settings on the transport: CA list, verify flags, backend choice ("SSL/TLS") | the application's TLS library; the stack is told `SIPRAL_TRANSPORT_TLS` | `signalling=Transport.TLS` with `tls_trust`, and TURN over TLS; `22-tls.md` |
 
 ## Endpoint, transport, account and call, whole
 
@@ -567,9 +568,14 @@ sipral_status_t start_conference(sipral_handle_t stack, sipral_handle_t call_a,
 
 Both calls must have media running and agree on a sample rate and a frame
 length, since nothing resamples (`08-ffi.md`, "Two calls can be joined into
-a local conference of three"). The idiomatic layers drive each call's media
-on its own thread, which a joined pair must not have, so a conference is a
-C ABI (or raw-layer) feature today.
+a local conference of three"). For more than two calls, or calls on
+different codecs and rates, `sipral_local_conference_create` mixes any
+number, each on its own codec, and the idiomatic layers carry it as a
+class of their own — Python's `LocalConference`, .NET's and Kotlin's
+`SipralLocalConference`, Swift's `LocalConference` — which takes a member's
+frames over from that call's own media thread while it is in the
+conference (`08-ffi.md`, "Any number of calls can be mixed in a local
+conference").
 
 ## Buddies, presence and messages
 
@@ -579,10 +585,14 @@ subscription and not the object: `sipral_account_subscribe` with the
 `presence` package keeps one SUBSCRIBE dialog alive, refreshing it and
 starting a new one after a recoverable failure under the same handle, and
 every NOTIFY arrives as `SIPRAL_EVENT_KIND_NOTIFIED` with the request in
-`event->message`. The body is a PIDF document (RFC 3863), and reading it is
-the application's; this tree reads the bodies of the `dialog` package (a busy
-lamp field) and of `message-summary` (message waiting,
-`SIPRAL_EVENT_KIND_MESSAGES_WAITING`), and no other. Publishing this end's own status has no entry point.
+`event->message`; a watched address's presence also arrives as
+`SIPRAL_EVENT_KIND_PRESENCE_CHANGED`. The body is a PIDF document (RFC 3863),
+and reading it is the application's; this tree reads the bodies of the
+`dialog` package (a busy lamp field), of `message-summary` (message waiting,
+`SIPRAL_EVENT_KIND_MESSAGES_WAITING`) and of `conference`
+(`sipral_subscription_conference`). This end's own status is published with
+`sipral_account_publish_presence` (RFC 3903), which the stack then refreshes
+and modifies under the entity tag the compositor gave.
 
 ```c
 #include <string.h>
@@ -748,25 +758,26 @@ that a garbage-collected language must destroy its objects explicitly
 ## TLS and DNS
 
 PJSIP resolves names and runs TLS inside its transports, with a choice of
-TLS backend and verification flags ("SSL/TLS"). Sipral does neither. A
-registrar or a proxy is an address (`registrar_address`), and RFC 3263's
-NAPTR, SRV and A lookups for it are the application's; a dialog whose next
-hop turns out to be a name is `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, answered
-with `sipral_stack_resolved` or, legitimately, not at all. TLS is the application's, with the
-platform's own library, and the certificate check is the application's too:
-`22-tls.md` is the recipe, per platform, with what RFC 5922 asks beyond an
-ordinary HTTPS check.
+TLS backend and verification flags ("SSL/TLS"). Sipral's core does neither.
+A registrar or a proxy is an address (`registrar_address`) or a URI
+(`server_uri`): for a URI the stack runs RFC 3263 — NAPTR when asked for,
+SRV, A or AAAA, the order kept for failover — and asks the application for
+each lookup, which every idiomatic layer answers with the platform's
+resolver. A dialog whose next hop turns out to be a name is
+`SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, answered with `sipral_stack_resolved`
+or, legitimately, not at all. TLS is the application's, with the platform's
+own library — the Swift, Kotlin, .NET and Python layers run it — and so is
+the certificate check: `22-tls.md` is the recipe, per platform, with what
+RFC 5922 asks beyond an ordinary HTTPS check and how to pin a PBX's own
+certificate.
 
 ## What has no equivalent here
 
 - **Video.** Phase 6, after 1.0 (`10-roadmap.md`).
-- **A buddy list, presence publication and a PIDF reader.** The
-  subscription is here; the object around it and the document inside it
-  are the application's.
+- **A buddy list and a PIDF reader.** Watching and publishing presence are
+  here; the list around them and the document inside a notification are
+  the application's.
 - **A file player port.** Audio in is PCM the application hands over.
 - **Persisting configuration as JSON.** PJSUA2's configuration classes can
   write themselves out ("General Concepts"); a Sipral configuration is a
   struct the application fills from wherever it keeps its settings.
-- **SIP over TCP or TLS in the idiomatic layers.** Their signalling socket
-  is UDP; a stream transport is reached through the C ABI or a binding's
-  generated layer, as `22-tls.md` shows.

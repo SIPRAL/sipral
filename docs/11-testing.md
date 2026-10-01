@@ -329,7 +329,7 @@ again.
 outside the workspace, with its own `rust-toolchain.toml` pinned to a nightly
 date and its own lockfile, so the rest of the tree keeps its stable pin.
 
-Thirty targets, one per door an attacker's bytes come through.
+Thirty-four targets, one per door an attacker's bytes come through.
 
 The four over SIP itself. `parse` walks every typed accessor after a
 successful parse, because a message that parses can still hold a field nobody
@@ -467,6 +467,23 @@ produced (and G.722's encoder too), `media_mix` the local mixer's sums, and
 `headless_media` the facade's `HeadlessSession` between the socket's frames
 and a codec's.
 
+And four for what came with caller verification, recording sessions, text
+and RTCP feedback. `stir_identity` takes an `Identity` header field and a
+certificate chain through the whole of STIR verification — the header's
+grammar, base64url, the PASSporT's JSON, PEM, DER, X.509, TNAuthList and the
+path built from the chain, which is also offered as the anchors so a chain
+that issues itself gets past path building — since both come from whoever can
+reach the SIP port. `multipart` takes a `Content-Type` and a body through the
+multipart reader (RFC 5621, RFC 2046 §5.1), and checks that every part lies
+inside the input and that the leaf parts, written again, read back the same;
+a part that claims to be recording metadata is read as a recording session's
+INVITE would read it. `rtt` takes a stream of RTP datagrams through the RFC
+4103 receiver, where the sequence numbers, the RFC 2198 redundancy headers
+and the octets meant as UTF-8 are all the peer's. `rtcp_fb` takes a datagram
+through the RTCP feedback readers, compound and reduced-size, and the same
+bytes as an `a=rtcp-fb` value; a Generic NACK that parses is written back and
+must come out the same.
+
 ```sh
 ./scripts/fuzz.sh 600 parse        # one target, ten minutes
 ./scripts/fuzz.sh 600              # every target, ten minutes each
@@ -486,7 +503,7 @@ cargo fuzz run parse target/corpus/parse corpus/parse -- \
 ```
 
 Seeds are committed, under `fuzz/corpus/<target>/`, so that a clone gets
-targets with something to start from rather than thirty runs beginning at
+targets with something to start from rather than thirty-four runs beginning at
 the empty input. `tools/fuzz-seeds` writes them out of the library's own
 builders and encoders and puts each one through the reader its target puts
 it through — the framer seeds through the framer, the protected runs through
@@ -494,8 +511,8 @@ an unprotector holding the target's own key, the DTLS runs through ends built
 as the target builds them — so a seed that is not what it claims to be fails
 the generator rather than sitting in the corpus doing nothing — the
 `turn_client` programs through a client driven the way the target drives
-one, each required to end with an allocation. Twenty-nine of
-the thirty families go through that check; the one that does not is `builder`,
+one, each required to end with an allocation. Of the thirty families that
+came first, twenty-nine go through that check; the one that does not is `builder`,
 whose input is not a message but the five field
 values the target cuts it into, so what is checked there is the cut. The
 generator also owns the directory: what it does not write, it removes, since
@@ -535,10 +552,13 @@ for `media_g729`, which decodes every input and encodes the result again, so
 its 24 hours reached a far smaller share of its input space than any other
 target's did. `ice_lite`, the newest, had it on 27 September 2026, the same
 way: 48 runs of 30 minutes, 24 CPU-hours, about 254 million executions, and
-not one run that exited with an error or left an input behind. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
+not one run that exited with an error or left an input behind. The four
+added on 29 September 2026 — `stir_identity`, `multipart`, `rtt` and
+`rtcp_fb` — are built and seeded like the rest; their 24-hour run is not
+recorded here yet. Outside that gate, `scripts/fuzz.sh` runs each target for as long as it is
 given, five minutes each by default — before a release and overnight, not
 before every commit, which would add an hour to buy very little. What the gate does
-do on every run is **build** all thirty, under the nightly that `fuzz/` pins, so
+do on every run is **build** all thirty-four, under the nightly that `fuzz/` pins, so
 that a target cannot rot uncompiled between releases; `cargo test --workspace`
 never looks inside `fuzz/`, which is a workspace of its own. Every crashing
 input will be minimised and committed under `fixtures/regressions/` with the
@@ -1102,7 +1122,7 @@ warnings as errors for `aarch64-apple-ios` over every crate that builds for it
 — `sipral-ffi`'s graph, read from `cargo tree` so a crate that joins it is
 covered, and `sipral-io-coreaudio` — for two targets this
 machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
-over all thirty fuzz targets under their own nightly — which nothing else
+over all thirty-four fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
 history, and the tree checks — SPDX headers, provenance references,

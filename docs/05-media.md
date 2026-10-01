@@ -641,6 +641,15 @@ its two retransmissions (the final packet goes out three times in total, RFC
 collapse into a single reported digit, which is the bug everyone ships at least
 once.
 
+**Offered on every clock the offer's codecs run on.** Events "MUST use the
+same sequence number and timestamp base as the regular audio channel"
+(§2.5.1.2), so an offer names
+`telephone-event` once per clock rate among its codecs
+(`MediaCapabilities::dtmf_payloads`): Opus at 48 000 and the 8 000 that
+G.722's RTP clock, PCMU and PCMA share. An offer that named only the first
+codec's clock left a PBX settling on PCMU with no events it could agree to,
+and the digits went in-band.
+
 **What the schedule costs, and where it lives.** `sipral-rtp` writes the packet
 and knows what §2.1 does to the sequence number and the timestamp; it never
 sees a frame boundary, so it cannot know when the next one is due. The facade

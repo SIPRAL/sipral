@@ -43,7 +43,7 @@ The cost is honest: the caller writes the event loop. `sipral-ua` ships a
 reference loop for people who do not want to, off by default and described
 below. The bindings ship more than the declarations: each has a handwritten
 idiomatic layer over the printed C ABI (Swift classes and async events, a C#
-layer over P/Invoke, Kotlin coroutines, Python), and `bindings/react-native`
+layer over P/Invoke, Kotlin coroutines, Python, Dart), and `bindings/react-native`
 is a React Native TurboModule over the Swift and Kotlin layers rather than
 over the ABI — `bindings/README.md` lists
 which files are generated and which are written by hand, and
@@ -52,8 +52,9 @@ which files are generated and which are written by hand, and
 ## Layers
 
 ```
-                    sipral-ffi          C ABI, Swift / .NET / Kotlin / Python
-                        │
+                    sipral-ffi          C ABI, Swift / .NET / Kotlin / Python / Dart
+                        │  └──── sipral-audio   the built-in engine: devices
+                        │                       opened and pumped (device mode)
                      sipral             the facade, and the one crate an
                         │               application depends on
         ┌───────────────┼───────────────┐
@@ -68,19 +69,25 @@ which files are generated and which are written by hand, and
                                             dialogs, SDP, auth
 
    sipral-dtls       DTLS 1.2 for DTLS-SRTP, keyed beside sipral-nat (`dtls`)
+   sipral-stir       STIR/SHAKEN, sans-I/O — sipral-ua and sipral (`stir`)
+   sipral-diag       pcapng export and redaction — sipral (`redaction`)
    sipral-headless   PCM on a socket, no audio device — sipral ⇠ ⎯ ⎯ (`headless`)
-   sipral-io-*       CoreAudio, WASAPI, PipeWire, the device itself
+   sipral-io-*       CoreAudio, WASAPI, AAudio, PipeWire, the device itself
         │
    sipral-io-common  the ring, the gate, volume — no device at all
 ```
 
 Dependencies point down only, and most of these crates have none. `sipral-core`
 depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`,
-`sipral-dtls` and `sipral-headless` name no Sipral crate at all, and the three `sipral-io-*`
-name exactly one, `sipral-io-common`, which names none. The device crates
+`sipral-dtls`, `sipral-stir` and `sipral-headless` name no Sipral crate at
+all, `sipral-diag` names only `sipral-core`, and the four
+`sipral-io-*` name exactly one, `sipral-io-common`, which names none. The device crates
 stand outside the picture because nothing in it depends on them: an
-application links at most one of `sipral-io-coreaudio`, `sipral-io-wasapi` or
-`sipral-io-pipewire`, and never more than one.
+application links at most one of `sipral-io-coreaudio`, `sipral-io-wasapi`,
+`sipral-io-aaudio` or `sipral-io-pipewire`, and never more than one.
+`sipral-audio` is the one crate above them: the engine `sipral-ffi` runs in
+device mode, which names `sipral`, `sipral-media` and the device crate of the
+platform it is built for, and which nothing below `sipral-ffi` names.
 
 `sipral-headless` stands outside the picture the same way, and names no
 Sipral crate itself — it stays the leaf the picture above draws it as, sans-I/O
@@ -115,7 +122,8 @@ into neither.
 The consequence one layer up is the same shape: `sipral-ffi` names `sipral`
 first in its manifest, with `sipral-core` and `sipral-ua` beside it for the
 places the facade has no opinion about — binding a transport, a timer, an
-in-dialog INFO. So **the C ABI carries media as well as signalling**: a client
+in-dialog INFO — and `sipral-audio` for device mode. So **the C ABI carries
+media as well as signalling**: a client
 on the other side of it hands a datagram in and gets PCM back, rather than
 bringing a second stack to parse its own SDP and run its own RTP. That half of
 the boundary is `crates/sipral-ffi/src/media.rs`, and it is written out in
@@ -214,7 +222,10 @@ layer was kept out of the core in the first place.
 Neither device backend depends on `sipral` either — the same rule that keeps
 `sipral-media` and `sipral-rtp` from naming `sipral-ua` keeps a device backend
 from naming the facade, and an application wires a device's ring buffer to a
-live `MediaSession` itself, the way `crates/sipral/examples/` does. `sipral`'s
+live `MediaSession` itself, the way `crates/sipral/examples/` does — or
+leaves that to `sipral-audio`, which does it for every call of a stack in
+device mode, ringer, device changes and the platform's echo cancellation
+included ([05-media.md](05-media.md), "The built-in engine"). `sipral`'s
 own optional `headless` feature is the one exception to that pattern, and it
 is one only because the facade is the seam already, not because
 `sipral-headless` moved: see the note on the diagram above and
@@ -238,6 +249,29 @@ refused `GetBuffer` calls, and a buffer-ready event that did not arrive, and
 PipeWire counts the cycles `pw_stream_dequeue_buffer` had no buffer for. Those
 are not one measurement with three names, so they are not shared.
 
+### sipral-audio
+
+The built-in audio engine, and the piece every softphone otherwise writes for
+itself between a call's frames and a device: it lists the devices with an
+identity that survives a replug, opens the microphone, the loudspeaker and
+the ringer on the platform's own crate (`sipral-io-coreaudio`,
+`sipral-io-wasapi`, `sipral-io-aaudio`), pumps every call of a stack through
+them, and follows a device that arrives or leaves. `sipral-ffi` runs it for a
+stack created in device mode; nothing below `sipral-ffi` names it, so a
+headless build or an application that brings its own audio never links it.
+Detail in [05-media.md](05-media.md), "The built-in engine: device mode".
+
+### sipral-stir, sipral-diag
+
+`sipral-stir` is STIR/SHAKEN, sans-I/O like the core: the PASSporT, the
+`Identity` header, TNAuthList certificates, signing and verification. It
+names no Sipral crate; `sipral-ua` uses it behind the `stir` feature to sign
+what an account places and verify who calls it
+([04-ua.md](04-ua.md), "STIR/SHAKEN"). `sipral-diag` turns a replay recording
+into pcapng and redacts personal data out of a SIP message before it leaves
+the organisation, behind the facade's `redaction` feature
+([14-diagnostics.md](14-diagnostics.md)).
+
 ### sipral-ffi
 
 One narrow C ABI. Handles are opaque, ownership is explicit, and events arrive
@@ -251,7 +285,7 @@ depends on this one crate and gets `sipral-ua` plus a media pipeline
 re-exported under one name.
 
 It is still the only crate with `publish = true` and the only one that ships
-before the ABI freezes. The crates.io name is not held yet: the upload has not
+before 1.0. The crates.io name is not held yet: the upload has not
 happened.
 What it now also carries is the join:
 

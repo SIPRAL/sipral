@@ -20,8 +20,9 @@ whether it is met; *in part* is followed by what is missing.
 |---|---|---|---|
 | 3261 | SIP: Session Initiation Protocol | sipral-core | phase 1 |
 | 3263 | Locating SIP servers: transport selection, the `maddr` target, the default port, and what counts as a failed hop | sipral-core | phase 1 |
-| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller; the reference loop does the A query only | phase 1 |
-| 2782 | SRV records: ordering candidates by priority and weight | caller; `std::net` cannot ask for SRV | phase 1 |
+| 3263 | Locating SIP servers: the NAPTR, SRV and A queries themselves | caller, asked one at a time (`UaEvent::LookupWanted`, `SIPRAL_EVENT_KIND_LOOKUP_WANTED`) and answered as records (`sipral_account_looked_up`); every binding answers with the platform's resolver, and the reference loop does the A query only | phase 1 |
+| 3263 | Locating an account's server named by a URI (`Account::located`, `server_uri`): NAPTR when asked for, SRV for the account's transport, then A or AAAA; every target kept in §4.3's order for failover on a timeout, a lost transport or a 503; the name asked again when its time-to-live runs out or the recovery ladder wants an address | sipral-core, sipral-ua | phase 1; built |
+| 2782 | SRV records: ordering candidates by priority and weight | sipral-core, over the records the caller's resolver returns | phase 1; built |
 | 3264 | Offer/answer model with SDP | sipral-core | phase 1 |
 | 4566 | SDP | sipral-core | phase 1 |
 | 3581 | Symmetric response routing (`rport`) | sipral-core | phase 1 |
@@ -57,7 +58,16 @@ whether it is met; *in part* is followed by what is missing.
 | 4475 | SIP torture test messages | test corpus | phase 1 |
 | 7616 | HTTP Digest: challenge, `qop`, nonce count restarted only for a new nonce (§3.4) | sipral-core | phase 1 |
 | 6086 | The INFO framework, for DTMF over SIP INFO | sipral-ua | phase 2 |
-| 3903 | PUBLISH, for the RFC 6035 report only | sipral-ua | phase 2 |
+| 3903 | PUBLISH: the RFC 6035 report, an account's presence (`publish_presence`) and any package's state, refreshed and modified under the entity tag the compositor gave and removed with `Expires: 0` | sipral-ua | phase 2, built |
+| 4575 | Conference event package: `application/conference-info+xml` read, full and partial documents merged as §4.6 says | sipral-ua | phase 2, built |
+| 4579 | Conferencing for user agents: `isfocus` read from the far end's `Contact` and written on this end's, and the conference subscribed outside the call's dialog (§3.4) | sipral-ua | phase 2, built |
+| 7866 / 7865 | SIPREC: a recording session placed to a recording server with `Require: siprec`, `+sip.src` and the metadata in a `multipart/mixed` body, new metadata always with an offer (§9.1), an encrypted call's copies kept encrypted unless the account allows otherwise (§12.2); and the recording server's side | sipral-ua, sipral | phase 2, built |
+| 5621 / 2046 | Multipart bodies, read and written, for a recording session's offer and metadata | sipral-core | phase 2, built |
+| 8224 | Authenticated identity: every INVITE an account places signed (§6.1), and the caller of every INVITE verified before the phone rings (§6.2), reported or refused with §6.2.2's response | sipral-stir, sipral-ua | phase 2, built |
+| 8225 | PASSporT, in the full form a signer that reads its own clock must use | sipral-stir | phase 2, built |
+| 8588 | SHAKEN's `attest` and `origid` | sipral-stir | phase 2, built |
+| 8226 | STIR certificates and TNAuthList; a certificate naming only a service provider code accepted where the application says so (§9) | sipral-stir | phase 2, built |
+| 5922 | Domain certificates in SIP: the identity a TLS server's certificate must carry | caller, whose TLS it is; `docs/22-tls.md` shows the check per platform | phase 3 |
 | 3841 | Caller preferences: `Accept-Contact`, `Reject-Contact` and `Request-Disposition` known to the parser, with their compact forms, and carried; no preference is acted on | sipral-core | phase 1 |
 | 2543 | Backward compatibility: tagless `From`, branch without the magic cookie | sipral-core | phase 1 |
 
@@ -100,6 +110,8 @@ whether it is met; *in part* is followed by what is missing.
 | 3611 | RTCP-XR: the XR packet and the VoIP Metrics report block (§4.7), including the Appendix A.2 burst/gap classification, negotiated with `a=rtcp-xr` (§5) on both offer and answer. The R factor and the two MOS fields come from a simplified ITU-T G.107 E-model, with the codec's own G.113 Appendix I `Ie`/`Bpl` mapped in `sipral`; a codec G.113 does not tabulate reports its own §4.7.5 "unavailable" sentinel rather than a guess | sipral-rtp, sipral-core, sipral | phase 2; done |
 | 6035 | Quality reports published as `vq-rtcpxr` over a PUBLISH (RFC 3903) when an account names a collector, once per call on call end. `LocalMetrics` always; `RemoteMetrics` from the last RTCP XR VoIP Metrics block (RFC 3611 §4.7) the far end sent about this end's stream, left out when it sent none | sipral-ua, sipral | phase 2; done |
 | 8842 | `a=setup` in re-offers | sipral | phase 2; done |
+| 4585 / 5506 | RTP/AVPF with Generic NACKs and `trr-int`, and reduced-size RTCP, offered when a call asks for them and answered whenever offered | sipral-rtp, sipral | phase 2, built |
+| 4103 / 2198 | Real-time text: T.140 on a stream of its own beside the audio, with two redundant generations | sipral-rtp, sipral | phase 2, built |
 
 ## NAT
 

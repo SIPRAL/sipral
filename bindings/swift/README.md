@@ -9,7 +9,7 @@ Two layers, the way every binding here is two layers:
 
 - `Sources/Sipral/SipralAbi.swift` — printed by `tools/abi-gen`'s Swift back
   end from `sipral_ffi::abi::SURFACE`, the same declarations the header and
-  the .NET, Kotlin and Python bindings are printed from, over the `CSipral`
+  the .NET, Kotlin, Python and Dart bindings are printed from, over the `CSipral`
   C target (`c/include/sipral.h`, this package's own copy of the header).
   A status is a thrown `SipralError` carrying the last message, the number
   (`code`) and its name (`status`, nil for one a newer library returned

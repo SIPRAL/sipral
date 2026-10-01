@@ -133,7 +133,10 @@ SHA-256 fingerprint, whoever signed it. `srtp: 'bestEffort'` offers SDES on
 plain RTP/AVP; `srtpSuites`, `pathMtu`, `datagramWithoutStreamBytes` (a
 request over UDP anyway once no stream to a UDP-only server can be had),
 `pseudonymSalt` (hexadecimal) and `diagnosticTrace`
-(`client.setDiagnosticTrace`) reach the library as given.
+(`client.setDiagnosticTrace`) reach the library as given. Two things the
+other layers have are not exposed here: an account's own pin (`tlsPin` with
+`checkCertificate`, for an application running the account's TLS itself) and
+the stack's settings read back.
 
 ### Accounts
 
