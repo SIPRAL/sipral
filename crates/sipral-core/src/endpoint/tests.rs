@@ -3776,13 +3776,11 @@ fn a_request_that_timed_out_is_kept_for_the_next_server() {
     let message = endpoint.request(&request(Method::Message), t0).unwrap();
     let invite = endpoint.invite(&invite_request(), t0).unwrap();
     let _ = transmits(&mut endpoint);
-    let mut now = t0;
     while let Some(due) = endpoint.poll_timeout() {
         if due > t0 + 64 * T1 {
             break;
         }
-        now = due;
-        endpoint.handle_timeout(now);
+        endpoint.handle_timeout(due);
     }
     assert!(
         endpoint

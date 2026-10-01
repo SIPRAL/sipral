@@ -10,7 +10,7 @@
 //! [`Locator`]'s; the lookups are the application's resolver's, asked for
 //! with [`UaEvent::LookupWanted`] and answered with [`UserAgent::looked_up`],
 //! the same division as the endpoint's own
-//! [`Event::ResolveNeeded`](sipral_core::endpoint::Event::ResolveNeeded) for a
+//! [`Event::ResolveNeeded`] for a
 //! dialog: the core decides what to ask and what the answers mean, and never
 //! does I/O.
 //!
@@ -36,7 +36,7 @@
 //! other request outside a dialog that went to the account's located address
 //! — an INVITE, a MESSAGE, a SUBSCRIBE, a PUBLISH — fails over the same way,
 //! as the very request that failed with a new branch
-//! ([`UserAgent::on_unreached_event`]), and is reported as failed only once
+//! (`UserAgent::on_unreached_event`), and is reported as failed only once
 //! no address is left. Any other final response — a 404, a 500 — is an
 //! answer from the right server and moves nothing.
 //!
