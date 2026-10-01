@@ -534,4 +534,28 @@ mod tests {
         }
         assert!(equal(&base, &base));
     }
+    /// The one list of pin texts every layer's parser is held to: the
+    /// library's own takes and refuses the same, and reads the same digest.
+    #[test]
+    fn every_form_the_layers_take_is_taken_here_and_nothing_else() {
+        let forms = include_str!("../../../bindings/fixtures/pin-forms.txt");
+        let mut digest = None;
+        let mut checked = 0;
+        for line in forms.lines().filter(|line| !line.starts_with('#')) {
+            let (verdict, text) = line.split_once('\t').unwrap();
+            match verdict {
+                "digest" => digest = Some(CertificatePin::parse(text).unwrap()),
+                "accept" => {
+                    let parsed = CertificatePin::parse(text);
+                    assert_eq!(parsed.ok(), digest, "{text:?} is taken, as that digest");
+                }
+                "refuse" => {
+                    assert!(CertificatePin::parse(text).is_err(), "{text:?} is refused");
+                }
+                other => panic!("no verdict {other:?}"),
+            }
+            checked += 1;
+        }
+        assert!(digest.is_some() && checked > 20, "the list was read");
+    }
 }
