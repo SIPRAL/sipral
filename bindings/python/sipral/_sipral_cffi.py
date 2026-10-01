@@ -12907,7 +12907,7 @@ sipral_status_t sipral_stack_srtp_suite_order(sipral_handle_t stack, sipral_srtp
  * moved into a conference and back, and gone when it ends. While the
  * call is a member of a local conference the engine carries the
  * conference in its place, so the call's own controls are kept but act
- * on nothing, its meter included, until it leaves: there the
+ * on nothing, and its meter reads silence, until it leaves: there the
  * conference's own member controls (`sipral_local_conference_set_muted`
  * and `_set_gain`) are the ones that act.
  * `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not

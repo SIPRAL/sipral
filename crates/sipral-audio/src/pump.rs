@@ -471,7 +471,16 @@ impl Pump {
                         self.note_ended(id);
                     }
                 }
-                Ok(Command::Detach(id)) => self.calls.retain(|call| call.id != id),
+                Ok(Command::Detach(id)) => self.calls.retain(|call| {
+                    let carried = call.id != id;
+                    if !carried {
+                        // its controls outlive the detach, and its meter
+                        // reads silence rather than the last frame it had
+                        call.channels.up.quiet();
+                        call.channels.down.quiet();
+                    }
+                    carried
+                }),
                 Ok(Command::Replace(role, stream)) => self.replace(role, stream),
                 Ok(Command::Ring(ring)) => self.ringing = Some(Ringing::new(ring)),
                 Ok(Command::StopRing) => self.ringing = None,

@@ -980,6 +980,19 @@ fn one_calls_mute_gain_and_meter_are_its_own() {
     );
     assert!((down - 1_000).abs() < 100, "{down}");
 
+    // a call the engine no longer carries, one gone into a local
+    // conference, reads silence on its meter, not the last frame it had
+    engine.detach(2);
+    wait_ticks(&engine, 2);
+    assert_eq!(
+        engine.call_level(2, Direction::Input).map(Level::peak),
+        Some(0)
+    );
+    assert_eq!(
+        engine.call_level(2, Direction::Output).map(Level::peak),
+        Some(0)
+    );
+
     // a detach keeps them, a call forgotten has none
     engine.detach(1);
     assert_eq!(engine.call_muted(1, Direction::Input), Some(true));

@@ -3274,7 +3274,8 @@ ends, a hold or a move into a local conference and back keeping them, and
 are `SIPRAL_STATUS_WRONG_STATE` outside that and in application mode, where
 the frames are the application's to scale. While a call is a member of a
 local conference the engine carries the conference in its place, so its own
-controls are kept but act on nothing until it leaves — a muted call that
+controls are kept but act on nothing, and its meter reads silence, until it
+leaves — a muted call that
 joins one is heard, and hears this end, like every member; inside a
 conference, `sipral_local_conference_set_muted` and `_set_gain` are the
 controls that act.
