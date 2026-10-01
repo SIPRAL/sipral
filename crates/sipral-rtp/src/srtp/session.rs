@@ -3013,7 +3013,10 @@ mod tests {
             for sequence in 1..16 {
                 let _ = sent(&mut protector, sequence);
                 let mut arriving = sent(&mut unbounded, sequence);
-                assert!(unprotector.unprotect_rtp(&mut arriving).is_ok(), "{suite:?}");
+                assert!(
+                    unprotector.unprotect_rtp(&mut arriving).is_ok(),
+                    "{suite:?}"
+                );
                 let _ = reported(&mut protector, SSRC);
                 let (mut report, _) = reported(&mut unbounded, SSRC);
                 assert!(unprotector.unprotect_rtcp(&mut report).is_ok(), "{suite:?}");

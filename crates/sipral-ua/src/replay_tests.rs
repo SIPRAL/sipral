@@ -345,8 +345,8 @@ fn a_recording_of_one_layer_replays_into_the_layer_below_it() {
 /// The first `count` tokens a fresh endpoint built with `seed` draws: every
 /// `Call-ID`, tag and branch a holder of `seed` could work out.
 fn predicted(seed: [u8; 32], count: usize) -> Vec<Vec<u8>> {
-    let mut endpoint = sipral_core::endpoint::Endpoint::new(EndpointConfig::default(), seed)
-        .expect("an endpoint");
+    let mut endpoint =
+        sipral_core::endpoint::Endpoint::new(EndpointConfig::default(), seed).expect("an endpoint");
     (0..count).map(|_| endpoint.token().to_vec()).collect()
 }
 
@@ -369,13 +369,21 @@ fn a_recording_carries_a_seed_of_its_own_and_predicts_nothing_after_it() {
 
     agent.start_recording(Some("what a support engineer asked for"));
     let _ = ask(&mut agent, t0);
-    let during = agent.poll_transmit().expect("the REGISTER").payload.to_vec();
+    let during = agent
+        .poll_transmit()
+        .expect("the REGISTER")
+        .payload
+        .to_vec();
     let recording = agent
         .stop_recording()
         .expect("a recording was running")
         .expect("and it was whole")
         .clone();
-    assert_ne!(recording.seed(), SEED, "the agent's own seed left in the file");
+    assert_ne!(
+        recording.seed(),
+        SEED,
+        "the agent's own seed left in the file"
+    );
 
     let mut replayed = UserAgent::new(EndpointConfig::default(), recording.seed()).unwrap();
     replayed.receive(bound(), t0).expect("binding a transport");

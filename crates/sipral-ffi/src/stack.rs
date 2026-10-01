@@ -3594,7 +3594,8 @@ pub(crate) mod tests {
         .expect("the stack is live");
         assert_eq!(key.len(), 32);
         assert!(
-            !key.windows(8).any(|run| MEDIA_SEED.windows(8).any(|seed| seed == run)),
+            !key.windows(8)
+                .any(|run| MEDIA_SEED.windows(8).any(|seed| seed == run)),
             "the pseudonym key carries a run of the media seed: {key:?}"
         );
         let mut labelled = MEDIA_SEED.to_vec();

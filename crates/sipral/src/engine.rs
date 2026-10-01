@@ -3703,7 +3703,9 @@ impl MediaEngine {
         stream
             .attributes
             .retain(|attribute| attribute.name != "crypto");
-        stream.attributes.insert(at.min(stream.attributes.len()), line);
+        stream
+            .attributes
+            .insert(at.min(stream.attributes.len()), line);
         true
     }
 

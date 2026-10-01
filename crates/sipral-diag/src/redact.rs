@@ -995,7 +995,10 @@ mod tests {
         let secret = [3_u8; 32];
         assert_eq!(*derive_key(&secret, b"one"), *derive_key(&secret, b"one"));
         assert_ne!(*derive_key(&secret, b"one"), *derive_key(&secret, b"two"));
-        assert_ne!(*derive_key(&secret, b"one"), *derive_key(&[4_u8; 32], b"one"));
+        assert_ne!(
+            *derive_key(&secret, b"one"),
+            *derive_key(&[4_u8; 32], b"one")
+        );
         assert_eq!(*derive_key(&secret, b"one"), hmac(&secret, b"one"));
         let long = [5_u8; 100];
         assert_eq!(*derive_key(&long, b"one"), hmac(&long, b"one"));

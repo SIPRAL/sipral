@@ -3842,16 +3842,25 @@ fn a_sips_request_never_leaves_on_a_transport_that_is_not_tls() {
     for refusal in refusals {
         assert_eq!(refusal, Some(super::SendError::SipsNeedsTls));
     }
-    assert!(transmits(&mut endpoint).is_empty(), "something went in clear");
+    assert!(
+        transmits(&mut endpoint).is_empty(),
+        "something went in clear"
+    );
 
     let mut over_tls = secure_target();
     over_tls.transport = tls;
-    endpoint.invite(&over_tls, t0).expect("the INVITE goes over TLS");
+    endpoint
+        .invite(&over_tls, t0)
+        .expect("the INVITE goes over TLS");
     endpoint
         .request(&options_request(), t0)
         .expect("a sip: request goes over UDP");
     let out = transmits(&mut endpoint);
     assert_eq!(out.len(), 2);
-    assert!(out[0].payload.starts_with(b"INVITE sips:bob@example.com SIP/2.0\r\n"));
+    assert!(
+        out[0]
+            .payload
+            .starts_with(b"INVITE sips:bob@example.com SIP/2.0\r\n")
+    );
     assert_eq!(out[0].protocol, TransportProtocol::Tls);
 }

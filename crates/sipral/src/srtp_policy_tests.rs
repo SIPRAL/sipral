@@ -788,14 +788,16 @@ fn sdes_over_udp_is_refused_where_the_catalogue_takes_it_over_tls_only() {
         secure_only(SrtpPolicy::Offered),
     );
     let ringing = pair.ring();
-    let answered = pair
-        .callee
-        .engine
-        .answer(&mut pair.callee.agent, ringing, callee_media(), pair.now);
+    let answered =
+        pair.callee
+            .engine
+            .answer(&mut pair.callee.agent, ringing, callee_media(), pair.now);
     assert_eq!(answered, Err(MediaError::KeysWouldTravelInClear));
     let sent = pair.callee.outbound();
     assert!(
-        !statuses(&sent).iter().any(|line| line.starts_with("SIP/2.0 200")),
+        !statuses(&sent)
+            .iter()
+            .any(|line| line.starts_with("SIP/2.0 200")),
         "{:?}",
         statuses(&sent)
     );

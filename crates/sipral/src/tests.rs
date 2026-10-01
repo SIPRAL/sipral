@@ -5102,14 +5102,19 @@ fn a_far_end_re_offering_its_key_under_another_mode_is_refused() {
     }
     pair.settle();
     assert!(
-        pair.caller.media_events().iter().any(|event| matches!(
-            event,
-            MediaEvent::Failed(MediaError::UnusableKeying)
-        )),
+        pair.caller
+            .media_events()
+            .iter()
+            .any(|event| matches!(event, MediaEvent::Failed(MediaError::UnusableKeying))),
         "{:?}",
         pair.caller.media_events()
     );
-    assert!(pair.caller.engine.encryption(call).is_some_and(|streams| streams[0].encrypted));
+    assert!(
+        pair.caller
+            .engine
+            .encryption(call)
+            .is_some_and(|streams| streams[0].encrypted)
+    );
 }
 
 // -- a re-negotiation that moves the codec -----------------------------------
@@ -7661,8 +7666,8 @@ fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
         .expect("a re-offer once the branch answered");
     let offer_of = |datagram: &[u8]| {
         let mut scratch = ParseScratch::new();
-        let message = sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient)
-            .expect("a message");
+        let message =
+            sipral_core::msg::parse(datagram, &mut scratch, ParseMode::Lenient).expect("a message");
         parse(message.body()).expect("a description")
     };
     let (first, again) = (offer_of(&invite), offer_of(reinvite));
@@ -7674,7 +7679,11 @@ fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
             .count()
     };
     assert_eq!(lines(&again), 1, "one line, the one the call agreed");
-    assert_ne!(offered_key(&invite), offered_key(reinvite), "a key of its own");
+    assert_ne!(
+        offered_key(&invite),
+        offered_key(reinvite),
+        "a key of its own"
+    );
     for datagram in sent {
         pair.callee.deliver(&datagram, caller_sip(), pair.now);
     }
@@ -7694,7 +7703,9 @@ fn a_forked_sdes_call_is_offered_a_key_of_its_own_once_answered() {
     );
     let mut under_old = protected;
     assert!(
-        copy_opener(&first, 0).unprotect_rtp(&mut under_old).is_err(),
+        copy_opener(&first, 0)
+            .unprotect_rtp(&mut under_old)
+            .is_err(),
         "the key every branch of the INVITE holds still opens what this end sends"
     );
 }
@@ -12882,9 +12893,18 @@ fn an_sdes_call_moved_to_another_address_offers_a_new_key() {
         .collect();
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with("1 AEAD_AES_256_GCM "), "{lines:?}");
-    let key_of = |line: &str| line.split_whitespace().nth(2).unwrap_or_default().to_owned();
+    let key_of = |line: &str| {
+        line.split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_owned()
+    };
     let before = crypto_line(&one_stream(&first)).expect("a crypto line");
-    assert_ne!(key_of(&lines[0]), before.key_params, "the same key at a new address");
+    assert_ne!(
+        key_of(&lines[0]),
+        before.key_params,
+        "the same key at a new address"
+    );
 
     for datagram in written {
         pair.callee.deliver(&datagram, moved_sip(), pair.now);
@@ -14187,7 +14207,10 @@ fn a_recording_whose_keys_go_in_clear_says_so_or_is_refused() {
         pair.now,
     );
     assert_eq!(refused, Err(MediaError::KeysWouldTravelInClear));
-    assert!(pair.caller.outbound().is_empty(), "the recording's offer went");
+    assert!(
+        pair.caller.outbound().is_empty(),
+        "the recording's offer went"
+    );
 }
 
 /// A server that answers an encrypted call's recording session in the clear
