@@ -1274,7 +1274,14 @@ SDES that is a crypto line naming the tag it accepted, with this end's own key
 (§5.1.2), and the key is the one this end is already sending under: §7.1.4
 lets an answerer change its key and warns in the same breath that the offerer
 cannot read it until the answer arrives, and a hold is no reason to open that
-window. Under DTLS-SRTP it is this end's fingerprint and the role the running
+window. That key is read off the running plan, which holds the one line the
+two ends agreed on, and not off this end's last description: an offer this end
+wrote carries a line per suite, and the far end may have taken any of them. It
+is repeated only while the re-offer is answered under that line's suite; one
+that moves to another suite is answered with a key drawn for it, at its width
+(§6.1 fixes the width per suite, and a key belongs to its suite). An answer
+line whose key is not its suite's width is never written, since its reader
+must take it as invalid: the stream is refused instead. Under DTLS-SRTP it is this end's fingerprint and the role the running
 association gives it (RFC 8842 §5.3; see "The DTLS roles" below). The user
 agent's own answer used to carry neither. The end that asked for the hold then
 read a secured stream with no key on it: the hold never reached its media, and

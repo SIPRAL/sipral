@@ -343,8 +343,15 @@ pub(crate) fn sdes_suites(suites: Option<&[Suite]>) -> Vec<CryptoSuite> {
 /// (§5.1.2), and this end's own key rather than the offerer's, because
 /// §7.1.2 makes reusing the offerer's key across both directions the one
 /// thing an answerer must not do.
-pub(crate) fn answer_line(accepted: &CryptoPolicy, keys: KeySalt) -> Crypto {
-    CryptoPolicy::new(accepted.tag, accepted.suite, keys).to_crypto()
+///
+/// `None` for a key that is not the width the accepted suite calls for:
+/// §6.1 has the reader of such a line treat it as invalid, so writing one
+/// answers with a key the far end cannot take and leaves both directions of
+/// the stream without one. The stream is refused instead.
+pub(crate) fn answer_line(accepted: &CryptoPolicy, keys: KeySalt) -> Option<Crypto> {
+    let fits = keys.key().len() == accepted.suite.key_len()
+        && keys.salt().len() == accepted.suite.salt_len();
+    fits.then(|| CryptoPolicy::new(accepted.tag, accepted.suite, keys).to_crypto())
 }
 
 /// How a stream is keyed, as a kind rather than as keys: in the clear, by
@@ -375,14 +382,20 @@ impl Shape {
     }
 }
 
-/// The key a stream this end described is sending under: the first key of
-/// its first crypto line that reads, or `None` where it carries none.
+/// The suite and key a running stream sends under, read off the keying its
+/// plan settled on, or `None` for a stream not keyed by SDES.
 ///
-/// This end's own description, which carries one line — the one it offered,
-/// or the one it answered with — so there is no choosing between lines here.
-pub(crate) fn key_in_force(stream: &MediaDescription) -> Option<KeySalt> {
-    let policy = crypto_lines(stream).find_map(|line| line.policy())?;
-    policy.keys.into_iter().next().map(|inline| inline.keys)
+/// The plan and not this end's own description, because the description
+/// does not say which of its lines was agreed: an offer this end wrote
+/// carries one line per offered suite, and the far end may have taken any
+/// of them. The plan holds the one line both ends agreed on, by tag (RFC
+/// 4568 §5.1.3).
+pub(crate) fn key_in_force(keying: Option<&Keying>) -> Option<(CryptoSuite, KeySalt)> {
+    let Some(Keying::Sdes { local, .. }) = keying else {
+        return None;
+    };
+    let inline = local.keys.first()?;
+    Some((local.suite, inline.keys.clone()))
 }
 
 /// The offered line this end will answer: "the first valid supported crypto
@@ -639,8 +652,8 @@ pub(crate) const fn transform(suite: CryptoSuite) -> Suite {
 #[cfg(test)]
 mod tests {
     use super::{
-        OFFERED, Opening, SrtpPolicy, acceptable, is_secure, offer_lines, opening, peer_line_holds,
-        usable,
+        OFFERED, Opening, SrtpPolicy, acceptable, answer_line, is_secure, key_in_force,
+        offer_lines, opening, peer_line_holds, usable,
     };
     use sipral_core::sdp::{Crypto, CryptoSuite, KeySalt, Keying, MediaPlan, parse};
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtcpPlan, RtpMap};
@@ -919,5 +932,44 @@ mod tests {
         // short suite is four octets of tag rather than ten
         assert_eq!(built.rtp_overhead(), 4);
         assert_eq!(built.rtcp_overhead(), 14);
+    }
+
+    /// RFC 4568 §6.1: a line whose key is not its suite's width is invalid
+    /// to whoever reads it, so an answer is never written with one. A
+    /// forty-four octet `AEAD_AES_256_GCM` key under the
+    /// `AES_CM_128_HMAC_SHA1_80` tag the offer was taken on is the line a
+    /// re-offer used to be answered with.
+    #[test]
+    fn an_answer_line_is_never_written_with_a_key_of_another_suites_width() {
+        let accepted = sipral_core::sdp::CryptoPolicy::new(2, CryptoSuite::AesCm80, keys(1));
+        let gcm = KeySalt::new(&[3; 32], &[4; 12]);
+        assert_eq!(answer_line(&accepted, gcm), None);
+        let short_salt = KeySalt::new(&[3; 16], &[4; 12]);
+        assert_eq!(answer_line(&accepted, short_salt), None);
+
+        let line = answer_line(&accepted, keys(5)).expect("a key of the suite's own width");
+        assert_eq!(
+            (line.tag, line.suite.as_str()),
+            (2, "AES_CM_128_HMAC_SHA1_80")
+        );
+        let read = line.policy().expect("a line its reader can take");
+        assert_eq!(read.keys.first().map(|inline| &inline.keys), Some(&keys(5)));
+    }
+
+    /// The key in force is the agreed line's, with that line's suite — not
+    /// whichever line this end happened to write first.
+    #[test]
+    fn the_key_in_force_is_the_agreed_lines() {
+        let ours = sipral_core::sdp::CryptoPolicy::new(2, CryptoSuite::AesCm80, keys(1));
+        let theirs = sipral_core::sdp::CryptoPolicy::new(2, CryptoSuite::AesCm80, keys(9));
+        let keying = Keying::Sdes {
+            local: ours,
+            remote: theirs,
+        };
+        assert_eq!(
+            key_in_force(Some(&keying)),
+            Some((CryptoSuite::AesCm80, keys(1)))
+        );
+        assert_eq!(key_in_force(None), None);
     }
 }
