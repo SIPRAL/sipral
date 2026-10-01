@@ -72,7 +72,7 @@ impl Tn {
     /// deployment, which this crate does not know; a number that reaches
     /// here in another form is canonical in that form, as §8.3 allows "in
     /// the case that an implementation cannot determine how to convert the
-    /// number".
+    /// number". [`Tn::canonical_with`] takes the deployment's plan.
     ///
     /// # Errors
     ///
@@ -80,7 +80,34 @@ impl Tn {
     /// name rather than a number (RFC 8224 §8.1) — or nothing but
     /// separators.
     pub fn canonical(written: &str) -> Result<Self, InvalidTn> {
-        let body = written.strip_prefix('+').unwrap_or(written);
+        Self::canonical_with(written, |_| None)
+    }
+
+    /// As [`Tn::canonical`], with the rest of §8.3 left to the deployment:
+    /// a number written without a leading `+` is handed to `plan`, its
+    /// separators already gone, and what `plan` gives back is the number in
+    /// international form — `2155551212` dialled in the United States as
+    /// `12155551212`, say. `None` from `plan` keeps the number as written,
+    /// which §8.3 allows when it "cannot determine how to convert the
+    /// number". A number written with `+` is international already, and
+    /// `plan` is not asked.
+    ///
+    /// Signer and verifier have to convert alike, or a number one signs is
+    /// not the number the other checks; that is why the plan is the
+    /// deployment's to give and not this crate's to guess.
+    ///
+    /// # Errors
+    ///
+    /// As [`Tn::canonical`], and [`InvalidTn`] when what `plan` gives back
+    /// is not a canonical number with or without its separators.
+    pub fn canonical_with(
+        written: &str,
+        plan: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<Self, InvalidTn> {
+        let (international, body) = match written.strip_prefix('+') {
+            Some(body) => (true, body),
+            None => (false, written),
+        };
         let mut number = String::with_capacity(body.len());
         for c in body.chars() {
             match c {
@@ -91,6 +118,9 @@ impl Tn {
         }
         if !number.bytes().any(|b| b.is_ascii_digit()) {
             return Err(InvalidTn);
+        }
+        if !international && let Some(converted) = plan(&number) {
+            return Self::canonical(&converted);
         }
         Tn::new(&number)
     }

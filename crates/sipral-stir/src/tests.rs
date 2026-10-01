@@ -468,11 +468,194 @@ fn stale_iat_either_way() {
     for iat in [NOW - DEFAULT_FRESHNESS - 1, NOW + DEFAULT_FRESHNESS + 1, 0] {
         let identity = signer().identity(&claims(iat)).unwrap();
         let verdict = verdict(&identity, &pki.chain(), &pki);
-        assert_eq!(verdict, Verdict::Invalid(Failure::Stale { iat, now: NOW }));
+        assert_eq!(
+            verdict,
+            Verdict::Invalid(Failure::Stale {
+                iat,
+                now: NOW,
+                what: Staleness::Iat
+            })
+        );
         let response = verdict.sip_response().unwrap();
         assert_eq!((response.code, response.reason), (403, "Stale Date"));
         assert_eq!(verdict.verstat(), Verstat::TnValidationFailed);
     }
+}
+
+#[test]
+fn the_date_is_held_to_the_window_and_to_iat() {
+    let pki = Pki::new();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let pending = Verifier::default().start(&identity, None).unwrap();
+    let at = |date: u64| {
+        pending
+            .clone()
+            .dated(date)
+            .verify(&pki.chain(), &anchors(&pki), NOW)
+    };
+    for date in [NOW, NOW - DEFAULT_FRESHNESS, NOW + DEFAULT_FRESHNESS] {
+        assert!(matches!(at(date), Verdict::Valid(_)), "{date}");
+    }
+    for date in [NOW - DEFAULT_FRESHNESS - 1, NOW + DEFAULT_FRESHNESS + 1, 0] {
+        assert_eq!(
+            at(date),
+            Verdict::Invalid(Failure::Stale {
+                iat: NOW,
+                now: NOW,
+                what: Staleness::Date { date }
+            }),
+            "{date}"
+        );
+    }
+
+    // each fresh on its own, and too far from each other: signed for
+    // another request's time
+    let early = signer().identity(&claims(NOW - DEFAULT_FRESHNESS)).unwrap();
+    let pending = Verifier::default().start(&early, None).unwrap();
+    let date = NOW + 1;
+    let verdict = pending
+        .dated(date)
+        .verify(&pki.chain(), &anchors(&pki), NOW);
+    assert_eq!(
+        verdict,
+        Verdict::Invalid(Failure::Stale {
+            iat: NOW - DEFAULT_FRESHNESS,
+            now: NOW,
+            what: Staleness::DateMismatch { date }
+        })
+    );
+    let response = verdict.sip_response().unwrap();
+    assert_eq!((response.code, response.reason), (403, "Stale Date"));
+}
+
+#[test]
+fn a_passport_verified_once_is_refused_as_a_replay_inside_its_window() {
+    let pki = Pki::new();
+    let mut seen = ReplayCache::default();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let pending = Verifier::default().start(&identity, None).unwrap();
+    assert!(matches!(
+        pending.verify_once(&pki.chain(), &anchors(&pki), NOW, &mut seen),
+        Verdict::Valid(_)
+    ));
+    let again = Verifier::default().start(&identity, None).unwrap();
+    let verdict = again.verify_once(&pki.chain(), &anchors(&pki), NOW + 5, &mut seen);
+    assert_eq!(
+        verdict,
+        Verdict::Invalid(Failure::Stale {
+            iat: NOW,
+            now: NOW + 5,
+            what: Staleness::Replayed
+        })
+    );
+    assert_eq!(verdict.verstat(), Verstat::TnValidationFailed);
+
+    // another call signed the next second is not the same PASSporT
+    let next = signer().identity(&claims(NOW + 1)).unwrap();
+    let pending = Verifier::default().start(&next, None).unwrap();
+    assert!(matches!(
+        pending.verify_once(&pki.chain(), &anchors(&pki), NOW + 5, &mut seen),
+        Verdict::Valid(_)
+    ));
+    assert_eq!(seen.len(), 2);
+
+    // and what does not verify is never recorded
+    let mut tampered = identity.clone();
+    tampered.replace_range(
+        identity.find('.').unwrap() + 1..identity.find('.').unwrap() + 2,
+        "X",
+    );
+    if let Ok(pending) = Verifier::default().start(&tampered, None) {
+        assert!(matches!(
+            pending.verify_once(&pki.chain(), &anchors(&pki), NOW, &mut seen),
+            Verdict::Invalid(_)
+        ));
+    }
+    assert_eq!(seen.len(), 2);
+}
+
+#[test]
+fn the_replay_cache_forgets_what_has_left_the_window_and_stays_bounded() {
+    let pki = Pki::new();
+    let mut seen = ReplayCache::new(2);
+    for iat in [NOW - 3, NOW - 2, NOW - 1] {
+        let identity = signer().identity(&claims(iat)).unwrap();
+        let pending = Verifier::default().start(&identity, None).unwrap();
+        assert!(matches!(
+            pending.verify_once(&pki.chain(), &anchors(&pki), NOW, &mut seen),
+            Verdict::Valid(_)
+        ));
+        assert!(seen.len() <= 2);
+    }
+    let later = NOW + DEFAULT_FRESHNESS;
+    let identity = signer().identity(&claims(later)).unwrap();
+    let pending = Verifier::default().start(&identity, None).unwrap();
+    assert!(matches!(
+        pending.verify_once(&pki.chain(), &anchors(&pki), later, &mut seen),
+        Verdict::Valid(_)
+    ));
+    assert_eq!(seen.len(), 1, "what left the window went");
+}
+
+#[test]
+fn info_is_fetched_over_https_unless_the_policy_names_another_scheme() {
+    let pki = Pki::new();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    for scheme in ["http", "file", "ldap", "data", "ftp"] {
+        let elsewhere = identity.replace("https:", &format!("{scheme}:"));
+        assert_eq!(
+            Verifier::default().start(&elsewhere, None).err(),
+            Some(Failure::BadInfo(InfoProblem::Scheme)),
+            "{scheme}"
+        );
+    }
+    // a scheme is the same scheme in either case (RFC 3986 §3.1)
+    let upper = Signer::new(&[0x33; 32], "HTTPS://cert.example.org/passport.cer")
+        .unwrap()
+        .identity(&claims(NOW))
+        .unwrap();
+    assert!(Verifier::default().start(&upper, None).is_ok());
+
+    // a deployment that fetches over plain http says so
+    let http = Verifier::new(Config {
+        info_schemes: &["https", "http"],
+        ..Config::default()
+    });
+    let plain = Signer::new(&[0x33; 32], "http://cert.example.org/passport.cer")
+        .unwrap()
+        .identity(&claims(NOW))
+        .unwrap();
+    let pending = http.start(&plain, None).unwrap();
+    assert!(matches!(
+        pending.verify(&pki.chain(), &anchors(&pki), NOW),
+        Verdict::Valid(_)
+    ));
+    assert_eq!(
+        Verifier::default().start(&plain, None).err(),
+        Some(Failure::BadInfo(InfoProblem::Scheme))
+    );
+}
+
+#[test]
+fn a_number_without_a_plus_goes_through_the_deployments_plan() {
+    let national = |number: &str| (number.len() == 10).then(|| format!("1{number}"));
+    assert_eq!(
+        Tn::canonical_with("(215) 555-1212", national),
+        Ok(tn("12155551212"))
+    );
+    // international already: the plan is not asked
+    assert_eq!(
+        Tn::canonical_with("+44 20 7946 0000", |_| panic!("asked")),
+        Ok(tn("442079460000"))
+    );
+    // a plan that cannot say keeps the number as written
+    assert_eq!(Tn::canonical_with("5551212", national), Ok(tn("5551212")));
+    // and one that answers with something that is not a number is refused
+    assert_eq!(
+        Tn::canonical_with("5551212", |_| Some("not a number".to_owned())),
+        Err(passport::InvalidTn)
+    );
+    assert_eq!(Tn::canonical("(215) 555-1212"), Ok(tn("2155551212")));
 }
 
 #[test]
@@ -1541,7 +1724,11 @@ fn iat_at_the_ends_of_the_clock() {
     for now in [NOW, 0] {
         assert_eq!(
             pending.verify(&pki.chain(), &anchors(&pki), now),
-            Verdict::Invalid(Failure::Stale { iat: u64::MAX, now })
+            Verdict::Invalid(Failure::Stale {
+                iat: u64::MAX,
+                now,
+                what: Staleness::Iat
+            })
         );
     }
     let zero = CLAIMS.replace("1790000000", "0");
@@ -1550,7 +1737,8 @@ fn iat_at_the_ends_of_the_clock() {
         pending.verify(&pki.chain(), &anchors(&pki), u64::MAX),
         Verdict::Invalid(Failure::Stale {
             iat: 0,
-            now: u64::MAX
+            now: u64::MAX,
+            what: Staleness::Iat
         })
     );
     // a window as wide as the clock lets anything through the freshness

@@ -255,6 +255,24 @@ counted from the moment an INVITE is let in, not from the dialog it eventually
 makes), past which a stranger's request is answered 503 statelessly — refusing
 costs nothing more than the response itself (`docs/03-core-signalling.md`).
 
+**What a STIR verifier holds a request to.** `crates/sipral-stir` checks a
+PASSporT's `iat` against a freshness window, sixty seconds by default (RFC
+8224 §6.2 Step 4), and the request's own Date header field against the same
+window and against `iat` (`Pending::dated`): a full-form PASSporT carries its
+own time, and without the Date nothing tied it to the request it arrived in.
+The agent hands the Date over on every INVITE it verifies. Inside the window a
+replayed request still verifies unless the verifier remembers what it has
+verified; `ReplayCache` and `Pending::verify_once` are that memory, keyed by
+`orig`, `dest`, `iat` and the signature and bounded both by the window and by
+a capacity, and refuse a second presentation as `Staleness::Replayed` (§12.1).
+It is the application's to keep, since verification is two steps with a fetch
+between them; the agent does not keep one yet. The certificate URI in `info`
+is only ever handed to the application to fetch when its scheme is `https`,
+unless `Config::info_schemes` names others, so a request cannot point a
+verifier at a `file:` or `ldap:` URI of its choosing. A number's canonical
+form beyond stripping (§8.3's conversion of a national number) is the
+deployment's dialling plan, given to `Tn::canonical_with`.
+
 ## The keys
 
 **Where an SRTP key comes from.** `MediaEngine::new` takes a 32-byte media

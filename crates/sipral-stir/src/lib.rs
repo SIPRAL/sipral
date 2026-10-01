@@ -18,7 +18,12 @@
 //!   attestation level, originating number and origination identifier of a
 //!   valid PASSporT, or the one [`Failure`] that stops it, each with the SIP
 //!   response of RFC 8224 §6.2.2 ([`Failure::sip_response`]) and the
-//!   `verstat` value of 3GPP TS 24.229 ([`Verdict::verstat`]).
+//!   `verstat` value of 3GPP TS 24.229 ([`Verdict::verstat`]). The
+//!   request's Date is held to the same freshness window as `iat`
+//!   ([`Pending::dated`]), a [`ReplayCache`] refuses a PASSporT verified
+//!   once already ([`Pending::verify_once`]), and the certificate is only
+//!   ever asked for over `https` unless [`Config::info_schemes`] says
+//!   otherwise.
 //! - The parts both are made of, each usable alone: [`passport`] (claims,
 //!   header, and the deterministic JSON of RFC 8225 §9), [`identity`] (the
 //!   header field's grammar, RFC 8224 §4.1), [`tnauthlist`] (the certificate
@@ -126,9 +131,10 @@ pub use passport::{Attest, Claims, Dest, OrigId, Shaken, Tn, canonical_uri};
 pub use sign::{SignError, Signer};
 pub use tnauthlist::{Coverage, TnAuthList, TnEntry};
 pub use verdict::{
-    ChainProblem, Failure, InfoProblem, Malformed, SipResponse, Verdict, Verified, Verstat,
+    ChainProblem, Failure, InfoProblem, Malformed, SipResponse, Staleness, Verdict, Verified,
+    Verstat,
 };
-pub use verify::{Config, DEFAULT_FRESHNESS, Pending, Verifier};
+pub use verify::{Config, DEFAULT_FRESHNESS, DEFAULT_INFO_SCHEMES, Pending, ReplayCache, Verifier};
 
 /// The longest Identity header field value read or written, in octets.
 pub const MAX_IDENTITY_LEN: usize = 8 * 1024;
