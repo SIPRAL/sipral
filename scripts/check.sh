@@ -1729,11 +1729,11 @@ if [ -n "$jdk" ] && [ -f "$jdk/include/jni.h" ]; then
                     # eachStagedPairIsForItsOwnMachine has no natives to read
                     # here -- they are staged by a Linux build -- and says so
                     # as a skip rather than passing with nothing checked
-                    skipped=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests skipped *\].*/\1/p' | tail -1)
+                    skipped=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests aborted *\].*/\1/p' | tail -1)
                     warned=$(printf '%s\n' "$ran" \
                         | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
                     if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 6 ] || [ "${skipped:-0}" -ne 1 ]; then
-                        fail "bindings/jvm's tests, the loader's five and the Java loopback call (${succeeded:-0} of 6 passed, ${skipped:-0} of 1 skipped):"
+                        fail "bindings/jvm's tests, the loader's five and the Java loopback call (${succeeded:-0} of 6 passed, ${skipped:-0} of 1 skipped by its assumption):"
                         printf '%s\n' "$ran" | grep -vE '^[[:space:]]+at ' | tail -40 | sed 's/^/        /'
                     elif [ -n "$warned" ]; then
                         fail "-Xcheck:jni found something wrong under SipralJava:"
@@ -2036,7 +2036,7 @@ fi
 
 # scripts/package/jvm.sh builds the server jar on a Linux host with Maven,
 # which this gate never is; that it parses is what can be proved here.
-pkg_run "bash -n scripts/package/jvm.sh" bash -n scripts/package/jvm.sh
+pkg_run "jvm.sh parses (bash -n)" bash -n scripts/package/jvm.sh
 
 pkg_run "nuget.sh collect (osx-arm64, osx-x64)" \
     scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid osx-arm64 --rid osx-x64
