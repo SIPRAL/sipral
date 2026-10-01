@@ -38,9 +38,9 @@ and takes the binding back at the end; ``SIPRAL_KEEPALIVE_MS`` is the account's 
 interval. ``SIPRAL_SIGNALLING=tls`` signals over TLS to ``SIPRAL_SERVER``,
 trusting the one certificate whose SHA-256 fingerprint is
 ``SIPRAL_TLS_PIN``. ``SIPRAL_CODECS`` is the codecs to offer, in order
-(``opus,PCMU,PCMA``); ``SIPRAL_DTMF`` digits sent as named events two
-seconds after the call is confirmed, and every digit that comes back is
-printed.
+(``opus,PCMU,PCMA``); ``SIPRAL_DTMF`` digits sent as named events
+``SIPRAL_DTMF_AFTER_MS`` (two seconds unless set) after the call is
+confirmed, and every digit that comes back is printed.
 
 Lines, one each, flushed as they happen, for the step to read:
 
@@ -201,6 +201,7 @@ async def main() -> None:
     plain = policy == "off"
     register = os.environ.get("SIPRAL_REGISTER") == "1"
     digits = os.environ.get("SIPRAL_DTMF") or ""
+    digits_after = int(os.environ.get("SIPRAL_DTMF_AFTER_MS", "2000")) / 1000 if digits else 0
     tasks: list[asyncio.Task] = []
     account = None
 
@@ -228,7 +229,7 @@ async def main() -> None:
         call = None
         if not register and not server_uri:
             call = dial()
-        async with asyncio.timeout(patience + hold_after + dwell):
+        async with asyncio.timeout(patience + digits_after + hold_after + dwell):
             while True:
                 event = await stack.events.get()
                 fields = event.fields
@@ -261,7 +262,7 @@ async def main() -> None:
                 elif event.kind == EventKind.CALL_CONFIRMED and event.call == call.handle:
                     print("confirmed", flush=True)
                     if digits:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(digits_after)
                         call.send_dtmf(digits)
                         print(f"sent dtmf {digits}", flush=True)
                     await asyncio.sleep(hold_after)
