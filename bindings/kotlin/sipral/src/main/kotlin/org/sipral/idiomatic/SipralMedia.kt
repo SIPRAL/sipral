@@ -209,8 +209,31 @@ class SipralMedia internal constructor(
     /** `sipral_media_info`, read fresh. */
     fun info(): SipralMediaInfo = Sipral.mediaInfo(handle)
 
-    /** `sipral_media_statistics`. */
-    fun statistics(): SipralStreamStats = Sipral.mediaStatistics(handle, client.nowMs())
+    /**
+     * `sipral_media_statistics`. Once the call has ended the stream is gone
+     * and the library answers `SIPRAL_STATUS_WRONG_STATE`; from the moment
+     * the end-of-call record has arrived this answers with that record
+     * ([SipralCall.finalStatistics]) instead.
+     */
+    fun statistics(): SipralStreamStats =
+        try {
+            Sipral.mediaStatistics(handle, client.nowMs())
+        } catch (refused: SipralException) {
+            val final = finalStatistics
+            if (refused.status != SipralStatus.WRONG_STATE || final == null) {
+                throw refused
+            }
+            final
+        }
+
+    @Volatile
+    private var finalStatistics: SipralStreamStats? = null
+
+    /** The end-of-call record arrived: what [statistics] answers from now
+     * on, when the library no longer can. */
+    internal fun endedWith(record: SipralStreamStats) {
+        finalStatistics = record
+    }
 
     /**
      * `sipral_media_record_start_with`: record both directions to [path] --

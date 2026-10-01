@@ -32,6 +32,7 @@ import org.sipral.SipralHeader
 import org.sipral.SipralProgressConfig
 import org.sipral.SipralProgressEvent
 import org.sipral.SipralStatus
+import org.sipral.SipralStreamStats
 import org.sipral.SipralToggle
 import org.sipral.SipralToneRegion
 
@@ -86,6 +87,17 @@ class SipralCall internal constructor(
     /** Set once `SIPRAL_EVENT_KIND_CALL_ENDED` has been delivered. */
     @Volatile
     var ended: Boolean = false
+        private set
+
+    /**
+     * What the call's media cost in the end: the record
+     * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries, kept from the moment it
+     * arrives -- right after `SIPRAL_EVENT_KIND_CALL_ENDED` -- and null before
+     * that or for a call whose media never started. [SipralMedia.statistics]
+     * answers with it too once the stream is gone.
+     */
+    @Volatile
+    var finalStatistics: SipralStreamStats? = null
         private set
 
     // Guards every read-then-act on [media] that [close] and [deliver] each
@@ -172,6 +184,11 @@ class SipralCall internal constructor(
         }
         if (event.kind == SipralEventKind.CALL_ENDED.value.toLong()) {
             ended = true
+        }
+        val record = if (event.kind == SipralEventKind.MEDIA_STATISTICS.value.toLong()) event.payload.media.statistics else null
+        if (record != null) {
+            finalStatistics = record
+            media?.endedWith(record)
         }
         eventsFlow.tryEmit(event)
     }
