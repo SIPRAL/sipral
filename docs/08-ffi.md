@@ -3268,11 +3268,16 @@ and a direction and do for one call what the stack-wide five do for all of
 them, on top of them, in the engine's mix: the input direction is what the
 microphone sends that call alone, the output how loud that call is in the
 loudspeaker beside the others, and the meter reads each after its own gain
-and mute. For a conference or two calls at once: mute the call being spoken
-about, turn one down. They exist from the moment a call's media starts to the
-moment it ends, a hold or a move into a local conference and back keeping
-them, and are `SIPRAL_STATUS_WRONG_STATE` outside that and in application
-mode, where the frames are the application's to scale.
+and mute. For two calls at once: mute the call being spoken about, turn one
+down. They exist from the moment a call's media starts to the moment it
+ends, a hold or a move into a local conference and back keeping them, and
+are `SIPRAL_STATUS_WRONG_STATE` outside that and in application mode, where
+the frames are the application's to scale. While a call is a member of a
+local conference the engine carries the conference in its place, so its own
+controls are kept but act on nothing until it leaves — a muted call that
+joins one is heard, and hears this end, like every member; inside a
+conference, `sipral_local_conference_set_muted` and `_set_gain` are the
+controls that act.
 
 **Settings read back** (`sipral_stack_settings_t`, after
 `datagram_without_stream_bytes`): `srtp_suite_count`, with

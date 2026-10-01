@@ -7999,7 +7999,12 @@ public enum Sipral {
     /// what the microphone sends that call alone, the output how loud that
     /// call is in the loudspeaker beside the others (ABI 0.35). Applied in
     /// the engine's mix from the next frame; kept while the call is held or
-    /// moved into a conference and back, and gone when it ends.
+    /// moved into a conference and back, and gone when it ends. While the
+    /// call is a member of a local conference the engine carries the
+    /// conference in its place, so the call's own controls are kept but act
+    /// on nothing, its meter included, until it leaves: there the
+    /// conference's own member controls (`sipral_local_conference_set_muted`
+    /// and `_set_gain`) are the ones that act.
     /// `SIPRAL_STATUS_WRONG_STATE` for a call whose media the engine is not
     /// carrying — before its media starts, after it ends, or in application
     /// mode, where the frames are the application's own.
@@ -8030,7 +8035,9 @@ public enum Sipral {
     /// Mute one call in one direction, or unmute it (ABI 0.35): the far end
     /// of that call alone hears silence, or that call alone is silent in the
     /// loudspeaker, while every other call goes on — the other half of a
-    /// consultation, a conference member being spoken about. A muted
+    /// consultation. Not a member of a local conference: a muted call that
+    /// joins one is heard, and hears this end, as every member is, until it
+    /// leaves (see `sipral_audio_call_set_gain`). A muted
     /// direction still runs and sends silence. Kept and dropped as
     /// `sipral_audio_call_set_gain` is, and refused the same way.
     ///
