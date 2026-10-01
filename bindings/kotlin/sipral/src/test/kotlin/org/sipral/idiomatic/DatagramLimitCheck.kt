@@ -38,10 +38,17 @@ import org.sipral.SipralSrtp
 import org.sipral.SipralStatus
 import org.sipral.SipralTransportError
 
-private fun header(name: String, message: String): String? =
-    message.split("\r\n")
-        .firstOrNull { it.lowercase().startsWith(name.lowercase() + ":") }
+/** RFC 3261 §7.3.3's compact names for the fields this PBX reads: a request
+ * over the line is written compact before it is weighed against it, and a
+ * server reads either form. */
+private val compactNames = mapOf("via" to "v", "from" to "f", "to" to "t", "call-id" to "i", "content-length" to "l")
+
+private fun header(name: String, message: String): String? {
+    val names = setOf(name.lowercase(), compactNames[name.lowercase()] ?: name.lowercase())
+    return message.split("\r\n")
+        .firstOrNull { it.contains(':') && it.substringBefore(':').trim().lowercase() in names }
         ?.substringAfter(':')?.trim()
+}
 
 private fun response(request: String, status: String, extra: String = ""): ByteArray {
     val lines = mutableListOf("SIP/2.0 $status")
@@ -253,7 +260,10 @@ private suspend fun aPbxOnUdpAloneTakesTheRequestOverUdpUpToTheClientsLimit(): S
             val (invite, bytes) = pbx.answeredOverUdp.single()
             assertNotNull(header("Authorization", invite))
             assertTrue(bytes > 1300, "$bytes")
-            assertTrue(client.diagnosticsJson().contains("transport.kept.datagram"))
+            val diagnostics = client.diagnosticsJson()
+            assertTrue(diagnostics.contains("transport.kept.datagram"))
+            // written compact first, and still over the line
+            assertTrue(diagnostics.contains("transport.compacted.size"))
         }
     }
     for ((options, what) in listOf(

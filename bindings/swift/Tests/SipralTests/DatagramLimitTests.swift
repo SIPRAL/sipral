@@ -119,13 +119,30 @@ final class ChallengingPbx: @unchecked Sendable {
     static func response(_ request: String, _ status: String, _ extra: String = "") -> String {
         var lines = ["SIP/2.0 \(status)"]
         for name in ["Via", "From", "To", "Call-ID", "CSeq"] {
-            var value = FakeRegistrar.header(name, request) ?? ""
+            var value = field(name, request) ?? ""
             if name == "To", !value.contains(";tag=") {
                 value += ";tag=pbx"
             }
             lines.append("\(name): \(value)")
         }
         return lines.joined(separator: "\r\n") + "\r\n" + extra + "Content-Length: 0\r\n\r\n"
+    }
+
+    /// RFC 3261 §7.3.3's compact names for the fields a response repeats: a
+    /// request over the line is written compact before it is weighed against
+    /// it, and a server reads either form.
+    private static let compact = ["via": "v", "from": "f", "to": "t", "call-id": "i"]
+
+    /// A field's value under its full name or its compact one.
+    static func field(_ name: String, _ message: String) -> String? {
+        let names: Set = [name.lowercased(), compact[name.lowercased()] ?? name.lowercased()]
+        for line in message.components(separatedBy: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            if names.contains(line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()) {
+                return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
     }
 }
 
@@ -238,7 +255,10 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(answered.count, 1)
         XCTAssertNotNil(FakeRegistrar.header("Authorization", answered.first?.message ?? ""))
         XCTAssertGreaterThan(answered.first?.bytes ?? 0, 1300)
-        XCTAssertTrue(try stack.diagnosticsJson().contains("transport.kept.datagram"))
+        let diagnostics = try stack.diagnosticsJson()
+        XCTAssertTrue(diagnostics.contains("transport.kept.datagram"))
+        // written compact first, and still over the line
+        XCTAssertTrue(diagnostics.contains("transport.compacted.size"))
     }
 
     func testALimitPastOneDatagramAndAPathUnderTheIpv4FloorAreRefused() {

@@ -37,10 +37,18 @@ from sipral.enums import AudioMode, CallEndReason, EventKind, Status, TransportE
 _NONCE_BYTES = 700
 
 
+#: RFC 3261 Section 7.3.3's compact names for the fields this PBX reads: a
+#: request over the line is written compact before it is weighed against it,
+#: and a server reads either form.
+_COMPACT = {"via": "v", "from": "f", "to": "t", "call-id": "i", "content-length": "l"}
+
+
 def _header(name: str, message: str) -> str | None:
+    names = {name.lower(), _COMPACT.get(name.lower(), name.lower())}
     for line in message.split("\r\n"):
-        if line.lower().startswith(f"{name.lower()}:"):
-            return line.split(":", 1)[1].strip()
+        field, colon, value = line.partition(":")
+        if colon and field.strip().lower() in names:
+            return value.strip()
     return None
 
 
@@ -251,7 +259,10 @@ class ACallWhoseAnswerOutgrewTheDatagram(unittest.IsolatedAsyncioTestCase):
         [(invite, size)] = pbx.answered_over_udp
         self.assertIsNotNone(_header("Authorization", invite))
         self.assertGreater(size, 1300)
-        self.assertIn("transport.kept.datagram", stack.diagnostics_json())
+        diagnostics = stack.diagnostics_json()
+        self.assertIn("transport.kept.datagram", diagnostics)
+        # written compact first, and still over the line
+        self.assertIn("transport.compacted.size", diagnostics)
 
     def test_a_limit_past_one_datagram_and_a_path_under_the_ipv4_floor_are_refused(self) -> None:
         with self.assertRaises(SipralError) as past:

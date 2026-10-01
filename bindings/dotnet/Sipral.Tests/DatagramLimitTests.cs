@@ -31,10 +31,24 @@ public sealed class DatagramLimitTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(8);
 
-    private static string? Header(string name, string message) =>
-        message.Split("\r\n")
-            .FirstOrDefault(line => line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
-            ?.Split(':', 2)[1].Trim();
+    /// <summary>RFC 3261 §7.3.3's compact names for the fields this PBX
+    /// reads: a request over the line is written compact before it is
+    /// weighed against it, and a server reads either form.</summary>
+    private static readonly Dictionary<string, string> Compact = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Via"] = "v", ["From"] = "f", ["To"] = "t", ["Call-ID"] = "i", ["Content-Length"] = "l",
+    };
+
+    private static string? Header(string name, string message)
+    {
+        var compact = Compact.GetValueOrDefault(name, name);
+        return message.Split("\r\n")
+            .Select(line => line.Split(':', 2))
+            .FirstOrDefault(field => field.Length == 2
+                && (field[0].Trim().Equals(name, StringComparison.OrdinalIgnoreCase)
+                    || field[0].Trim().Equals(compact, StringComparison.OrdinalIgnoreCase)))
+            ?[1].Trim();
+    }
 
     private static byte[] Response(string request, string status, string extra = "")
     {
@@ -296,7 +310,10 @@ public sealed class DatagramLimitTests
         var (invite, bytes) = Assert.Single(pbx.AnsweredOverUdp());
         Assert.NotNull(Header("Authorization", invite));
         Assert.True(bytes > 1300, $"{bytes}");
-        Assert.Contains("transport.kept.datagram", stack.DiagnosticsJson());
+        var diagnostics = stack.DiagnosticsJson();
+        Assert.Contains("transport.kept.datagram", diagnostics);
+        // written compact first, and still over the line
+        Assert.Contains("transport.compacted.size", diagnostics);
     }
 
     [Fact]
