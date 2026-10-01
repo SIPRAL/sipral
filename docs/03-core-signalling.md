@@ -107,9 +107,10 @@ connection is retired, and `receive` returns the error.
 ### Serialization
 
 Deterministic byte-for-byte output, so tests can compare against fixtures.
-Compact header forms are accepted on receive and never written on send. A
-request near the MTU is moved to a stream transport instead (§2 below), not
-shortened.
+Compact header forms are accepted on receive, and written on send only for
+a request bound for a datagram that is over the line §2 below draws (or for
+every datagram, when the deployment asks): what is still over after that is
+moved to a stream transport, in full.
 
 ### The things that are always got wrong
 
