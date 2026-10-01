@@ -29,26 +29,32 @@ cargo run -p sipral-abi-gen -- --check # say whether they are current
 | `c/abi-sizes.txt` | Each sized struct's pinned member, and on each of the three layouts the length it pins and the length the struct is now |
 | `c/abi-layout.c` | Every length, offset and pin on the three layouts, as assertions a C compiler checks against the header for six targets |
 
-Written by hand: `Package.swift`, `c/sipral.c`, `c/smoke.c`,
-`dotnet/Sipral/Sipral.csproj`, `dotnet/Sipral/SipralInfo.cs` and the rest of
-`dotnet/Sipral/*.cs` other than `SipralAbi.cs`, `dotnet/Sipral.Tests/`,
-`dotnet/samples/`,
-`kotlin/sipral/src/main/kotlin/org/sipral/{idiomatic,telecom}/`,
-`kotlin/sipral/src/main/jni/idiomatic_media.c`, `kotlin/sipral/src/test/`,
-`kotlin/android/`, `kotlin/examples/`,
-`python/pyproject.toml`, `python/sipral/{stack,account,call,media,events,enums,errors}.py`
-(the idiomatic layer `_sipral_cffi.py` is written against), `python/tests/`,
-`python/examples/agent.py`,
-`dart/lib/src/{idiomatic,stack,account,call,media,events}.dart`, `dart/test/`,
-`jvm/` (the Maven build of the Kotlin binding for a server JVM),
-`swift/Sources/Sipral/{SipralStack,Account,Call,Media,SipralEvent,Broadcast,UDPSocket,CStrings,CallKitBridge,PushKitBridge,CallKitAdapter,PushKitAdapter}.swift`
-(the idiomatic layer `SipralAbi.swift` is written against, the same way
-the Python files above are written against `_sipral_cffi.py`),
-`swift/Tests/SipralTests/`, `swift/Sources/SipralLabAgent/`,
-`swift/Sources/SipralSampleMac/`, `react-native/` (the React Native package,
-over the Swift and Kotlin layers rather than the ABI), and the readmes.
-Everything the packages
-build from declarations rather than write themselves is generated.
+Everything else under `bindings/` is written by hand: `Package.swift`,
+`c/sipral.c` and `c/smoke.c`; every other source file of each package — the
+idiomatic layer each language's application uses, written against its
+printed file (`swift/Sources/Sipral/`, `dotnet/Sipral/`,
+`kotlin/sipral/src/main/kotlin/org/sipral/{idiomatic,telecom}/` with the JNI
+shims `idiomatic_media.c` and `audio_routes.c`, `python/sipral/`,
+`dart/lib/src/`), with its tests, samples and examples; `kotlin/android/`
+(the AAR's Gradle build, the telecom helper and the Compose sample); `jvm/`
+(the Maven build of the Kotlin binding for a server JVM, with its Java face);
+`fixtures/` (the STIR certificate chain the bindings' tests share); `react-native/`
+(the React Native package, over the Swift and Kotlin layers rather than the
+ABI); and the readmes. Everything the packages build from declarations rather
+than write themselves is generated.
+
+| Binding | Readme | Where it runs | Audio |
+|---|---|---|---|
+| C | `c/include/sipral.h` | anywhere the library builds | device or application mode |
+| Swift | [`swift/README.md`](swift/README.md) | macOS, iOS | device or application mode; CallKit and PushKit helpers |
+| Kotlin and Java | [`kotlin/README.md`](kotlin/README.md), [`jvm/README.md`](jvm/README.md) | Android (AAR), a JVM (jar for linux-x64 and linux-arm64) | device mode on Android from API level 28, application mode anywhere; a `ConnectionService` helper |
+| .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux | device or application mode |
+| Python | [`python/README.md`](python/README.md) | macOS, Windows, Linux | device or application mode |
+| Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP |
+| React Native | [`react-native/README.md`](react-native/README.md) | iOS, Android | device mode, over the Swift and Kotlin layers |
+
+Device mode is wherever the library has an audio backend: CoreAudio on macOS
+and iOS, WASAPI on Windows, AAudio on Android.
 
 `c/sipral.c` is the Swift package's one translation unit, and exists so that
 a header that will not compile is found by building the package. `c/smoke.c`

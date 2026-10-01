@@ -17,7 +17,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **A documentation site, built with mdBook from `docs/`.** `site/book.toml` and `site/src/SUMMARY.md` make the design documents a book whose pages are symlinks into the tree, so `docs/` stays the only copy of the text; `scripts/site.sh` builds it into `target/site` and fails on an mdbook error or warning, a link that names no page, file or anchor, anything loaded from another host, or an email address on a page, and `scripts/check.sh` runs it. Nothing is published.
 - **A JVM server artefact, `sipral-jvm`.** `bindings/jvm` builds the Kotlin binding with Maven for a plain JVM (Java 17 bytecode, Kotlin 2.2 metadata) with `libsipral_ffi.so` and `libsipral_jni.so` for linux-x64 and linux-arm64 inside the jar; `SipralNatives` picks the pair for `os.name` and `os.arch`, checks its ELF machine and loads it by absolute path, so nothing goes on `java.library.path`. `SipralJava` gives Java callers the idiomatic layer: overloads for Kotlin defaults, blocking calls and `CompletableFuture`s for the suspend waits, and a listener for an event flow. A Kotlin and a Java test each place a call between two stacks on loopback in one JVM against the packaged jar, under `-Xcheck:jni`, and the loader's choice is tested on its own. `scripts/package/jvm.sh` builds linux-x64 in manylinux_2_28 and cross-compiles linux-arm64 in the aarch64 cross image, runs the tests again on an arm64 JVM under qemu, and writes the jar, its sources, the flattened POM and the SBOM; `--dry-run` builds only the host's own pair, without Docker. The Docker route reads every native's symbol versions and fails on one that asks for a glibc newer than 2.28. `scripts/check.sh` compiles `bindings/jvm` without Maven and runs, with the JUnit console launcher, the loader's platform and ELF tests and the Java loopback call. The group id is a placeholder property, and nothing is published.
 - **A React Native package, `bindings/react-native` (`sipral-react-native`, React Native 0.87.1, New Architecture).** A TurboModule whose codegen spec is `src/NativeSipral.ts`, a typed TypeScript API over it (`Sipral.open`, `SipralClient`, `SipralAccount`, `SipralCall`: registration, calls placed and answered, hold, blind transfer taken or asked for, DTMF, mute and manual audio activation, events on typed emitters, refusals as `SipralError` codes), and two native halves over the idiomatic layers rather than the ABI: Kotlin's `SipralClient` on Android, Swift's `SipralStack` on iOS, both in device mode. Swift's `Call.transfer(to:)` with `TransferEventData`, and Kotlin's `SipralCall.transfer` with `transferOf`, are new for it, each with a three-stack loopback test. `scripts/check.sh` runs the jest suite, the type check and codegen over the spec, both halves' logic over real stacks on loopback, the Android library through Gradle and the iOS module against React Native's headers.
-- **ABI 0.34: what the device-mode trial and the account work of wave E needed from C (`docs/08-ffi.md`, "What ABI 0.34 added").** Appended to `sipral_stack_config_t`: `srtp_suites`, `path_mtu`, `datagram_without_stream_bytes`, `pseudonym_salt`, `diagnostic_trace` (`sipral_stack_diagnostic_trace` while it runs; the path MTU and the UDP limit read back in `sipral_stack_settings_t`); to `sipral_account_config_t`: `keepalive_ms`, `server_uri` with `server_naptr`, `tls_pin_sha256`. `SIPRAL_SRTP_BEST_EFFORT`; `SIPRAL_EVENT_KIND_LOOKUP_WANTED`, `_LOCATED` and `_LOCATE_FAILED` with `sipral_account_looked_up` taking the resolver's records as text; `sipral_account_check_certificate` and `sipral_pinned_certificate_t`; `SIPRAL_STATUS_CERTIFICATE_REFUSED`, `SIPRAL_STATUS_UNREACHABLE_ADDRESS`, `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT` and `sipral_advertised_address`. Every pin and every 0.33 member's offset is where it was on all three layouts.
+- **ABI 0.34: what device mode on a real PBX and the account work needed from C (`docs/08-ffi.md`, "What ABI 0.34 added").** Appended to `sipral_stack_config_t`: `srtp_suites`, `path_mtu`, `datagram_without_stream_bytes`, `pseudonym_salt`, `diagnostic_trace` (`sipral_stack_diagnostic_trace` while it runs; the path MTU and the UDP limit read back in `sipral_stack_settings_t`); to `sipral_account_config_t`: `keepalive_ms`, `server_uri` with `server_naptr`, `tls_pin_sha256`. `SIPRAL_SRTP_BEST_EFFORT`; `SIPRAL_EVENT_KIND_LOOKUP_WANTED`, `_LOCATED` and `_LOCATE_FAILED` with `sipral_account_looked_up` taking the resolver's records as text; `sipral_account_check_certificate` and `sipral_pinned_certificate_t`; `SIPRAL_STATUS_CERTIFICATE_REFUSED`, `SIPRAL_STATUS_UNREACHABLE_ADDRESS`, `SIPRAL_REGISTRATION_FAILURE_UNREACHABLE_CONTACT` and `sipral_advertised_address`. Every pin and every 0.33 member's offset is where it was on all three layouts.
 - **ABI 0.34 in every layer: Swift, Kotlin, .NET, Python, Dart and React Native.** A stack given no bind address listens on every interface and advertises the route toward its first account's server (`sipral_advertised_address`), each account and each call's media socket the route toward its own peer, so an application that names nothing gets audio from a PBX on the network and a loopback peer still works; the layers expose `advertisedAddress`. An account names its server by `serverUri` (with `serverNaptr`), and the layer answers `LOOKUP_WANTED` with the platform's resolver, replaceable by the application's: Apple's DNS service with SRV and NAPTR, JNDI's on a JVM, this package's own UDP SRV and NAPTR query in .NET, addresses only in Python, Dart and on Android, each documented; `LOCATED` points the account at the address found and `LOCATE_FAILED` says why. `keepaliveMs`; a TLS trust that pins one certificate by its SHA-256 fingerprint (`TlsTrust.pinned`, `TLSTrust.pinned`, `SipralTlsTrust.Pinned`) and an account's `tlsPin` with `checkCertificate`; SRTP best effort and the stack's suite list; the path MTU and UDP past the limit for a UDP-only server, with the stack's diagnostic record readable as JSON; the pseudonym salt and the diagnostic trace, at creation and while the stack runs; the new statuses, registration failure and events decoded. The React Native client takes them in `Sipral.open` and `addAccount`, raises `located` and `locateFailed`, and has `setDiagnosticTrace`. Each layer's tests run every one on loopback, against a resolver, a DNS server or a TLS registrar of their own.
 - **An account names its registrar or proxy, and RFC 3263 locates it with the application's resolver.** `Account::located`, `Account::unregistered_located` and `Account::locate`; NAPTR when asked for, SRV for the account's transport, A or AAAA, the §4.3 order kept for failover on a timeout, a lost transport or a 503, and the name looked up again when its time-to-live runs out or the recovery ladder asks for an address, in which case the ladder climbs on as soon as the answers are in.
 - **An account keeps its registrar flow open at an interval of its own** (`Account::keepalive`, 1 to 120 s) whatever STUN found; **a PBX's self-signed certificate is trusted by its SHA-256 fingerprint** (`Account::tls_pin`, `CertificatePin`); **a loopback address is never advertised to a peer on another machine** (`UaError::UnreachableAddress`, `RegistrationFailure::UnreachableContact`, `sipral::advertised_address`); **a diagnostic trace writes messages whole** with credentials and keys taken out, under **pseudonyms an installation keeps** (`Log::set_diagnostic`, `Log::from_salt`), and a TCP or TLS connection is traced a whole framed message at a time.
@@ -1447,6 +1447,1899 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **A voice-agent preset for the INVITE rate floor.** The default floor, ten INVITEs from one address at once and then one every two seconds, answered `480`, is published as `SIPRAL_INVITE_LIMIT_BURST` and `SIPRAL_INVITE_LIMIT_EVERY_MS`; `Rate::voice_agent()` and `SIPRAL_INVITE_LIMIT_VOICE_AGENT_*` (128 at once, then twenty a second) let a headless service take a trunk's rush.
 - **Swift and Kotlin carry conferences, presence, real-time text, RTCP feedback, L16 and SIPREC.** `placeCall`/`answerCall` take `text`, `feedback`, `focus` and per-call `codecs` (`L16/16000`); `Media.sendText`, `Call.text()` / `SipralCall.text`, `rtcpFeedback()`; `Account.subscribe`, `watchPresence`, `publishPresence` and `unpublishPresence` with a `Subscription` whose `conference()` reads the whole picture; `Call.setFocus`, `conferenceUri()` and `subscribeConference()`; and `Call.record(toServer:destination:)` / `SipralCall.recordTo`, which opens its own TCP connection to the recording server and sends both parties' copies from sockets of their own. The lab agents echo real-time text with `SIPRAL_TEXT=echo`.
 
+- **DTMF by SIP INFO, both ways, owned by the user agent**.
+  `UserAgent::send_dtmf_info` builds and sends the INFO in `sipral-ua` now —
+  the construction moved out of `sipral-ffi`, which used to build it by hand
+  with no transaction ownership and no report of the answer — and reports the
+  far end's final status as `UaEvent::DtmfSent`, so a 415 from a switch that
+  does not read the `Content-Type` reaches the application with the digit and
+  the code rather than vanishing — as does an INFO nobody answered, reported
+  as the 408 or 503 RFC 3261 §8.1.3.1 treats a timeout or a transport failure
+  as, and one whose challenge nothing could answer, as its 401 or 407.
+  `sipral_call_send_dtmf`'s two INFO forms
+  hand it their whole string once; its own signature is unchanged. An incoming INFO in
+  a dialog, `application/dtmf-relay` or `application/dtmf`, is read by a
+  small panic-free parser in `sipral-ua`, answered 200 when it names a digit
+  and 400 when it does not (RFC 3261 §21.4.1), and reported as the
+  same `DigitReceived` an RFC 4733 event already is — `MediaEvent` and
+  `sipral_media_event_t` both gained a `source` member saying which of the
+  two carried it, rather than a second event for the same fact. All three
+  forms — RFC 4733 sending, INFO sending, INFO receiving — share one
+  validation (`sipral_ua::dtmf`) for the sixteen keys a keypad has; both ways
+  of sending refuse a tone under 40 ms or over ten seconds identically before
+  anything is sent, and receiving holds a peer only to the ceiling; `MediaSession::dial` and `send_dtmf` gained the
+  ceiling (`MediaError::DigitTooLong`, `LONGEST_DIGIT`) and INFO the floor
+  RFC 4733 already had. Reserved event kind 27 becomes `SIPRAL_EVENT_KIND_DTMF_SENT` in
+  place, taking a `digit` member appended to `sipral_call_event_t`; nothing
+  else in the ABI moved and no minor version was bumped. A new fuzz target,
+  `dtmf_info`, exercises the incoming parser. `interop/harness` gained a
+  `DtmfInfo` flow against Asterisk's own `labuser-infodtmf` endpoint
+  (`dtmf_mode=info`), so the lab dialplan's echo now exercises this stack's
+  receiving half as well as its sending one.
+
+- **The SRTP policy is now chosen from C**. An application
+  linking `sipral.h` could not ask for SRTP at all, although the facade
+  underneath always could: `sipral_stack_config_t::srtp` sets the stack's
+  default and `sipral_call_config_t::srtp` overrides it for one call, both a
+  `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`, `SIPRAL_SRTP_OFFERED` or
+  `SIPRAL_SRTP_REQUIRED` — reaching `sipral::SrtpPolicy` through `catalog_of`
+  and `with_srtp` with the same three meanings. Zero keeps today's behaviour:
+  unspecified on the stack is this build's own default, and unspecified on a
+  call is the stack's own setting. Both members are appended at the tail of
+  their structs with the pinned oldest length left where it was, so a caller
+  built against an older header still works and gets the default. An
+  out-of-range value is refused before anything is built.
+
+- **A call event now names who is on it**. `sipral_call_event_t`
+  gained `from_uri`, `from_display`, `to_uri` and `call_id`: the `From` URI,
+  the resolved `From` display name, the `To` URI and the `Call-ID` of the
+  request that opened the call, read once and the same on every event of that
+  call afterwards, including the one that reports its end. An application no
+  longer has to parse `sipral_event_t::message` itself, or keep a table of its
+  own, to know both parties from any event. Appended at the tail of the
+  struct, which grows `sipral_event_t` with it — sixty-four bytes this
+  build — but `sipral_event_t` carries no pinned length to begin with, so a
+  caller built against an older header is unaffected.
+
+- **Early media when this stack runs the audio**. An incoming
+  call could be answered with audio (`sipral_call_answer_media`,
+  `MediaEngine::answer`) but not rung with it: `sipral_call_ring` only sent a
+  183 with whatever description the application wrote itself.
+  `sipral_call_ring_media`/`MediaEngine::ring`/`MediaEngine::ring_with` write
+  the answer from this stack's codec order and open the session on it right
+  away, so the far end hears whatever the application plays before anybody
+  answers. `sipral_call_answer_media`/`MediaEngine::answer` afterwards reuses
+  that session and description rather than negotiating a second one — the
+  same `o=` id and version — and what the 200 OK carries then follows RFC
+  3262 §5 and RFC 6337 §3.1.1 exactly, from whether the 183 went out reliably.
+  `sipral_call_ring_media` also takes `sipral_call_config_t::srtp`, closing
+  the gap the stack-wide setting left: an answered call could not override
+  the stack's SRTP
+  policy at all. Ringing with media twice is `SIPRAL_STATUS_WRONG_STATE`;
+  ringing with media after a `sipral_call_ring` that sent no description is
+  not, and after one that sent the application's own it is, since every
+  description in the responses to one INVITE has to be that same one (RFC
+  3261 §13.2.1, RFC 6337 §3.1.1). An INVITE that
+  carried no offer is not rung with media (`SIPRAL_STATUS_WRONG_STATE`,
+  nothing sent): RFC 3261 §13.2.1 and RFC 6337 §3.1.2 leave an offer from
+  this end no provisional response this stack can follow up.
+
+- **The DTLS-SRTP handshake, both roles, in a crate no call reaches yet.**
+  `sipral-dtls` gains `Connection`, the client and server state machines of
+  RFC 6347 for DTLS-SRTP, sans-I/O like the rest of the tree: the server's
+  stateless HelloVerifyRequest cookie exchange; a certificate from both ends,
+  each checked against the fingerprints the signalling carried and against
+  nothing else (RFC 5763 §5, RFC 8122 §5.1); ServerKeyExchange and
+  CertificateVerify signatures; the extended master secret and `use_srtp`
+  required in both hellos, the profile chosen by the server from the client's
+  list; Finished verified over the transcript and accepted only protected.
+  Flights go out again on RFC 6347 §4.2.4.1's timer — one second, doubled,
+  capped at sixty, six attempts — and a peer's retransmitted flight is answered
+  with the last flight rather than processed a second time. A failure sends one
+  fatal alert saying why; `close_notify` is answered; renegotiation is refused
+  with `no_renegotiation`. The SRTP keys, arranged per direction in the shape
+  `sipral-rtp` takes them, and any application data come out only after the
+  peer's Finished is verified. `setup::dtls_role` maps `a=setup` to the role.
+  Two findings from reading that foundation back against RFC 6347 go with it:
+  a hello's extensions
+  were checked for a duplicate by searching the list once per extension, a
+  hundred million comparisons for one 64 KiB block, and are now sorted once;
+  and reassembly kept the first of two fragments that disagree, so one forged
+  fragment ahead of a genuine message locked that message out for good, where
+  now the later one replaces what was held (`Offered::Replaced`), and a message
+  short of room takes it from messages held further ahead, so two forged
+  fragments numbered past the flight cannot fill the budget instead. Two fuzz
+  targets, `dtls_record` and `dtls_handshake`, seeded from a real handshake.
+  The join to a call — the SDP lines, RFC 7983 demultiplexing, `MediaSession`
+  — is the next part.
+
+- **Header fields in and out through the C ABI, and a field the stack writes
+  refused rather than written twice.** `sipral_header_t` is a name and a value;
+  `headers`/`headers_len` sit at the tail of `sipral_call_config_t` for the
+  INVITE and of `sipral_account_config_t` for every REGISTER;
+  `sipral_call_set_headers` (`UserAgent::respond_with_headers` in Rust) sets the
+  fields for the 180/183, 200, refusal, BYE and re-INVITE a call sends at the
+  application's request, kept until replaced and never on a CANCEL or on what
+  the stack sends by itself; and `sipral_message_header_count` and
+  `sipral_message_header`, with their `_element` pair, count and reach a field
+  in any message by line or by list value, compact names included, as an offset
+  into the caller's bytes. A
+  field the stack writes itself (`Via`, `Call-ID`, `Contact`, `Route`,
+  `Content-Length` and the rest in `docs/04-ua.md`) is refused on every path, C
+  and Rust (`UaError::Header`, and `BuildError::OwnedField` from the core, which
+  until now wrote a caller's `Contact` beside its own); so are a value holding a
+  line break and a name that is not a token, which the core used to drop without
+  a word. `Endpoint::bye_with` sends a BYE of the caller's own. The ABI minor
+  moves once, with the rest of this block of surface work.
+
+- **An account can have no registrar.** A trunk that knows this end by its
+  address could not be configured: `sipral_account_add` refused an empty
+  `registrar`, and `Account` had no way to say there was none.
+  `Account::unregistered(aor, contact, transport, outbound_proxy)` makes one,
+  and so does a `registrar_len` of zero in C, where `registrar_address` becomes
+  the outbound proxy its requests go to. Its state is `NotRegistering`
+  (`SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, 10) for as long as it exists;
+  registering it is refused with nothing sent (`UaError::NoRegistrar`,
+  `SIPRAL_STATUS_INVALID_ARGUMENT`); no refresh, back-off, recovery rung or push
+  pre-warm touches it; and a registration snapshot offered to it is refused
+  (`SnapshotError::NotRegistering`). `Account::registrar` now answers
+  `Option<&Uri>`.
+
+- **The 200 OK to REGISTER is kept, and what a registrar says in it is used.**
+  `UaEvent::Registered` gains `response`, the 2xx whole, and `info`, a
+  `RegistrarInfo` with the service route, the GRUUs and the associated
+  identities; `UserAgent::registrar_info` reads the same while the binding
+  stands, and the C event for a registration that went live carries the 2xx in
+  `message` as a refusal always has. The Service-Route (RFC 3608) is preloaded
+  on the INVITEs and SUBSCRIBEs an account starts towards its registrar and
+  never on the REGISTER; an account with an instance identifier asks for GRUUs
+  with `Supported: gruu` and uses the one RFC 5627 §4.4 names as the `Contact`
+  of what opens a dialog; P-Associated-URI (RFC 7315) is reported. Every value
+  is parsed strictly and bounded, and one that is not is left out and written
+  into the REGISTER's diagnostic record under three new codes.
+
+- **ICE in the full role, written and not yet reached from a call.**
+  `sipral_nat::ice::IceAgent` gathers host, server-reflexive and relayed
+  candidates, forms and paces checklists, resolves role conflicts, nominates,
+  restarts, and keeps consent on the pair it selects (RFC 8445, RFC 7675), in
+  the sans-I/O shape of the STUN and TURN clients. No trickle, deliberately, and
+  RTP and RTCP multiplexed. The SDP side gains `a=ice-pacing`, `a=ice-mismatch`
+  and a mismatch check that reads `a=rtcp`; the lite agent now authenticates a
+  check through the same code as the full one. Tested over a simulated network
+  with the NAT behaviours that decide which pair works, role conflicts from
+  both starting roles, a restart, consent lost and revoked, and a lossy path;
+  `docs/06-nat.md` says what it does and what it does not do yet.
+
+- **Kotlin can build a stack and hear its events.** The generated binding took
+  every struct a caller fills in — `sipral_stack_config_t`,
+  `sipral_account_config_t`, `sipral_call_config_t` — as a `Long` holding its
+  address, which nothing on the JVM can produce, and had no way to be called
+  back. Each of those structs is now a Kotlin class the JNI shim copies into a
+  zeroed C struct with its size set, and the event callback is a
+  `SipralEventListener`: the listener stays on the Kotlin side under a key, and
+  the C function the shim prints for the callback to land in attaches the
+  polling thread only when it is not attached, detaches only what it attached,
+  and deletes the array it made for each event before the next one arrives.
+  `SipralNative` calls `sipral_abi_check` as it loads and throws naming both
+  versions. `scripts/check.sh` now links the shim against the shared library
+  and runs `BindingCheck.kt` on a JVM under `-Xcheck:jni`, including a poll
+  from a thread no JVM made. The event payload union is not carried yet:
+  nothing in the declarations says which kind writes which arm. A
+  `stackCreate` that throws instead of answering lets its listener go too.
+
+- **The foundation of DTLS-SRTP, in a new crate nothing calls yet.**
+  `sipral-dtls` is DTLS 1.2 written from RFC 6347 and RFC 5246 over
+  RustCrypto's P-256, AES-GCM, SHA-256 and HMAC: the PRF, the master secret
+  and RFC 7627's extended master secret, the RFC 5705 exporter and RFC 5764's
+  SRTP key layout, the record layer with AES-128-GCM and the anti-replay
+  window, fragmentation and bounded reassembly, every message and extension of
+  an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake with its cookie, and a
+  self-signed certificate with its fingerprint. The state machines come next;
+  the exporter already refuses a session without the extended master secret,
+  as RFC 7627 §5.4 requires.
+
+- **Nine more fuzz targets, and the gate builds all thirteen.**
+  `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
+  `srtp_unprotect`, `stun` and `turn` join the four that existed, one per door
+  an attacker's bytes come through that the first four never reached: the
+  `a=crypto` policy reader that decodes key material, the recording format a
+  person hand-edits, the dialog-info body a SUBSCRIBE gets back, the control
+  channel a voice agent connects on, RTCP and its typed accessors, the RFC
+  4733 event receiver, SRTP and SRTCP unprotect ahead of the authentication
+  check, the STUN parser that shares a port with media, and TURN's framer and
+  ChannelData both ways they arrive. `srtp_unprotect` drives a run of
+  length-prefixed datagrams through one unprotector per suite rather than one
+  packet through a fresh one, because the replay window and the rollover
+  estimate are the only state an unprotector keeps between packets and a
+  fresh one reaches neither. `scripts/check.sh` now runs `cargo fmt
+  --check`, `cargo clippy -D warnings` and `cargo fuzz build` over all
+  thirteen under the nightly `fuzz/` pins, so a target cannot rot uncompiled
+  or unformatted between releases — `cargo test --workspace`, `cargo fmt
+  --all` and the workspace clippy run all stop at the edge of `fuzz/`, which
+  is a workspace of its own, and four of the targets had already drifted out
+  from under all three. Where the binaries landed is cargo's answer now
+  rather than a hard-coded `fuzz/target`, which was the wrong directory on
+  any machine that sets `CARGO_TARGET_DIR`. The step says `skip` and names
+  what is missing when `cargo-fuzz` or that nightly is not installed, which
+  is the one place in this gate a skip is allowed.
+
+- **The fuzz seed corpus is committed, and says where it came from.**
+  `fuzz/corpus/<target>/` holds 37 seeds, 10 KB in all, so a clone gets
+  thirteen targets with something to start from rather than thirteen runs
+  beginning at the empty input. `tools/fuzz-seeds` writes them out of the
+  library's own builders and encoders — `RequestBuilder`, `CompoundBuilder`,
+  `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector` — and
+  puts each one through the reader its target puts it through before writing
+  it, so a seed that is not what it claims to be fails the generator rather
+  than sitting in the corpus doing nothing: the framer seeds through the
+  framer, the control-channel seeds through the frame decoder, the protected
+  runs through an unprotector holding the target's own key, which is also
+  what says the three that authenticate and the one that is refused as a
+  replay really do. Twelve of the thirteen families go through that; the
+  thirteenth is `builder`, whose input is not a message but the five field
+  values its target cuts it into, so what is checked there is the cut. The
+  one seed that is not written at all is a copy of
+  `fixtures/replay/registration-challenged.sipralrec`, which is this
+  project's own. The generator owns the directory besides writing it: what it
+  does not write, it removes, so a seed dropped from the generator cannot sit
+  in the tree for good behind a check that only counts directories. Nothing
+  here is a capture of anybody's traffic, addresses are RFC 5737's and names
+  are RFC 2606's, and `fuzz/corpus/README.md` says so. `scripts/check.sh`
+  holds the directory to it twice over — its shape, every subdirectory a
+  target `fuzz/Cargo.toml` declares, every target one, the README tracked and
+  the whole of it under 200 KB; and its content, every byte of every seed
+  read for an address somebody could harvest, a forbidden project's name, an
+  assistant trace and Romanian, which are the four things the rest of the
+  tree is read for and which no scan had ever read here. `scripts/fuzz.sh`
+  now writes what a run finds into a scratch corpus under `fuzz/target/`, so
+  a run does not push a thousand mutations in beside the seeds.
+
+- **`tools/abi-gen` has tests, and a pass that reads the names back after it
+  derives them.** The tool that prints the header and three bindings had none.
+  It now has golden files for a small synthetic surface, one per file the
+  generator writes — five of them, since the Kotlin back end prints the
+  binding and the JNI shim beside it — so a change to an emitter shows up as
+  a diff in `tools/abi-gen/golden/` rather than buried in three thousand
+  lines of `bindings/`; and it has a pass that
+  claims every identifier each back end will print, in the scope it will sit
+  in, refusing two declarations that derive one name and naming both. The same
+  pass carries a reserved-word list per language. C#, Kotlin and Swift can be
+  made to take one of their own keywords — `@event`, backticks — and the back
+  ends do; C cannot, and the header is a C++ header too, so a member called
+  `class` or `switch` stops the generator instead of reaching a consumer. A
+  test asserts the real surface passes all four, so the day a declaration is
+  added with a colliding or a reserved name, `cargo test` says so. The
+  callback goes through the same walk: it is the one signature that is not an
+  entry point, it is printed into the header as a function pointer and into
+  the .NET binding as a delegate, and its parameters were the last names in
+  the surface that nothing read back. Every refusal now names the declaration
+  as well as the identifier, in all four languages rather than in the one
+  that happened to report a qualified name. And how wide the golden surface
+  is stopped being a claim: a test counts the shapes of the real surface
+  against the synthetic one and fails naming each one the golden files do not
+  reach, which was twenty of them — the union, the records with no size
+  member, a pointer to a record, the callback in a field, samples going both
+  ways, a struct crossing in both directions at once, and three of the four
+  shapes a documentation link has.
+
+- **`Screen::on_replaces`: the application has the last word on a takeover.**
+  A matched `Replaces` is honoured only when the INVITE carrying it arrived
+  from the same place the named call's own signalling does, which is right as
+  a default and wrong as an absolute — a legitimate attended transfer whose
+  transferee reaches this end directly rather than through the line's proxy is
+  refused by it, and that is a deployment rather than a corner case. The rule
+  is now a defaulted hook on the screening policy: `on_replaces` is handed the
+  INVITE and a `Replacing`, which says which of this end's calls would be hung
+  up and whether it arrived on that call's own flow, and its default body is
+  `Replacing::strict` — the rule as it stands and nothing else. So an agent
+  with no policy, and a policy that implements only `on_invite`, including
+  every closure, behaves exactly as before. An override can widen the rule for
+  the case it recognises and hand the rest back to `Replacing::strict`, and it
+  can tighten it: refusing one that *did* arrive on the call's own flow is a
+  decision it returns. What it cannot do is see a `Replaces` that matches
+  nothing, which is 481 before the hook is reached, or overrule §3 on the
+  state of the matched call afterwards. `Incoming` gains `referred_by`, the
+  field RFC 3892 §2.2 has a transferee copy from the REFER that asked for the
+  transfer, with its rustdoc saying what it is for: it and `From` are plain
+  fields on the INVITE being judged, so they are context for recognising a
+  transfer that was expected and never authority. The C ABI gains nothing
+  here: the screening policy does not cross it yet.
+
+- **Opus is a compile-time feature, and it is on.** `sipral-media` takes
+  libopus as an optional dependency behind `opus`, `sipral` and `sipral-ffi`
+  carry the feature up, and the default is on so that nothing changes for
+  anybody who does not choose. A build with it off offers G.722 and the two
+  G.711 laws and does nothing else differently: `Codec::ALL` is three long, a
+  codec order naming `opus` is refused where it is set exactly as one naming
+  G.729 is, and a negotiation with nothing in common fails on the ordinary
+  path. The C ABI gains `SIPRAL_FEATURE_OPUS`, bit 6 of
+  `sipral_capabilities_t`'s `features`, clear in such a build, while
+  `SIPRAL_CODEC_OPUS` stays 4 in every build: a number that has left the
+  header is spent for good. Every C-side answer about the codec — that bit,
+  the name `sipral_codec_name` gives 4, the number `named_codec` puts on a
+  stream — is read from the catalogue the facade hands down and never from a
+  `cfg` in `sipral-ffi`, because a Cargo feature belongs to the crate that
+  declares it and features are additive: `sipral-ffi` with its own `opus` off
+  over a `sipral` built with it is a configuration anybody can compile, and
+  the ABI has to be right in it. `sipral::Capabilities` gains `opus` and
+  `sipral::Codec` gains `is_opus` and `sipral::MediaError` gains `is_codec`,
+  so the Rust layer answers both questions directly too — and `is_codec` is
+  the hinge the C side turns on before either of its tables. The ABI minor goes to 0.7, because the printed surface gained
+  a constant and `sipral_abi_check` compares the minor and nothing else while
+  the major is 0 — a header that grew without the bump is one no load-time
+  check can tell from the one before it. What raises which of the three
+  numbers is now written where the ABI is documented, in `docs/08-ffi.md`'s
+  Versioning section, with the constant's own rustdoc pointing at it:
+  everything the generator prints raises the minor, and not only a function
+  or a struct member, which is a project rule rather than something about
+  codecs. The reason for all of it is licensing and not size —
+  `docs/05-media.md` sets out the licensing position in full, and notes that
+  a build without the feature needs no cmake and no C++ toolchain because
+  nothing compiles libopus from source, and `docs/10-roadmap.md` now carries
+  the half of that decision the packaging owns, so that the pointer lands on
+  something: a precompiled artefact is built without the feature, or
+  published as two variants labelled clearly enough that nobody ships the
+  wrong one without noticing. The `sipral` crate, which is the one that
+  publishes, documents the feature in its own rustdoc — what disappears with
+  it off, and why — and asks docs.rs for all features, because a published
+  crate whose feature removes items from its public API has to say so where
+  the API is read. And `scripts/check.sh` now builds, tests and lints both
+  configurations, tests the mixed one, and asserts that libopus is out of the
+  dependency graph of `sipral` **and** of `sipral-ffi` — the C library
+  reaches the codec down an edge of its own, and two
+  graphs that agree today can be made to disagree by one edit. That assertion
+  captures the tree into a variable first and counts a cargo that did not run
+  as a failure: written as a negated pipeline, as it first was, a renamed
+  package or an unparseable manifest would have made it print ok having read
+  nothing.
+
+- **There is a C library now, and a C program in the gate that links it.**
+  `crates/sipral-ffi` declares `crate-type = ["rlib", "cdylib", "staticlib"]`,
+  so a release build produces `libsipral_ffi.dylib` and `libsipral_ffi.a`
+  beside the rlib the tests and the generator use. Until now the 98 KB header
+  described a library nobody could open. `scripts/check.sh` gains the step
+  that reads the symbols back out: every entry point `abi.rs` lists is in the
+  shared library and in the archive, there are exactly as many exported
+  `sipral_` symbols as `SURFACE` has entry points, and nothing else leaves
+  unmangled. It reads them with `nm-classic` rather than `nm`, because Apple's
+  `nm` is an LLVM 14 tool and refuses the newer bitcode a `lto = "thin"`
+  archive carries; it reads the list once and fails when it is empty, because
+  an `nm` that resolves and errors prints nothing and every question asked of
+  no symbols answers ok. What the archive exports beside the ABI is the other
+  690 unmangled C names its dependencies' objects carry — libopus,
+  compiler-rt, the LTO symbols — which is not a defect and is now a paragraph
+  under "What it does not catch" in `docs/08-ffi.md`, because a consumer that
+  static-links has to know before it links.
+
+  And a consumer: `bindings/c/smoke.c`, compiled with `-std=c11 -Wall -Wextra
+  -Werror`, linked against the shared library and **run** by the gate. It
+  checks the ABI version, builds a stack with a callback and a user pointer of
+  its own and proves the pointer arrives, adds an account, places one call and
+  has another refused with a status and the sentence that names what was
+  wrong with it and no handle, retires the transport with
+  `sipral_stack_transport_failed` and has a third call — well formed, over a
+  stack with nowhere to write — come back `SIPRAL_STATUS_NOT_SENT`, polls
+  once, and destroys the stack from inside its own event callback, once, on
+  the first event. That last is the one re-entrant call, which
+  `docs/08-ffi.md` now states in its rules list rather than leaving to the
+  header, and the one nothing proved from C. It also asks the library the
+  length of all fourteen structs that carry their own size and compares each
+  with C's `sizeof`, through a new entry point, `sipral_abi_struct_size`, which
+  answers for any struct of the ABI by the name the header gives it — and
+  asks a second one, `sipral_abi_versioned_count`, how many such structs
+  there are, so that the list of fourteen names in `smoke.c` is compared
+  against the library's own count and a fifteenth cannot arrive unasked
+  about. The ABI minor goes to 0.8 and the four printed files were printed
+  again. The rule that turns `SipralStackConfig` into
+  `sipral_stack_config` moved out of `tools/abi-gen` and into
+  `crates/sipral-ffi/src/abi.rs`, where the declarations are, because the
+  library now answers questions about the C names too and a derivation written
+  twice can disagree with itself; `abi::Record` carries the size the compiler
+  settled on, beside the members it was built from.
+
+- **The gate sees three things nothing compiled.** `RUSTDOCFLAGS="-D
+  warnings" cargo doc --workspace --no-deps --all-features` runs in it, so a
+  documentation comment is source that has to compile clean, and
+  `--all-features` because otherwise the 579 lines of `sipral-ua`'s reference
+  loop, which are behind one, are read by no rustdoc at all. Then
+  `cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc
+  --all-targets -- -D warnings` and, beside it, the same target under
+  `cargo doc`: together they are the only thing in the tree that reads the
+  four modules behind `cfg(target_os = "windows")` — 3221 of that crate's
+  7782 lines, two fifths of it, and compiled by nobody on the machine the
+  gate runs on — and the doc run is what keeps its four links into those
+  types honest. And `cargo clippy -p sipral-io-coreaudio --target
+  aarch64-apple-ios`, for the three bodies in that crate no installed target
+  compiled either. All of them fail rather than skip when the toolchain or
+  the target is missing, and so does `gitleaks` from now on: a gate that goes
+  green without the scanner has not looked.
+
+- INVITEs refused because the table of watched sources was full are counted
+  apart from those refused for calling too fast (`Refusals::by_crowding`).
+  Both are one 480 from the far end and two different things to do about it:
+  one source over its allowance is a limit set too tight, many addresses at
+  once is a flood that wants a firewall.
+
+- **One declaration of the ABI, with the header and three bindings printed from
+  it** (B7). The failure this exists for is a C seam declared in three places
+  that must agree: add a function, forget one of them, and the build succeeds
+  and the field fails, on one platform. The declarations now record themselves
+  — the same macros that emit the Rust item emit a descriptor beside it, doc
+  comments included — and `tools/abi-gen` prints the C header, the Swift, the
+  Kotlin with its JNI shim, and the C#. No Rust source is parsed anywhere.
+  `scripts/check.sh` regenerates and compares, so a binding that fell behind is
+  a failed gate rather than a surprise.
+
+  What the gate cannot do is stated with it, because a gate believed to catch
+  more than it does is worse than a smaller one: **nothing compiles the
+  generated Swift, Kotlin or C#**, there being no toolchains in the gate, and
+  the JNI shim in particular has never been compiled. The descriptor records
+  the spelling rather than the layout, so a wrong `usize`-to-`size_t` rule
+  would be wrong in all five outputs at once and compare clean.
+
+  It also closed a coupling of exactly the shape B7 describes, inside the
+  workspace itself: `UaEvent::IncomingCall` was destructured field by field
+  in the FFI, so adding a field to it broke the build, and a feature in
+  progress had already had to be redesigned around that.
+
+- **SRTP is reachable from a call** (SDES, RFC 4568). It was written in full,
+  proved against RFC 3711's own test vectors, and joined to nothing: no offer
+  named `RTP/SAVP`, no answer was read for keys, and no session was ever opened
+  protected. `Capabilities` said `srtp: true` regardless, which is the D8
+  failure exactly — a capability that cannot drift from the build is the whole
+  point of deriving it, and this one was a constant.
+
+  Offering is off by default and on per call, because the key travels in the
+  body (§7) and this layer cannot tell whether the signalling protects it.
+  **Answering is on by default**, which is a different decision made
+  differently: the peer has already asked for encryption, and refusing there
+  turns a call that would have worked into a silent one. "Offer" and "require"
+  are two settings and they differ in one place — an offer arriving *without*
+  keys, which `Required` refuses before anything goes on the wire, because that
+  is the only place a downgrade would be invisible.
+
+  Proved on the bytes rather than on the SDP: the same call is placed twice
+  from the same seeds, and the protected datagram is ten octets longer, shares
+  its first twelve with the plain one, and does not contain the plaintext
+  payload anywhere in it.
+
+  DTLS-SRTP is reported absent rather than pretended: there is no handshake in
+  this tree, and `Capabilities` now lists which keying a call can actually
+  reach instead of answering a bare yes.
+
+- **A session can be recorded and replayed deterministically** (D2). The
+  hardest failures happen on one PBX, on one carrier, behind one NAT, and do
+  not reproduce in a lab; they are fixed today by reasoning about a capture,
+  shipping a guess and waiting. A recording holds the inbound messages, their
+  timing and the seed the run was drawn from, and a replay feeds them back — so
+  the bytes out, the events and the whole diagnostic record come back identical,
+  which is asserted rather than claimed. The sans-I/O core is what makes this
+  nearly free: everything enters through one shape and time was already a
+  parameter.
+
+  **It never contains audio, and that is structural rather than careful.** The
+  format has no binary spelling at all — no escape for an arbitrary byte, no
+  base64, no length prefix — and the only constructor for a payload validates
+  against that alphabet. The honest cost is stated with it: a message with a
+  binary body cannot be recorded either, and the recorder spoils the whole
+  recording rather than dropping the body, because a recording holds every byte
+  the stack was fed or it does not exist.
+
+  One limit is worth knowing before relying on it: what the application does on
+  its own — register, place a call, answer — arrives from nowhere, so it cannot
+  be captured. A recording names those moments instead, and a replay hands the
+  names back at the same offsets. There is a test showing that a replay which
+  ignores them drives a stack that sends nothing.
+
+- **The engine says why the codecs that lost, lost** (D5), and **a call carries
+  its own catalogue** (D6, A2). "PCMU was chosen" is a fact; "Opus was offered
+  and the answer never named it, G.722 was offered and the far end's own order
+  put PCMU first" is a diagnosis, and it is what makes a wrong configuration
+  visible instead of inferred from a capture. Every codec the call's catalogue
+  could have offered now carries exactly one outcome, worked out at the moment
+  the plan is settled rather than reconstructed afterwards — a reconstruction
+  can be wrong in precisely the case somebody is debugging.
+
+  The catalogue, the media configuration and the device are properties of a
+  call now, not of the process. Two calls up is not hypothetical in a stack
+  that has attended transfer, and every global mutable value in an engine is a
+  race waiting for the second call. The process-wide default stays, because one
+  codec order per site is the ordinary case; what is new is that a call can be
+  placed with its own and keep it.
+
+  Two things were checked before being built and turned out to need nothing:
+  the transport half of D5 is already covered by the diagnostic record, and the
+  NAT half has no decision to report because nothing in the tree reaches
+  `sipral-nat` yet — which is `docs/06-nat.md`'s own admission, now confirmed
+  from the other side.
+
+- **Every call carries the story of what the stack decided** (D1). An ordered,
+  bounded record per `Call-ID`: a stable reason code, the wire event that caused
+  it with its size on the wire, a monotonic offset, and the addresses and limits
+  involved — serialising to JSON that can be attached to a bug report unchanged.
+  Eighteen codes to start with, and the rule that a code's wire form never
+  changes and is never reused is written next to the type rather than hoped for.
+
+  The bound is the part that is easy to get wrong twice. A record that overflows
+  says how much it lost instead of quietly becoming a lie, records are evicted
+  by least-recently-written so an hour-long call survives churn, and a request
+  refused for want of room goes to the endpoint's own record — otherwise a
+  scanner dialling extensions all night would evict every live call.
+
+- **A stack that knows the device sleeps** (C2, C3). An application woken by a
+  push tells the stack a call is expected on this account from this caller; the
+  stack pre-warms the transport and refreshes the binding on the fastest path
+  it has, matches the INVITE that follows to that announcement so the call
+  screen already on the screen is the one that gets the call, and reports an
+  announced call that never arrived as its own diagnosis rather than as an
+  error. The INVITE that beats its own push, the call cancelled before the
+  device woke, and two calls in quick succession are all tested rather than
+  hoped for.
+
+  A push carries no `Call-ID` and cannot be made to, so the match is on the
+  account plus the user and host of the `From`. Full §19.1.4 equivalence is
+  wrong in both directions here: it fails on a proxy that adds `;user=phone`,
+  and failing to match sounds safe but produces a second call screen for a call
+  the person is already looking at.
+
+  Registration can also be frozen and thawed across a cold start, with a
+  versioned format that refuses a snapshot from a later version rather than
+  misreading it, and a restored binding says it is restored rather than
+  claiming to be proved. Time-to-ready is measured and reported, because it is
+  what decides how long a queue rings a sleeping phone before skipping it. RFC
+  8599's `pn-provider`, `pn-prid` and `pn-param` go on the REGISTER contact and
+  nowhere else — and a de-registration leaves the push identifier out.
+
+- **A lifecycle for a machine that suspends** (D4, A7, C5), and the state that
+  was missing from it. `suspending`, `resumed`, `network_changed(from, to)`,
+  `interface_lost` and `name_resolution_lost`, each with a written recovery
+  ladder and each tested under the conditions that actually break it rather
+  than only the path where everything works.
+
+  The idea the rest hangs off: **a monotonic clock cannot tell you that you
+  slept.** It does not advance during suspend, so a stack that slept eight
+  hours comes back believing eight milliseconds passed, with every deadline
+  still in the future and every binding still valid, and nothing it can measure
+  contradicts that. Hence `Unverified` — a binding a registrar really granted,
+  over a transport since suspended or lost, that nothing has proved since.
+  Neither registered nor failed, and the direct answer to a cached registration
+  that read as valid while name resolution had gone.
+
+  `suspending` sends nothing at all. A graceful unregister cannot be observed
+  to have left, and if it does leave, a de-registered device cannot be woken by
+  a push.
+
+- **Health counters and an honest answer about what this build can do** (D3,
+  D8). Registrations attempted, succeeded and failed **by reason**; calls by
+  disposition; media gaps; jitter-buffer events; transport promotions; and one
+  gauge for calls in progress. A snapshot differences against an earlier one,
+  so a deployment's health is a subtraction rather than a search through text.
+  Capabilities are derived from the build — the codec catalogue, the transports
+  and features actually compiled in — never hand-maintained, because a
+  capability list that can drift from the build is worse than none: it is
+  believed.
+
+- **The device crates report the delay the canceller needs.** WASAPI had it in
+  one property; CoreAudio has four per direction across two kinds of object,
+  and a rate to convert them by, so `sipral-io-coreaudio` assembles it and both
+  crates now answer the same question in the same shape. On a laptop's own
+  speakers and microphone, with a stream open, that comes to a little over a
+  hundred milliseconds. It is what the devices report, not an estimate, and
+  `docs/05-media.md` gives the readings and the conditions they were taken
+  under.
+
+  On Windows the stream is now opened as a communications stream, which is what
+  puts the operating system's own capture-side processing in the path. What it
+  cannot do is confirm that anything is cancelling: Windows offers no
+  per-stream way to report it, so the crate says what was asked and accepted
+  and stops there rather than implying more.
+
+- **A call can be dialled into, and hears what is dialled at it** (RFC 4733).
+  The packet and everything §2.1 does to the sequence number and the timestamp
+  were already written and had no schedule to run on, because the layer that
+  writes them never sees a frame boundary. The facade does: one packet per
+  captured frame, which §2.5.1.2 calls the natural interval, and the digit
+  replaces the audio for as long as it lasts because §2.1 leaves no way for
+  both to be on the wire at once.
+
+  Keys queue rather than being refused — somebody entering an extension presses
+  four of them faster than four can be sent — and the 40 ms floor RFC 4733
+  §2.5.2.1 takes from ITU-T Q.24 is enforced where the digit is asked for
+  rather than discovered by a far end that heard nothing. A dial string with a
+  character no keypad has queues nothing at all: half an extension is worse
+  than none, because it reaches somebody. A call whose negotiation settled on
+  no telephone-event payload type says so instead of swallowing the key.
+
+  The other direction was missing outright: events arrived, were correctly
+  ignored by the earpiece, and were never reported to anybody. One keypress is
+  now one event, collapsed on the timestamp that identifies it — reporting per
+  packet would have turned one 7 into five.
+
+- **The echo-cancellation seam is reachable from a live call.** `Processor` has
+  been in `sipral-media` since the audio pipeline was written and nothing
+  called it, which made it a shape rather than a seam. A call now takes one,
+  and — the part that is actually work — keeps the recent past of its own
+  loudspeaker so the processor is handed the frame that was playing while the
+  microphone was open, at a distance the platform reports with
+  `set_render_delay`. Handing a canceller the wrong frame is not weaker
+  cancellation but none at all: an adaptive filter given an uncorrelated
+  reference diverges, and the call ends up worse than with nothing attached.
+
+  Nothing is allocated until a processor is attached, so a headless build —
+  which has no loudspeaker and therefore no echo — pays nothing. Two decisions
+  that follow are worth knowing about: silence suppression and the recording
+  tap both see the processed audio rather than the raw microphone, and the
+  application's own capture buffer is never written to. A delay above half a
+  second is refused where it is set, because nothing between a loudspeaker and
+  a microphone in one room takes that long and the number would only ever be a
+  platform reporting something else.
+
+- **Subscriptions, and the busy-lamp field on top of them** (RFC 6665, RFC 4235)
+  — the largest piece of protocol the stack was missing, and the one a desktop
+  client cannot ship without. Establish, refresh, expire, re-subscribe after
+  failure, and report every state change including the termination and its
+  reason, which is the half that tells an application whether to try again.
+
+  The dialog is established by the first notification and not by the 2xx,
+  because §4.4.1 says so and because the notification really does arrive first
+  in the field. Writing that turned up something sharper: on a reliable
+  transport the server transaction is gone the instant its final response is
+  sent, and the request and the flow the dialog is built from live on that
+  transaction — so the dialog has to be opened before the 200, not after. Found
+  by a test that passed on UDP and failed on TCP.
+
+  A subscription that ends takes its dialog with it, since there is no BYE for
+  one. Without that a phone watching thirty extensions leaks a dialog per lamp
+  per refresh.
+
+  The `dialog-info+xml` reader is deliberately not an XML parser and must not
+  become one. No DOCTYPE, so there is no entity to expand and the billion-laughs
+  shape cannot be written; no CDATA; the five predefined entities and numeric
+  references only; and depth, element count, attribute count and value length
+  all bounded before the first byte is read. Above it sits §4.3's coherence
+  table and §3.7.2's state machine, which is what a lamp actually shows.
+
+  Notifications are divided with the transfer handler by their event package,
+  and the general machine runs last: a transfer owns `refer` inside a call it is
+  driving, and only once everyone holding a subscription has had a turn can
+  anything say a notification belongs to nobody — which is answered 481, as
+  §4.1.3 requires. Two silent `?` in the transfer path that swallowed a REFER or
+  a NOTIFY arriving on a dialog that is not a call are now reachable, because
+  subscriptions have dialogs too.
+
+  Not built, with the seams named: no notifier role, so an incoming SUBSCRIBE
+  still reaches the application unclaimed; `Allow-Events` is read but not yet
+  advertised; and the REFER subscription stays as it is rather than being
+  half-converted — it opens with a REFER, its dialog already belongs to a call,
+  and this end is the notifier there, which is three real differences and a
+  rewrite that needs the notifier role first.
+
+- **A call can be placed through the C ABI.** It could not: `sipral_stack_poll`
+  counted what the stack wanted written and threw it away, and nothing could
+  hand it bytes that had arrived. The only thing that ever read an outgoing
+  message was a test helper. So the ABI could carry a call's audio and not its
+  INVITE, which blocked the phase whose exit criterion is a desktop client
+  running on this engine.
+
+  Six entry points now: take the next message out, put a datagram or a run of
+  stream bytes in, and tell the stack that a transport is bound, has failed, or
+  has closed. A message that will not fit the caller's buffer is **kept**, not
+  dropped — the difference between this and the media path is that a media
+  packet is refused before it is built while a SIP message already exists by the
+  time it reaches the boundary, and throwing away something the stack has
+  committed to sending is not a refusal, it is a lost call. The needed length
+  comes back so the caller can ask, then fetch.
+
+  What travels with a message is all of it, including the address it must leave
+  *from*: RFC 3581 §4 makes a response go out from the address its request
+  arrived on, and a caller on a wildcard socket cannot work that out. Addresses
+  cross as `host:port` text, which is the convention every other address in this
+  ABI already uses.
+
+  One transport, its number published rather than hard-coded out of sight, and
+  every other number refused with a message naming the one that exists — so the
+  day a second one arrives it is more valid numbers rather than a second set of
+  functions.
+
+  Two older tests asserted that one message had been discarded, as a stand-in
+  for "something went out". They now take that message through the ABI and
+  assert what it is, which makes their names true for the first time.
+
+- **The C ABI carries media.** It depended on signalling and stopped there, so a
+  client on the other side of it parsed its own SDP, ran its own RTP and owned
+  its own audio — which is why most of `docs/13-client-requirements.md` was
+  waiting on one crate. It now drives the facade's engine, and fourteen entry
+  points came with it: the codecs this build contains and the order they are
+  offered in, without needing a stack to ask; what a live call agreed, with its
+  wire payload type, clocks and keying; recording started and stopped mid-call;
+  statistics live and complete at the end; media stopping and coming back; and
+  the audio path itself, without which the rest is decoration.
+
+  A call is described one way or the other and never both: give it a media
+  address and the stack writes the offer and owns the audio, give it raw SDP and
+  it behaves as it always did. Both is refused. A managed call answers its own
+  re-offers, so the application is told the media changed rather than asked what
+  to do about it.
+
+  The recording's ownership is the part that had to be got right: the file
+  belongs to the media session and C never sees a handle, and the WAVE header's
+  lengths are patched on all three exits — an explicit stop, the call ending,
+  and the stack being destroyed, including when it is destroyed from inside the
+  event callback. A file that is never closed is a file that will not play.
+
+  Two of the reserved event numbers were taken in place, which is what they were
+  reserved for. Taking them meant letting live and reserved lines interleave in
+  one run rather than forcing the live ones into a prefix, since otherwise
+  reaching a number meant also spending the ones before it on features that do
+  not exist.
+
+  **What this does not yet do, said plainly: a call still cannot be placed
+  through this ABI.** There is no transport entry point — `sipral_stack_poll`
+  counts what the stack wants to send and discards it — so media I/O is now
+  ahead of signalling I/O. That gap predates this change and is next.
+
+- A default profile for the equipment this stack is actually deployed against —
+  a softphone behind consumer NAT talking to an Asterisk-family PBX — with what
+  each optional mechanism costs on the wire beside it. **Declaring ICE adds 143
+  bytes per candidate**, measured and pinned by a test rather than estimated
+  into a document that would stop being true, and that is the floor: a laptop
+  with Wi-Fi, Ethernet and a VPN writes nine such lines, and an offer carrying
+  them no longer fits the 1300-byte datagram floor of RFC 3261 §18.1.1. Which is
+  not hypothetical — NAT attributes were four hundred of the bytes in the
+  request that fragmented in the field and died in silence, sent to a peer that
+  did not speak the protocol at all.
+  The document also says the uncomfortable part plainly: ICE is off today
+  because nothing links `sipral-nat`, which is the right behaviour reached the
+  wrong way. A default that holds only because nobody wired the alternative is
+  one that changes the first time somebody does.
+
+- Gain, mute and a level meter on both device crates, and the device that goes
+  away mid-call reported rather than turning into silence.
+
+  The gain is applied to the frames here rather than through the platform,
+  because none of the platform's volumes belongs to a call: the device volume
+  is shared with everything on the machine, the process volume is one setting
+  for the whole application, and both outlive the call. Turning a call down
+  must not turn a film down. It is applied at the device end of the ring rather
+  than the caller's, because the ring holds sixteen frames and a mute heard a
+  third of a second after the button is not a mute.
+
+  Both ends of the range are defined: the ratio clamps, the samples saturate
+  instead of wrapping, and every sample that lands at the end is counted — so a
+  gain set too high is a number beside the slider rather than a mystery
+  distortion. A muted direction keeps frames moving, so unmuting does not play
+  a backlog.
+
+  The meter is the loudest sample over a tenth of a second, held between one
+  window and two. Peak-since-last-poll was rejected because it makes the number
+  depend on how often it is read; polling now mutates nothing, so any number of
+  callers at any rate see the same answer. It costs one compare per sample,
+  folded into the pass the gain already makes.
+
+  A device that disappears mid-call is reported — read from the platform rather
+  than inferred from silence — and the stream stops rather than quietly
+  producing nothing, so an application that ignores the event finds a stream
+  that has plainly stopped. Recovery is one call, carrying the gain and the
+  mute across, and is deliberately not automatic: whether to move to the laptop
+  speaker, wait, or end the call is not this layer's decision. A saved
+  selection is held as the identity that survives a replug, and the
+  documentation is explicit that a crate cannot stop the operating system
+  changing the default — reopening is what re-applies it.
+
+- An INVITE nobody asked for can be refused before anything sees it. Scanners
+  dial common extension numbers at every hour, and a client on a public port
+  either filters them or wakes its user at three in the morning. The policy hook
+  sits between registration and calls in the event chain, which is the last
+  place before the one site that mints a call handle and pushes
+  `IncomingCall` — "before any user-visible effect" is the requirement's own
+  sentence and it is where the ordering comes from.
+
+  Beneath it, a token bucket per source address — per address rather than per
+  socket, since a port costs an attacker nothing to change — in a table bounded
+  at sixty-four entries. At the bound a source whose bucket has refilled is
+  evicted, holding nothing a new entry would not; if every seat is still
+  spending, a stranger is refused rather than admitted untracked, because
+  admitting what cannot be limited is a hole exactly when it matters. The
+  limiter runs before the hook: calling arbitrary application code at flood rate
+  is the second attack.
+
+  Refusals are counted, cumulatively, and are deliberately not an event. An
+  event queue anybody on the internet can fill is the same attack one layer up.
+
+  The answer is 480 for every reason. §21.4.18 covers a callee "in a state that
+  precludes communication", which is what a screened number is and also what a
+  switched-off phone says, so one answer gives a scanner no way to tell a
+  guarded extension from an unattended one. 404 was rejected as an enumeration
+  oracle, 503 because §21.5.4 has a proxy stop forwarding to this agent
+  altogether, and 6xx because it speaks for the person rather than the device
+  and would silence the desk phone they are also registered on.
+
+- **The `sipral` crate is the facade it was always described as.** It was eleven
+  lines — a name reserved for crates.io, not yet uploaded — while
+  `docs/01-architecture.md` said it was
+  where signalling and media meet. Nothing joined them, so `MediaPlan` and
+  `MediaCapabilities` were a vocabulary nobody spoke, and an application that
+  wanted a call with audio in it wrote the join itself.
+
+  It now carries: a codec catalogue that says what this build actually contains,
+  in the order it offers them, and what one live call settled on — a name the
+  build has no encoder for is refused where the order is set rather than dropped
+  where it would have been used; a media session that owns one call's audio,
+  taking the negotiated description, driving the codec and the jitter buffer and
+  comfort noise, allocating nothing per packet and reading no clock; the engine
+  that attaches a session when a call confirms, follows it through hold, resume,
+  a peer that moved and a codec change, and releases it with the call's
+  statistics; call recording, both directions mixed into one WAVE file the crate
+  never opens itself; stream statistics that travel, live and at the end; and a
+  watchdog that says when inbound audio stops and when it comes back, silent
+  while this end is not meant to be receiving, because an alarm that cries wolf
+  during hold is an alarm an application learns to ignore.
+
+  The rule it exists to keep is unchanged: `sipral-ua` still reaches into no
+  media crate and no media crate reaches into it. The join lives here because
+  here is the only place the architecture allows it.
+
+  Deliberately not yet: ICE, SRTP keying and DTMF sending, each with its seam
+  named in the code rather than left to be found. And the C ABI still points at
+  signalling alone, which is the next thing to close.
+
+- One declaration for the ABI's event numbers, and disagreeing with it is a
+  build failure. The kinds, their names and their numbers are generated from a
+  single list, with an assertion that the list runs `1, 2, 3, …` with nothing
+  repeated, moved or missing. The hole it closes is the one the requirements
+  describe from the other side: two features written in two branches each take
+  the number after the last kind, both compile, and the one that lands second
+  has silently renumbered an event a shipped binding already knows. The numbers
+  of the six features already committed to are spent now, as reserved lines
+  naming what each belongs to, so taking one means reading a number rather than
+  choosing it.
+
+- The shapes of bad network a call is measured over, as fixtures in
+  `interop/impairment/` rather than as arguments somebody types. A threshold
+  measured against a profile that lives in a shell history is a threshold
+  nobody can reproduce. Four of them: bursty loss with jitter and reordering; a
+  mobile leg losing two per cent in bursts on a link whose delay moves; a
+  geostationary carrier, where the interesting failure is arithmetic rather
+  than audio, because a retransmission schedule tuned on a fast path gives up
+  before a satellite answers; and a link that disappears for eight seconds in
+  the middle of the call.
+  That last one is the one worth having, and the one an easy simulator does not
+  produce: loss and delay held constant for a whole call are a bad line, not an
+  interruption. It does not ask whether audio survived, since eight seconds of
+  nothing cannot be concealed, but whether the stack is still there afterwards
+  — the dialog kept, no timer having fired into the gap, and a buffer that
+  returns to the target it had rather than staying where the gap left it. Each
+  profile declares what must appear in the qdisc once it is applied, and the
+  runner reads it back, because `tc` accepts settings the kernel then discards
+  in silence and a run whose impairment never happened is byte for byte a clean
+  one.
+
+- `scripts/lab.sh` and `scripts/fuzz.sh`, and no CI configuration at all.
+  Nothing runs on hardware that is not ours: a runner that builds, signs or
+  publishes needs credentials on somebody else's machine, and for Apple
+  signing there is no way to give it one — a runner has no keychain. So the
+  three jobs that were hosted are three scripts. `scripts/check.sh` was already
+  the gate and is unchanged; `lab.sh` brings the three-container lab up, runs
+  the flows against each server and repeats one over a link made bad with
+  `tc netem`; `fuzz.sh` runs every target for as long as it is given.
+  `.github/workflows/` is gone and gitignored.
+- G.722 wired into the interop harness, and the trap that goes with it closed.
+  What used to be a single `Law` field is a codec, because G.711's samples,
+  octets and timestamp ticks for a twenty-millisecond frame are all 160 and
+  G.722's are 320, 160 and 160 — one constant served all three, and anything
+  written against that shape encodes half a frame and calls it a packet. The
+  session now accepts payload type 9, the tone keeps its pitch when the rate
+  doubles, and `SIPRAL_CODEC=g722` puts the wideband codec first in the offer
+  so the same ten flows run against real software with it. Not the default:
+  every lab server takes G.722, so offering it unasked would quietly change
+  what those flows have been proving.
+- G.722 in `sipral-media`, written from ITU-T Recommendation G.722 (09/2012).
+  The twenty-four-tap filter pair that splits sixteen kilohertz into two bands
+  of eight and puts them back together, six-bit ADPCM on the lower band and
+  two-bit on the higher, the logarithmic scale factor and its adaptation, the
+  sixth-order zero section and second-order pole section, and all three
+  decoder modes. Every arithmetic operation is §6.2's, including its
+  definition of multiplication as a shift and its saturating addition, because
+  a wrapping add here decodes to noise only on loud passages.
+  The roadmap used to say this would be linked. There is nothing to link: the
+  usual library is spandsp's, which the clean-room rule forbids by name, and
+  the Rust crate that looks free of it carries spandsp's comments word for
+  word. A Recommendation is a specification, and this is implemented from it.
+  Every table was read off the document twice, independently, and compared;
+  the one cell the two readings disagreed on was settled against the closed
+  form the table follows. Two of the document's own slips are handled and
+  written down: Table 19 prints six characters for a five-bit codeword, and
+  Table 14 prints two of its columns two rows lower than the address they are
+  addressed by.
+  G.722's RTP clock rate is 8000 although it samples at 16000 (RFC 3551
+  §4.5.2), so `SAMPLE_RATE` and `CLOCK_RATE` are separate constants and
+  `frame_samples`, `frame_octets` and `frame_ticks` are three different
+  numbers for the same frame.
+- SRTP and SRTCP in `sipral-rtp`, written from RFC 3711. Counter mode and f8
+  keystreams, HMAC-SHA-1 tags, the key derivation of §4.3 with erratum 3712
+  applied to the SRTCP index, the implicit packet index of §3.3.1 with
+  Appendix A's estimator, and a replay window twice the size §3.3.2 requires.
+  The three suites RFC 4568 defines, the `UNENCRYPTED_*` and
+  `UNAUTHENTICATED_SRTP` session parameters, an optional master key
+  identifier, and the packet counts §9.2 caps at 2^48 and 2^31.
+  Protecting and unprotecting happen in the caller's own buffer, so a
+  protected packet costs no allocation. Every test vector in the RFC's
+  Appendix B is in the suite, as are RFC 3174's for SHA-1 and RFC 2202's for
+  HMAC.
+  The block cipher comes from the `aes` crate, the first thing `sipral-rtp`
+  depends on, because a table-driven AES leaks its key through the cache;
+  everything above it is in-tree. Linking libsrtp2, which the roadmap used to
+  name, was dropped: it is C, and this crate denies `unsafe`.
+- `RtpSession::protected`, which puts SRTP under an ordinary RTP stream. What
+  it builds goes out protected and what arrives is verified before any of it
+  is believed, so the order RFC 3711 §3.3 sets out is not something an
+  integrator can get wrong. `RtpSession::receive` and `rtcp_receive` now take
+  the caller's buffer mutably, because a receiver decrypts in place.
+- The `a=crypto` line read as values in `sipral-core`: the suite, the master
+  key and salt out of the `inline:` parameter, the lifetime in both forms, the
+  master key identifier, and the session parameters that say whether to
+  encrypt and whether to authenticate. Every rule RFC 4568 states as making
+  the attribute invalid refuses it. A peer that sends back a key we offered is
+  refused too — §7.1.2 requires the keys to differ, and one key protecting
+  both directions is the failure the transform cannot survive.
+- Hold and resume in `sipral-ua`, and the offers that come after them. Hold is
+  RFC 3264 §8.4's: the description already negotiated, with a stream that was
+  `sendrecv` marked `sendonly` and one that was `recvonly` marked `inactive`,
+  and the `o=` version moved on. The stack writes it, so the application says
+  hold rather than `a=sendonly`, and resume puts back the direction each stream
+  started with rather than assuming `sendrecv`. `Hold` has a flag per
+  direction, because §8.4 holds each one separately; the far end holding us is
+  read off `sendonly`, `inactive`, or the `0.0.0.0` address RFC 2543 used, and
+  reported as `SessionChanged`.
+  Which request carries the change is the dialog's decision first: a confirmed
+  call uses a re-INVITE, which RFC 3311 §5.1 recommends outright, and an early
+  one uses UPDATE, because §14.1 forbids a second INVITE while the first is
+  running — and only when the far end listed UPDATE in an `Allow` (§4), which
+  this end now advertises on its INVITE, on a provisional carrying a
+  description, and on the 2xx.
+  An offer arriving from the far end is answered here when it keeps the streams
+  and the formats that were negotiated, because the answer is then this end's
+  own ports with the direction §6.1 leaves. One that changes the codecs or the
+  stream list arrives as `Reoffer` with the transaction still open, for
+  `accept_reoffer` or `reject_reoffer`; a body that claims to be a session
+  description and is not gets a 488 with the `Warning` §14.2 asks for.
+  Glare is handled from both sides: a 491 carries the wait §14.1 draws and the
+  change goes out again once, and an offer that crosses one of ours is answered
+  491 while one that arrives on top of an unanswered offer of theirs is
+  answered 500 with a drawn `Retry-After` (RFC 3311 §5.2, generalised to both
+  requests).
+- `StatusCode::NOT_ACCEPTABLE_HERE`, the refusal that is about the session
+  description rather than about the request that carried it.
+- A 2xx that is never acknowledged now ends the dialog with a BYE, which
+  §13.3.1.4 asks for and §14.2 repeats for a re-INVITE. RFC 6026's timer L was
+  ending the transaction in silence, so the layer above could not tell an ACK
+  that arrived from one that never did; it now reports
+  `TerminationReason::TimedOut`, and `sipral-ua` sends the BYE and reports the
+  call as unreachable. Without it a far end that stops answering leaves a line
+  busy for as long as the process runs.
+- `OutgoingResponse::status`, to read back what a response was built with.
+- Session timers (RFC 4028) in `sipral-ua`. `Supported: timer` on every request,
+  an interval asked for per account and thirty minutes by default, the
+  refresher left to the negotiation on the first INVITE and carried afterwards.
+  The refresher refreshes at half the interval (§7.2) and the other end hangs up
+  shortly before expiry (§10), reporting `CallEndReason::Expired`. The refresh
+  is an UPDATE where the peer takes one and a re-INVITE where it does not,
+  repeating the description already agreed unchanged, which is how §7.4 and
+  RFC 3264 §8 together say nothing has moved. A 422 sends the INVITE again on
+  the same `Call-ID` with the demanded floor, once; an incoming interval below
+  §5's ninety seconds is answered 422 before the application sees it.
+- `StatusCode::SESSION_INTERVAL_TOO_SMALL`.
+- `sipral-rtp`, phase one's share of it: the fixed header read and written
+  (RFC 3550 §5.1), the validity checks a receiver makes before it believes a
+  source (Appendix A.1) including the probation state machine and sequence
+  wraparound, the marker-bit rule the audio profile adds (RFC 3551 §4.1),
+  symmetric RTP with latching onto the first valid packet's source, and a
+  fixed-depth de-jitter buffer that takes reordering as normal, drops
+  duplicates by sequence number and never grows past its depth. Sans-I/O, with
+  no dependency on `sipral-core`. RTCP, the adaptive buffer, loss concealment,
+  DTMF and SRTP are later phases and are not stubbed here.
+- `sipral-media`, phase one's share: G.711 mu-law and A-law, encode and decode,
+  written from the companding law, with the frame arithmetic a caller needs and
+  the two payload types RFC 3551 fixes. Every one of the 512 code points is
+  round-tripped in the tests, which is the strongest property the code has.
+- The interop lab under `interop/`: Kamailio, FreeSWITCH and Asterisk on
+  default settings in Compose, a capture beside them, and a harness that drives
+  `sipral-ua` through register, call, and hold and resume, judging each flow
+  against conditions written before the run. It runs as its own CI job on
+  Linux. Every other test in this workspace runs the stack against a peer we
+  wrote; this is the first that does not.
+- Reliable provisional responses on the answering side (RFC 3262). `ring` sends
+  reliably exactly when the INVITE asked — §3 leaves no choice either way — and
+  the PRACK is answered 2xx here, with an answer to any offer it carried. A
+  reliable response that carried a description holds the 2xx to the INVITE until
+  it is acknowledged (§5), so an application that answers early has its 200 kept
+  and sent on the PRACK rather than putting two unanswered offers on the wire.
+  In the other direction an offer arriving in a reliable provisional is reported
+  by `answer_wanted` on `CallProgress` and answered with
+  `UserAgent::answer_early`, which puts it in the PRACK where §5 wants it.
+- A `Require` naming an extension that is not implemented is answered 420 with
+  the token in `Unsupported` (§8.2.2.3), before the application sees the call.
+- Transfer, both kinds (RFC 3515, RFC 3891). `transfer` sends a REFER and
+  reports what the transferee says in its `message/sipfrag` NOTIFYs as
+  `TransferProgress` and `TransferDone`; the call is given up only when the
+  transfer has actually succeeded, because hanging up when the REFER goes turns
+  a failure into a call that vanished. `transfer_to` sends the other call's
+  remote target with an escaped `Replaces` naming its dialog, which is the only
+  difference between an attended transfer and a blind one.
+  A REFER that arrives is `TransferRequested`, taken with `accept_transfer` —
+  202, the opening NOTIFY, and the call it asked for — or refused with
+  `reject_transfer`; anything but exactly one `Refer-To` is answered 400.
+  `Replaces` on an incoming INVITE is matched before the application sees it,
+  with §3's status code for each way it can fail: 481 for no match or several,
+  603 for a dialog that has ended, 486 for `early-only` against a confirmed
+  one. A match is replaced when the new call is answered, and reported as
+  `CallReplaced`.
+- The reference loop, behind the `reference-loop` feature and off by default.
+  `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
+  per socket doing the blocking reads, and a `Handler` with two methods. It
+  answers `ResolveNeeded` with an A lookup and `TransportWanted` by opening the
+  TCP connection §18.1.1 asks for; it does not do SRV, does not link TLS, and
+  binds to a named address rather than a wildcard, because `std::net` cannot
+  say which local address a datagram arrived on and RFC 3581 §4 needs that.
+  With it comes the first test in this workspace where two stacks talk to each
+  other over real sockets rather than to a peer written in the same file: an
+  INVITE, a 180, a 200, the ACK, a hold and a BYE, on loopback.
+
+- Glare, both ways (§14.2, RFC 3311 §5.2). An INVITE that crosses one of ours
+  inside a dialog is answered 491, a second one that arrives before we answered
+  the first is answered 500 with a drawn `Retry-After`, and so is a second
+  UPDATE; none of them reaches the caller, because none is a decision. The end
+  that receives a 491 gets `Event::ReinviteGlare` with how long to wait, drawn
+  from the range §14.1 gives it — which differs by who generated the `Call-ID`,
+  so that two ends backing off do not collide again.
+- `SendError::InviteInProgress` and `SendError::WrongMethod`: §14.1 forbids a
+  second INVITE transaction in a dialog while one is running in either
+  direction, and an INVITE handed to `request_in_dialog` would have run on a
+  transaction machine that cannot acknowledge it.
+
+- The mark, and the rules for drawing it. `assets/` carries the mark and the
+  horizontal lockup as SVG and PNG, light and dark, with `assets/BRAND.md` for
+  the geometry, the three colours and the one red cell. The README shows the
+  lockup, every crate carries `html_logo_url` and `html_favicon_url` for
+  docs.rs, and the NuGet package carries an icon. The lockup SVG keeps the
+  wordmark as live text, so anywhere Archivo is not installed the PNG is the
+  one to use — which `BRAND.md` says.
+- `scripts/check.sh` fails on embedded provenance metadata. Artwork arrives with
+  a signed C2PA manifest naming the tool that made it, in a PNG `caBX` chunk or
+  an SVG `<metadata>` element; it is base64 inside a binary, so the existing
+  text scan never saw it, and this repository is public. The files in `assets/`
+  were stripped before being committed — PNG down to `IHDR`, `PLTE`, `tRNS`,
+  `IDAT`, `IEND` and `sRGB`, SVG without `<metadata>` — which changes no pixel.
+
+- Workspace skeleton: the eight crates from `docs/01-architecture.md`, each with
+  its scope documented and nothing implemented.
+- Design documents for phase 0: architecture, clean-room rules, signalling
+  core, user agent, media, NAT, headless endpoint, FFI, RFC index, roadmap,
+  testing.
+- Licensing set: AGPL-3.0-only alongside a commercial arm, with `LICENSING.md`,
+  `LICENSE-COMMERCIAL.md`, `TRADEMARK.md`, `AUTHORS`, `THIRD-PARTY-NOTICES.md`,
+  and SPDX headers on every source file.
+- `deny.toml` with a permissive-only allow-list, enforced by the check script.
+- `scripts/check.sh`: licence headers, provenance, published-tree language,
+  internal files and captures, build, lints, tests, dependency licences,
+  secrets.
+- CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
+- `sipral-core::msg`: the message layer's foundation. `Span`, `HeaderSlot` and
+  a reusable `ParseScratch`; `Method` and `StatusCode`; `RawMessage` as a view
+  over the caller's buffer; and a parser that locates the start line, the
+  header fields and the body without copying any of them. Folded values are one
+  slot with their interior CRLF intact, repeated headers are one slot each in
+  wire order, and `Content-Length` frames the body so trailing octets in a
+  datagram are ignored. Bounded by a `Limits` struct so a hostile peer cannot
+  make it do unbounded work, and written so that no input reaches a panic.
+  37 tests, several of them RFC 4475 cases the corpus will assert in full later.
+- `sipral-core::msg::HeaderName`: the 38 header fields the stack knows, matched
+  whatever their case and in either form. Fifteen compact forms, each read out
+  of the RFC that defines it rather than from memory. `RawMessage` gains
+  `header`, `header_values`, `header_count` and `header_names`, so asking for
+  `Via` finds a `v:` line and asking for an extension is case-insensitive too.
+- `sipral-core::msg::UriRef`: SIP URIs in parts, borrowed from the buffer.
+  An enum rather than a struct, because only `sip:` and `sips:` have a
+  hostport: a `tel:` URI and an unknown scheme are kept whole instead of being
+  forced into a shape they do not have. The userinfo boundary is settled before
+  parameters or headers are looked for, since `user` may contain `;` and `?`
+  unescaped. Parameters and headers are walked on demand, and `unescape`
+  handles `%` escapes including `%00`, leaving a stray `%` alone because the
+  corpus has one in a message that is valid.
+- `sipral-core::msg::lex`: the lexical rules every header value obeys, in one
+  place instead of once per field. Unfolding, comma-separated values, and
+  `;name=value` parameters, all of which stop at a quoted string or a `<...>`
+  URI. `Contact: "Smith, John" <sip:j@x>` is one value; `qop="auth=1,auth-int"`
+  is one parameter.
+- `sipral-core::msg::OwnedMessage`: the same bytes and header index behind two
+  `Arc`s, so a message the stack keeps costs one copy and a clone costs none.
+  Bytes past the body are left behind, so a second request sharing a datagram
+  is not carried along.
+- `sipral-core::msg::scalar`: the fields that carry a number, and `CSeq`, which
+  carries one and a method. The separator inside `CSeq` and `RAck` is `LWS`, so
+  a fold between the digits and the method still reads. Overflow is two rules,
+  not one: a `CSeq` that does not fit in 32 bits is refused, while an `Expires`
+  parses and reports that it did not fit, because the RFC lets an element fall
+  back to its default there. Nothing is truncated, so a hundred-digit `Expires`
+  cannot become a plausible small number.
+- `sipral-core::msg::ViaRef`: the field that decides where a response goes.
+  `SLASH` and `COLON` absorb surrounding whitespace, so the two slashes are
+  located before anything else; `received` carries an IPv6 address without
+  brackets, unlike everywhere else, and accepts them anyway because they are
+  sent; `ttl` is `1*3DIGIT`, so `;ttl=1234` is not a ttl at all; `rport` has
+  three states and `;rport=` is none of them. A `Via` with no branch is an RFC
+  2543 peer to be matched per §17.2.3, not a malformed header.
+- `sipral-core::msg::NameAddrRef`: `From`, `To` and `Contact`. The angle
+  brackets decide who owns the parameters — inside them `;transport=tcp` is on
+  the URI, outside them it is on the header field — and RFC 4475 `cparam01` and
+  `cparam02` are one address written both ways to catch a stack that cannot
+  tell. Whitespace lives outside the brackets, so `< sip:a@b >` is refused; a
+  display name is a token run or a quoted string and nothing else, so
+  `Bell, Alexander <sip:...>` is refused while `caller<sip:...>` is accepted as
+  the documented grammar defect it is; an unterminated quoted string is refused
+  rather than guessed at. `Contact: *` is the whole field or nothing.
+  `RawMessage` gains `from`, `to`, `contact` and `field_values`, the last
+  walking a comma-separated field across its lines and its commas alike.
+- `sipral-core::msg::RouteRef`: `Route` and `Record-Route`. A route entry is a
+  `name-addr` with no bracket-less alternative, so `Route: sip:p1;lr` is
+  refused rather than guessed at — without the `>` there is nothing to say
+  where the URI ends. `is_loose_route()` reads `;lr` on the URI and not on the
+  header field, because `<sip:p1>;lr` is a strict router carrying a parameter
+  that happens to be spelled the same, and getting that backwards sends the
+  request to a strict router with a Request-URI it cannot use. Entries come
+  back in wire order, never sorted or deduplicated.
+- `sipral-core::msg::ChallengeRef` and `CredentialsRef`: digest challenges and
+  credentials, as two types rather than one, because `qop` is a quoted comma
+  list in a challenge and a bare token in credentials and the RFC's own worked
+  example writes both. `realm`, `nonce`, `cnonce`, `username` and `opaque` come
+  back unescaped; `uri` and `response` come back exactly as written, since
+  neither is a `quoted-string` and a Request-URI is no place to resolve
+  backslashes. `response` has no fixed length, per RFC 8760. Each header line
+  is one value: RFC 3261 §20.7 and §20.28 exempt these fields from
+  comma-joining, and several challenges are several lines in preference order.
+- `sipral-core::msg::TokenIter` and `MediaTypeRef`: `Require`, `Proxy-Require`,
+  `Supported`, `Unsupported`, `Content-Encoding`, `Accept`, `Allow` and
+  `Content-Type`. Option tags are matched without case; methods are not,
+  because the six RFC 3261 verbs are fixed-case literals in the grammar and
+  `Allow: invite` is an extension method that happens to be spelled like one
+  of them.
+- `sipral-core::msg::RequestBuilder` and `ResponseBuilder`: writing a message
+  out. Deterministic — same inputs, same bytes, whatever order the setters were
+  called in — because a retransmission has to be the identical datagram and a
+  byte-comparing test is worth nothing otherwise. `Via` goes first, then the
+  routing and dialog fields, then whatever else the caller added, then the
+  body's two fields; `Content-Length` is always written, since a stream
+  transport has no other way to find the end of a message. A response copies
+  what RFC 3261 §8.2.6.2 says must be equal, adds a `To` tag only when the
+  request carried none, and copies `Record-Route` only when asked, because
+  §12.1.1 requires that of a response establishing a dialog and only the
+  caller knows whether this is one. No value may hold CR or LF: a header value
+  goes out on one line, and a caller's data with a line break in it would
+  otherwise write headers of its own.
+- `sipral-core::msg::StreamFramer`: reassembling TCP and TLS into messages, and
+  the one place in the receive path that copies. A message without
+  `Content-Length` is refused rather than read to the end of the buffer, since
+  RFC 3261 §18.3 makes the field mandatory on a stream and guessing would
+  swallow whatever followed. Keep-alives (RFC 5626 §4.4.1) are skipped between
+  messages and counted, so the connection's owner can send the single CRLF a
+  double CRLF is owed. Work is bounded per byte received rather than per call:
+  a peer feeding one byte at a time cannot make reassembly quadratic.
+- `RawMessage::validate`: the question a UAS asks before answering — is this a
+  message the stack can act on, or one that draws a 400? A message can be
+  framed correctly and still carry a `From` whose display name is not one, a
+  `CSeq` naming a different method than the start line, or a `Date` in a zone
+  nobody can read. The parser has no business refusing those, since it does not
+  know which fields the caller will read, so the question is asked once, here,
+  by whoever is about to answer.
+- `SipDate` and `RawMessage::date`: RFC 3261 §20.17, which narrows RFC 1123 to
+  GMT and says outright that the names are case-sensitive. `EST` is not a zone
+  this reads, and neither is `UT`, `UTC` or `gmt`.
+- `sipral-core::transaction`: the handles the transaction layer is addressed
+  by. Typed by machine, so answering a PRACK with an INVITE server transaction
+  handle is a compile error rather than a runtime one, and the guarantee
+  survives into C as one struct per kind. Generational, so a handle issued
+  before a transaction died never answers to whoever took its slot — which is
+  what a late retransmission is holding. The four state enums carry RFC 6026's
+  `Accepted` on both INVITE machines.
+- The INVITE client transaction (RFC 3261 §17.1.1, RFC 6026 §7.2), and the ACK
+  a client transaction builds for a final response that is not a 2xx. A 2xx
+  does not end the transaction: the machine moves to `Accepted` and stays there
+  for timer M, so a retransmitted 2xx or one from another fork is passed up
+  rather than dropped as a stray. A provisional response stops both timer A and
+  timer B, because how long to wait for a ringing phone is the user's decision.
+  A retransmitted final response re-sends the ACK and is not reported twice.
+  On UDP the request goes out seven times in 64·T1, which is what the RFC says
+  that number is for.
+- The non-INVITE client transaction (RFC 3261 §17.1.2), which is what REGISTER,
+  OPTIONS, BYE and MESSAGE run on. Retransmissions cap at T2 rather than
+  doubling forever, and a provisional response does not stop them — it moves
+  the machine to `Proceeding`, where the interval is T2 flat and timer F still
+  ends the transaction. Only an INVITE gets to ring indefinitely.
+- The two server transactions (RFC 3261 §17.2, RFC 6026 §8.1). The INVITE one
+  sends a 100 Trying at once — the transaction layer never knows whether the
+  user will answer within 200 ms, and a redundant 100 costs one datagram while
+  a missing one costs six retransmitted INVITEs. A 2xx puts it in `Accepted`,
+  where retransmitted INVITEs are absorbed rather than answered again and an
+  arriving ACK is passed up rather than swallowed, because after a 2xx the ACK
+  belongs to the dialog. A non-2xx final response is retransmitted by timer G,
+  but only on an unreliable transport. The non-INVITE one sends nothing until
+  the user says so: in `Trying` a retransmitted request is discarded, since
+  inventing a response the user never wrote is worse than silence.
+- Message matching (RFC 3261 §17.1.3 and §17.2.3). A response finds its client
+  transaction by branch and `CSeq` method — the method matters because a CANCEL
+  borrows the branch of the request it cancels while being a transaction of its
+  own. A request finds its server transaction by branch, the `Via`'s sent-by
+  and the method, with an ACK keyed as the INVITE it answers. A peer without
+  the magic cookie is matched the pre-3261 way instead, on the Request-URI,
+  From tag, `Call-ID`, `CSeq` number and top `Via`.
+- CANCEL (RFC 3261 §9.1): built to look exactly like the INVITE it cancels so
+  the two can be paired, with `Route` copied for stateless proxies and
+  `Require`/`Proxy-Require` deliberately dropped. Asking to cancel is always
+  accepted while the transaction is open: a CANCEL may not be sent before a
+  provisional response has arrived — the server could otherwise receive it
+  before the INVITE and have nothing to cancel — so one asked for too early is
+  held and released at the first provisional rather than refused.
+- Dialogs (RFC 3261 §12): route set, remote target, the two sequence spaces,
+  the `secure` flag and both ways of opening one — from the response to a
+  request we sent, and from a request we are answering. The route set is
+  reversed for the caller and kept in order for the callee, because the two
+  ends face opposite ways down the same path, and it is built from the bytes as
+  they arrived so that every URI parameter survives. Requests come out through
+  §12.2.1.1, including the strict-router rewrite for proxies that predate loose
+  routing: the request is addressed to the first hop and the real target is
+  pushed to the end of the `Route`, where a loose router lifts it back. ACK and
+  CANCEL are refused there — their number belongs to the request they answer.
+  The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
+  never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
+  changes nothing.
+- Digest authentication (RFC 3261 §22, RFC 8760): MD5, MD5-sess, SHA-256,
+  SHA-256-sess, SHA-512-256 and SHA-512-256-sess, with `qop=auth` and the
+  counter that makes a captured response useless a second time. The three hash
+  functions are written out here, because the crate has no dependencies, and
+  each is checked against published digests — including the SHA-256 of the
+  empty string that RFC 8760 §2.6 prints — before anything is built on it.
+  `AuthCache` keeps a challenge per protection domain so a later request can
+  carry credentials without a round trip, answers the topmost challenge it
+  understands per realm, keeps the 401 and 407 spaces apart, and refuses to
+  answer the same nonce twice after a refusal: §22.1 forbids re-attempting
+  credentials that were just rejected, and repeating them only locks the
+  account. A `-sess` algorithm without `qop` is treated as unanswerable rather
+  than guessed at, which is what §22.4 rule 8 leaves. The password lives in a
+  `Secret` with no `Debug` and no way out of its module, overwritten on drop as
+  far as safe Rust can promise.
+- SDP (RFC 4566) and offer/answer (RFC 3264). A description that is read and
+  written back comes out as it went in, down to the lines the stack has no use
+  for — an SDP body travels through a call inside messages that get forwarded,
+  so quietly dropping what is not understood breaks the next extension somebody
+  adds. Ordering is enforced the way §5 fixes it, and a type letter that is not
+  one of the fourteen refuses the whole description rather than the line, which
+  is what §5 asks for. `answer()` builds the answer from the offer: the same
+  number of streams in the same order, the same `t=` line, the payload mappings
+  the offer defined, and a direction narrowed to what the offer allows — an
+  offer of `sendonly` can only be answered `recvonly` or `inactive`. Which
+  codecs to keep and which streams to take arrive as arguments; there is no
+  policy here. The RFC 3264 §10.1 exchange is a test, byte for byte, and a
+  fourth fuzz target asserts that writing a description out and reading it back
+  yields the same description.
+- Forking and the ACK for a 2xx (RFC 3261 §13.2.2). One INVITE can produce
+  several dialogs — a proxy rings the desk phone, the mobile and the voicemail,
+  and each branch that answers is told apart by its `To` tag. `DialogSet` keeps
+  them all and chooses between none of them: which fork to keep is policy, and
+  policy does not live in the core. A non-2xx final ends every dialog still
+  early and leaves an already confirmed one alone; a 2xx arriving after that is
+  still taken, because dropping it would leave a call standing at the far end
+  with nobody able to hang it up. The 2xx confirming an early dialog recomputes
+  its route set, which RFC 2543 compatibility requires and which nothing else
+  in a dialog's life does. The ACK for a 2xx belongs to the dialog rather than
+  the transaction: the caller builds it once, since only the caller knows
+  whether there is an answer to put in it, and every retransmitted 2xx after
+  that is answered from the stored bytes.
+- `sipral-core::endpoint`: what a transport is to a stack that never opens one.
+  `TransportProtocol` derives from the protocol alone everything the RFCs make
+  conditional on the transport — reliability, which is what RFC 3261 §17 sets
+  timers D, I, J and K to zero on; framing, which is why TCP and TLS need
+  `Content-Length` and WebSocket does not, since RFC 7118 §4.2 puts one SIP
+  message in each WebSocket message; and the default ports of §18.1.1.
+  `Input` and `Transmit` are the two directions of the whole surface, with the
+  payload refcounted because a retransmission has to be the identical datagram.
+  `DatagramLimit` is §18.1.1's size rule as two numbers, both settable because
+  the RFC's 1300 assumes a 1500-byte Ethernet MTU that plenty of access
+  networks do not have.
+- `sipral-core::endpoint::Endpoint`: the five calls the whole stack is driven
+  through, and the first place the layers are bound together. Bytes and time
+  in, bytes and events out; nothing opens a socket, reads a clock or draws a
+  random number. The branch, the sent-by, the tags, the `Call-ID` and the
+  sequence numbers are the endpoint's, derived from thirty-two bytes of
+  caller-supplied entropy, because a caller that writes its own branch writes
+  one that repeats. Registrations, calls, forking, CANCEL racing a 200, the
+  ACK for a 2xx and its retransmissions, incoming calls and the dialogs they
+  open, BYE in both directions, the §18.1.1 switch to a stream transport, the
+  §18.2.2 and RFC 3581 rules for where a response goes, the §18.1.2 check that
+  discards a response addressed to somebody else, and RFC 5626 keep-alives on
+  a jittered interval. Two things happen without asking, because the RFC
+  leaves no choice: a CANCEL that matches gets its 200 and its INVITE gets a
+  487 (§9.2), and an in-dialog request whose `CSeq` runs backwards gets a 500
+  (§12.2.2). Everything else is reported and left to the layer above.
+  36 tests, each a scripted exchange on a fake clock.
+- Reliable provisional responses (RFC 3262), both ways round. A 180 is a
+  datagram like any other and can be lost, which matters because an offer or an
+  answer can travel in a 1xx and offer/answer has no recovery from a lost
+  message — and because a carrier that puts `100rel` in `Require` will not
+  complete a call without one. The end that sends one numbers it, retransmits
+  it doubling from T1 with no cap, and refuses to send a second until the first
+  is acknowledged; 64·T1 without a PRACK refuses the call with a 500, which is
+  what §3 asks for. The end that receives one keeps the highest number it has
+  seen in order and silently drops a retransmission or a gap, so a PRACK is
+  never sent twice for one response. A PRACK that matches nothing is answered
+  481 without being handed up, and one that matches stops the retransmissions
+  before the caller sees it. `Supported: 100rel` goes on every outgoing INVITE,
+  merged with whatever the caller listed rather than written as a second line
+  of the same field. The received numbering is kept per dialog rather than per
+  request, because a forked INVITE is answered by several user agents that each
+  number from their own transaction; the reasoning is in `docs/03`.
+- Answering a challenge (RFC 3261 §22, RFC 8760). A registrar refuses the first
+  REGISTER it ever sees and a proxy refuses the first INVITE; that is the
+  handshake, not a failure. The endpoint reads the challenge, reports it, and
+  waits — the password is the one thing this layer must not hold, and answering
+  with the wrong one is how an account gets locked. `retry_with_credentials`
+  sends the original request again header for header, body included, with a new
+  branch, the next `CSeq` (§22.2, taken from the dialog when it had one so the
+  numbering does not collide), and the credentials. The nonce count moves by one
+  and never skips, since a skipped number reads to a server as a replay; the
+  same nonce coming back without `stale` is a refusal rather than a fresh
+  challenge, because §22.1 does not re-try credentials that were just rejected;
+  and a challenge nothing here understands is ignored rather than reported, per
+  RFC 8760 §2.4. A challenge outlives the transaction that earned it, and the
+  set of them is capped so a peer that refuses everything cannot grow it.
+- Where a dialog's requests go (RFC 3261 §8.1.2, §12.2.1.1, RFC 3263). A dialog
+  keeps the flow its first message travelled on — the address the INVITE went
+  to and the answer came back from — which §8.1.2 explicitly allows as "an
+  alternate address" and which is the only thing that survives the NAT nearly
+  every softphone sits behind. When the next hop the route set or the target
+  names is not that address, the endpoint says so rather than resolving it:
+  `Event::ResolveNeeded` carries the host, the port if the URI gave one, and
+  the transport if the URI or the scheme named one, and `resolved` retargets
+  the dialog. Ignoring it is a legitimate choice and the common one. There is
+  no `ResolveId`: the only thing the core ever needs resolved is a dialog's next
+  hop, so the dialog is both the question and the handle.
+- `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
+  `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
+  back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4
+  comparison as `equivalent()` rather than `PartialEq`, because §19.1.4
+  equivalence is not transitive and the RFC says so itself. `Tag` and `CallId`
+  compare the way the RFC compares them, which is not the same way: byte for
+  byte for a `Call-ID` (§20.8), without case for a tag, which is a token
+  (§7.3.1).
+- `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
+  with every other timer derived from them, and a schedule that answers "when
+  do I have to come back" through a shared reference. Nothing reads a clock —
+  the caller says what time it is — so a timer diagram from §17 is an ordinary
+  test that runs in microseconds. The absorbing timers are zero on a reliable
+  transport, because nothing retransmits there.
+- Fuzzing under `fuzz/`: three libFuzzer targets over the parser and every
+  typed accessor, the stream framer fed at arbitrary read sizes, and the
+  builder fed arbitrary bytes as header values to prove a caller's data cannot
+  become structure. Outside the workspace with its own lockfile and nightly
+  pin, and covered by `cargo deny` too.
+- The RFC 4475 corpus is now a test, and it passes: all 49 messages behave as
+  `fixtures/rfc4475/manifest.toml` says, and every valid one round trips byte
+  for byte. Three messages moved from `semantic` to `reject` — `insuf`,
+  `multi01` and `mcl01` sit in the application group but their RFC sections ask
+  for a 400 outright — so the split is 13 parse, 22 reject, 14 semantic.
+- `StatusCode::reason`: the reason phrases RFC 3261 §21 registers, plus 422
+  from RFC 4028, so nobody has to invent one.
+- `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK
+  answers INVITE, since the INVITE server transaction absorbs the ACK to a
+  non-2xx and an ACK to a 2xx finds nothing under that key and belongs to the
+  dialog; a response answers with its `CSeq` method, having none of its own.
+- `crates/sipral`: the facade crate, for now a name reserved for crates.io
+  that exports a version constant. The only crate with `publish = true`.
+- `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
+  published to NuGet as `Sipral` 0.0.1.
+- `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
+  with register, call, CANCEL-race and fork walkthroughs, a fake-clock test,
+  the C projection, and a record of what was rejected and why. Adds the RFC
+  6026 `Accepted` state to both INVITE machines, which every draft of the
+  surface had missed on the client side.
+- RFC 4475 torture corpus under `fixtures/rfc4475/`: the 49 messages decoded
+  byte for byte from the archive in Appendix A, laid out by RFC section, with
+  a manifest carrying section, title, expected outcome and SHA-256 per file.
+  `scripts/check.sh` verifies the hashes so line-ending normalisation cannot
+  silently alter a test.
+- `SECURITY.md`, pointing at GitHub private vulnerability reporting, and an
+  issue template for commercial licence enquiries. No email address appears
+  anywhere in the repository, by design: `scripts/check.sh` fails on one, in a
+  file or in commit metadata.
+
+### Changed
+
+- **The README is one page on what Sipral is and what sets it apart**, with a call placed from Python (run against a loopback server before it went in), the platforms, languages and audio modes in one table, the status at ABI 0.34 and the planned work marked as planned. The design documents are brought up to ABI 0.34: the freeze section no longer calls minor 33 the last one, `docs/09-rfc-index.md` gains RFC 3263's location procedure, PUBLISH beyond quality reports, the conference package and focus, SIPREC, multipart bodies, STIR/SHAKEN, RFC 5922, RTCP feedback and real-time text; `docs/01-architecture.md` places `sipral-audio`, `sipral-stir` and `sipral-diag`; `docs/06-nat.md` says which address this end advertises; `docs/10-roadmap.md` records device mode, the freeze and ICE restarts from C as done; the testing and security documents count thirty-four fuzz targets; and `docs/08-ffi.md` no longer says macOS cannot choose its microphone. This changelog's Unreleased section is one list per kind.
+- **ABI 0.33, the surface 1.0 freezes (`docs/08-ffi.md`, "The freeze").** Every pin is the member the struct's 0.33 version ends with, derived per target, so a 32-bit build no longer refuses 27 structs at the size its own header gives them; no struct ends in padding on any of the three layouts (fourteen gained a `reserved` member, `dtmf_detection` moved), checked by the `record!` macro on every target, by `tools/abi-gen`, and by `bindings/c/abi-layout.c` compiled for six targets, with every binding's size test holding its own layout to the same table, and the gate holding every member's offset on every layout to the last commit's, so a member slipped into a hole between two others is refused like one in tail padding. Renamed: `SIPRAL_STATUS_NOT_A_FOCUS`, `sipral_media_{attach,detach,reset}_processor`, `sipral_stack_transport_failed_with`, `sipral_stack_state_text`; `sipral_call_identity_text` takes `index` before `which`. Text out is one convention (`out_needed`, nullable, NUL written and counted, `sipral_audio_device_at` included), `SIPRAL_STATUS_CLOCK_BEHIND` (24) is its own status, an empty optional address or `sdp` is absent (and a member `sipral_call_ring_media` or `sipral_call_accept_transfer` does not read counts as set by its length alone), a packet longer than its buffer is refused, a media handle from inside any frame and a stack destroyed from the transmit callback are `BUSY`, and a poll no longer waits for the audio engine. Every parameter and member that holds an enumeration's number is declared with its `typedef` (`sipral_call_state_t *out_state`, not `uint32_t *`), and the header names no Rust module, macro or type. The .NET, Python and Dart layers no longer end every error message in a NUL; the generated .NET layer passes every callback as a function pointer and finds an unpackaged library even when its own class is the first thing used, the Swift one takes a null listener and keeps the number of a status it has no name for rather than calling it `.panic`, and Kotlin reaches `sipral_media_mix`.
+- **A service provider code in a STIR certificate covers no number unless the application says so.** `sipral_stir::Config::accept_service_provider_codes` is off by default, and `StirConfig::accept_service_provider_codes(true)` turns it on for an agent: a certificate whose TNAuthList names only a code (RFC 8226 §9) vouched for every number there is.
+- **A call that cannot meet a required SRTP policy is refused by the stack.**
+  An INVITE whose offer a `Required`, `DtlsRequired` or `DtlsOrSdes` call
+  will not carry audio on is answered 488 by `MediaEngine::answer` and
+  `ring`, which still return `MediaError::SrtpRequired`
+  (`SIPRAL_STATUS_SECURITY_POLICY` in C), instead of being left ringing for
+  the application to refuse; a call this end placed and the far end answered
+  in the clear is hung up with `Reason: SIP;cause=488`.
+  `SIPRAL_MEDIA_FAULT_SECURITY_POLICY` (10) names the media failure.
+
+- **A call recording's WAVE header is the 80-octet one of `sipral_media::formats::wav`**, with a `JUNK` chunk held for RF64: the data length is at offset 76, not 40. `MediaError::CodecChanged` and `MediaError::NoDtmf` are gone, since a codec change no longer ends a recording and a call with no telephone event takes its digits in the audio; `Codec` prints and is named in a codec order by `Codec::name`, which is the encoding name for every codec but L16's two.
+- **On Android from API level 28 a client opens in device mode by default.** `SIPRAL_FEATURE_AUDIO_DEVICE` is now set there, so `SipralAudioMode.platformDefault` is `Device` with automatic activation and the engine, not the application, opens the microphone and the loudspeaker as a call's media starts; an application that reads `SipralMedia.frames` and runs its own audio opens its client with `SipralAudioMode.Application`, and one under the telecom framework with `Device(SipralAudioActivation.MANUAL)`, as the sample does.
+- **`max_dialogs` holds the calls this end places too.** A call counts
+  from its INVITE on, and one placed at the ceiling is
+  `SendError::LimitReached` before anything goes out; a refusal or timer B
+  gives the room back at once. A dialler that places more than 128 calls at
+  once raises the limit, as a server that answers them already did.
+- **`MediaEngine::poll_event` costs the sessions that have an event, not
+  every session.** A session puts its call on the engine's ready list when
+  it queues an event, and a poll takes from that list, so a stack holding
+  ten thousand calls pays nothing for the ones with nothing to say.
+- **A drain of `MediaEngine::poll_rtcp` looks at each session once.** Each
+  call picks up after the call the last report came from, where it used to
+  start from the first session every time: draining the reports due among
+  ten thousand calls cost 8.3 ms of the signalling thread every sweep on
+  the lab machine, more than the sweep interval.
+- **`AudioRoute` is `org.sipral.telecom.AudioRoute`.** It moved out of the
+  Android helper into the JVM library beside `CallAudio`, which reports
+  route changes with it; `SipralConnection.routes`, `route` and
+  `requestRoute` take the same type under its new name. The Android
+  sample's own `AudioPump` is gone, replaced by `SipralCallAudio`.
+- **What a pause keeps in hand for the earpiece's pace is bounded at
+  100 ms.** Every clock a device runs at needs a frame or two: measured, a
+  laptop's loudspeaker ran 3 ppm off its machine's crystal, and the widest
+  a device may run and meet its bus's specification is USB full speed's
+  2500 ppm (USB 2.0 §7.1.11). The budget carries 2500 ppm through a
+  twenty-second spurt, and no frame runs dry up to ±10 000 ppm in the
+  crate's simulations of `scripts/lab.sh drift`, either callback length.
+  Past that the skew is a stream played at the wrong rate, and the buffer
+  no longer chases it with delay — 340 ms at 500 000 ppm, past what ITU-T
+  G.114 finds acceptable for conversation — but keeps the budget, runs dry
+  for the rest and counts every frame (`Quality::underruns`,
+  `frames_underrun`), so the loss rate, `is_suffering` and the score say
+  so. At 500 000 ppm in the lab the fast earpiece now holds 80 ms at most and
+  is scored 0 and suffering at every report (`docs/05-media.md`,
+  `docs/19-numbers.md`).
+- **`scripts/lab.sh drift` proves a two-frame earpiece, and judges a skew
+  no device runs at on what the product does with it.** The flow places
+  six calls: slow, true and fast, each taking one frame and two at a
+  callback, as a 40 ms device period on 20 ms packets does. Up to 5000 ppm
+  it fails, as before, on any cut in the tone and on a buffer past 250 ms;
+  past it on a buffer deeper than its own ring, on one deeper than 250 ms
+  that the stack still scores at half or more, and on a call that ran dry
+  on a twentieth of its frames that the stack never called suffering.
+  Every run now fails where the frames the earpiece played as silence and
+  the stack's own under-run count differ by more than a run in progress.
+  The step runs on the Compose project's own network, so a copy of the lab
+  under a `COMPOSE_PROJECT_NAME` of its own runs it against its own
+  Asterisk.
+- **ABI 0.28.** `sipral_stack_config_t` grew `registrar_keepalive` and
+  `registrar_keepalive_ms` at the tail, and `sipral_stack_settings_t`
+  `registrar_keepalive_ms`; `sipral_call_accept_session` refuses a null
+  `sdp`. A binding built against 0.27 is refused by this library, and the
+  Kotlin agent's jar has to be rebuilt.
+- **`UserAgent::accept_reoffer` takes the answer, not an `Option` of one.**
+  Every `UaEvent::Reoffer` carries an offer — a re-INVITE without one is
+  answered with this end's own offer before anything is handed up — and
+  RFC 3264 §5 has an offer answered, so `None` sent a 2xx with no body that
+  answered nothing. The signature is now `sdp: &[u8]`, and the C ABI's
+  `sipral_call_accept_session` refuses a null or empty `sdp` with
+  `SIPRAL_STATUS_INVALID_ARGUMENT`, the request still waiting to be answered
+  or refused.
+- **A re-INVITE or UPDATE whose only body is of a type the agent does not
+  read, marked `handling=optional`, no longer reaches the application.** It
+  used to arrive as a `UaEvent::Reoffer` carrying no offer; RFC 3204 §6,
+  which defines the parameter RFC 3261 §20.11 points to, has "the UAS MUST
+  ignore the message body" when it is optional, so the request is answered
+  as the one it would be without it: a re-INVITE with this end's own offer
+  (§14.1), an UPDATE as a target refresh. A body without that marking is
+  refused 415, as above.
+- **ABI 0.29.** `sipral_stack_config_t` grew `turn_transport` and
+  `sipral_media_packet_t` grew `protocol`, both at the tail with `MIN_SIZE`
+  unmoved, after `registrar_keepalive_ms`; event kind 42, status 12 and
+  feature bit 1024 are spent, and a binding built against 0.28 is refused
+  (the Kotlin agent's jar is rebuilt). The same minor carries the built-in
+  audio engine and the caller-identity and moving-call surface: after
+  `turn_transport`, `sipral_stack_config_t` grew the `audio*` members;
+  `sipral_account_config_t` grew `session_timer`,
+  `session_interval_seconds`, `privacy` and `trusted_peers`, and
+  `sipral_call_event_t` the identity, cause and answer-mode members, all at
+  their tails; event kinds 43 (audio devices changed) and 45 (call address
+  wanted), statuses 13 to 15 and feature bits 2048, 4096 and 8192 are spent,
+  and 44 is held and spent unused. In Rust, `sipral_nat::ice::Transmit`,
+  `Route` and `TurnServer`, `sipral::Datagram`, `RelayDatagram` and
+  `MixOutcome` each grew a field saying what a message goes over, and
+  `TurnError` a variant; a caller that builds one by its fields names the
+  new one.
+- **The `sipral` crate's own description of its bindings names all four.**
+  `crates/sipral/README.md`, its `Cargo.toml` description and
+  `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"
+  leaving out Python though the crate has had one as long as the other three.
+  No behaviour changed.
+- **ABI 0.27.** `sipral_stack_config_t` and `sipral_stack_settings_t` grew
+  `referrals` at the tail, `SIPRAL_EVENT_KIND_REFERRAL` (41) and
+  `sipral_referral_event_t` are new, `SIPRAL_ICE_LITE` is 4, and
+  `sipral_call_reject_transfer` refuses a code under 300. A binding built
+  against 0.26 is refused by this library, and the Kotlin agent's jar has to
+  be rebuilt.
+- **Every Swift event stream now reaches every reader.**
+  `SipralStack.events`, `Call.events`, `Call.dtmf` and `Media.frames` were
+  each one `AsyncStream`, which hands every item to one reader only: a call
+  bound to `CallKitBridge`, which reads the call's events itself, lost
+  events to the application's own loop over the same call, and the other
+  way round. They are now methods — `events()`, `dtmf()`,
+  `frames(bufferingNewest:)` — and every call returns a stream of its own
+  that gets every item from then on, in order. Nothing raised before a
+  stream is taken reaches it, except a call's `CALL_ENDED`: a call's
+  streams finish right after it, and one taken later gets that event and
+  finishes at once, so a call that ended before `CallKitBridge.bind` is
+  still reported ended. A media's streams finish when it ends, a stack's
+  when it closes. A reader that falls behind drops its own oldest items —
+  past 4096 events or digits, past 50 frames unless it asks for another
+  number — and never slows the others. `CallKitBridge` also covers the one
+  case where a call's stream finishes without ever handing over
+  `CALL_ENDED` — the application hanging up and closing a bound call
+  without reading its own `events()` first — by still reporting the call
+  ended and forgetting it.
+- **The packaged artefacts leave libopus out unless asked for it.** The
+  XCFramework, wheel, NuGet and AAR scripts build the C ABI without the
+  `opus` feature by default, with every other default feature kept;
+  `--with-opus` builds the variant that carries it, under a name that says
+  so (`CSipral-opus.xcframework.zip`, `sipral-opus`, `Sipral.Opus`,
+  `sipral-opus.aar`). The gate checks the packaged XCFramework for libopus
+  symbols.
+- **`CallMedia` is no longer `Clone` or `PartialEq`.** It can carry a relay
+  on a TURN server, which is an allocation one call holds, not a value two
+  calls can share or be compared by; build one per call with
+  `CallMedia::new`.
+- **One header field's value may be 16 KiB, up from 4 KiB.**
+  `msg::Limits::DEFAULT.max_header_value_bytes` was tight for real traffic:
+  a full RFC 8224 `Identity` with rich call data, a long `History-Info`, or a
+  caller's display name of a few kilobytes all refused the request that
+  carried them. The message bound (64 KiB) and the header count (128) are
+  unchanged, and a value is a span into the message, so the new bound costs
+  no memory of its own. `StreamFramer::next_message` now returns `Framed`,
+  which is either the message or the head of one it refused and passed over.
+- **The licence documents say what they mean.** `LICENSE-COMMERCIAL.md` is
+  now plainly a description that grants nothing on its own, with the licensor
+  named by the signed agreement rather than by `AUTHORS`. It gains the rights a
+  licensee's customers, stores and contractors need, a patent clause that
+  grants nothing and names the Opus pool, a first year of maintenance inside
+  the one-time fee, a liability cap that does not fall to zero and keeps what
+  the law does not allow to be limited, and a termination clause that protects
+  copies already delivered. `LICENSING.md` describes the AGPL arm as the AGPL
+  actually reads and explains `LicenseRef-Sipral-Commercial`; `TRADEMARK.md`
+  attaches the AGPL section 7 additional terms; `AUTHORS` promises a
+  contributor licence rather than an assignment; the Opus pool facts in
+  `THIRD-PARTY-NOTICES.md` are corrected; `SECURITY.md` lists the one advisory
+  a scanner will report and why it does not apply.
+- **Every re-offer hands the DTLS roles back, and a far end that moves them
+  is refused by name.** RFC 8842 §5.5 asks each subsequent offer for
+  `a=setup:actpass`; the hold, the resume and the codec change now write it
+  whichever role the call has, where a call this end had answered used to
+  carry the role it answered with. Each re-offer this end answers takes the
+  role the running association gives it (§5.3) — to `actpass`, a fresh answer
+  said `active` every time, which from a DTLS server is asking to become the
+  client. A far end that takes the other role anyway is asking for a new
+  association, which this stack does not start: its answer is not adopted and
+  is reported as the new `MediaError::DtlsRoleChanged`, and a re-offer that
+  leaves this end only the other role is answered 488 under the same name. A
+  re-offer naming another certificate is answered 488 too, as
+  `MediaError::DtlsFingerprintChanged`, where it used to be accepted and then
+  not followed.
+
+- **Every re-offer on a secured call is answered by the facade.** `sipral-ua`
+  hands them up, holds and refreshes included, because their answers need a
+  key, or a certificate and a role, that only the layer holding them can
+  write; see Fixed. An application that describes its own secured calls now
+  hears the far end's hold as `SIPRAL_EVENT_KIND_SESSION_OFFERED`, as it hears
+  a codec change. An SDES answer repeats the key this end already sends under
+  rather than drawing one, which RFC 4568 §7.1.4 warns leaves the far end
+  unable to read this end until the answer arrives.
+
+- **The ABI is at 0.26.** Each minor since 0.20 is noted with the entry that
+  caused it.
+- **ABI 0.20.** It covers two changes to the printed header: ICE's own
+  (`SipralIce`, `SIPRAL_FEATURE_ICE`, event 33, the `ice` member on both
+  config structs, and `now_ms` on `sipral_media_capture`), which went out
+  without the minor moving, and `sipral_call_change_codecs`. The gate now
+  refuses the first kind.
+- **ABI 0.21.** `sipral_call_join`, `sipral_call_leave` and
+  `sipral_media_mix`, for a two-call conference held on this stack, and
+  what had landed since 0.20 without the minor moving: `sipral_account_message`
+  and events 34 to 37 (MESSAGE received and sent, message waiting, and the
+  quality report sent).
+- **ABI 0.22.** `SIPRAL_EVENT_KIND_MEDIA_UNJOINED` (38), the survivor notice
+  a joined call's partner gets when the call it was joined to ends.
+- **ABI 0.23.** STUN from the stack (`sipral_stack_nat_map`,
+  `sipral_stack_poll_stun`, `sipral_stack_receive_stun`, the `nat` and
+  `stun_server` fields of `sipral_stack_config_t`, `SIPRAL_FEATURE_STUN` and
+  event 39, `SIPRAL_EVENT_KIND_NAT_MAPPING`) and the audio processor
+  attached from C (`sipral_call_attach_processor` and its detach and reset,
+  `sipral_processor_frame_t`, `sipral_processor_callback_t`).
+- **ABI 0.24.** `SIPRAL_CODEC_G729`.
+- **ABI 0.25.** TURN in the stack configuration (`turn_server`,
+  `turn_username`, `turn_password`), its relay event and records
+  (`SIPRAL_EVENT_KIND_NAT_RELAY`, event 40), and the G.729 Annex B toggle
+  (`g729_annex_b` on `sipral_stack_config_t` and `sipral_stack_settings_t`).
+- **ABI 0.26.** `sipral_stack_nat_unmap`.
+
+- **`sipral_media_capture` takes `now_ms`**, in the position its three
+  siblings put it and read exactly as they read theirs. ICE has to be told
+  that traffic went out on the pair it chose — RFC 8445 §11 is what lets it
+  stop sending keepalives — and the capture path was the one producer with no
+  clock at all. `MediaSession::capture` and `MediaSession::poll_transmit` take
+  one for the same reason. The ABI's major is 0 and `docs/08-ffi.md` says in
+  plain words that it is not frozen; this is the kind of change that is free
+  now and impossible later.
+
+- **An answer the user agent writes itself no longer withdraws ICE from a call
+  that had it.** `sipral-ua` answers a hold, a resume and a peer moving its
+  address without handing the description up, and it carried forward
+  `rtcp-mux`, `ptime` and `maxptime` and nothing else. RFC 8839 §4.4 wants the
+  username fragment, the password and the candidates on every description of a
+  session, so an answer without them reads as ICE being withdrawn mid-call —
+  which takes a checked path away from a call that had one, silently, from a
+  layer that has never read a candidate. Exactly the failure the function's own
+  documentation already described for multiplexing.
+
+- **`sipral_nat::ice::Received::Data` and `sipral_nat::turn::Input::Data` now
+  answer with a position rather than a borrow**, and both types have lost
+  their lifetime parameter. A borrow holds the caller's datagram shared for as
+  long as it holds the answer, and what a caller does next with a relayed
+  packet is unprotect it in place — so the type that said "here it is" was the
+  type that stopped it. The position comes from the layers that already knew
+  it: `stun::Attribute::range` and `turn::ChannelData::range` are new and
+  public for it.
+
+- **A peer's `a=ice-pacing` no longer outlives the session it was proposed
+  for.** RFC 8445 §14.2 makes Ta the larger of the two agents' values, and a
+  restart is a new session; `IceAgent::restart` now goes back to this agent's
+  own proposal. Carried forward, one peer asking for the ten seconds RFC 8839
+  §5.5 allows slowed every check, every gathering transaction and every
+  retransmission of that agent for the rest of its life — including across the
+  restart a network change causes, which is when pacing matters most.
+
+- **An ICE checklist with nothing left to check is now waited on, then
+  failed** (RFC 8863), where before it stayed `Running` for the life of the
+  call. Two situations reach it and neither is rare: a peer whose candidates
+  were all unusable leaves a checklist with no pairs at all, and a checklist
+  whose pairs have all failed is the same thing one round trip later. Both
+  used to leave `IceAgent::deadline()` answering `None`, so a caller that
+  slept until the agent next had something to do slept for ever, on a call
+  that was never going to carry a packet. The wait is `IceConfig::patience`,
+  one whole STUN transaction by default, and it is a window rather than a
+  delay: a check arriving inside it still forms a peer-reflexive pair and
+  connects the call.
+
+- **`SipralClient.events`, `SipralCall.events` and `digits` document what
+  their buffer actually guarantees.** A stale comment in `IdiomaticCheck.kt`
+  called them "unbounded Kotlin channels"; they are a `SharedFlow` with
+  `extraBufferCapacity = 4096` and `onBufferOverflow = DROP_OLDEST`, which
+  is bounded, not unbounded, and does not mean a slow collector sees
+  everything -- past 4096 events of lag, its oldest unread ones are
+  silently dropped to make room, with no exception and no signal. The KDoc
+  on both flows and `bindings/kotlin/README.md` now say so directly, found
+  while reproducing the ordering bug above and checking, as its own review
+  asked, whether a live collector under a burst load could still lose
+  events: a slow one can, once it falls behind by more than the buffer
+  holds. No behaviour changed.
+
+- **A zeroed field no longer means "send the digits in the media".**
+  `SIPRAL_DTMF_RTP` was zero, which is what a caller who filled nothing in
+  leaves behind, and the way a digit travels is the one setting here a peer can
+  ignore in silence: a call that meant INFO and sent nothing at all looks, from
+  this end, exactly like one that sent it. The three forms are 1, 2 and 3 now,
+  and zero is refused by name. The ABI minor goes to 10.
+
+- **A compound RTCP report is held to a bound of its own on the way in.**
+  `sipral_media_receive` refused anything over `SIPRAL_MEDIA_PACKET_BYTES`,
+  which is the bound this stack builds against — but what arrives is the
+  peer's arithmetic, and RFC 3550's compound report grows with the number of
+  sources it describes. A datagram RFC 5761 §4 says is control is now held to
+  `SIPRAL_MEDIA_RTCP_BYTES` (8 KB) instead, so a report larger than this end
+  would have built is read and judged for what it is rather than refused as a
+  caller's mistake. Media is unchanged, and so is sending.
+
+- **The Swift binding checks the ABI before the first call into it, rather
+  than asking the application to remember**. C# and Kotlin
+  already checked at load; Swift has no load hook, so the generator now
+  prints a `static let` whose initialiser runs once, before the first read of
+  it returns, on whichever thread gets there first — and every generated
+  entry point reads it first. A mismatch is a thrown `SipralError` naming
+  both versions, not a printed warning. The three name lookups
+  (`statusName`, `codecName`, `eventKindName`) became `throws` with the
+  rest, because an entry point that skips the check is a gap rather than a
+  convenience. Written in `tools/abi-gen`, not by hand in the binding.
+
+- **The gate reads the artefact for libopus, not only the dependency graph**.
+  `cargo tree` says what the build was told to link; it does
+  not say what came out. The step that proves a build without the feature
+  carries no Opus now rebuilds `sipral-ffi`'s shared library with
+  `--no-default-features` and inspects it — `otool -L` for a dynamic
+  dependency, and `nm` for the statically linked symbols, which is where they
+  actually are, since the Opus crate vendors and builds libopus with hidden
+  visibility. The mirror half asserts the default build does carry them, so
+  an empty default feature set cannot pass quietly. The inspection is of a
+  debug artefact on purpose: the release profile strips local symbols, which
+  would make the two builds look identical.
+
+- **`docs/13-client-requirements.md` says which requirements a C caller can
+  reach today**. A new section sorts all of them three ways:
+  answerable from `sipral.h` alone, built in Rust with no C entry point yet,
+  and not built anywhere. It is written against the header and the FFI crate
+  rather than against a plan for them, and it is the list 8.4 shortens.
+  Two documents were also brought back to the truth: `docs/08-ffi.md` said no
+  Swift, Kotlin or .NET toolchain ran in the gate, which stopped being true
+  when that step was added, and `docs/04-ua.md` said neither form of DTMF had
+  been run against a real server, which stopped being true when the lab ran
+  both. Both forms pass against Asterisk; RFC 4733 does not yet pass through
+  the lab's proxy to FreeSWITCH, and the document now says so rather than
+  reporting a pass on one server's word.
+
+- **The Kotlin step finds its own standard library on a wrapped
+  installation**. `kotlinc` from a package manager is often a
+  one-line wrapper that execs the real compiler a directory further in, so
+  reading the jars off the command landed beside the wrapper and the step
+  failed on a machine where Kotlin was installed correctly. Both layouts are
+  tried now. With that, and with a Kotlin compiler present, the gate runs
+  with no skipped step for the first time.
+
+- **Event kinds 28 and 29 are held for two events the C ABI does not raise
+  yet**: the stack recovering from a suspension or a network change, and the
+  application being asked to resolve a destination. `sipral.h` lists them
+  with the other reserved numbers, so the branches that add them cannot
+  collide. 27 was held the same way, for a DTMF digit sent by SIP INFO being
+  answered, and the work that brought DTMF by SIP INFO turned it into a kind
+  in place.
+
+- **A transfer taken from C places its call the way `sipral_call_place`
+  does**. `sipral_call_accept_transfer` used to place an
+  offerless INVITE with no SRTP policy and no application headers on it,
+  because it had no configuration to read one from; it now takes a
+  `sipral_call_config_t`, the same struct and the same versioned reader
+  `sipral_call_place` uses, meaning the same thing on every member but
+  `target` — the REFER already named where this goes, so a `target` of the
+  caller's own is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it, and nothing is
+  placed. `media_address` writes the offer from this stack's codecs and runs
+  the audio, exactly as it does on a placed call, and `MediaEngine` gained
+  `accept_transfer`/`accept_transfer_with` to do it: the new call is managed
+  the same way one `place` placed, so its session opens once the 2xx is
+  acknowledged and `MEDIA_STARTED` follows. `sdp` carries the application's
+  own description and this stack runs no audio for it, as before. Giving
+  neither is now refused rather than placing an offerless INVITE — the
+  same rule `sipral_call_place` already keeps, and for the same reason: the
+  answer would have to travel in the ACK, which this ABI has no way to hand
+  back. In `sipral-ua`, `UserAgent::accept_transfer` takes an `OutgoingExtras`
+  bundling a destination, a fork policy and header fields — the pieces
+  `OutgoingCall` carries beside the target this call has no legitimate value
+  for, since the REFER supplies it instead. The REFER supplies `Replaces` and
+  `Referred-By` as well, so either among those header fields is refused
+  (`SIPRAL_STATUS_INVALID_ARGUMENT` from C) — RFC 3891 §3 has an INVITE with
+  more than one `Replaces` refused with a 400 — and every field is checked
+  before the REFER is touched, so a refusal leaves the transfer still there to
+  take. The signature is not additive:
+  nothing outside this tree calls it yet, so it changed outright rather than
+  carrying a parameter nobody could ever set.
+
+- **The lab now drives calls through the facade an application links**.
+  `sipral-interop` carried its own RTP session, its own codec pair and
+  its own DTMF sender — a second media join, written for the lab and used
+  nowhere else, which is a phase 1 exit criterion this stack had not met:
+  "a phase whose proof runs on a path no customer uses has not exited"
+  (`docs/10-roadmap.md`). It now depends on `sipral` and drives every flow
+  through `MediaEngine`/`MediaSession` — RTP, codecs, DTMF and SRTP alike —
+  and `interop/harness/src/media.rs` is gone; `crate::audio` is what is left,
+  a socket and a tone, which is what any application still has to write for
+  itself. The five existing flows judge exactly what they judged before, with
+  their numbers now read off what `capture`/`receive`/`playback` actually did
+  on the wire rather than a hand-rolled `RtpSession`. Three flows join them:
+  DTMF as an RFC 4733 named telephone event, confirmed by the lab's own
+  dialplan reading a digit however it arrived and naming it straight back
+  (`interop/asterisk/extensions.conf`'s 9003, `interop/freeswitch/lab.xml`'s
+  9003); SRTP against a new SDES endpoint of Asterisk's own
+  (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004); and a
+  hold whose resume re-offers a narrower codec list than the call held on
+  (the case a codec change makes), against Asterisk, by a re-offer the harness
+  writes
+  itself — `sipral::MediaEngine` has no public way yet to re-offer a live
+  call on a catalogue of its own choosing, which `interop/harness/src/main.rs`
+  (`reoffer_onto`) says in full. DTMF by SIP INFO is not among them:
+  nothing in `sipral-ua` sends one yet, so there is no path through the
+  facade to drive rather than a lab limitation to work around. The lessons
+  the old media join encoded by hand are now tests of `sipral::MediaSession`
+  itself (`crates/sipral/src/tests.rs`): a peer that answers with one G.711
+  law and sends the other used to be dropped as an unnegotiated payload
+  type, and is now decoded with the law it actually names — `accepted` and
+  `fill` in `crates/sipral/src/session.rs` both changed for it, watched red
+  before the fix by sending A-law on a call negotiated for mu-law.
+
+- **A call's audio no longer waits on the stack, and the event callback runs
+  with nothing held.** `sipral_stack_poll` holds the stack only while it works
+  and delivers afterwards, from a queue the stack owns, so the callback may call
+  back into the library and events still arrive in order and on one thread at
+  a time. Every per-call media entry point takes a media handle from the new
+  `sipral_call_media` instead of the stack and the call, is renamed
+  `sipral_media_…` to match, and never takes the stack's lock; the handle is
+  freed with `sipral_media_release`, answers `SIPRAL_STATUS_WRONG_STATE` once
+  its call or stack is gone, and `SIPRAL_STATUS_BUSY` only when a thread
+  re-enters its own session — which a processor calling into its call's stack
+  is told as well. `sipral_media_poll_rtcp` asks one call rather than
+  the stack. Underneath, each `MediaSession` has a lock of its own,
+  `Processor` requires `Send`, `MediaEngine::session` hands out a guard,
+  `MediaEngine::share` a `SessionShare`, and `MediaEngine::poll_rtcp` returns
+  the octets rather than a borrow.
+
+- **The derived constant names in two bindings were nonsense, and are not any
+  more.** `SIPRAL_FEATURE_OPUS` — the one symbol an application reads to know
+  whether this build has Opus — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,
+  beside `fEATURESUBSCRIPTIONS` and `MEDIAPACKETBYTES` and seventeen others.
+  The camel-case derivation looked for an underscore or a capital to start a
+  word at, and a name already in capitals has neither, so it lower-cased the
+  first letter and left the rest. It now finds word boundaries the way
+  `abi::snake` does, which is the rule the library itself answers with, and
+  the twenty constants are `featureOpus` in Swift, `FeatureOpus` in C#,
+  `FEATURE_OPUS` in Kotlin and `SIPRAL_FEATURE_OPUS` in C. Nothing else in any
+  of the four files moved. The ABI is not frozen and nothing depends on the
+  old spellings, which is why this is a rename rather than an alias.
+
+- **The roadmap carries what an outside reading of the tree found, and what
+  was decided about it.** Phase 1 gains two exit criteria: the lab's flows run
+  through the join an application links and then through `sipral.h`, and no
+  request leaves as an oversized datagram inside a dialog either. Phase 2
+  gains re-negotiation that keeps stream identity and never reuses an SRTP
+  index, RTCP-XR with an E-model MOS, SIP MESSAGE and message waiting, a local
+  three-way conference, STUN reached from a call, early media on the answering
+  side, the REGISTER 200 OK kept, and a written decision on DTLS-SRTP. Phase 3
+  now lists what is built in Rust and unreachable from C, and does not freeze
+  the ABI before that list is empty and every printed binding compiles in the
+  gate; it adds the idiomatic Swift, C# and Kotlin layers, the platform
+  artefacts, a Linux device crate over PipeWire and a common device crate.
+  Phase 5 starts by joining the headless crate to the engine, and adds Python,
+  a sixty-second example with no account, measured numbers, a public
+  interoperability matrix and a security model. G.729 joins phase 2, written
+  from the Recommendation with the patent position confirmed before it ships;
+  ICE in the full role joins phase 4, off by default on a desktop. DTLS-SRTP
+  is written in-tree as the last item of phase 2, the state machine from the
+  RFC and the primitives from the crate family that already supplies AES.
+  Video waits for 1.0 and is phase 6 after it, with its contents named.
+
+- Documents corrected against the tree after an outside reading of the README.
+  RFC 3263 is split in the index between what the core owns and what the caller
+  does, with RFC 2782 named next to it; RFC 3327 and RFC 8599 added; iLBC and
+  AMR given their exclusion rows. `a=ice-lite` is now conditioned on a public
+  address, which RFC 8445 Appendix A requires and which separates the headless
+  build from the softphone. SDES is stated to need a secured signalling channel
+  (RFC 4568 §7). The layer diagram says outright that signalling and media do
+  not depend on each other, and `MediaPlan` and `MediaCapabilities` name what
+  crosses between them. The README names the codecs, the fuzzing and the parser
+  bounds, and no longer refers to a transport crate that does not exist.
+- The project's home is `sipral.org`. `Cargo.toml`, both package READMEs and the
+  NuGet `PackageProjectUrl` say so; the published NuGet 0.0.1 still carries the
+  previous domain and is corrected at the next version.
+
+- Phase 1 readiness review, nine gaps closed: WebSocket scoped to phase 2 and
+  its framing corrected (one SIP message per WebSocket message, never the
+  `Content-Length` framer); keepalive given a home in `EndpointConfig`; the
+  `sipral-ua` call handle renamed away from the core's `CallId`; a fuzzing
+  plan and a per-flow interoperability pass bar in `docs/11-testing.md`; the
+  `sipral` facade crate inheriting version, licence and lints from the
+  workspace; `scripts/check.sh` failing on version drift between the
+  workspace and the .NET package.
+- Design and licensing documents checked claim by claim against the RFC text
+  and the primary sources; 20 corrections applied. The ones that change
+  behaviour: the release profile no longer sets `panic = "abort"`, because the
+  FFI layer has to catch unwinding at the C boundary; `sipral-ffi` and
+  `sipral-io-coreaudio` now carry the `unwrap`/`expect`/`panic`/indexing lints
+  they were silently missing; phase 1 explicitly includes the minimal RTP and
+  G.711 slice a bidirectional call needs; `LICENSING.md` no longer implies that
+  charging for a product is by itself what triggers the commercial arm. CI
+  installs the toolchain from `rust-toolchain.toml` instead of pinning a second
+  time in the workflow, and runs the gitleaks binary (pinned, checksum
+  verified) instead of the marketplace action, which requires a paid licence
+  on organisation repositories.
+
 ### Fixed
 
 - **A signalling connection the stack let go of is made again.** Over TCP or TLS, the stack retires the main connection itself when a flow that answered keep-alive pings leaves one unanswered for ten seconds (RFC 5626 §4.4.1), and says so with `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` while the socket is still open in the layer; the Swift, .NET, Kotlin and Python layers kept that socket and never connected again, so every registration on it lapsed. Each now closes it after the poll that said so and connects again with the back-off it uses for a lost connection, registering again every account that was registering.
@@ -1472,7 +3365,7 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **A PASSporT holds only for the called party it was signed for, whatever the request names it with.** The verifier compared `dest` with the request only when `To` was a number, so a PASSporT signed for `sip:alice@example.com` vouched for a request to anyone else; now the number or SIP URI in `To` or the Request-URI is held against `dest.tn` and `dest.uri` in every case, both canonical (RFC 8224 §8.3, §8.5), and `DestMismatch`'s `detail` names what was signed and what was asked for. The signer writes `dest.uri` in §8.5's canonical form (`sip:user@host`, lower case, no port, parameters or headers), and `sipral_stir::canonical_uri`, `Dest::uri`, `Dest::names_number` and `Dest::names_uri` do the same for any caller.
 - **The Kotlin binding loads with every 0.31 event arm.** Each payload arm's numbers now cross JNI in one `long[]`, so the event's `deliver` stays inside the JVM's 255 parameter slots; `SipralEvent.payload` reads the same.
 - **The Swift binding hands an empty list over as a null pointer.** `Sipral.callAnswerWith` with no header fields was refused `headers is not read here`, because an empty Swift array still carried a buffer; every printed wrapper that takes a list now passes null and zero for an empty one, as the .NET and Kotlin layers already did.
-- **The interop matrix reads the steps wave C added to a lab run.** The SRTP policy per account against Asterisk and through the proxy, STIR/SHAKEN between two C ABI stacks (whose flows start after the seed and end at `every STIR call passed`) and SIP over TCP and TLS through the four layers (one row per agent, a stray FAIL a row of its own) each have rows and a feature in `interop/features.toml`, so the recorded run passes the generator's own check again; `docs/11-testing.md` is regenerated from it.
+- **The interop matrix reads the newer steps of a lab run.** The SRTP policy per account against Asterisk and through the proxy, STIR/SHAKEN between two C ABI stacks (whose flows start after the seed and end at `every STIR call passed`) and SIP over TCP and TLS through the four layers (one row per agent, a stray FAIL a row of its own) each have rows and a feature in `interop/features.toml`, so the recorded run passes the generator's own check again; `docs/11-testing.md` is regenerated from it.
 - **Every result a lab run prints has a row in the interop matrix.**
   `scripts/interop-matrix.py` knew section headers only from its own list, so
   a step it was not told about was read as the tail of the step above it: the
@@ -2427,282 +4320,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
 - **.NET trusts a certificate its one pinned authority signed.** `turnTrustedCertificates` built its chain with revocation checked online, which a private authority's certificates never pass, having no revocation list; revocation is now left unchecked, as `SslStream` itself leaves it.
 - **An INVITE retried with credentials is held to `max_dialogs`.** A proxy's `407` gives the call's room back, and the authenticated retry went out without looking, so a call placed in between took the stack one past its ceiling; the retry is now refused like a call placed afresh, the challenge kept for when there is room.
 
-### Changed
-
-- **ABI 0.33, the surface 1.0 freezes (`docs/08-ffi.md`, "The freeze").** Every pin is the member the struct's 0.33 version ends with, derived per target, so a 32-bit build no longer refuses 27 structs at the size its own header gives them; no struct ends in padding on any of the three layouts (fourteen gained a `reserved` member, `dtmf_detection` moved), checked by the `record!` macro on every target, by `tools/abi-gen`, and by `bindings/c/abi-layout.c` compiled for six targets, with every binding's size test holding its own layout to the same table, and the gate holding every member's offset on every layout to the last commit's, so a member slipped into a hole between two others is refused like one in tail padding. Renamed: `SIPRAL_STATUS_NOT_A_FOCUS`, `sipral_media_{attach,detach,reset}_processor`, `sipral_stack_transport_failed_with`, `sipral_stack_state_text`; `sipral_call_identity_text` takes `index` before `which`. Text out is one convention (`out_needed`, nullable, NUL written and counted, `sipral_audio_device_at` included), `SIPRAL_STATUS_CLOCK_BEHIND` (24) is its own status, an empty optional address or `sdp` is absent (and a member `sipral_call_ring_media` or `sipral_call_accept_transfer` does not read counts as set by its length alone), a packet longer than its buffer is refused, a media handle from inside any frame and a stack destroyed from the transmit callback are `BUSY`, and a poll no longer waits for the audio engine. Every parameter and member that holds an enumeration's number is declared with its `typedef` (`sipral_call_state_t *out_state`, not `uint32_t *`), and the header names no Rust module, macro or type. The .NET, Python and Dart layers no longer end every error message in a NUL; the generated .NET layer passes every callback as a function pointer and finds an unpackaged library even when its own class is the first thing used, the Swift one takes a null listener and keeps the number of a status it has no name for rather than calling it `.panic`, and Kotlin reaches `sipral_media_mix`.
-- **A service provider code in a STIR certificate covers no number unless the application says so.** `sipral_stir::Config::accept_service_provider_codes` is off by default, and `StirConfig::accept_service_provider_codes(true)` turns it on for an agent: a certificate whose TNAuthList names only a code (RFC 8226 §9) vouched for every number there is.
-- **A call that cannot meet a required SRTP policy is refused by the stack.**
-  An INVITE whose offer a `Required`, `DtlsRequired` or `DtlsOrSdes` call
-  will not carry audio on is answered 488 by `MediaEngine::answer` and
-  `ring`, which still return `MediaError::SrtpRequired`
-  (`SIPRAL_STATUS_SECURITY_POLICY` in C), instead of being left ringing for
-  the application to refuse; a call this end placed and the far end answered
-  in the clear is hung up with `Reason: SIP;cause=488`.
-  `SIPRAL_MEDIA_FAULT_SECURITY_POLICY` (10) names the media failure.
-
-- **A call recording's WAVE header is the 80-octet one of `sipral_media::formats::wav`**, with a `JUNK` chunk held for RF64: the data length is at offset 76, not 40. `MediaError::CodecChanged` and `MediaError::NoDtmf` are gone, since a codec change no longer ends a recording and a call with no telephone event takes its digits in the audio; `Codec` prints and is named in a codec order by `Codec::name`, which is the encoding name for every codec but L16's two.
-- **On Android from API level 28 a client opens in device mode by default.** `SIPRAL_FEATURE_AUDIO_DEVICE` is now set there, so `SipralAudioMode.platformDefault` is `Device` with automatic activation and the engine, not the application, opens the microphone and the loudspeaker as a call's media starts; an application that reads `SipralMedia.frames` and runs its own audio opens its client with `SipralAudioMode.Application`, and one under the telecom framework with `Device(SipralAudioActivation.MANUAL)`, as the sample does.
-- **`max_dialogs` holds the calls this end places too.** A call counts
-  from its INVITE on, and one placed at the ceiling is
-  `SendError::LimitReached` before anything goes out; a refusal or timer B
-  gives the room back at once. A dialler that places more than 128 calls at
-  once raises the limit, as a server that answers them already did.
-- **`MediaEngine::poll_event` costs the sessions that have an event, not
-  every session.** A session puts its call on the engine's ready list when
-  it queues an event, and a poll takes from that list, so a stack holding
-  ten thousand calls pays nothing for the ones with nothing to say.
-- **A drain of `MediaEngine::poll_rtcp` looks at each session once.** Each
-  call picks up after the call the last report came from, where it used to
-  start from the first session every time: draining the reports due among
-  ten thousand calls cost 8.3 ms of the signalling thread every sweep on
-  the lab machine, more than the sweep interval.
-- **`AudioRoute` is `org.sipral.telecom.AudioRoute`.** It moved out of the
-  Android helper into the JVM library beside `CallAudio`, which reports
-  route changes with it; `SipralConnection.routes`, `route` and
-  `requestRoute` take the same type under its new name. The Android
-  sample's own `AudioPump` is gone, replaced by `SipralCallAudio`.
-- **What a pause keeps in hand for the earpiece's pace is bounded at
-  100 ms.** Every clock a device runs at needs a frame or two: measured, a
-  laptop's loudspeaker ran 3 ppm off its machine's crystal, and the widest
-  a device may run and meet its bus's specification is USB full speed's
-  2500 ppm (USB 2.0 §7.1.11). The budget carries 2500 ppm through a
-  twenty-second spurt, and no frame runs dry up to ±10 000 ppm in the
-  crate's simulations of `scripts/lab.sh drift`, either callback length.
-  Past that the skew is a stream played at the wrong rate, and the buffer
-  no longer chases it with delay — 340 ms at 500 000 ppm, past what ITU-T
-  G.114 finds acceptable for conversation — but keeps the budget, runs dry
-  for the rest and counts every frame (`Quality::underruns`,
-  `frames_underrun`), so the loss rate, `is_suffering` and the score say
-  so. At 500 000 ppm in the lab the fast earpiece now holds 80 ms at most and
-  is scored 0 and suffering at every report (`docs/05-media.md`,
-  `docs/19-numbers.md`).
-- **`scripts/lab.sh drift` proves a two-frame earpiece, and judges a skew
-  no device runs at on what the product does with it.** The flow places
-  six calls: slow, true and fast, each taking one frame and two at a
-  callback, as a 40 ms device period on 20 ms packets does. Up to 5000 ppm
-  it fails, as before, on any cut in the tone and on a buffer past 250 ms;
-  past it on a buffer deeper than its own ring, on one deeper than 250 ms
-  that the stack still scores at half or more, and on a call that ran dry
-  on a twentieth of its frames that the stack never called suffering.
-  Every run now fails where the frames the earpiece played as silence and
-  the stack's own under-run count differ by more than a run in progress.
-  The step runs on the Compose project's own network, so a copy of the lab
-  under a `COMPOSE_PROJECT_NAME` of its own runs it against its own
-  Asterisk.
-- **ABI 0.28.** `sipral_stack_config_t` grew `registrar_keepalive` and
-  `registrar_keepalive_ms` at the tail, and `sipral_stack_settings_t`
-  `registrar_keepalive_ms`; `sipral_call_accept_session` refuses a null
-  `sdp`. A binding built against 0.27 is refused by this library, and the
-  Kotlin agent's jar has to be rebuilt.
-- **`UserAgent::accept_reoffer` takes the answer, not an `Option` of one.**
-  Every `UaEvent::Reoffer` carries an offer — a re-INVITE without one is
-  answered with this end's own offer before anything is handed up — and
-  RFC 3264 §5 has an offer answered, so `None` sent a 2xx with no body that
-  answered nothing. The signature is now `sdp: &[u8]`, and the C ABI's
-  `sipral_call_accept_session` refuses a null or empty `sdp` with
-  `SIPRAL_STATUS_INVALID_ARGUMENT`, the request still waiting to be answered
-  or refused.
-- **A re-INVITE or UPDATE whose only body is of a type the agent does not
-  read, marked `handling=optional`, no longer reaches the application.** It
-  used to arrive as a `UaEvent::Reoffer` carrying no offer; RFC 3204 §6,
-  which defines the parameter RFC 3261 §20.11 points to, has "the UAS MUST
-  ignore the message body" when it is optional, so the request is answered
-  as the one it would be without it: a re-INVITE with this end's own offer
-  (§14.1), an UPDATE as a target refresh. A body without that marking is
-  refused 415, as above.
-- **ABI 0.29.** `sipral_stack_config_t` grew `turn_transport` and
-  `sipral_media_packet_t` grew `protocol`, both at the tail with `MIN_SIZE`
-  unmoved, after `registrar_keepalive_ms`; event kind 42, status 12 and
-  feature bit 1024 are spent, and a binding built against 0.28 is refused
-  (the Kotlin agent's jar is rebuilt). The same minor carries the built-in
-  audio engine and the caller-identity and moving-call surface: after
-  `turn_transport`, `sipral_stack_config_t` grew the `audio*` members;
-  `sipral_account_config_t` grew `session_timer`,
-  `session_interval_seconds`, `privacy` and `trusted_peers`, and
-  `sipral_call_event_t` the identity, cause and answer-mode members, all at
-  their tails; event kinds 43 (audio devices changed) and 45 (call address
-  wanted), statuses 13 to 15 and feature bits 2048, 4096 and 8192 are spent,
-  and 44 is held and spent unused. In Rust, `sipral_nat::ice::Transmit`,
-  `Route` and `TurnServer`, `sipral::Datagram`, `RelayDatagram` and
-  `MixOutcome` each grew a field saying what a message goes over, and
-  `TurnError` a variant; a caller that builds one by its fields names the
-  new one.
-- **The `sipral` crate's own description of its bindings names all four.**
-  `crates/sipral/README.md`, its `Cargo.toml` description and
-  `bindings/dotnet/Sipral/README.md` said "Swift, .NET and Kotlin bindings,"
-  leaving out Python though the crate has had one as long as the other three.
-  No behaviour changed.
-- **ABI 0.27.** `sipral_stack_config_t` and `sipral_stack_settings_t` grew
-  `referrals` at the tail, `SIPRAL_EVENT_KIND_REFERRAL` (41) and
-  `sipral_referral_event_t` are new, `SIPRAL_ICE_LITE` is 4, and
-  `sipral_call_reject_transfer` refuses a code under 300. A binding built
-  against 0.26 is refused by this library, and the Kotlin agent's jar has to
-  be rebuilt.
-- **Every Swift event stream now reaches every reader.**
-  `SipralStack.events`, `Call.events`, `Call.dtmf` and `Media.frames` were
-  each one `AsyncStream`, which hands every item to one reader only: a call
-  bound to `CallKitBridge`, which reads the call's events itself, lost
-  events to the application's own loop over the same call, and the other
-  way round. They are now methods — `events()`, `dtmf()`,
-  `frames(bufferingNewest:)` — and every call returns a stream of its own
-  that gets every item from then on, in order. Nothing raised before a
-  stream is taken reaches it, except a call's `CALL_ENDED`: a call's
-  streams finish right after it, and one taken later gets that event and
-  finishes at once, so a call that ended before `CallKitBridge.bind` is
-  still reported ended. A media's streams finish when it ends, a stack's
-  when it closes. A reader that falls behind drops its own oldest items —
-  past 4096 events or digits, past 50 frames unless it asks for another
-  number — and never slows the others. `CallKitBridge` also covers the one
-  case where a call's stream finishes without ever handing over
-  `CALL_ENDED` — the application hanging up and closing a bound call
-  without reading its own `events()` first — by still reporting the call
-  ended and forgetting it.
-- **The packaged artefacts leave libopus out unless asked for it.** The
-  XCFramework, wheel, NuGet and AAR scripts build the C ABI without the
-  `opus` feature by default, with every other default feature kept;
-  `--with-opus` builds the variant that carries it, under a name that says
-  so (`CSipral-opus.xcframework.zip`, `sipral-opus`, `Sipral.Opus`,
-  `sipral-opus.aar`). The gate checks the packaged XCFramework for libopus
-  symbols.
-- **`CallMedia` is no longer `Clone` or `PartialEq`.** It can carry a relay
-  on a TURN server, which is an allocation one call holds, not a value two
-  calls can share or be compared by; build one per call with
-  `CallMedia::new`.
-- **One header field's value may be 16 KiB, up from 4 KiB.**
-  `msg::Limits::DEFAULT.max_header_value_bytes` was tight for real traffic:
-  a full RFC 8224 `Identity` with rich call data, a long `History-Info`, or a
-  caller's display name of a few kilobytes all refused the request that
-  carried them. The message bound (64 KiB) and the header count (128) are
-  unchanged, and a value is a span into the message, so the new bound costs
-  no memory of its own. `StreamFramer::next_message` now returns `Framed`,
-  which is either the message or the head of one it refused and passed over.
-- **The licence documents say what they mean.** `LICENSE-COMMERCIAL.md` is
-  now plainly a description that grants nothing on its own, with the licensor
-  named by the signed agreement rather than by `AUTHORS`. It gains the rights a
-  licensee's customers, stores and contractors need, a patent clause that
-  grants nothing and names the Opus pool, a first year of maintenance inside
-  the one-time fee, a liability cap that does not fall to zero and keeps what
-  the law does not allow to be limited, and a termination clause that protects
-  copies already delivered. `LICENSING.md` describes the AGPL arm as the AGPL
-  actually reads and explains `LicenseRef-Sipral-Commercial`; `TRADEMARK.md`
-  attaches the AGPL section 7 additional terms; `AUTHORS` promises a
-  contributor licence rather than an assignment; the Opus pool facts in
-  `THIRD-PARTY-NOTICES.md` are corrected; `SECURITY.md` lists the one advisory
-  a scanner will report and why it does not apply.
-- **Every re-offer hands the DTLS roles back, and a far end that moves them
-  is refused by name.** RFC 8842 §5.5 asks each subsequent offer for
-  `a=setup:actpass`; the hold, the resume and the codec change now write it
-  whichever role the call has, where a call this end had answered used to
-  carry the role it answered with. Each re-offer this end answers takes the
-  role the running association gives it (§5.3) — to `actpass`, a fresh answer
-  said `active` every time, which from a DTLS server is asking to become the
-  client. A far end that takes the other role anyway is asking for a new
-  association, which this stack does not start: its answer is not adopted and
-  is reported as the new `MediaError::DtlsRoleChanged`, and a re-offer that
-  leaves this end only the other role is answered 488 under the same name. A
-  re-offer naming another certificate is answered 488 too, as
-  `MediaError::DtlsFingerprintChanged`, where it used to be accepted and then
-  not followed.
-
-- **Every re-offer on a secured call is answered by the facade.** `sipral-ua`
-  hands them up, holds and refreshes included, because their answers need a
-  key, or a certificate and a role, that only the layer holding them can
-  write; see Fixed. An application that describes its own secured calls now
-  hears the far end's hold as `SIPRAL_EVENT_KIND_SESSION_OFFERED`, as it hears
-  a codec change. An SDES answer repeats the key this end already sends under
-  rather than drawing one, which RFC 4568 §7.1.4 warns leaves the far end
-  unable to read this end until the answer arrives.
-
-- **The ABI is at 0.26.** Each minor since 0.20 is noted with the entry that
-  caused it.
-- **ABI 0.20.** It covers two changes to the printed header: ICE's own
-  (`SipralIce`, `SIPRAL_FEATURE_ICE`, event 33, the `ice` member on both
-  config structs, and `now_ms` on `sipral_media_capture`), which went out
-  without the minor moving, and `sipral_call_change_codecs`. The gate now
-  refuses the first kind.
-- **ABI 0.21.** `sipral_call_join`, `sipral_call_leave` and
-  `sipral_media_mix`, for a two-call conference held on this stack, and
-  what had landed since 0.20 without the minor moving: `sipral_account_message`
-  and events 34 to 37 (MESSAGE received and sent, message waiting, and the
-  quality report sent).
-- **ABI 0.22.** `SIPRAL_EVENT_KIND_MEDIA_UNJOINED` (38), the survivor notice
-  a joined call's partner gets when the call it was joined to ends.
-- **ABI 0.23.** STUN from the stack (`sipral_stack_nat_map`,
-  `sipral_stack_poll_stun`, `sipral_stack_receive_stun`, the `nat` and
-  `stun_server` fields of `sipral_stack_config_t`, `SIPRAL_FEATURE_STUN` and
-  event 39, `SIPRAL_EVENT_KIND_NAT_MAPPING`) and the audio processor
-  attached from C (`sipral_call_attach_processor` and its detach and reset,
-  `sipral_processor_frame_t`, `sipral_processor_callback_t`).
-- **ABI 0.24.** `SIPRAL_CODEC_G729`.
-- **ABI 0.25.** TURN in the stack configuration (`turn_server`,
-  `turn_username`, `turn_password`), its relay event and records
-  (`SIPRAL_EVENT_KIND_NAT_RELAY`, event 40), and the G.729 Annex B toggle
-  (`g729_annex_b` on `sipral_stack_config_t` and `sipral_stack_settings_t`).
-- **ABI 0.26.** `sipral_stack_nat_unmap`.
-
-- **`sipral_media_capture` takes `now_ms`**, in the position its three
-  siblings put it and read exactly as they read theirs. ICE has to be told
-  that traffic went out on the pair it chose — RFC 8445 §11 is what lets it
-  stop sending keepalives — and the capture path was the one producer with no
-  clock at all. `MediaSession::capture` and `MediaSession::poll_transmit` take
-  one for the same reason. The ABI's major is 0 and `docs/08-ffi.md` says in
-  plain words that it is not frozen; this is the kind of change that is free
-  now and impossible later.
-
-- **An answer the user agent writes itself no longer withdraws ICE from a call
-  that had it.** `sipral-ua` answers a hold, a resume and a peer moving its
-  address without handing the description up, and it carried forward
-  `rtcp-mux`, `ptime` and `maxptime` and nothing else. RFC 8839 §4.4 wants the
-  username fragment, the password and the candidates on every description of a
-  session, so an answer without them reads as ICE being withdrawn mid-call —
-  which takes a checked path away from a call that had one, silently, from a
-  layer that has never read a candidate. Exactly the failure the function's own
-  documentation already described for multiplexing.
-
-- **`sipral_nat::ice::Received::Data` and `sipral_nat::turn::Input::Data` now
-  answer with a position rather than a borrow**, and both types have lost
-  their lifetime parameter. A borrow holds the caller's datagram shared for as
-  long as it holds the answer, and what a caller does next with a relayed
-  packet is unprotect it in place — so the type that said "here it is" was the
-  type that stopped it. The position comes from the layers that already knew
-  it: `stun::Attribute::range` and `turn::ChannelData::range` are new and
-  public for it.
-
-- **A peer's `a=ice-pacing` no longer outlives the session it was proposed
-  for.** RFC 8445 §14.2 makes Ta the larger of the two agents' values, and a
-  restart is a new session; `IceAgent::restart` now goes back to this agent's
-  own proposal. Carried forward, one peer asking for the ten seconds RFC 8839
-  §5.5 allows slowed every check, every gathering transaction and every
-  retransmission of that agent for the rest of its life — including across the
-  restart a network change causes, which is when pacing matters most.
-
-- **An ICE checklist with nothing left to check is now waited on, then
-  failed** (RFC 8863), where before it stayed `Running` for the life of the
-  call. Two situations reach it and neither is rare: a peer whose candidates
-  were all unusable leaves a checklist with no pairs at all, and a checklist
-  whose pairs have all failed is the same thing one round trip later. Both
-  used to leave `IceAgent::deadline()` answering `None`, so a caller that
-  slept until the agent next had something to do slept for ever, on a call
-  that was never going to carry a packet. The wait is `IceConfig::patience`,
-  one whole STUN transaction by default, and it is a window rather than a
-  delay: a check arriving inside it still forms a peer-reflexive pair and
-  connects the call.
-
-- **`SipralClient.events`, `SipralCall.events` and `digits` document what
-  their buffer actually guarantees.** A stale comment in `IdiomaticCheck.kt`
-  called them "unbounded Kotlin channels"; they are a `SharedFlow` with
-  `extraBufferCapacity = 4096` and `onBufferOverflow = DROP_OLDEST`, which
-  is bounded, not unbounded, and does not mean a slow collector sees
-  everything -- past 4096 events of lag, its oldest unread ones are
-  silently dropped to make room, with no exception and no signal. The KDoc
-  on both flows and `bindings/kotlin/README.md` now say so directly, found
-  while reproducing the ordering bug above and checking, as its own review
-  asked, whether a live collector under a burst load could still lose
-  events: a slow one can, once it falls behind by more than the buffer
-  holds. No behaviour changed.
-
-### Fixed
-
 - **A pause at the start of a DTLS-SRTP call no longer costs half a second of
   delay.** FreeSWITCH sent two packets, paused while it keyed, and resumed
   with a timestamp that had not moved, so the jitter buffer read the pause as
@@ -3129,8 +4746,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   do — no sockets, no clock, no thread, no signalling TLS of its own — and,
   named plainly, what has had no security reading yet.
 
-### Fixed
-
 - **A request that cannot be read is answered 400, and named.** RFC 3261
   §8.2.x has a UAS that detects a syntax error answer 400 with a phrase
   identifying the problem. `RawMessage::validate` has always been able to find
@@ -3153,35 +4768,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   empty ladder says so only when the state moved now. A device that reports
   its network on every wake would otherwise have announced a recovery it never
   made.
-
-### Security
-
-- **The SRTP master key and salt are built in a buffer that wipes itself**.
-  `draw_key` drew one block of `SHA-256(media seed || counter)`
-  into a plain array, copied the key and the salt out of it into two more,
-  and cleared only the block, by hand, with a compiler fence behind it — so
-  the two buffers that actually held the key outlived the function on the
-  stack. All three are `zeroize::Zeroizing` now, wiped in their own `Drop`,
-  which the next edit to that function cannot quietly stop doing. The two
-  halves are copied out a byte at a time rather than sliced, and an assertion
-  beside the function holds both lengths to the block: this is the one place
-  in the tree where reading past the end must not be recoverable, because a
-  key of zeros protects nothing while every message still looks right.
-  `zeroize` was already in the tree at the same pinned version for
-  `sipral-rtp` and `sipral-dtls`; `sipral` now names it directly, and
-  `THIRD-PARTY-NOTICES.md` says why.
-
-- **A recorded call is shown, not assumed, to carry no key**.
-  The separation of the media seed from the endpoint's own was already built;
-  what was missing was a demonstration of it. A test now negotiates a
-  real SRTP call between two stacks, records the caller's inbound half with
-  the replay recorder, and asserts the caller's own negotiated key appears
-  nowhere in the finished recording — and a second test places two calls from
-  two agents that share one endpoint seed and differ only in their media
-  seed, and asserts the keys they offer differ. The first test was watched to
-  fail with the key written in on purpose before it was left passing.
-
-### Fixed
 
 - **An expired subscription no longer claims it is worth retrying**.
   `SubscriptionEnd::is_worth_retrying` answered true for `Expired`
@@ -3245,220 +4831,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   milliseconds, `sipral_ua::dtmf::DEFAULT_DTMF_MS`, that RTP, both INFO
   bodies and the C ABI's own `duration_ms` all read, in place of INFO's own
   160.
-
-### Added
-
-- **DTMF by SIP INFO, both ways, owned by the user agent**.
-  `UserAgent::send_dtmf_info` builds and sends the INFO in `sipral-ua` now —
-  the construction moved out of `sipral-ffi`, which used to build it by hand
-  with no transaction ownership and no report of the answer — and reports the
-  far end's final status as `UaEvent::DtmfSent`, so a 415 from a switch that
-  does not read the `Content-Type` reaches the application with the digit and
-  the code rather than vanishing — as does an INFO nobody answered, reported
-  as the 408 or 503 RFC 3261 §8.1.3.1 treats a timeout or a transport failure
-  as, and one whose challenge nothing could answer, as its 401 or 407.
-  `sipral_call_send_dtmf`'s two INFO forms
-  hand it their whole string once; its own signature is unchanged. An incoming INFO in
-  a dialog, `application/dtmf-relay` or `application/dtmf`, is read by a
-  small panic-free parser in `sipral-ua`, answered 200 when it names a digit
-  and 400 when it does not (RFC 3261 §21.4.1), and reported as the
-  same `DigitReceived` an RFC 4733 event already is — `MediaEvent` and
-  `sipral_media_event_t` both gained a `source` member saying which of the
-  two carried it, rather than a second event for the same fact. All three
-  forms — RFC 4733 sending, INFO sending, INFO receiving — share one
-  validation (`sipral_ua::dtmf`) for the sixteen keys a keypad has; both ways
-  of sending refuse a tone under 40 ms or over ten seconds identically before
-  anything is sent, and receiving holds a peer only to the ceiling; `MediaSession::dial` and `send_dtmf` gained the
-  ceiling (`MediaError::DigitTooLong`, `LONGEST_DIGIT`) and INFO the floor
-  RFC 4733 already had. Reserved event kind 27 becomes `SIPRAL_EVENT_KIND_DTMF_SENT` in
-  place, taking a `digit` member appended to `sipral_call_event_t`; nothing
-  else in the ABI moved and no minor version was bumped. A new fuzz target,
-  `dtmf_info`, exercises the incoming parser. `interop/harness` gained a
-  `DtmfInfo` flow against Asterisk's own `labuser-infodtmf` endpoint
-  (`dtmf_mode=info`), so the lab dialplan's echo now exercises this stack's
-  receiving half as well as its sending one.
-
-### Changed
-
-- **A zeroed field no longer means "send the digits in the media".**
-  `SIPRAL_DTMF_RTP` was zero, which is what a caller who filled nothing in
-  leaves behind, and the way a digit travels is the one setting here a peer can
-  ignore in silence: a call that meant INFO and sent nothing at all looks, from
-  this end, exactly like one that sent it. The three forms are 1, 2 and 3 now,
-  and zero is refused by name. The ABI minor goes to 10.
-
-- **A compound RTCP report is held to a bound of its own on the way in.**
-  `sipral_media_receive` refused anything over `SIPRAL_MEDIA_PACKET_BYTES`,
-  which is the bound this stack builds against — but what arrives is the
-  peer's arithmetic, and RFC 3550's compound report grows with the number of
-  sources it describes. A datagram RFC 5761 §4 says is control is now held to
-  `SIPRAL_MEDIA_RTCP_BYTES` (8 KB) instead, so a report larger than this end
-  would have built is read and judged for what it is rather than refused as a
-  caller's mistake. Media is unchanged, and so is sending.
-
-- **The Swift binding checks the ABI before the first call into it, rather
-  than asking the application to remember**. C# and Kotlin
-  already checked at load; Swift has no load hook, so the generator now
-  prints a `static let` whose initialiser runs once, before the first read of
-  it returns, on whichever thread gets there first — and every generated
-  entry point reads it first. A mismatch is a thrown `SipralError` naming
-  both versions, not a printed warning. The three name lookups
-  (`statusName`, `codecName`, `eventKindName`) became `throws` with the
-  rest, because an entry point that skips the check is a gap rather than a
-  convenience. Written in `tools/abi-gen`, not by hand in the binding.
-
-- **The gate reads the artefact for libopus, not only the dependency graph**.
-  `cargo tree` says what the build was told to link; it does
-  not say what came out. The step that proves a build without the feature
-  carries no Opus now rebuilds `sipral-ffi`'s shared library with
-  `--no-default-features` and inspects it — `otool -L` for a dynamic
-  dependency, and `nm` for the statically linked symbols, which is where they
-  actually are, since the Opus crate vendors and builds libopus with hidden
-  visibility. The mirror half asserts the default build does carry them, so
-  an empty default feature set cannot pass quietly. The inspection is of a
-  debug artefact on purpose: the release profile strips local symbols, which
-  would make the two builds look identical.
-
-- **`docs/13-client-requirements.md` says which requirements a C caller can
-  reach today**. A new section sorts all of them three ways:
-  answerable from `sipral.h` alone, built in Rust with no C entry point yet,
-  and not built anywhere. It is written against the header and the FFI crate
-  rather than against a plan for them, and it is the list 8.4 shortens.
-  Two documents were also brought back to the truth: `docs/08-ffi.md` said no
-  Swift, Kotlin or .NET toolchain ran in the gate, which stopped being true
-  when that step was added, and `docs/04-ua.md` said neither form of DTMF had
-  been run against a real server, which stopped being true when the lab ran
-  both. Both forms pass against Asterisk; RFC 4733 does not yet pass through
-  the lab's proxy to FreeSWITCH, and the document now says so rather than
-  reporting a pass on one server's word.
-
-- **The Kotlin step finds its own standard library on a wrapped
-  installation**. `kotlinc` from a package manager is often a
-  one-line wrapper that execs the real compiler a directory further in, so
-  reading the jars off the command landed beside the wrapper and the step
-  failed on a machine where Kotlin was installed correctly. Both layouts are
-  tried now. With that, and with a Kotlin compiler present, the gate runs
-  with no skipped step for the first time.
-
-- **Event kinds 28 and 29 are held for two events the C ABI does not raise
-  yet**: the stack recovering from a suspension or a network change, and the
-  application being asked to resolve a destination. `sipral.h` lists them
-  with the other reserved numbers, so the branches that add them cannot
-  collide. 27 was held the same way, for a DTMF digit sent by SIP INFO being
-  answered, and the work that brought DTMF by SIP INFO turned it into a kind
-  in place.
-
-- **A transfer taken from C places its call the way `sipral_call_place`
-  does**. `sipral_call_accept_transfer` used to place an
-  offerless INVITE with no SRTP policy and no application headers on it,
-  because it had no configuration to read one from; it now takes a
-  `sipral_call_config_t`, the same struct and the same versioned reader
-  `sipral_call_place` uses, meaning the same thing on every member but
-  `target` — the REFER already named where this goes, so a `target` of the
-  caller's own is `SIPRAL_STATUS_INVALID_ARGUMENT` naming it, and nothing is
-  placed. `media_address` writes the offer from this stack's codecs and runs
-  the audio, exactly as it does on a placed call, and `MediaEngine` gained
-  `accept_transfer`/`accept_transfer_with` to do it: the new call is managed
-  the same way one `place` placed, so its session opens once the 2xx is
-  acknowledged and `MEDIA_STARTED` follows. `sdp` carries the application's
-  own description and this stack runs no audio for it, as before. Giving
-  neither is now refused rather than placing an offerless INVITE — the
-  same rule `sipral_call_place` already keeps, and for the same reason: the
-  answer would have to travel in the ACK, which this ABI has no way to hand
-  back. In `sipral-ua`, `UserAgent::accept_transfer` takes an `OutgoingExtras`
-  bundling a destination, a fork policy and header fields — the pieces
-  `OutgoingCall` carries beside the target this call has no legitimate value
-  for, since the REFER supplies it instead. The REFER supplies `Replaces` and
-  `Referred-By` as well, so either among those header fields is refused
-  (`SIPRAL_STATUS_INVALID_ARGUMENT` from C) — RFC 3891 §3 has an INVITE with
-  more than one `Replaces` refused with a 400 — and every field is checked
-  before the REFER is touched, so a refusal leaves the transfer still there to
-  take. The signature is not additive:
-  nothing outside this tree calls it yet, so it changed outright rather than
-  carrying a parameter nobody could ever set.
-
-- **The lab now drives calls through the facade an application links**.
-  `sipral-interop` carried its own RTP session, its own codec pair and
-  its own DTMF sender — a second media join, written for the lab and used
-  nowhere else, which is a phase 1 exit criterion this stack had not met:
-  "a phase whose proof runs on a path no customer uses has not exited"
-  (`docs/10-roadmap.md`). It now depends on `sipral` and drives every flow
-  through `MediaEngine`/`MediaSession` — RTP, codecs, DTMF and SRTP alike —
-  and `interop/harness/src/media.rs` is gone; `crate::audio` is what is left,
-  a socket and a tone, which is what any application still has to write for
-  itself. The five existing flows judge exactly what they judged before, with
-  their numbers now read off what `capture`/`receive`/`playback` actually did
-  on the wire rather than a hand-rolled `RtpSession`. Three flows join them:
-  DTMF as an RFC 4733 named telephone event, confirmed by the lab's own
-  dialplan reading a digit however it arrived and naming it straight back
-  (`interop/asterisk/extensions.conf`'s 9003, `interop/freeswitch/lab.xml`'s
-  9003); SRTP against a new SDES endpoint of Asterisk's own
-  (`interop/asterisk/pjsip.conf`'s `labuser-srtp`, extension 9004); and a
-  hold whose resume re-offers a narrower codec list than the call held on
-  (the case a codec change makes), against Asterisk, by a re-offer the harness
-  writes
-  itself — `sipral::MediaEngine` has no public way yet to re-offer a live
-  call on a catalogue of its own choosing, which `interop/harness/src/main.rs`
-  (`reoffer_onto`) says in full. DTMF by SIP INFO is not among them:
-  nothing in `sipral-ua` sends one yet, so there is no path through the
-  facade to drive rather than a lab limitation to work around. The lessons
-  the old media join encoded by hand are now tests of `sipral::MediaSession`
-  itself (`crates/sipral/src/tests.rs`): a peer that answers with one G.711
-  law and sends the other used to be dropped as an unnegotiated payload
-  type, and is now decoded with the law it actually names — `accepted` and
-  `fill` in `crates/sipral/src/session.rs` both changed for it, watched red
-  before the fix by sending A-law on a call negotiated for mu-law.
-
-### Added
-
-- **The SRTP policy is now chosen from C**. An application
-  linking `sipral.h` could not ask for SRTP at all, although the facade
-  underneath always could: `sipral_stack_config_t::srtp` sets the stack's
-  default and `sipral_call_config_t::srtp` overrides it for one call, both a
-  `sipral_srtp_t` — `SIPRAL_SRTP_NOT_OFFERED`, `SIPRAL_SRTP_OFFERED` or
-  `SIPRAL_SRTP_REQUIRED` — reaching `sipral::SrtpPolicy` through `catalog_of`
-  and `with_srtp` with the same three meanings. Zero keeps today's behaviour:
-  unspecified on the stack is this build's own default, and unspecified on a
-  call is the stack's own setting. Both members are appended at the tail of
-  their structs with the pinned oldest length left where it was, so a caller
-  built against an older header still works and gets the default. An
-  out-of-range value is refused before anything is built.
-
-- **A call event now names who is on it**. `sipral_call_event_t`
-  gained `from_uri`, `from_display`, `to_uri` and `call_id`: the `From` URI,
-  the resolved `From` display name, the `To` URI and the `Call-ID` of the
-  request that opened the call, read once and the same on every event of that
-  call afterwards, including the one that reports its end. An application no
-  longer has to parse `sipral_event_t::message` itself, or keep a table of its
-  own, to know both parties from any event. Appended at the tail of the
-  struct, which grows `sipral_event_t` with it — sixty-four bytes this
-  build — but `sipral_event_t` carries no pinned length to begin with, so a
-  caller built against an older header is unaffected.
-
-- **Early media when this stack runs the audio**. An incoming
-  call could be answered with audio (`sipral_call_answer_media`,
-  `MediaEngine::answer`) but not rung with it: `sipral_call_ring` only sent a
-  183 with whatever description the application wrote itself.
-  `sipral_call_ring_media`/`MediaEngine::ring`/`MediaEngine::ring_with` write
-  the answer from this stack's codec order and open the session on it right
-  away, so the far end hears whatever the application plays before anybody
-  answers. `sipral_call_answer_media`/`MediaEngine::answer` afterwards reuses
-  that session and description rather than negotiating a second one — the
-  same `o=` id and version — and what the 200 OK carries then follows RFC
-  3262 §5 and RFC 6337 §3.1.1 exactly, from whether the 183 went out reliably.
-  `sipral_call_ring_media` also takes `sipral_call_config_t::srtp`, closing
-  the gap the stack-wide setting left: an answered call could not override
-  the stack's SRTP
-  policy at all. Ringing with media twice is `SIPRAL_STATUS_WRONG_STATE`;
-  ringing with media after a `sipral_call_ring` that sent no description is
-  not, and after one that sent the application's own it is, since every
-  description in the responses to one INVITE has to be that same one (RFC
-  3261 §13.2.1, RFC 6337 §3.1.1). An INVITE that
-  carried no offer is not rung with media (`SIPRAL_STATUS_WRONG_STATE`,
-  nothing sent): RFC 3261 §13.2.1 and RFC 6337 §3.1.2 leave an offer from
-  this end no provisional response this stack can follow up.
-
-### Fixed
 
 - **`MediaEngine::ring_with` no longer reports a change that never
   happened.** `settle` re-evaluated the negotiation on every event that
@@ -3613,207 +4985,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   of holding the delivering thread open to chase it — and a poll whose pass
   left something waiting answers a deadline already due, so a caller that
   sleeps until input or the deadline does not strand it.
-
-### Security
-
-- **No binding reads past the header fields it was handed.** The Swift and .NET
-  wrappers printed for `sipral_call_set_headers` took a single `sipral_header_t`
-  and the caller's `headers_len`, so any length above one read the memory after
-  it, and the Kotlin binding could not be printed at all once `headers` joined
-  the call and account configurations. `tools/abi-gen` now reads an array of
-  records going in off the declarations — a `const` pointer to a record and the
-  `_len` named for it, as parameters or as struct members — and every binding
-  takes a list whose own count is what C sees: `[SipralHeader]` in Swift, copied
-  into one buffer for the length of the call; `(string Name, string Value)[]` in
-  .NET, copied and pinned until the call returns or throws; `List<SipralHeader>`
-  in Kotlin, packed, with the JNI shim checking every length against the bytes
-  before it points into them. A pointer to records beside a length that is not
-  that shape — the `_len` of a writable pointer, or any length beside a record
-  with no `size` — and a call answering with text that takes a list are refused
-  by name in Swift, .NET and Kotlin rather than printed as one struct.
-
-- **A CR that neither ends a line nor begins a fold makes a message malformed,
-  in both parse modes.** It has no reading in RFC 3261 §25.1, and it could never
-  be written back: `From: <sip:bob@example.com>;x=a\rb;tag=1` on an INVITE made a
-  call that could not be answered, refused or hung up, whose server transaction
-  waited for good, and the same byte in a REFER's `Referred-By` got a 202 for a
-  transfer that then placed nothing. The parser now answers
-  `ParseError::BadHeaderLine`, or `BadStartLine` on the first line.
-
-- **A request whose copied fields arrived folded can be answered.** Every
-  response copies `Via`, `From`, `To`, `Call-ID` and `CSeq` from the request,
-  and the builder refused the line break a fold leaves in them (RFC 3261
-  §7.3.1), so no response to such a request could be written: an INVITE got no
-  100, could not be answered, refused or hung up, and its server transaction
-  waited for good. A fold now goes out as the one space it stands for; any other
-  CR or LF is still refused.
-
-- **A REFER whose `Replaces` unescapes to a control byte draws a 400.** The
-  `Replaces` in a `Refer-To` is unescaped to go onto the INVITE sent to the
-  transfer target, so `?Replaces=call%00x...` put a NUL into that header, and
-  `%0D%0AContact:%20...` a line break the builder refused only after the REFER
-  had been accepted with a 202, leaving a transfer that could never be placed.
-  The Refer-To is now refused up front (RFC 3515 §2.4.2).
-
-- **A `From` or `To` whose tag is not a token is a malformed field.** The tag
-  was unquoted and kept as it came, and a dialog writes it back after `;tag=`
-  on every request: `tag="alice1;maddr=198.51.100.66"` put a `maddr` the peer
-  chose into the `To` of the BYE, and `tag=bob1, <sip:mallory@example.net>`
-  put a second address into it. `RawMessage::from` and `RawMessage::to` now
-  refuse such a tag (RFC 3261 §25.1 `tag-param`); a quoted token still reads.
-
-- **A URI holding an unescaped space, control byte, `"`, `<` or `>` is refused
-  (`UriError::IllegalByte`).** Kept from a peer and written into the next
-  message, each one broke out of where it was put: a REFER whose
-  `Refer-To: <sip:carol>;tag=abc@example.com>` made the transferee's INVITE
-  carry a `To` tag the referrer chose, and an unbracketed
-  `From: sip:a"b@example.com;tag=alice1` left the dialog with no remote tag and
-  every BYE addressed `To: <sip:a"b@example.com;tag=alice1>`.
-
-- **`Uri::equivalent` no longer matches a URI whose `maddr` is spelled with an
-  escape.** Parameter and URI header names were compared as written, so
-  `;%6Daddr=198.51.100.66` was an unknown parameter and ignored, and the URI
-  compared equal to the same address without it (RFC 3261 §19.1.4 makes
-  `%6D` the letter `m`).
-
-- **`Uri::equivalent` no longer reads a lone `%` as the start of the escape
-  after it.** `sip:a%%33B@example.com` decoded `%33` to `3`, the lone `%`
-  joined it, and the user compared equal to `sip:a%3B@example.com`, whose
-  user holds a semicolon. A `%` that starts no escape is now the octet `%25`.
-
-- **`Uri::equivalent` compares URI header values with their case.**
-  `?to=sip:Bob%40example.com` matched `?to=sip:bob%40example.com` and
-  `?Call-ID=abc` matched `?Call-ID=ABC`, although RFC 3261 §20 compares both
-  with case; header names still ignore it.
-
-- **A fork opens no more dialogs than `max_dialogs` has room for.** Every
-  distinct `To` tag answering one INVITE of ours opened a dialog, with no
-  bound at all, and each one was looked up by a linear scan of the INVITE's
-  branches, so whoever could answer the INVITE decided how much the endpoint
-  held and how long each response took. The first dialog of an INVITE, and
-  the first 2xx to it, still always open, since a forking proxy can ring one
-  phone and have another answer; each further branch opens only while there
-  is room, and one
-  that finds none is reported without a dialog, or, as a 2xx, is not
-  acknowledged here.
-
-- **`max_dialogs` holds for calls that arrive faster than they are answered.**
-  The ceiling was measured against the dialogs that existed when an INVITE
-  arrived, and an incoming call's dialog is made later, by this end's own 180
-  or 2xx; every INVITE that came in ahead of the first answer was let in, and
-  answering them all took the store past the ceiling by up to
-  `max_server_transactions`. A call now counts from the moment it is let in.
-
-- **An incoming call that rang and was then refused no longer leaves its early
-  dialog behind.** The 487 to a CANCEL, a refusal the application sent, and
-  the 500 after an unacknowledged reliable 180 all left the dialog the 180 had
-  opened standing for the life of the process, so a peer repeating INVITE and
-  CANCEL filled `max_dialogs` and had every later call refused with a 503. The
-  refusal now ends it with `DialogTerminated { Refused }` (RFC 3261 §12.3),
-  including for an INVITE that carried a `To` tag naming no dialog. While a
-  reliable provisional response is still unacknowledged the dialog ends with
-  the INVITE transaction instead, so that a PRACK crossing the refusal is still
-  answered (RFC 3262 §3).
-
-- **An ACK no longer confirms a dialog that no 2xx has confirmed.** An ACK
-  naming the tag of a 180 moved the early dialog to confirmed and was reported
-  as `IncomingAck`, so anyone who saw the ringing could make a call nobody had
-  answered read as up; it is now dropped (RFC 3261 §13.3.1.4).
-
-- **`sdp::parse` had no bound on a session description's size, `m=` count or
-  attribute lists — the message parser has had one since it was written, this
-  did not.** A body arrives inside a message a proxy may have grown on the
-  way, and every line of it becomes an allocation; nothing stopped a hostile
-  peer from writing thousands of `m=` blocks, an attribute flood, or a single
-  line long enough to be the whole body by itself. `sdp::Limits` now bounds
-  body size, line length, `m=` blocks, attributes per section and in total,
-  and formats on one `m=` line, mirroring `msg::Limits`'s shape; exceeding one
-  is a typed `SdpError`, and every default is sized and documented against
-  what a real call plus ICE and SRTP actually carry. `EndpointConfig` gains
-  `sdp_limits`, and every place `sipral-ua` reads a session description off
-  the wire now parses against it instead of an implicit default.
-
-- **A replay recording no longer carries the means to decrypt what it
-  recorded.** SRTP master keys were drawn from the same seeded stream as the
-  branches, tags and `Call-ID`s — and that seed is written into every
-  recording, in clear, under a document promising the file held only what a
-  capture would have held. Anyone handed a recording taken to diagnose
-  something else could derive every key the stack had offered and every key it
-  ever would. The media engine now has a seed of its own, supplied by the
-  application, written nowhere. `MediaEngine::new` takes it as a fourth
-  argument; `sipral_stack_config_t` gains `media_seed` and `media_seed_len`,
-  and `sipral_stack_create` **refuses** the two seeds being equal, because
-  that call is the only place in the library that can see both. The ABI minor
-  moves 8 → 9, so a caller built against the older header is turned away at
-  create rather than running with one generator for both. A key is now one
-  block of `SHA-256(media seed || counter)` rather than two hex tokens, and
-  the block is wiped before it leaves the stack.
-
-- **A debug print of a live stack no longer carries the keys.** `{:?}` on a
-  user agent printed every `a=crypto` line of every call with its master key
-  on it, and every RFC 8599 push token every account held — the one that wakes
-  the device, which §4.1 keeps off every request but REGISTER for exactly that
-  reason. RFC 4568 §9.2 says the SDP "MUST be protected"; a log file is a worse
-  place for a key than an INVITE is, because it is kept. The engine redacted
-  its own copy, but that was a rule every other holder had to remember, and
-  they did not. The redaction now sits on the four types that carry the
-  material — `Attribute` (which keeps the tag and the suite and drops the key),
-  the deprecated `k=` line, `KeySalt`, and the push token — so every holder
-  above them may derive `Debug` freely and none of them can get it wrong.
-  `scripts/check.sh` refuses a build in which one of the four grows a derive
-  or loses its own implementation. The `k=` value is now `sdp::KeyLine` rather
-  than `String`.
-
-- **A mid-call downgrade is no longer answered by a layer that holds no
-  policy.** `SrtpPolicy::Required` promises that a plain re-offer inside a
-  live call is refused rather than accepted, and it was — as long as the
-  re-offer also changed a codec. A re-offer that kept every format the first
-  negotiation settled and moved only the transport profile, or only dropped
-  the `a=crypto` line, read as "the same media" to `sipral-ua`, which answered
-  it itself: 200 OK, from a layer that has never read a crypto line and knows
-  nothing about the account's policy. That is what a B2BUA which has lost its
-  own SRTP sends, and what an attacker in the signalling path would send. The
-  comparison now takes in the transport profile and whether a key is there at
-  all, so both go up to the facade and both are refused with 488 under
-  *required*. The `a=crypto` **value** is deliberately not compared: RFC 4568
-  §7.1.4 makes a re-offer an opportunity to re-key, and a re-key reaches the
-  media session by its own path.
-
-- **An SRTP receiver no longer forgets one source the moment another one
-  speaks.** `Unprotector` kept the rollover counter and the replay list of a
-  single SSRC, and an authenticated packet from any other SSRC under the same
-  master key replaced both. RFC 3711 §3.2.3 names a context by its SSRC and
-  RFC 4568 §6.4.2 lets every source a peer sends share one key, so nothing had
-  to be forged: once a peer had changed its SSRC, a recording of either source
-  was accepted again, and a single packet from a second source cost the running
-  one its rollover counter, so everything it sent after its first wrap was
-  refused as forged. SRTP and SRTCP now keep that state per source, for up to
-  eight sources held in place, and the one heard from least recently is the one
-  that gives way.
-
-- **A copy of a secured packet sent from another address no longer costs the
-  genuine packet its place.** `RtpSession::receive` ran SRTP before the address
-  latch, so a datagram the latch was about to refuse had already had its index
-  recorded in the replay list, and the genuine packet arriving from the peer
-  afterwards was dropped as a replay. Anyone who could see the stream and get a
-  datagram in ahead of it could silence a call packet by packet without holding
-  a key. A stream that has latched now refuses a foreign address before SRTP
-  looks at the datagram. `RtpSession::rtcp_receive` had the same order for
-  SRTCP, so a copied report, a goodbye included, cost the genuine one its
-  index in the same way; a secured stream now refuses a report from a host
-  its origin check would refuse before SRTCP looks at it.
-
-- **A re-offer that writes a lifetime or an identifier beside an unchanged key
-  no longer re-opens the replay window.** The facade decided whether a
-  direction had been re-keyed by comparing the whole `inline:` parameter,
-  lifetime and MKI included, so the same thirty octets with `|2^31` added read
-  as a new master key: the receive context was replaced, its fresh replay list
-  accepted packets the stream had already taken, and a peer whose rollover
-  counter had moved past zero was refused once the 250-packet grace ran out.
-  Only the key and salt are compared now, which are all RFC 3711 §4.3.1 derives
-  the session keys from.
-
-### Fixed
 
 - **On Windows, a saved device choice now falls back when the headset is
   unplugged, not only when the machine has never seen it.**
@@ -4494,392 +5665,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   never grant a GRUU. The reader that matches a registrar's echoed value
   against this instance already tolerated both forms and needed no change.
 
-### Added
-
-- **The DTLS-SRTP handshake, both roles, in a crate no call reaches yet.**
-  `sipral-dtls` gains `Connection`, the client and server state machines of
-  RFC 6347 for DTLS-SRTP, sans-I/O like the rest of the tree: the server's
-  stateless HelloVerifyRequest cookie exchange; a certificate from both ends,
-  each checked against the fingerprints the signalling carried and against
-  nothing else (RFC 5763 §5, RFC 8122 §5.1); ServerKeyExchange and
-  CertificateVerify signatures; the extended master secret and `use_srtp`
-  required in both hellos, the profile chosen by the server from the client's
-  list; Finished verified over the transcript and accepted only protected.
-  Flights go out again on RFC 6347 §4.2.4.1's timer — one second, doubled,
-  capped at sixty, six attempts — and a peer's retransmitted flight is answered
-  with the last flight rather than processed a second time. A failure sends one
-  fatal alert saying why; `close_notify` is answered; renegotiation is refused
-  with `no_renegotiation`. The SRTP keys, arranged per direction in the shape
-  `sipral-rtp` takes them, and any application data come out only after the
-  peer's Finished is verified. `setup::dtls_role` maps `a=setup` to the role.
-  Two findings from reading that foundation back against RFC 6347 go with it:
-  a hello's extensions
-  were checked for a duplicate by searching the list once per extension, a
-  hundred million comparisons for one 64 KiB block, and are now sorted once;
-  and reassembly kept the first of two fragments that disagree, so one forged
-  fragment ahead of a genuine message locked that message out for good, where
-  now the later one replaces what was held (`Offered::Replaced`), and a message
-  short of room takes it from messages held further ahead, so two forged
-  fragments numbered past the flight cannot fill the budget instead. Two fuzz
-  targets, `dtls_record` and `dtls_handshake`, seeded from a real handshake.
-  The join to a call — the SDP lines, RFC 7983 demultiplexing, `MediaSession`
-  — is the next part.
-
-- **Header fields in and out through the C ABI, and a field the stack writes
-  refused rather than written twice.** `sipral_header_t` is a name and a value;
-  `headers`/`headers_len` sit at the tail of `sipral_call_config_t` for the
-  INVITE and of `sipral_account_config_t` for every REGISTER;
-  `sipral_call_set_headers` (`UserAgent::respond_with_headers` in Rust) sets the
-  fields for the 180/183, 200, refusal, BYE and re-INVITE a call sends at the
-  application's request, kept until replaced and never on a CANCEL or on what
-  the stack sends by itself; and `sipral_message_header_count` and
-  `sipral_message_header`, with their `_element` pair, count and reach a field
-  in any message by line or by list value, compact names included, as an offset
-  into the caller's bytes. A
-  field the stack writes itself (`Via`, `Call-ID`, `Contact`, `Route`,
-  `Content-Length` and the rest in `docs/04-ua.md`) is refused on every path, C
-  and Rust (`UaError::Header`, and `BuildError::OwnedField` from the core, which
-  until now wrote a caller's `Contact` beside its own); so are a value holding a
-  line break and a name that is not a token, which the core used to drop without
-  a word. `Endpoint::bye_with` sends a BYE of the caller's own. The ABI minor
-  moves once, with the rest of this block of surface work.
-
-- **An account can have no registrar.** A trunk that knows this end by its
-  address could not be configured: `sipral_account_add` refused an empty
-  `registrar`, and `Account` had no way to say there was none.
-  `Account::unregistered(aor, contact, transport, outbound_proxy)` makes one,
-  and so does a `registrar_len` of zero in C, where `registrar_address` becomes
-  the outbound proxy its requests go to. Its state is `NotRegistering`
-  (`SIPRAL_REGISTRATION_STATE_NOT_REGISTERING`, 10) for as long as it exists;
-  registering it is refused with nothing sent (`UaError::NoRegistrar`,
-  `SIPRAL_STATUS_INVALID_ARGUMENT`); no refresh, back-off, recovery rung or push
-  pre-warm touches it; and a registration snapshot offered to it is refused
-  (`SnapshotError::NotRegistering`). `Account::registrar` now answers
-  `Option<&Uri>`.
-
-- **The 200 OK to REGISTER is kept, and what a registrar says in it is used.**
-  `UaEvent::Registered` gains `response`, the 2xx whole, and `info`, a
-  `RegistrarInfo` with the service route, the GRUUs and the associated
-  identities; `UserAgent::registrar_info` reads the same while the binding
-  stands, and the C event for a registration that went live carries the 2xx in
-  `message` as a refusal always has. The Service-Route (RFC 3608) is preloaded
-  on the INVITEs and SUBSCRIBEs an account starts towards its registrar and
-  never on the REGISTER; an account with an instance identifier asks for GRUUs
-  with `Supported: gruu` and uses the one RFC 5627 §4.4 names as the `Contact`
-  of what opens a dialog; P-Associated-URI (RFC 7315) is reported. Every value
-  is parsed strictly and bounded, and one that is not is left out and written
-  into the REGISTER's diagnostic record under three new codes.
-
-- **ICE in the full role, written and not yet reached from a call.**
-  `sipral_nat::ice::IceAgent` gathers host, server-reflexive and relayed
-  candidates, forms and paces checklists, resolves role conflicts, nominates,
-  restarts, and keeps consent on the pair it selects (RFC 8445, RFC 7675), in
-  the sans-I/O shape of the STUN and TURN clients. No trickle, deliberately, and
-  RTP and RTCP multiplexed. The SDP side gains `a=ice-pacing`, `a=ice-mismatch`
-  and a mismatch check that reads `a=rtcp`; the lite agent now authenticates a
-  check through the same code as the full one. Tested over a simulated network
-  with the NAT behaviours that decide which pair works, role conflicts from
-  both starting roles, a restart, consent lost and revoked, and a lossy path;
-  `docs/06-nat.md` says what it does and what it does not do yet.
-
-- **Kotlin can build a stack and hear its events.** The generated binding took
-  every struct a caller fills in — `sipral_stack_config_t`,
-  `sipral_account_config_t`, `sipral_call_config_t` — as a `Long` holding its
-  address, which nothing on the JVM can produce, and had no way to be called
-  back. Each of those structs is now a Kotlin class the JNI shim copies into a
-  zeroed C struct with its size set, and the event callback is a
-  `SipralEventListener`: the listener stays on the Kotlin side under a key, and
-  the C function the shim prints for the callback to land in attaches the
-  polling thread only when it is not attached, detaches only what it attached,
-  and deletes the array it made for each event before the next one arrives.
-  `SipralNative` calls `sipral_abi_check` as it loads and throws naming both
-  versions. `scripts/check.sh` now links the shim against the shared library
-  and runs `BindingCheck.kt` on a JVM under `-Xcheck:jni`, including a poll
-  from a thread no JVM made. The event payload union is not carried yet:
-  nothing in the declarations says which kind writes which arm. A
-  `stackCreate` that throws instead of answering lets its listener go too.
-
-- **The foundation of DTLS-SRTP, in a new crate nothing calls yet.**
-  `sipral-dtls` is DTLS 1.2 written from RFC 6347 and RFC 5246 over
-  RustCrypto's P-256, AES-GCM, SHA-256 and HMAC: the PRF, the master secret
-  and RFC 7627's extended master secret, the RFC 5705 exporter and RFC 5764's
-  SRTP key layout, the record layer with AES-128-GCM and the anti-replay
-  window, fragmentation and bounded reassembly, every message and extension of
-  an `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` handshake with its cookie, and a
-  self-signed certificate with its fingerprint. The state machines come next;
-  the exporter already refuses a session without the extended master secret,
-  as RFC 7627 §5.4 requires.
-
-- **Nine more fuzz targets, and the gate builds all thirteen.**
-  `crypto`, `dialoginfo`, `headless`, `replay`, `rtcp`, `rtp_dtmf`,
-  `srtp_unprotect`, `stun` and `turn` join the four that existed, one per door
-  an attacker's bytes come through that the first four never reached: the
-  `a=crypto` policy reader that decodes key material, the recording format a
-  person hand-edits, the dialog-info body a SUBSCRIBE gets back, the control
-  channel a voice agent connects on, RTCP and its typed accessors, the RFC
-  4733 event receiver, SRTP and SRTCP unprotect ahead of the authentication
-  check, the STUN parser that shares a port with media, and TURN's framer and
-  ChannelData both ways they arrive. `srtp_unprotect` drives a run of
-  length-prefixed datagrams through one unprotector per suite rather than one
-  packet through a fresh one, because the replay window and the rollover
-  estimate are the only state an unprotector keeps between packets and a
-  fresh one reaches neither. `scripts/check.sh` now runs `cargo fmt
-  --check`, `cargo clippy -D warnings` and `cargo fuzz build` over all
-  thirteen under the nightly `fuzz/` pins, so a target cannot rot uncompiled
-  or unformatted between releases — `cargo test --workspace`, `cargo fmt
-  --all` and the workspace clippy run all stop at the edge of `fuzz/`, which
-  is a workspace of its own, and four of the targets had already drifted out
-  from under all three. Where the binaries landed is cargo's answer now
-  rather than a hard-coded `fuzz/target`, which was the wrong directory on
-  any machine that sets `CARGO_TARGET_DIR`. The step says `skip` and names
-  what is missing when `cargo-fuzz` or that nightly is not installed, which
-  is the one place in this gate a skip is allowed.
-
-- **The fuzz seed corpus is committed, and says where it came from.**
-  `fuzz/corpus/<target>/` holds 37 seeds, 10 KB in all, so a clone gets
-  thirteen targets with something to start from rather than thirteen runs
-  beginning at the empty input. `tools/fuzz-seeds` writes them out of the
-  library's own builders and encoders — `RequestBuilder`, `CompoundBuilder`,
-  `PacketBuilder`, `MessageBuilder`, `ChannelData::encode`, `Protector` — and
-  puts each one through the reader its target puts it through before writing
-  it, so a seed that is not what it claims to be fails the generator rather
-  than sitting in the corpus doing nothing: the framer seeds through the
-  framer, the control-channel seeds through the frame decoder, the protected
-  runs through an unprotector holding the target's own key, which is also
-  what says the three that authenticate and the one that is refused as a
-  replay really do. Twelve of the thirteen families go through that; the
-  thirteenth is `builder`, whose input is not a message but the five field
-  values its target cuts it into, so what is checked there is the cut. The
-  one seed that is not written at all is a copy of
-  `fixtures/replay/registration-challenged.sipralrec`, which is this
-  project's own. The generator owns the directory besides writing it: what it
-  does not write, it removes, so a seed dropped from the generator cannot sit
-  in the tree for good behind a check that only counts directories. Nothing
-  here is a capture of anybody's traffic, addresses are RFC 5737's and names
-  are RFC 2606's, and `fuzz/corpus/README.md` says so. `scripts/check.sh`
-  holds the directory to it twice over — its shape, every subdirectory a
-  target `fuzz/Cargo.toml` declares, every target one, the README tracked and
-  the whole of it under 200 KB; and its content, every byte of every seed
-  read for an address somebody could harvest, a forbidden project's name, an
-  assistant trace and Romanian, which are the four things the rest of the
-  tree is read for and which no scan had ever read here. `scripts/fuzz.sh`
-  now writes what a run finds into a scratch corpus under `fuzz/target/`, so
-  a run does not push a thousand mutations in beside the seeds.
-
-- **`tools/abi-gen` has tests, and a pass that reads the names back after it
-  derives them.** The tool that prints the header and three bindings had none.
-  It now has golden files for a small synthetic surface, one per file the
-  generator writes — five of them, since the Kotlin back end prints the
-  binding and the JNI shim beside it — so a change to an emitter shows up as
-  a diff in `tools/abi-gen/golden/` rather than buried in three thousand
-  lines of `bindings/`; and it has a pass that
-  claims every identifier each back end will print, in the scope it will sit
-  in, refusing two declarations that derive one name and naming both. The same
-  pass carries a reserved-word list per language. C#, Kotlin and Swift can be
-  made to take one of their own keywords — `@event`, backticks — and the back
-  ends do; C cannot, and the header is a C++ header too, so a member called
-  `class` or `switch` stops the generator instead of reaching a consumer. A
-  test asserts the real surface passes all four, so the day a declaration is
-  added with a colliding or a reserved name, `cargo test` says so. The
-  callback goes through the same walk: it is the one signature that is not an
-  entry point, it is printed into the header as a function pointer and into
-  the .NET binding as a delegate, and its parameters were the last names in
-  the surface that nothing read back. Every refusal now names the declaration
-  as well as the identifier, in all four languages rather than in the one
-  that happened to report a qualified name. And how wide the golden surface
-  is stopped being a claim: a test counts the shapes of the real surface
-  against the synthetic one and fails naming each one the golden files do not
-  reach, which was twenty of them — the union, the records with no size
-  member, a pointer to a record, the callback in a field, samples going both
-  ways, a struct crossing in both directions at once, and three of the four
-  shapes a documentation link has.
-
-- **`Screen::on_replaces`: the application has the last word on a takeover.**
-  A matched `Replaces` is honoured only when the INVITE carrying it arrived
-  from the same place the named call's own signalling does, which is right as
-  a default and wrong as an absolute — a legitimate attended transfer whose
-  transferee reaches this end directly rather than through the line's proxy is
-  refused by it, and that is a deployment rather than a corner case. The rule
-  is now a defaulted hook on the screening policy: `on_replaces` is handed the
-  INVITE and a `Replacing`, which says which of this end's calls would be hung
-  up and whether it arrived on that call's own flow, and its default body is
-  `Replacing::strict` — the rule as it stands and nothing else. So an agent
-  with no policy, and a policy that implements only `on_invite`, including
-  every closure, behaves exactly as before. An override can widen the rule for
-  the case it recognises and hand the rest back to `Replacing::strict`, and it
-  can tighten it: refusing one that *did* arrive on the call's own flow is a
-  decision it returns. What it cannot do is see a `Replaces` that matches
-  nothing, which is 481 before the hook is reached, or overrule §3 on the
-  state of the matched call afterwards. `Incoming` gains `referred_by`, the
-  field RFC 3892 §2.2 has a transferee copy from the REFER that asked for the
-  transfer, with its rustdoc saying what it is for: it and `From` are plain
-  fields on the INVITE being judged, so they are context for recognising a
-  transfer that was expected and never authority. The C ABI gains nothing
-  here: the screening policy does not cross it yet.
-
-- **Opus is a compile-time feature, and it is on.** `sipral-media` takes
-  libopus as an optional dependency behind `opus`, `sipral` and `sipral-ffi`
-  carry the feature up, and the default is on so that nothing changes for
-  anybody who does not choose. A build with it off offers G.722 and the two
-  G.711 laws and does nothing else differently: `Codec::ALL` is three long, a
-  codec order naming `opus` is refused where it is set exactly as one naming
-  G.729 is, and a negotiation with nothing in common fails on the ordinary
-  path. The C ABI gains `SIPRAL_FEATURE_OPUS`, bit 6 of
-  `sipral_capabilities_t`'s `features`, clear in such a build, while
-  `SIPRAL_CODEC_OPUS` stays 4 in every build: a number that has left the
-  header is spent for good. Every C-side answer about the codec — that bit,
-  the name `sipral_codec_name` gives 4, the number `named_codec` puts on a
-  stream — is read from the catalogue the facade hands down and never from a
-  `cfg` in `sipral-ffi`, because a Cargo feature belongs to the crate that
-  declares it and features are additive: `sipral-ffi` with its own `opus` off
-  over a `sipral` built with it is a configuration anybody can compile, and
-  the ABI has to be right in it. `sipral::Capabilities` gains `opus` and
-  `sipral::Codec` gains `is_opus` and `sipral::MediaError` gains `is_codec`,
-  so the Rust layer answers both questions directly too — and `is_codec` is
-  the hinge the C side turns on before either of its tables. The ABI minor goes to 0.7, because the printed surface gained
-  a constant and `sipral_abi_check` compares the minor and nothing else while
-  the major is 0 — a header that grew without the bump is one no load-time
-  check can tell from the one before it. What raises which of the three
-  numbers is now written where the ABI is documented, in `docs/08-ffi.md`'s
-  Versioning section, with the constant's own rustdoc pointing at it:
-  everything the generator prints raises the minor, and not only a function
-  or a struct member, which is a project rule rather than something about
-  codecs. The reason for all of it is licensing and not size —
-  `docs/05-media.md` sets out the licensing position in full, and notes that
-  a build without the feature needs no cmake and no C++ toolchain because
-  nothing compiles libopus from source, and `docs/10-roadmap.md` now carries
-  the half of that decision the packaging owns, so that the pointer lands on
-  something: a precompiled artefact is built without the feature, or
-  published as two variants labelled clearly enough that nobody ships the
-  wrong one without noticing. The `sipral` crate, which is the one that
-  publishes, documents the feature in its own rustdoc — what disappears with
-  it off, and why — and asks docs.rs for all features, because a published
-  crate whose feature removes items from its public API has to say so where
-  the API is read. And `scripts/check.sh` now builds, tests and lints both
-  configurations, tests the mixed one, and asserts that libopus is out of the
-  dependency graph of `sipral` **and** of `sipral-ffi` — the C library
-  reaches the codec down an edge of its own, and two
-  graphs that agree today can be made to disagree by one edit. That assertion
-  captures the tree into a variable first and counts a cargo that did not run
-  as a failure: written as a negated pipeline, as it first was, a renamed
-  package or an unparseable manifest would have made it print ok having read
-  nothing.
-
-- **There is a C library now, and a C program in the gate that links it.**
-  `crates/sipral-ffi` declares `crate-type = ["rlib", "cdylib", "staticlib"]`,
-  so a release build produces `libsipral_ffi.dylib` and `libsipral_ffi.a`
-  beside the rlib the tests and the generator use. Until now the 98 KB header
-  described a library nobody could open. `scripts/check.sh` gains the step
-  that reads the symbols back out: every entry point `abi.rs` lists is in the
-  shared library and in the archive, there are exactly as many exported
-  `sipral_` symbols as `SURFACE` has entry points, and nothing else leaves
-  unmangled. It reads them with `nm-classic` rather than `nm`, because Apple's
-  `nm` is an LLVM 14 tool and refuses the newer bitcode a `lto = "thin"`
-  archive carries; it reads the list once and fails when it is empty, because
-  an `nm` that resolves and errors prints nothing and every question asked of
-  no symbols answers ok. What the archive exports beside the ABI is the other
-  690 unmangled C names its dependencies' objects carry — libopus,
-  compiler-rt, the LTO symbols — which is not a defect and is now a paragraph
-  under "What it does not catch" in `docs/08-ffi.md`, because a consumer that
-  static-links has to know before it links.
-
-  And a consumer: `bindings/c/smoke.c`, compiled with `-std=c11 -Wall -Wextra
-  -Werror`, linked against the shared library and **run** by the gate. It
-  checks the ABI version, builds a stack with a callback and a user pointer of
-  its own and proves the pointer arrives, adds an account, places one call and
-  has another refused with a status and the sentence that names what was
-  wrong with it and no handle, retires the transport with
-  `sipral_stack_transport_failed` and has a third call — well formed, over a
-  stack with nowhere to write — come back `SIPRAL_STATUS_NOT_SENT`, polls
-  once, and destroys the stack from inside its own event callback, once, on
-  the first event. That last is the one re-entrant call, which
-  `docs/08-ffi.md` now states in its rules list rather than leaving to the
-  header, and the one nothing proved from C. It also asks the library the
-  length of all fourteen structs that carry their own size and compares each
-  with C's `sizeof`, through a new entry point, `sipral_abi_struct_size`, which
-  answers for any struct of the ABI by the name the header gives it — and
-  asks a second one, `sipral_abi_versioned_count`, how many such structs
-  there are, so that the list of fourteen names in `smoke.c` is compared
-  against the library's own count and a fifteenth cannot arrive unasked
-  about. The ABI minor goes to 0.8 and the four printed files were printed
-  again. The rule that turns `SipralStackConfig` into
-  `sipral_stack_config` moved out of `tools/abi-gen` and into
-  `crates/sipral-ffi/src/abi.rs`, where the declarations are, because the
-  library now answers questions about the C names too and a derivation written
-  twice can disagree with itself; `abi::Record` carries the size the compiler
-  settled on, beside the members it was built from.
-
-- **The gate sees three things nothing compiled.** `RUSTDOCFLAGS="-D
-  warnings" cargo doc --workspace --no-deps --all-features` runs in it, so a
-  documentation comment is source that has to compile clean, and
-  `--all-features` because otherwise the 579 lines of `sipral-ua`'s reference
-  loop, which are behind one, are read by no rustdoc at all. Then
-  `cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc
-  --all-targets -- -D warnings` and, beside it, the same target under
-  `cargo doc`: together they are the only thing in the tree that reads the
-  four modules behind `cfg(target_os = "windows")` — 3221 of that crate's
-  7782 lines, two fifths of it, and compiled by nobody on the machine the
-  gate runs on — and the doc run is what keeps its four links into those
-  types honest. And `cargo clippy -p sipral-io-coreaudio --target
-  aarch64-apple-ios`, for the three bodies in that crate no installed target
-  compiled either. All of them fail rather than skip when the toolchain or
-  the target is missing, and so does `gitleaks` from now on: a gate that goes
-  green without the scanner has not looked.
-
-### Changed
-
-- **A call's audio no longer waits on the stack, and the event callback runs
-  with nothing held.** `sipral_stack_poll` holds the stack only while it works
-  and delivers afterwards, from a queue the stack owns, so the callback may call
-  back into the library and events still arrive in order and on one thread at
-  a time. Every per-call media entry point takes a media handle from the new
-  `sipral_call_media` instead of the stack and the call, is renamed
-  `sipral_media_…` to match, and never takes the stack's lock; the handle is
-  freed with `sipral_media_release`, answers `SIPRAL_STATUS_WRONG_STATE` once
-  its call or stack is gone, and `SIPRAL_STATUS_BUSY` only when a thread
-  re-enters its own session — which a processor calling into its call's stack
-  is told as well. `sipral_media_poll_rtcp` asks one call rather than
-  the stack. Underneath, each `MediaSession` has a lock of its own,
-  `Processor` requires `Send`, `MediaEngine::session` hands out a guard,
-  `MediaEngine::share` a `SessionShare`, and `MediaEngine::poll_rtcp` returns
-  the octets rather than a borrow.
-
-- **The derived constant names in two bindings were nonsense, and are not any
-  more.** `SIPRAL_FEATURE_OPUS` — the one symbol an application reads to know
-  whether this build has Opus — reached Swift as `fEATUREOPUS` and C# as `FEATUREOPUS`,
-  beside `fEATURESUBSCRIPTIONS` and `MEDIAPACKETBYTES` and seventeen others.
-  The camel-case derivation looked for an underscore or a capital to start a
-  word at, and a name already in capitals has neither, so it lower-cased the
-  first letter and left the rest. It now finds word boundaries the way
-  `abi::snake` does, which is the rule the library itself answers with, and
-  the twenty constants are `featureOpus` in Swift, `FeatureOpus` in C#,
-  `FEATURE_OPUS` in Kotlin and `SIPRAL_FEATURE_OPUS` in C. Nothing else in any
-  of the four files moved. The ABI is not frozen and nothing depends on the
-  old spellings, which is why this is a rename rather than an alias.
-
-- **The roadmap carries what an outside reading of the tree found, and what
-  was decided about it.** Phase 1 gains two exit criteria: the lab's flows run
-  through the join an application links and then through `sipral.h`, and no
-  request leaves as an oversized datagram inside a dialog either. Phase 2
-  gains re-negotiation that keeps stream identity and never reuses an SRTP
-  index, RTCP-XR with an E-model MOS, SIP MESSAGE and message waiting, a local
-  three-way conference, STUN reached from a call, early media on the answering
-  side, the REGISTER 200 OK kept, and a written decision on DTLS-SRTP. Phase 3
-  now lists what is built in Rust and unreachable from C, and does not freeze
-  the ABI before that list is empty and every printed binding compiles in the
-  gate; it adds the idiomatic Swift, C# and Kotlin layers, the platform
-  artefacts, a Linux device crate over PipeWire and a common device crate.
-  Phase 5 starts by joining the headless crate to the engine, and adds Python,
-  a sixty-second example with no account, measured numbers, a public
-  interoperability matrix and a security model. G.729 joins phase 2, written
-  from the Recommendation with the patent position confirmed before it ships;
-  ICE in the full role joins phase 4, off by default on a desktop. DTLS-SRTP
-  is written in-tree as the last item of phase 2, the state machine from the
-  RFC and the primitives from the crate family that already supplies AES.
-  Video waits for 1.0 and is phase 6 after it, with its contents named.
-
-### Fixed
-
 - **Two entry points took a `call` and an `out_call`, and three printed
   bindings could not survive it.** `sipral_call_consult` and
   `sipral_call_accept_transfer` both had a parameter named `call` and one
@@ -5151,16 +5936,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   reads back what a stack is actually running on, since a zero in the config
   means "the default" and the effective figure is otherwise unknowable.
 
-### Added
-
-- INVITEs refused because the table of watched sources was full are counted
-  apart from those refused for calling too fast (`Refusals::by_crowding`).
-  Both are one 480 from the far end and two different things to do about it:
-  one source over its allowance is a limit set too tight, many addresses at
-  once is a flood that wants a firewall.
-
-### Fixed
-
 - A `Require` this agent cannot honour is refused on every request, not only on
   the INVITE that opens a call. §8.2.2.3 says a UAS, not an INVITE: a re-INVITE,
   an UPDATE, an OPTIONS or a NOTIFY demanding an extension that is not
@@ -5170,464 +5945,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   anything it was handed, including this, because it sat first in the event
   chain; it now runs after the check. Only the tags that are actually unknown
   come back in `Unsupported`, which the section asks for by name.
-
-### Added
-
-- **One declaration of the ABI, with the header and three bindings printed from
-  it** (B7). The failure this exists for is a C seam declared in three places
-  that must agree: add a function, forget one of them, and the build succeeds
-  and the field fails, on one platform. The declarations now record themselves
-  — the same macros that emit the Rust item emit a descriptor beside it, doc
-  comments included — and `tools/abi-gen` prints the C header, the Swift, the
-  Kotlin with its JNI shim, and the C#. No Rust source is parsed anywhere.
-  `scripts/check.sh` regenerates and compares, so a binding that fell behind is
-  a failed gate rather than a surprise.
-
-  What the gate cannot do is stated with it, because a gate believed to catch
-  more than it does is worse than a smaller one: **nothing compiles the
-  generated Swift, Kotlin or C#**, there being no toolchains in the gate, and
-  the JNI shim in particular has never been compiled. The descriptor records
-  the spelling rather than the layout, so a wrong `usize`-to-`size_t` rule
-  would be wrong in all five outputs at once and compare clean.
-
-  It also closed a coupling of exactly the shape B7 describes, inside the
-  workspace itself: `UaEvent::IncomingCall` was destructured field by field
-  in the FFI, so adding a field to it broke the build, and a feature in
-  progress had already had to be redesigned around that.
-
-- **SRTP is reachable from a call** (SDES, RFC 4568). It was written in full,
-  proved against RFC 3711's own test vectors, and joined to nothing: no offer
-  named `RTP/SAVP`, no answer was read for keys, and no session was ever opened
-  protected. `Capabilities` said `srtp: true` regardless, which is the D8
-  failure exactly — a capability that cannot drift from the build is the whole
-  point of deriving it, and this one was a constant.
-
-  Offering is off by default and on per call, because the key travels in the
-  body (§7) and this layer cannot tell whether the signalling protects it.
-  **Answering is on by default**, which is a different decision made
-  differently: the peer has already asked for encryption, and refusing there
-  turns a call that would have worked into a silent one. "Offer" and "require"
-  are two settings and they differ in one place — an offer arriving *without*
-  keys, which `Required` refuses before anything goes on the wire, because that
-  is the only place a downgrade would be invisible.
-
-  Proved on the bytes rather than on the SDP: the same call is placed twice
-  from the same seeds, and the protected datagram is ten octets longer, shares
-  its first twelve with the plain one, and does not contain the plaintext
-  payload anywhere in it.
-
-  DTLS-SRTP is reported absent rather than pretended: there is no handshake in
-  this tree, and `Capabilities` now lists which keying a call can actually
-  reach instead of answering a bare yes.
-
-- **A session can be recorded and replayed deterministically** (D2). The
-  hardest failures happen on one PBX, on one carrier, behind one NAT, and do
-  not reproduce in a lab; they are fixed today by reasoning about a capture,
-  shipping a guess and waiting. A recording holds the inbound messages, their
-  timing and the seed the run was drawn from, and a replay feeds them back — so
-  the bytes out, the events and the whole diagnostic record come back identical,
-  which is asserted rather than claimed. The sans-I/O core is what makes this
-  nearly free: everything enters through one shape and time was already a
-  parameter.
-
-  **It never contains audio, and that is structural rather than careful.** The
-  format has no binary spelling at all — no escape for an arbitrary byte, no
-  base64, no length prefix — and the only constructor for a payload validates
-  against that alphabet. The honest cost is stated with it: a message with a
-  binary body cannot be recorded either, and the recorder spoils the whole
-  recording rather than dropping the body, because a recording holds every byte
-  the stack was fed or it does not exist.
-
-  One limit is worth knowing before relying on it: what the application does on
-  its own — register, place a call, answer — arrives from nowhere, so it cannot
-  be captured. A recording names those moments instead, and a replay hands the
-  names back at the same offsets. There is a test showing that a replay which
-  ignores them drives a stack that sends nothing.
-
-- **The engine says why the codecs that lost, lost** (D5), and **a call carries
-  its own catalogue** (D6, A2). "PCMU was chosen" is a fact; "Opus was offered
-  and the answer never named it, G.722 was offered and the far end's own order
-  put PCMU first" is a diagnosis, and it is what makes a wrong configuration
-  visible instead of inferred from a capture. Every codec the call's catalogue
-  could have offered now carries exactly one outcome, worked out at the moment
-  the plan is settled rather than reconstructed afterwards — a reconstruction
-  can be wrong in precisely the case somebody is debugging.
-
-  The catalogue, the media configuration and the device are properties of a
-  call now, not of the process. Two calls up is not hypothetical in a stack
-  that has attended transfer, and every global mutable value in an engine is a
-  race waiting for the second call. The process-wide default stays, because one
-  codec order per site is the ordinary case; what is new is that a call can be
-  placed with its own and keep it.
-
-  Two things were checked before being built and turned out to need nothing:
-  the transport half of D5 is already covered by the diagnostic record, and the
-  NAT half has no decision to report because nothing in the tree reaches
-  `sipral-nat` yet — which is `docs/06-nat.md`'s own admission, now confirmed
-  from the other side.
-
-- **Every call carries the story of what the stack decided** (D1). An ordered,
-  bounded record per `Call-ID`: a stable reason code, the wire event that caused
-  it with its size on the wire, a monotonic offset, and the addresses and limits
-  involved — serialising to JSON that can be attached to a bug report unchanged.
-  Eighteen codes to start with, and the rule that a code's wire form never
-  changes and is never reused is written next to the type rather than hoped for.
-
-  The bound is the part that is easy to get wrong twice. A record that overflows
-  says how much it lost instead of quietly becoming a lie, records are evicted
-  by least-recently-written so an hour-long call survives churn, and a request
-  refused for want of room goes to the endpoint's own record — otherwise a
-  scanner dialling extensions all night would evict every live call.
-
-- **A stack that knows the device sleeps** (C2, C3). An application woken by a
-  push tells the stack a call is expected on this account from this caller; the
-  stack pre-warms the transport and refreshes the binding on the fastest path
-  it has, matches the INVITE that follows to that announcement so the call
-  screen already on the screen is the one that gets the call, and reports an
-  announced call that never arrived as its own diagnosis rather than as an
-  error. The INVITE that beats its own push, the call cancelled before the
-  device woke, and two calls in quick succession are all tested rather than
-  hoped for.
-
-  A push carries no `Call-ID` and cannot be made to, so the match is on the
-  account plus the user and host of the `From`. Full §19.1.4 equivalence is
-  wrong in both directions here: it fails on a proxy that adds `;user=phone`,
-  and failing to match sounds safe but produces a second call screen for a call
-  the person is already looking at.
-
-  Registration can also be frozen and thawed across a cold start, with a
-  versioned format that refuses a snapshot from a later version rather than
-  misreading it, and a restored binding says it is restored rather than
-  claiming to be proved. Time-to-ready is measured and reported, because it is
-  what decides how long a queue rings a sleeping phone before skipping it. RFC
-  8599's `pn-provider`, `pn-prid` and `pn-param` go on the REGISTER contact and
-  nowhere else — and a de-registration leaves the push identifier out.
-
-- **A lifecycle for a machine that suspends** (D4, A7, C5), and the state that
-  was missing from it. `suspending`, `resumed`, `network_changed(from, to)`,
-  `interface_lost` and `name_resolution_lost`, each with a written recovery
-  ladder and each tested under the conditions that actually break it rather
-  than only the path where everything works.
-
-  The idea the rest hangs off: **a monotonic clock cannot tell you that you
-  slept.** It does not advance during suspend, so a stack that slept eight
-  hours comes back believing eight milliseconds passed, with every deadline
-  still in the future and every binding still valid, and nothing it can measure
-  contradicts that. Hence `Unverified` — a binding a registrar really granted,
-  over a transport since suspended or lost, that nothing has proved since.
-  Neither registered nor failed, and the direct answer to a cached registration
-  that read as valid while name resolution had gone.
-
-  `suspending` sends nothing at all. A graceful unregister cannot be observed
-  to have left, and if it does leave, a de-registered device cannot be woken by
-  a push.
-
-- **Health counters and an honest answer about what this build can do** (D3,
-  D8). Registrations attempted, succeeded and failed **by reason**; calls by
-  disposition; media gaps; jitter-buffer events; transport promotions; and one
-  gauge for calls in progress. A snapshot differences against an earlier one,
-  so a deployment's health is a subtraction rather than a search through text.
-  Capabilities are derived from the build — the codec catalogue, the transports
-  and features actually compiled in — never hand-maintained, because a
-  capability list that can drift from the build is worse than none: it is
-  believed.
-
-- **The device crates report the delay the canceller needs.** WASAPI had it in
-  one property; CoreAudio has four per direction across two kinds of object,
-  and a rate to convert them by, so `sipral-io-coreaudio` assembles it and both
-  crates now answer the same question in the same shape. On a laptop's own
-  speakers and microphone, with a stream open, that comes to a little over a
-  hundred milliseconds. It is what the devices report, not an estimate, and
-  `docs/05-media.md` gives the readings and the conditions they were taken
-  under.
-
-  On Windows the stream is now opened as a communications stream, which is what
-  puts the operating system's own capture-side processing in the path. What it
-  cannot do is confirm that anything is cancelling: Windows offers no
-  per-stream way to report it, so the crate says what was asked and accepted
-  and stops there rather than implying more.
-
-- **A call can be dialled into, and hears what is dialled at it** (RFC 4733).
-  The packet and everything §2.1 does to the sequence number and the timestamp
-  were already written and had no schedule to run on, because the layer that
-  writes them never sees a frame boundary. The facade does: one packet per
-  captured frame, which §2.5.1.2 calls the natural interval, and the digit
-  replaces the audio for as long as it lasts because §2.1 leaves no way for
-  both to be on the wire at once.
-
-  Keys queue rather than being refused — somebody entering an extension presses
-  four of them faster than four can be sent — and the 40 ms floor RFC 4733
-  §2.5.2.1 takes from ITU-T Q.24 is enforced where the digit is asked for
-  rather than discovered by a far end that heard nothing. A dial string with a
-  character no keypad has queues nothing at all: half an extension is worse
-  than none, because it reaches somebody. A call whose negotiation settled on
-  no telephone-event payload type says so instead of swallowing the key.
-
-  The other direction was missing outright: events arrived, were correctly
-  ignored by the earpiece, and were never reported to anybody. One keypress is
-  now one event, collapsed on the timestamp that identifies it — reporting per
-  packet would have turned one 7 into five.
-
-- **The echo-cancellation seam is reachable from a live call.** `Processor` has
-  been in `sipral-media` since the audio pipeline was written and nothing
-  called it, which made it a shape rather than a seam. A call now takes one,
-  and — the part that is actually work — keeps the recent past of its own
-  loudspeaker so the processor is handed the frame that was playing while the
-  microphone was open, at a distance the platform reports with
-  `set_render_delay`. Handing a canceller the wrong frame is not weaker
-  cancellation but none at all: an adaptive filter given an uncorrelated
-  reference diverges, and the call ends up worse than with nothing attached.
-
-  Nothing is allocated until a processor is attached, so a headless build —
-  which has no loudspeaker and therefore no echo — pays nothing. Two decisions
-  that follow are worth knowing about: silence suppression and the recording
-  tap both see the processed audio rather than the raw microphone, and the
-  application's own capture buffer is never written to. A delay above half a
-  second is refused where it is set, because nothing between a loudspeaker and
-  a microphone in one room takes that long and the number would only ever be a
-  platform reporting something else.
-
-- **Subscriptions, and the busy-lamp field on top of them** (RFC 6665, RFC 4235)
-  — the largest piece of protocol the stack was missing, and the one a desktop
-  client cannot ship without. Establish, refresh, expire, re-subscribe after
-  failure, and report every state change including the termination and its
-  reason, which is the half that tells an application whether to try again.
-
-  The dialog is established by the first notification and not by the 2xx,
-  because §4.4.1 says so and because the notification really does arrive first
-  in the field. Writing that turned up something sharper: on a reliable
-  transport the server transaction is gone the instant its final response is
-  sent, and the request and the flow the dialog is built from live on that
-  transaction — so the dialog has to be opened before the 200, not after. Found
-  by a test that passed on UDP and failed on TCP.
-
-  A subscription that ends takes its dialog with it, since there is no BYE for
-  one. Without that a phone watching thirty extensions leaks a dialog per lamp
-  per refresh.
-
-  The `dialog-info+xml` reader is deliberately not an XML parser and must not
-  become one. No DOCTYPE, so there is no entity to expand and the billion-laughs
-  shape cannot be written; no CDATA; the five predefined entities and numeric
-  references only; and depth, element count, attribute count and value length
-  all bounded before the first byte is read. Above it sits §4.3's coherence
-  table and §3.7.2's state machine, which is what a lamp actually shows.
-
-  Notifications are divided with the transfer handler by their event package,
-  and the general machine runs last: a transfer owns `refer` inside a call it is
-  driving, and only once everyone holding a subscription has had a turn can
-  anything say a notification belongs to nobody — which is answered 481, as
-  §4.1.3 requires. Two silent `?` in the transfer path that swallowed a REFER or
-  a NOTIFY arriving on a dialog that is not a call are now reachable, because
-  subscriptions have dialogs too.
-
-  Not built, with the seams named: no notifier role, so an incoming SUBSCRIBE
-  still reaches the application unclaimed; `Allow-Events` is read but not yet
-  advertised; and the REFER subscription stays as it is rather than being
-  half-converted — it opens with a REFER, its dialog already belongs to a call,
-  and this end is the notifier there, which is three real differences and a
-  rewrite that needs the notifier role first.
-
-- **A call can be placed through the C ABI.** It could not: `sipral_stack_poll`
-  counted what the stack wanted written and threw it away, and nothing could
-  hand it bytes that had arrived. The only thing that ever read an outgoing
-  message was a test helper. So the ABI could carry a call's audio and not its
-  INVITE, which blocked the phase whose exit criterion is a desktop client
-  running on this engine.
-
-  Six entry points now: take the next message out, put a datagram or a run of
-  stream bytes in, and tell the stack that a transport is bound, has failed, or
-  has closed. A message that will not fit the caller's buffer is **kept**, not
-  dropped — the difference between this and the media path is that a media
-  packet is refused before it is built while a SIP message already exists by the
-  time it reaches the boundary, and throwing away something the stack has
-  committed to sending is not a refusal, it is a lost call. The needed length
-  comes back so the caller can ask, then fetch.
-
-  What travels with a message is all of it, including the address it must leave
-  *from*: RFC 3581 §4 makes a response go out from the address its request
-  arrived on, and a caller on a wildcard socket cannot work that out. Addresses
-  cross as `host:port` text, which is the convention every other address in this
-  ABI already uses.
-
-  One transport, its number published rather than hard-coded out of sight, and
-  every other number refused with a message naming the one that exists — so the
-  day a second one arrives it is more valid numbers rather than a second set of
-  functions.
-
-  Two older tests asserted that one message had been discarded, as a stand-in
-  for "something went out". They now take that message through the ABI and
-  assert what it is, which makes their names true for the first time.
-
-- **The C ABI carries media.** It depended on signalling and stopped there, so a
-  client on the other side of it parsed its own SDP, ran its own RTP and owned
-  its own audio — which is why most of `docs/13-client-requirements.md` was
-  waiting on one crate. It now drives the facade's engine, and fourteen entry
-  points came with it: the codecs this build contains and the order they are
-  offered in, without needing a stack to ask; what a live call agreed, with its
-  wire payload type, clocks and keying; recording started and stopped mid-call;
-  statistics live and complete at the end; media stopping and coming back; and
-  the audio path itself, without which the rest is decoration.
-
-  A call is described one way or the other and never both: give it a media
-  address and the stack writes the offer and owns the audio, give it raw SDP and
-  it behaves as it always did. Both is refused. A managed call answers its own
-  re-offers, so the application is told the media changed rather than asked what
-  to do about it.
-
-  The recording's ownership is the part that had to be got right: the file
-  belongs to the media session and C never sees a handle, and the WAVE header's
-  lengths are patched on all three exits — an explicit stop, the call ending,
-  and the stack being destroyed, including when it is destroyed from inside the
-  event callback. A file that is never closed is a file that will not play.
-
-  Two of the reserved event numbers were taken in place, which is what they were
-  reserved for. Taking them meant letting live and reserved lines interleave in
-  one run rather than forcing the live ones into a prefix, since otherwise
-  reaching a number meant also spending the ones before it on features that do
-  not exist.
-
-  **What this does not yet do, said plainly: a call still cannot be placed
-  through this ABI.** There is no transport entry point — `sipral_stack_poll`
-  counts what the stack wants to send and discards it — so media I/O is now
-  ahead of signalling I/O. That gap predates this change and is next.
-
-- A default profile for the equipment this stack is actually deployed against —
-  a softphone behind consumer NAT talking to an Asterisk-family PBX — with what
-  each optional mechanism costs on the wire beside it. **Declaring ICE adds 143
-  bytes per candidate**, measured and pinned by a test rather than estimated
-  into a document that would stop being true, and that is the floor: a laptop
-  with Wi-Fi, Ethernet and a VPN writes nine such lines, and an offer carrying
-  them no longer fits the 1300-byte datagram floor of RFC 3261 §18.1.1. Which is
-  not hypothetical — NAT attributes were four hundred of the bytes in the
-  request that fragmented in the field and died in silence, sent to a peer that
-  did not speak the protocol at all.
-  The document also says the uncomfortable part plainly: ICE is off today
-  because nothing links `sipral-nat`, which is the right behaviour reached the
-  wrong way. A default that holds only because nobody wired the alternative is
-  one that changes the first time somebody does.
-
-- Gain, mute and a level meter on both device crates, and the device that goes
-  away mid-call reported rather than turning into silence.
-
-  The gain is applied to the frames here rather than through the platform,
-  because none of the platform's volumes belongs to a call: the device volume
-  is shared with everything on the machine, the process volume is one setting
-  for the whole application, and both outlive the call. Turning a call down
-  must not turn a film down. It is applied at the device end of the ring rather
-  than the caller's, because the ring holds sixteen frames and a mute heard a
-  third of a second after the button is not a mute.
-
-  Both ends of the range are defined: the ratio clamps, the samples saturate
-  instead of wrapping, and every sample that lands at the end is counted — so a
-  gain set too high is a number beside the slider rather than a mystery
-  distortion. A muted direction keeps frames moving, so unmuting does not play
-  a backlog.
-
-  The meter is the loudest sample over a tenth of a second, held between one
-  window and two. Peak-since-last-poll was rejected because it makes the number
-  depend on how often it is read; polling now mutates nothing, so any number of
-  callers at any rate see the same answer. It costs one compare per sample,
-  folded into the pass the gain already makes.
-
-  A device that disappears mid-call is reported — read from the platform rather
-  than inferred from silence — and the stream stops rather than quietly
-  producing nothing, so an application that ignores the event finds a stream
-  that has plainly stopped. Recovery is one call, carrying the gain and the
-  mute across, and is deliberately not automatic: whether to move to the laptop
-  speaker, wait, or end the call is not this layer's decision. A saved
-  selection is held as the identity that survives a replug, and the
-  documentation is explicit that a crate cannot stop the operating system
-  changing the default — reopening is what re-applies it.
-
-- An INVITE nobody asked for can be refused before anything sees it. Scanners
-  dial common extension numbers at every hour, and a client on a public port
-  either filters them or wakes its user at three in the morning. The policy hook
-  sits between registration and calls in the event chain, which is the last
-  place before the one site that mints a call handle and pushes
-  `IncomingCall` — "before any user-visible effect" is the requirement's own
-  sentence and it is where the ordering comes from.
-
-  Beneath it, a token bucket per source address — per address rather than per
-  socket, since a port costs an attacker nothing to change — in a table bounded
-  at sixty-four entries. At the bound a source whose bucket has refilled is
-  evicted, holding nothing a new entry would not; if every seat is still
-  spending, a stranger is refused rather than admitted untracked, because
-  admitting what cannot be limited is a hole exactly when it matters. The
-  limiter runs before the hook: calling arbitrary application code at flood rate
-  is the second attack.
-
-  Refusals are counted, cumulatively, and are deliberately not an event. An
-  event queue anybody on the internet can fill is the same attack one layer up.
-
-  The answer is 480 for every reason. §21.4.18 covers a callee "in a state that
-  precludes communication", which is what a screened number is and also what a
-  switched-off phone says, so one answer gives a scanner no way to tell a
-  guarded extension from an unattended one. 404 was rejected as an enumeration
-  oracle, 503 because §21.5.4 has a proxy stop forwarding to this agent
-  altogether, and 6xx because it speaks for the person rather than the device
-  and would silence the desk phone they are also registered on.
-
-- **The `sipral` crate is the facade it was always described as.** It was eleven
-  lines — a name reserved for crates.io, not yet uploaded — while
-  `docs/01-architecture.md` said it was
-  where signalling and media meet. Nothing joined them, so `MediaPlan` and
-  `MediaCapabilities` were a vocabulary nobody spoke, and an application that
-  wanted a call with audio in it wrote the join itself.
-
-  It now carries: a codec catalogue that says what this build actually contains,
-  in the order it offers them, and what one live call settled on — a name the
-  build has no encoder for is refused where the order is set rather than dropped
-  where it would have been used; a media session that owns one call's audio,
-  taking the negotiated description, driving the codec and the jitter buffer and
-  comfort noise, allocating nothing per packet and reading no clock; the engine
-  that attaches a session when a call confirms, follows it through hold, resume,
-  a peer that moved and a codec change, and releases it with the call's
-  statistics; call recording, both directions mixed into one WAVE file the crate
-  never opens itself; stream statistics that travel, live and at the end; and a
-  watchdog that says when inbound audio stops and when it comes back, silent
-  while this end is not meant to be receiving, because an alarm that cries wolf
-  during hold is an alarm an application learns to ignore.
-
-  The rule it exists to keep is unchanged: `sipral-ua` still reaches into no
-  media crate and no media crate reaches into it. The join lives here because
-  here is the only place the architecture allows it.
-
-  Deliberately not yet: ICE, SRTP keying and DTMF sending, each with its seam
-  named in the code rather than left to be found. And the C ABI still points at
-  signalling alone, which is the next thing to close.
-
-- One declaration for the ABI's event numbers, and disagreeing with it is a
-  build failure. The kinds, their names and their numbers are generated from a
-  single list, with an assertion that the list runs `1, 2, 3, …` with nothing
-  repeated, moved or missing. The hole it closes is the one the requirements
-  describe from the other side: two features written in two branches each take
-  the number after the last kind, both compile, and the one that lands second
-  has silently renumbered an event a shipped binding already knows. The numbers
-  of the six features already committed to are spent now, as reserved lines
-  naming what each belongs to, so taking one means reading a number rather than
-  choosing it.
-
-- The shapes of bad network a call is measured over, as fixtures in
-  `interop/impairment/` rather than as arguments somebody types. A threshold
-  measured against a profile that lives in a shell history is a threshold
-  nobody can reproduce. Four of them: bursty loss with jitter and reordering; a
-  mobile leg losing two per cent in bursts on a link whose delay moves; a
-  geostationary carrier, where the interesting failure is arithmetic rather
-  than audio, because a retransmission schedule tuned on a fast path gives up
-  before a satellite answers; and a link that disappears for eight seconds in
-  the middle of the call.
-  That last one is the one worth having, and the one an easy simulator does not
-  produce: loss and delay held constant for a whole call are a bad line, not an
-  interruption. It does not ask whether audio survived, since eight seconds of
-  nothing cannot be concealed, but whether the stack is still there afterwards
-  — the dialog kept, no timer having fired into the gap, and a buffer that
-  returns to the target it had rather than staying where the gap left it. Each
-  profile declares what must appear in the qdisc once it is applied, and the
-  runner reads it back, because `tc` accepts settings the kernel then discards
-  in silence and a run whose impairment never happened is byte for byte a clean
-  one.
-
-### Fixed
 
 - A challenge to any request inside a call is now answered, not given up on.
   Only REGISTER and the INVITE that opened a call were retried with
@@ -5643,181 +5960,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   rather than inside it, since a BYE outlives the call it ended. And a REFER
   that is refused now gives back the seat it took, without which the first
   refusal was the last transfer that call could ever attempt.
-
-### Added
-
-- `scripts/lab.sh` and `scripts/fuzz.sh`, and no CI configuration at all.
-  Nothing runs on hardware that is not ours: a runner that builds, signs or
-  publishes needs credentials on somebody else's machine, and for Apple
-  signing there is no way to give it one — a runner has no keychain. So the
-  three jobs that were hosted are three scripts. `scripts/check.sh` was already
-  the gate and is unchanged; `lab.sh` brings the three-container lab up, runs
-  the flows against each server and repeats one over a link made bad with
-  `tc netem`; `fuzz.sh` runs every target for as long as it is given.
-  `.github/workflows/` is gone and gitignored.
-- G.722 wired into the interop harness, and the trap that goes with it closed.
-  What used to be a single `Law` field is a codec, because G.711's samples,
-  octets and timestamp ticks for a twenty-millisecond frame are all 160 and
-  G.722's are 320, 160 and 160 — one constant served all three, and anything
-  written against that shape encodes half a frame and calls it a packet. The
-  session now accepts payload type 9, the tone keeps its pitch when the rate
-  doubles, and `SIPRAL_CODEC=g722` puts the wideband codec first in the offer
-  so the same ten flows run against real software with it. Not the default:
-  every lab server takes G.722, so offering it unasked would quietly change
-  what those flows have been proving.
-- G.722 in `sipral-media`, written from ITU-T Recommendation G.722 (09/2012).
-  The twenty-four-tap filter pair that splits sixteen kilohertz into two bands
-  of eight and puts them back together, six-bit ADPCM on the lower band and
-  two-bit on the higher, the logarithmic scale factor and its adaptation, the
-  sixth-order zero section and second-order pole section, and all three
-  decoder modes. Every arithmetic operation is §6.2's, including its
-  definition of multiplication as a shift and its saturating addition, because
-  a wrapping add here decodes to noise only on loud passages.
-  The roadmap used to say this would be linked. There is nothing to link: the
-  usual library is spandsp's, which the clean-room rule forbids by name, and
-  the Rust crate that looks free of it carries spandsp's comments word for
-  word. A Recommendation is a specification, and this is implemented from it.
-  Every table was read off the document twice, independently, and compared;
-  the one cell the two readings disagreed on was settled against the closed
-  form the table follows. Two of the document's own slips are handled and
-  written down: Table 19 prints six characters for a five-bit codeword, and
-  Table 14 prints two of its columns two rows lower than the address they are
-  addressed by.
-  G.722's RTP clock rate is 8000 although it samples at 16000 (RFC 3551
-  §4.5.2), so `SAMPLE_RATE` and `CLOCK_RATE` are separate constants and
-  `frame_samples`, `frame_octets` and `frame_ticks` are three different
-  numbers for the same frame.
-- SRTP and SRTCP in `sipral-rtp`, written from RFC 3711. Counter mode and f8
-  keystreams, HMAC-SHA-1 tags, the key derivation of §4.3 with erratum 3712
-  applied to the SRTCP index, the implicit packet index of §3.3.1 with
-  Appendix A's estimator, and a replay window twice the size §3.3.2 requires.
-  The three suites RFC 4568 defines, the `UNENCRYPTED_*` and
-  `UNAUTHENTICATED_SRTP` session parameters, an optional master key
-  identifier, and the packet counts §9.2 caps at 2^48 and 2^31.
-  Protecting and unprotecting happen in the caller's own buffer, so a
-  protected packet costs no allocation. Every test vector in the RFC's
-  Appendix B is in the suite, as are RFC 3174's for SHA-1 and RFC 2202's for
-  HMAC.
-  The block cipher comes from the `aes` crate, the first thing `sipral-rtp`
-  depends on, because a table-driven AES leaks its key through the cache;
-  everything above it is in-tree. Linking libsrtp2, which the roadmap used to
-  name, was dropped: it is C, and this crate denies `unsafe`.
-- `RtpSession::protected`, which puts SRTP under an ordinary RTP stream. What
-  it builds goes out protected and what arrives is verified before any of it
-  is believed, so the order RFC 3711 §3.3 sets out is not something an
-  integrator can get wrong. `RtpSession::receive` and `rtcp_receive` now take
-  the caller's buffer mutably, because a receiver decrypts in place.
-- The `a=crypto` line read as values in `sipral-core`: the suite, the master
-  key and salt out of the `inline:` parameter, the lifetime in both forms, the
-  master key identifier, and the session parameters that say whether to
-  encrypt and whether to authenticate. Every rule RFC 4568 states as making
-  the attribute invalid refuses it. A peer that sends back a key we offered is
-  refused too — §7.1.2 requires the keys to differ, and one key protecting
-  both directions is the failure the transform cannot survive.
-- Hold and resume in `sipral-ua`, and the offers that come after them. Hold is
-  RFC 3264 §8.4's: the description already negotiated, with a stream that was
-  `sendrecv` marked `sendonly` and one that was `recvonly` marked `inactive`,
-  and the `o=` version moved on. The stack writes it, so the application says
-  hold rather than `a=sendonly`, and resume puts back the direction each stream
-  started with rather than assuming `sendrecv`. `Hold` has a flag per
-  direction, because §8.4 holds each one separately; the far end holding us is
-  read off `sendonly`, `inactive`, or the `0.0.0.0` address RFC 2543 used, and
-  reported as `SessionChanged`.
-  Which request carries the change is the dialog's decision first: a confirmed
-  call uses a re-INVITE, which RFC 3311 §5.1 recommends outright, and an early
-  one uses UPDATE, because §14.1 forbids a second INVITE while the first is
-  running — and only when the far end listed UPDATE in an `Allow` (§4), which
-  this end now advertises on its INVITE, on a provisional carrying a
-  description, and on the 2xx.
-  An offer arriving from the far end is answered here when it keeps the streams
-  and the formats that were negotiated, because the answer is then this end's
-  own ports with the direction §6.1 leaves. One that changes the codecs or the
-  stream list arrives as `Reoffer` with the transaction still open, for
-  `accept_reoffer` or `reject_reoffer`; a body that claims to be a session
-  description and is not gets a 488 with the `Warning` §14.2 asks for.
-  Glare is handled from both sides: a 491 carries the wait §14.1 draws and the
-  change goes out again once, and an offer that crosses one of ours is answered
-  491 while one that arrives on top of an unanswered offer of theirs is
-  answered 500 with a drawn `Retry-After` (RFC 3311 §5.2, generalised to both
-  requests).
-- `StatusCode::NOT_ACCEPTABLE_HERE`, the refusal that is about the session
-  description rather than about the request that carried it.
-- A 2xx that is never acknowledged now ends the dialog with a BYE, which
-  §13.3.1.4 asks for and §14.2 repeats for a re-INVITE. RFC 6026's timer L was
-  ending the transaction in silence, so the layer above could not tell an ACK
-  that arrived from one that never did; it now reports
-  `TerminationReason::TimedOut`, and `sipral-ua` sends the BYE and reports the
-  call as unreachable. Without it a far end that stops answering leaves a line
-  busy for as long as the process runs.
-- `OutgoingResponse::status`, to read back what a response was built with.
-- Session timers (RFC 4028) in `sipral-ua`. `Supported: timer` on every request,
-  an interval asked for per account and thirty minutes by default, the
-  refresher left to the negotiation on the first INVITE and carried afterwards.
-  The refresher refreshes at half the interval (§7.2) and the other end hangs up
-  shortly before expiry (§10), reporting `CallEndReason::Expired`. The refresh
-  is an UPDATE where the peer takes one and a re-INVITE where it does not,
-  repeating the description already agreed unchanged, which is how §7.4 and
-  RFC 3264 §8 together say nothing has moved. A 422 sends the INVITE again on
-  the same `Call-ID` with the demanded floor, once; an incoming interval below
-  §5's ninety seconds is answered 422 before the application sees it.
-- `StatusCode::SESSION_INTERVAL_TOO_SMALL`.
-- `sipral-rtp`, phase one's share of it: the fixed header read and written
-  (RFC 3550 §5.1), the validity checks a receiver makes before it believes a
-  source (Appendix A.1) including the probation state machine and sequence
-  wraparound, the marker-bit rule the audio profile adds (RFC 3551 §4.1),
-  symmetric RTP with latching onto the first valid packet's source, and a
-  fixed-depth de-jitter buffer that takes reordering as normal, drops
-  duplicates by sequence number and never grows past its depth. Sans-I/O, with
-  no dependency on `sipral-core`. RTCP, the adaptive buffer, loss concealment,
-  DTMF and SRTP are later phases and are not stubbed here.
-- `sipral-media`, phase one's share: G.711 mu-law and A-law, encode and decode,
-  written from the companding law, with the frame arithmetic a caller needs and
-  the two payload types RFC 3551 fixes. Every one of the 512 code points is
-  round-tripped in the tests, which is the strongest property the code has.
-- The interop lab under `interop/`: Kamailio, FreeSWITCH and Asterisk on
-  default settings in Compose, a capture beside them, and a harness that drives
-  `sipral-ua` through register, call, and hold and resume, judging each flow
-  against conditions written before the run. It runs as its own CI job on
-  Linux. Every other test in this workspace runs the stack against a peer we
-  wrote; this is the first that does not.
-- Reliable provisional responses on the answering side (RFC 3262). `ring` sends
-  reliably exactly when the INVITE asked — §3 leaves no choice either way — and
-  the PRACK is answered 2xx here, with an answer to any offer it carried. A
-  reliable response that carried a description holds the 2xx to the INVITE until
-  it is acknowledged (§5), so an application that answers early has its 200 kept
-  and sent on the PRACK rather than putting two unanswered offers on the wire.
-  In the other direction an offer arriving in a reliable provisional is reported
-  by `answer_wanted` on `CallProgress` and answered with
-  `UserAgent::answer_early`, which puts it in the PRACK where §5 wants it.
-- A `Require` naming an extension that is not implemented is answered 420 with
-  the token in `Unsupported` (§8.2.2.3), before the application sees the call.
-- Transfer, both kinds (RFC 3515, RFC 3891). `transfer` sends a REFER and
-  reports what the transferee says in its `message/sipfrag` NOTIFYs as
-  `TransferProgress` and `TransferDone`; the call is given up only when the
-  transfer has actually succeeded, because hanging up when the REFER goes turns
-  a failure into a call that vanished. `transfer_to` sends the other call's
-  remote target with an escaped `Replaces` naming its dialog, which is the only
-  difference between an attended transfer and a blind one.
-  A REFER that arrives is `TransferRequested`, taken with `accept_transfer` —
-  202, the opening NOTIFY, and the call it asked for — or refused with
-  `reject_transfer`; anything but exactly one `Refer-To` is answered 400.
-  `Replaces` on an incoming INVITE is matched before the application sees it,
-  with §3's status code for each way it can fail: 481 for no match or several,
-  603 for a dialog that has ended, 486 for `early-only` against a confirmed
-  one. A match is replaced when the new call is answered, and reported as
-  `CallReplaced`.
-- The reference loop, behind the `reference-loop` feature and off by default.
-  `Runtime::bind` gives a `UserAgent` with a datagram socket under it, a thread
-  per socket doing the blocking reads, and a `Handler` with two methods. It
-  answers `ResolveNeeded` with an A lookup and `TransportWanted` by opening the
-  TCP connection §18.1.1 asks for; it does not do SRV, does not link TLS, and
-  binds to a named address rather than a wildcard, because `std::net` cannot
-  say which local address a datagram arrived on and RFC 3581 §4 needs that.
-  With it comes the first test in this workspace where two stacks talk to each
-  other over real sockets rather than to a peer written in the same file: an
-  INVITE, a 180, a 200, the ACK, a hold and a BYE, on loopback.
-
-### Fixed
 
 - The reference loop could end without writing what it had been given. A
   handler that hangs up and stops in the same breath is the ordinary shape of
@@ -5868,8 +6010,6 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   from the stream the branches come from rather than asking the caller for a
   second seed.
 
-### Fixed
-
 - A refused re-INVITE held its dialog shut. §14.1 lets a new INVITE go once the
   old transaction is "completed or terminated", and a refusal completes it at
   once — the ACK for a non-2xx belongs to the transaction, not to the dialog —
@@ -5897,413 +6037,226 @@ Versioning is semantic once 1.0 exists; before that, minor versions may break.
   RFC 3263 §4 makes the target the `maddr` when there is one — the response
   path already did this, so the two halves of one rule disagreed.
 
-### Added
+### Security
 
-- Glare, both ways (§14.2, RFC 3311 §5.2). An INVITE that crosses one of ours
-  inside a dialog is answered 491, a second one that arrives before we answered
-  the first is answered 500 with a drawn `Retry-After`, and so is a second
-  UPDATE; none of them reaches the caller, because none is a decision. The end
-  that receives a 491 gets `Event::ReinviteGlare` with how long to wait, drawn
-  from the range §14.1 gives it — which differs by who generated the `Call-ID`,
-  so that two ends backing off do not collide again.
-- `SendError::InviteInProgress` and `SendError::WrongMethod`: §14.1 forbids a
-  second INVITE transaction in a dialog while one is running in either
-  direction, and an INVITE handed to `request_in_dialog` would have run on a
-  transaction machine that cannot acknowledge it.
+- **The SRTP master key and salt are built in a buffer that wipes itself**.
+  `draw_key` drew one block of `SHA-256(media seed || counter)`
+  into a plain array, copied the key and the salt out of it into two more,
+  and cleared only the block, by hand, with a compiler fence behind it — so
+  the two buffers that actually held the key outlived the function on the
+  stack. All three are `zeroize::Zeroizing` now, wiped in their own `Drop`,
+  which the next edit to that function cannot quietly stop doing. The two
+  halves are copied out a byte at a time rather than sliced, and an assertion
+  beside the function holds both lengths to the block: this is the one place
+  in the tree where reading past the end must not be recoverable, because a
+  key of zeros protects nothing while every message still looks right.
+  `zeroize` was already in the tree at the same pinned version for
+  `sipral-rtp` and `sipral-dtls`; `sipral` now names it directly, and
+  `THIRD-PARTY-NOTICES.md` says why.
 
-### Changed
+- **A recorded call is shown, not assumed, to carry no key**.
+  The separation of the media seed from the endpoint's own was already built;
+  what was missing was a demonstration of it. A test now negotiates a
+  real SRTP call between two stacks, records the caller's inbound half with
+  the replay recorder, and asserts the caller's own negotiated key appears
+  nowhere in the finished recording — and a second test places two calls from
+  two agents that share one endpoint seed and differ only in their media
+  seed, and asserts the keys they offer differ. The first test was watched to
+  fail with the key written in on purpose before it was left passing.
 
-- Documents corrected against the tree after an outside reading of the README.
-  RFC 3263 is split in the index between what the core owns and what the caller
-  does, with RFC 2782 named next to it; RFC 3327 and RFC 8599 added; iLBC and
-  AMR given their exclusion rows. `a=ice-lite` is now conditioned on a public
-  address, which RFC 8445 Appendix A requires and which separates the headless
-  build from the softphone. SDES is stated to need a secured signalling channel
-  (RFC 4568 §7). The layer diagram says outright that signalling and media do
-  not depend on each other, and `MediaPlan` and `MediaCapabilities` name what
-  crosses between them. The README names the codecs, the fuzzing and the parser
-  bounds, and no longer refers to a transport crate that does not exist.
-- The project's home is `sipral.org`. `Cargo.toml`, both package READMEs and the
-  NuGet `PackageProjectUrl` say so; the published NuGet 0.0.1 still carries the
-  previous domain and is corrected at the next version.
+- **No binding reads past the header fields it was handed.** The Swift and .NET
+  wrappers printed for `sipral_call_set_headers` took a single `sipral_header_t`
+  and the caller's `headers_len`, so any length above one read the memory after
+  it, and the Kotlin binding could not be printed at all once `headers` joined
+  the call and account configurations. `tools/abi-gen` now reads an array of
+  records going in off the declarations — a `const` pointer to a record and the
+  `_len` named for it, as parameters or as struct members — and every binding
+  takes a list whose own count is what C sees: `[SipralHeader]` in Swift, copied
+  into one buffer for the length of the call; `(string Name, string Value)[]` in
+  .NET, copied and pinned until the call returns or throws; `List<SipralHeader>`
+  in Kotlin, packed, with the JNI shim checking every length against the bytes
+  before it points into them. A pointer to records beside a length that is not
+  that shape — the `_len` of a writable pointer, or any length beside a record
+  with no `size` — and a call answering with text that takes a list are refused
+  by name in Swift, .NET and Kotlin rather than printed as one struct.
 
-### Added
+- **A CR that neither ends a line nor begins a fold makes a message malformed,
+  in both parse modes.** It has no reading in RFC 3261 §25.1, and it could never
+  be written back: `From: <sip:bob@example.com>;x=a\rb;tag=1` on an INVITE made a
+  call that could not be answered, refused or hung up, whose server transaction
+  waited for good, and the same byte in a REFER's `Referred-By` got a 202 for a
+  transfer that then placed nothing. The parser now answers
+  `ParseError::BadHeaderLine`, or `BadStartLine` on the first line.
 
-- The mark, and the rules for drawing it. `assets/` carries the mark and the
-  horizontal lockup as SVG and PNG, light and dark, with `assets/BRAND.md` for
-  the geometry, the three colours and the one red cell. The README shows the
-  lockup, every crate carries `html_logo_url` and `html_favicon_url` for
-  docs.rs, and the NuGet package carries an icon. The lockup SVG keeps the
-  wordmark as live text, so anywhere Archivo is not installed the PNG is the
-  one to use — which `BRAND.md` says.
-- `scripts/check.sh` fails on embedded provenance metadata. Artwork arrives with
-  a signed C2PA manifest naming the tool that made it, in a PNG `caBX` chunk or
-  an SVG `<metadata>` element; it is base64 inside a binary, so the existing
-  text scan never saw it, and this repository is public. The files in `assets/`
-  were stripped before being committed — PNG down to `IHDR`, `PLTE`, `tRNS`,
-  `IDAT`, `IEND` and `sRGB`, SVG without `<metadata>` — which changes no pixel.
+- **A request whose copied fields arrived folded can be answered.** Every
+  response copies `Via`, `From`, `To`, `Call-ID` and `CSeq` from the request,
+  and the builder refused the line break a fold leaves in them (RFC 3261
+  §7.3.1), so no response to such a request could be written: an INVITE got no
+  100, could not be answered, refused or hung up, and its server transaction
+  waited for good. A fold now goes out as the one space it stands for; any other
+  CR or LF is still refused.
 
-### Changed
+- **A REFER whose `Replaces` unescapes to a control byte draws a 400.** The
+  `Replaces` in a `Refer-To` is unescaped to go onto the INVITE sent to the
+  transfer target, so `?Replaces=call%00x...` put a NUL into that header, and
+  `%0D%0AContact:%20...` a line break the builder refused only after the REFER
+  had been accepted with a 202, leaving a transfer that could never be placed.
+  The Refer-To is now refused up front (RFC 3515 §2.4.2).
 
-- Phase 1 readiness review, nine gaps closed: WebSocket scoped to phase 2 and
-  its framing corrected (one SIP message per WebSocket message, never the
-  `Content-Length` framer); keepalive given a home in `EndpointConfig`; the
-  `sipral-ua` call handle renamed away from the core's `CallId`; a fuzzing
-  plan and a per-flow interoperability pass bar in `docs/11-testing.md`; the
-  `sipral` facade crate inheriting version, licence and lints from the
-  workspace; `scripts/check.sh` failing on version drift between the
-  workspace and the .NET package.
-- Design and licensing documents checked claim by claim against the RFC text
-  and the primary sources; 20 corrections applied. The ones that change
-  behaviour: the release profile no longer sets `panic = "abort"`, because the
-  FFI layer has to catch unwinding at the C boundary; `sipral-ffi` and
-  `sipral-io-coreaudio` now carry the `unwrap`/`expect`/`panic`/indexing lints
-  they were silently missing; phase 1 explicitly includes the minimal RTP and
-  G.711 slice a bidirectional call needs; `LICENSING.md` no longer implies that
-  charging for a product is by itself what triggers the commercial arm. CI
-  installs the toolchain from `rust-toolchain.toml` instead of pinning a second
-  time in the workflow, and runs the gitleaks binary (pinned, checksum
-  verified) instead of the marketplace action, which requires a paid licence
-  on organisation repositories.
+- **A `From` or `To` whose tag is not a token is a malformed field.** The tag
+  was unquoted and kept as it came, and a dialog writes it back after `;tag=`
+  on every request: `tag="alice1;maddr=198.51.100.66"` put a `maddr` the peer
+  chose into the `To` of the BYE, and `tag=bob1, <sip:mallory@example.net>`
+  put a second address into it. `RawMessage::from` and `RawMessage::to` now
+  refuse such a tag (RFC 3261 §25.1 `tag-param`); a quoted token still reads.
 
-### Added
+- **A URI holding an unescaped space, control byte, `"`, `<` or `>` is refused
+  (`UriError::IllegalByte`).** Kept from a peer and written into the next
+  message, each one broke out of where it was put: a REFER whose
+  `Refer-To: <sip:carol>;tag=abc@example.com>` made the transferee's INVITE
+  carry a `To` tag the referrer chose, and an unbracketed
+  `From: sip:a"b@example.com;tag=alice1` left the dialog with no remote tag and
+  every BYE addressed `To: <sip:a"b@example.com;tag=alice1>`.
 
-- Workspace skeleton: the eight crates from `docs/01-architecture.md`, each with
-  its scope documented and nothing implemented.
-- Design documents for phase 0: architecture, clean-room rules, signalling
-  core, user agent, media, NAT, headless endpoint, FFI, RFC index, roadmap,
-  testing.
-- Licensing set: AGPL-3.0-only alongside a commercial arm, with `LICENSING.md`,
-  `LICENSE-COMMERCIAL.md`, `TRADEMARK.md`, `AUTHORS`, `THIRD-PARTY-NOTICES.md`,
-  and SPDX headers on every source file.
-- `deny.toml` with a permissive-only allow-list, enforced by the check script.
-- `scripts/check.sh`: licence headers, provenance, published-tree language,
-  internal files and captures, build, lints, tests, dependency licences,
-  secrets.
-- CI on Linux, macOS and Windows, plus separate licence and hygiene jobs.
-- `sipral-core::msg`: the message layer's foundation. `Span`, `HeaderSlot` and
-  a reusable `ParseScratch`; `Method` and `StatusCode`; `RawMessage` as a view
-  over the caller's buffer; and a parser that locates the start line, the
-  header fields and the body without copying any of them. Folded values are one
-  slot with their interior CRLF intact, repeated headers are one slot each in
-  wire order, and `Content-Length` frames the body so trailing octets in a
-  datagram are ignored. Bounded by a `Limits` struct so a hostile peer cannot
-  make it do unbounded work, and written so that no input reaches a panic.
-  37 tests, several of them RFC 4475 cases the corpus will assert in full later.
-- `sipral-core::msg::HeaderName`: the 38 header fields the stack knows, matched
-  whatever their case and in either form. Fifteen compact forms, each read out
-  of the RFC that defines it rather than from memory. `RawMessage` gains
-  `header`, `header_values`, `header_count` and `header_names`, so asking for
-  `Via` finds a `v:` line and asking for an extension is case-insensitive too.
-- `sipral-core::msg::UriRef`: SIP URIs in parts, borrowed from the buffer.
-  An enum rather than a struct, because only `sip:` and `sips:` have a
-  hostport: a `tel:` URI and an unknown scheme are kept whole instead of being
-  forced into a shape they do not have. The userinfo boundary is settled before
-  parameters or headers are looked for, since `user` may contain `;` and `?`
-  unescaped. Parameters and headers are walked on demand, and `unescape`
-  handles `%` escapes including `%00`, leaving a stray `%` alone because the
-  corpus has one in a message that is valid.
-- `sipral-core::msg::lex`: the lexical rules every header value obeys, in one
-  place instead of once per field. Unfolding, comma-separated values, and
-  `;name=value` parameters, all of which stop at a quoted string or a `<...>`
-  URI. `Contact: "Smith, John" <sip:j@x>` is one value; `qop="auth=1,auth-int"`
-  is one parameter.
-- `sipral-core::msg::OwnedMessage`: the same bytes and header index behind two
-  `Arc`s, so a message the stack keeps costs one copy and a clone costs none.
-  Bytes past the body are left behind, so a second request sharing a datagram
-  is not carried along.
-- `sipral-core::msg::scalar`: the fields that carry a number, and `CSeq`, which
-  carries one and a method. The separator inside `CSeq` and `RAck` is `LWS`, so
-  a fold between the digits and the method still reads. Overflow is two rules,
-  not one: a `CSeq` that does not fit in 32 bits is refused, while an `Expires`
-  parses and reports that it did not fit, because the RFC lets an element fall
-  back to its default there. Nothing is truncated, so a hundred-digit `Expires`
-  cannot become a plausible small number.
-- `sipral-core::msg::ViaRef`: the field that decides where a response goes.
-  `SLASH` and `COLON` absorb surrounding whitespace, so the two slashes are
-  located before anything else; `received` carries an IPv6 address without
-  brackets, unlike everywhere else, and accepts them anyway because they are
-  sent; `ttl` is `1*3DIGIT`, so `;ttl=1234` is not a ttl at all; `rport` has
-  three states and `;rport=` is none of them. A `Via` with no branch is an RFC
-  2543 peer to be matched per §17.2.3, not a malformed header.
-- `sipral-core::msg::NameAddrRef`: `From`, `To` and `Contact`. The angle
-  brackets decide who owns the parameters — inside them `;transport=tcp` is on
-  the URI, outside them it is on the header field — and RFC 4475 `cparam01` and
-  `cparam02` are one address written both ways to catch a stack that cannot
-  tell. Whitespace lives outside the brackets, so `< sip:a@b >` is refused; a
-  display name is a token run or a quoted string and nothing else, so
-  `Bell, Alexander <sip:...>` is refused while `caller<sip:...>` is accepted as
-  the documented grammar defect it is; an unterminated quoted string is refused
-  rather than guessed at. `Contact: *` is the whole field or nothing.
-  `RawMessage` gains `from`, `to`, `contact` and `field_values`, the last
-  walking a comma-separated field across its lines and its commas alike.
-- `sipral-core::msg::RouteRef`: `Route` and `Record-Route`. A route entry is a
-  `name-addr` with no bracket-less alternative, so `Route: sip:p1;lr` is
-  refused rather than guessed at — without the `>` there is nothing to say
-  where the URI ends. `is_loose_route()` reads `;lr` on the URI and not on the
-  header field, because `<sip:p1>;lr` is a strict router carrying a parameter
-  that happens to be spelled the same, and getting that backwards sends the
-  request to a strict router with a Request-URI it cannot use. Entries come
-  back in wire order, never sorted or deduplicated.
-- `sipral-core::msg::ChallengeRef` and `CredentialsRef`: digest challenges and
-  credentials, as two types rather than one, because `qop` is a quoted comma
-  list in a challenge and a bare token in credentials and the RFC's own worked
-  example writes both. `realm`, `nonce`, `cnonce`, `username` and `opaque` come
-  back unescaped; `uri` and `response` come back exactly as written, since
-  neither is a `quoted-string` and a Request-URI is no place to resolve
-  backslashes. `response` has no fixed length, per RFC 8760. Each header line
-  is one value: RFC 3261 §20.7 and §20.28 exempt these fields from
-  comma-joining, and several challenges are several lines in preference order.
-- `sipral-core::msg::TokenIter` and `MediaTypeRef`: `Require`, `Proxy-Require`,
-  `Supported`, `Unsupported`, `Content-Encoding`, `Accept`, `Allow` and
-  `Content-Type`. Option tags are matched without case; methods are not,
-  because the six RFC 3261 verbs are fixed-case literals in the grammar and
-  `Allow: invite` is an extension method that happens to be spelled like one
-  of them.
-- `sipral-core::msg::RequestBuilder` and `ResponseBuilder`: writing a message
-  out. Deterministic — same inputs, same bytes, whatever order the setters were
-  called in — because a retransmission has to be the identical datagram and a
-  byte-comparing test is worth nothing otherwise. `Via` goes first, then the
-  routing and dialog fields, then whatever else the caller added, then the
-  body's two fields; `Content-Length` is always written, since a stream
-  transport has no other way to find the end of a message. A response copies
-  what RFC 3261 §8.2.6.2 says must be equal, adds a `To` tag only when the
-  request carried none, and copies `Record-Route` only when asked, because
-  §12.1.1 requires that of a response establishing a dialog and only the
-  caller knows whether this is one. No value may hold CR or LF: a header value
-  goes out on one line, and a caller's data with a line break in it would
-  otherwise write headers of its own.
-- `sipral-core::msg::StreamFramer`: reassembling TCP and TLS into messages, and
-  the one place in the receive path that copies. A message without
-  `Content-Length` is refused rather than read to the end of the buffer, since
-  RFC 3261 §18.3 makes the field mandatory on a stream and guessing would
-  swallow whatever followed. Keep-alives (RFC 5626 §4.4.1) are skipped between
-  messages and counted, so the connection's owner can send the single CRLF a
-  double CRLF is owed. Work is bounded per byte received rather than per call:
-  a peer feeding one byte at a time cannot make reassembly quadratic.
-- `RawMessage::validate`: the question a UAS asks before answering — is this a
-  message the stack can act on, or one that draws a 400? A message can be
-  framed correctly and still carry a `From` whose display name is not one, a
-  `CSeq` naming a different method than the start line, or a `Date` in a zone
-  nobody can read. The parser has no business refusing those, since it does not
-  know which fields the caller will read, so the question is asked once, here,
-  by whoever is about to answer.
-- `SipDate` and `RawMessage::date`: RFC 3261 §20.17, which narrows RFC 1123 to
-  GMT and says outright that the names are case-sensitive. `EST` is not a zone
-  this reads, and neither is `UT`, `UTC` or `gmt`.
-- `sipral-core::transaction`: the handles the transaction layer is addressed
-  by. Typed by machine, so answering a PRACK with an INVITE server transaction
-  handle is a compile error rather than a runtime one, and the guarantee
-  survives into C as one struct per kind. Generational, so a handle issued
-  before a transaction died never answers to whoever took its slot — which is
-  what a late retransmission is holding. The four state enums carry RFC 6026's
-  `Accepted` on both INVITE machines.
-- The INVITE client transaction (RFC 3261 §17.1.1, RFC 6026 §7.2), and the ACK
-  a client transaction builds for a final response that is not a 2xx. A 2xx
-  does not end the transaction: the machine moves to `Accepted` and stays there
-  for timer M, so a retransmitted 2xx or one from another fork is passed up
-  rather than dropped as a stray. A provisional response stops both timer A and
-  timer B, because how long to wait for a ringing phone is the user's decision.
-  A retransmitted final response re-sends the ACK and is not reported twice.
-  On UDP the request goes out seven times in 64·T1, which is what the RFC says
-  that number is for.
-- The non-INVITE client transaction (RFC 3261 §17.1.2), which is what REGISTER,
-  OPTIONS, BYE and MESSAGE run on. Retransmissions cap at T2 rather than
-  doubling forever, and a provisional response does not stop them — it moves
-  the machine to `Proceeding`, where the interval is T2 flat and timer F still
-  ends the transaction. Only an INVITE gets to ring indefinitely.
-- The two server transactions (RFC 3261 §17.2, RFC 6026 §8.1). The INVITE one
-  sends a 100 Trying at once — the transaction layer never knows whether the
-  user will answer within 200 ms, and a redundant 100 costs one datagram while
-  a missing one costs six retransmitted INVITEs. A 2xx puts it in `Accepted`,
-  where retransmitted INVITEs are absorbed rather than answered again and an
-  arriving ACK is passed up rather than swallowed, because after a 2xx the ACK
-  belongs to the dialog. A non-2xx final response is retransmitted by timer G,
-  but only on an unreliable transport. The non-INVITE one sends nothing until
-  the user says so: in `Trying` a retransmitted request is discarded, since
-  inventing a response the user never wrote is worse than silence.
-- Message matching (RFC 3261 §17.1.3 and §17.2.3). A response finds its client
-  transaction by branch and `CSeq` method — the method matters because a CANCEL
-  borrows the branch of the request it cancels while being a transaction of its
-  own. A request finds its server transaction by branch, the `Via`'s sent-by
-  and the method, with an ACK keyed as the INVITE it answers. A peer without
-  the magic cookie is matched the pre-3261 way instead, on the Request-URI,
-  From tag, `Call-ID`, `CSeq` number and top `Via`.
-- CANCEL (RFC 3261 §9.1): built to look exactly like the INVITE it cancels so
-  the two can be paired, with `Route` copied for stateless proxies and
-  `Require`/`Proxy-Require` deliberately dropped. Asking to cancel is always
-  accepted while the transaction is open: a CANCEL may not be sent before a
-  provisional response has arrived — the server could otherwise receive it
-  before the INVITE and have nothing to cancel — so one asked for too early is
-  held and released at the first provisional rather than refused.
-- Dialogs (RFC 3261 §12): route set, remote target, the two sequence spaces,
-  the `secure` flag and both ways of opening one — from the response to a
-  request we sent, and from a request we are answering. The route set is
-  reversed for the caller and kept in order for the callee, because the two
-  ends face opposite ways down the same path, and it is built from the bytes as
-  they arrived so that every URI parameter survives. Requests come out through
-  §12.2.1.1, including the strict-router rewrite for proxies that predate loose
-  routing: the request is addressed to the first hop and the real target is
-  pushed to the end of the `Route`, where a loose router lifts it back. ACK and
-  CANCEL are refused there — their number belongs to the request they answer.
-  The remote target moves only for a re-INVITE or an UPDATE (RFC 3311 §5.1),
-  never for an ACK; a request whose `CSeq` runs backwards is answered 500 and
-  changes nothing.
-- Digest authentication (RFC 3261 §22, RFC 8760): MD5, MD5-sess, SHA-256,
-  SHA-256-sess, SHA-512-256 and SHA-512-256-sess, with `qop=auth` and the
-  counter that makes a captured response useless a second time. The three hash
-  functions are written out here, because the crate has no dependencies, and
-  each is checked against published digests — including the SHA-256 of the
-  empty string that RFC 8760 §2.6 prints — before anything is built on it.
-  `AuthCache` keeps a challenge per protection domain so a later request can
-  carry credentials without a round trip, answers the topmost challenge it
-  understands per realm, keeps the 401 and 407 spaces apart, and refuses to
-  answer the same nonce twice after a refusal: §22.1 forbids re-attempting
-  credentials that were just rejected, and repeating them only locks the
-  account. A `-sess` algorithm without `qop` is treated as unanswerable rather
-  than guessed at, which is what §22.4 rule 8 leaves. The password lives in a
-  `Secret` with no `Debug` and no way out of its module, overwritten on drop as
-  far as safe Rust can promise.
-- SDP (RFC 4566) and offer/answer (RFC 3264). A description that is read and
-  written back comes out as it went in, down to the lines the stack has no use
-  for — an SDP body travels through a call inside messages that get forwarded,
-  so quietly dropping what is not understood breaks the next extension somebody
-  adds. Ordering is enforced the way §5 fixes it, and a type letter that is not
-  one of the fourteen refuses the whole description rather than the line, which
-  is what §5 asks for. `answer()` builds the answer from the offer: the same
-  number of streams in the same order, the same `t=` line, the payload mappings
-  the offer defined, and a direction narrowed to what the offer allows — an
-  offer of `sendonly` can only be answered `recvonly` or `inactive`. Which
-  codecs to keep and which streams to take arrive as arguments; there is no
-  policy here. The RFC 3264 §10.1 exchange is a test, byte for byte, and a
-  fourth fuzz target asserts that writing a description out and reading it back
-  yields the same description.
-- Forking and the ACK for a 2xx (RFC 3261 §13.2.2). One INVITE can produce
-  several dialogs — a proxy rings the desk phone, the mobile and the voicemail,
-  and each branch that answers is told apart by its `To` tag. `DialogSet` keeps
-  them all and chooses between none of them: which fork to keep is policy, and
-  policy does not live in the core. A non-2xx final ends every dialog still
-  early and leaves an already confirmed one alone; a 2xx arriving after that is
-  still taken, because dropping it would leave a call standing at the far end
-  with nobody able to hang it up. The 2xx confirming an early dialog recomputes
-  its route set, which RFC 2543 compatibility requires and which nothing else
-  in a dialog's life does. The ACK for a 2xx belongs to the dialog rather than
-  the transaction: the caller builds it once, since only the caller knows
-  whether there is an answer to put in it, and every retransmitted 2xx after
-  that is answered from the stored bytes.
-- `sipral-core::endpoint`: what a transport is to a stack that never opens one.
-  `TransportProtocol` derives from the protocol alone everything the RFCs make
-  conditional on the transport — reliability, which is what RFC 3261 §17 sets
-  timers D, I, J and K to zero on; framing, which is why TCP and TLS need
-  `Content-Length` and WebSocket does not, since RFC 7118 §4.2 puts one SIP
-  message in each WebSocket message; and the default ports of §18.1.1.
-  `Input` and `Transmit` are the two directions of the whole surface, with the
-  payload refcounted because a retransmission has to be the identical datagram.
-  `DatagramLimit` is §18.1.1's size rule as two numbers, both settable because
-  the RFC's 1300 assumes a 1500-byte Ethernet MTU that plenty of access
-  networks do not have.
-- `sipral-core::endpoint::Endpoint`: the five calls the whole stack is driven
-  through, and the first place the layers are bound together. Bytes and time
-  in, bytes and events out; nothing opens a socket, reads a clock or draws a
-  random number. The branch, the sent-by, the tags, the `Call-ID` and the
-  sequence numbers are the endpoint's, derived from thirty-two bytes of
-  caller-supplied entropy, because a caller that writes its own branch writes
-  one that repeats. Registrations, calls, forking, CANCEL racing a 200, the
-  ACK for a 2xx and its retransmissions, incoming calls and the dialogs they
-  open, BYE in both directions, the §18.1.1 switch to a stream transport, the
-  §18.2.2 and RFC 3581 rules for where a response goes, the §18.1.2 check that
-  discards a response addressed to somebody else, and RFC 5626 keep-alives on
-  a jittered interval. Two things happen without asking, because the RFC
-  leaves no choice: a CANCEL that matches gets its 200 and its INVITE gets a
-  487 (§9.2), and an in-dialog request whose `CSeq` runs backwards gets a 500
-  (§12.2.2). Everything else is reported and left to the layer above.
-  36 tests, each a scripted exchange on a fake clock.
-- Reliable provisional responses (RFC 3262), both ways round. A 180 is a
-  datagram like any other and can be lost, which matters because an offer or an
-  answer can travel in a 1xx and offer/answer has no recovery from a lost
-  message — and because a carrier that puts `100rel` in `Require` will not
-  complete a call without one. The end that sends one numbers it, retransmits
-  it doubling from T1 with no cap, and refuses to send a second until the first
-  is acknowledged; 64·T1 without a PRACK refuses the call with a 500, which is
-  what §3 asks for. The end that receives one keeps the highest number it has
-  seen in order and silently drops a retransmission or a gap, so a PRACK is
-  never sent twice for one response. A PRACK that matches nothing is answered
-  481 without being handed up, and one that matches stops the retransmissions
-  before the caller sees it. `Supported: 100rel` goes on every outgoing INVITE,
-  merged with whatever the caller listed rather than written as a second line
-  of the same field. The received numbering is kept per dialog rather than per
-  request, because a forked INVITE is answered by several user agents that each
-  number from their own transaction; the reasoning is in `docs/03`.
-- Answering a challenge (RFC 3261 §22, RFC 8760). A registrar refuses the first
-  REGISTER it ever sees and a proxy refuses the first INVITE; that is the
-  handshake, not a failure. The endpoint reads the challenge, reports it, and
-  waits — the password is the one thing this layer must not hold, and answering
-  with the wrong one is how an account gets locked. `retry_with_credentials`
-  sends the original request again header for header, body included, with a new
-  branch, the next `CSeq` (§22.2, taken from the dialog when it had one so the
-  numbering does not collide), and the credentials. The nonce count moves by one
-  and never skips, since a skipped number reads to a server as a replay; the
-  same nonce coming back without `stale` is a refusal rather than a fresh
-  challenge, because §22.1 does not re-try credentials that were just rejected;
-  and a challenge nothing here understands is ignored rather than reported, per
-  RFC 8760 §2.4. A challenge outlives the transaction that earned it, and the
-  set of them is capped so a peer that refuses everything cannot grow it.
-- Where a dialog's requests go (RFC 3261 §8.1.2, §12.2.1.1, RFC 3263). A dialog
-  keeps the flow its first message travelled on — the address the INVITE went
-  to and the answer came back from — which §8.1.2 explicitly allows as "an
-  alternate address" and which is the only thing that survives the NAT nearly
-  every softphone sits behind. When the next hop the route set or the target
-  names is not that address, the endpoint says so rather than resolving it:
-  `Event::ResolveNeeded` carries the host, the port if the URI gave one, and
-  the transport if the URI or the scheme named one, and `resolved` retargets
-  the dialog. Ignoring it is a legitimate choice and the common one. There is
-  no `ResolveId`: the only thing the core ever needs resolved is a dialog's next
-  hop, so the dialog is both the question and the handle.
-- `Uri`, a URI that outlives the buffer it arrived in: the text held once in an
-  `Arc<str>` with the parts as offsets into it, so borrowing the parsed form
-  back is free and a clone shares the bytes. It carries RFC 3261 §19.1.4
-  comparison as `equivalent()` rather than `PartialEq`, because §19.1.4
-  equivalence is not transitive and the RFC says so itself. `Tag` and `CallId`
-  compare the way the RFC compares them, which is not the same way: byte for
-  byte for a `Call-ID` (§20.8), without case for a tag, which is a token
-  (§7.3.1).
-- `TimerConfig` and the timer schedule: T1, T2 and T4 from RFC 3261 Table 4,
-  with every other timer derived from them, and a schedule that answers "when
-  do I have to come back" through a shared reference. Nothing reads a clock —
-  the caller says what time it is — so a timer diagram from §17 is an ordinary
-  test that runs in microseconds. The absorbing timers are zero on a reliable
-  transport, because nothing retransmits there.
-- Fuzzing under `fuzz/`: three libFuzzer targets over the parser and every
-  typed accessor, the stream framer fed at arbitrary read sizes, and the
-  builder fed arbitrary bytes as header values to prove a caller's data cannot
-  become structure. Outside the workspace with its own lockfile and nightly
-  pin, and covered by `cargo deny` too.
-- The RFC 4475 corpus is now a test, and it passes: all 49 messages behave as
-  `fixtures/rfc4475/manifest.toml` says, and every valid one round trips byte
-  for byte. Three messages moved from `semantic` to `reject` — `insuf`,
-  `multi01` and `mcl01` sit in the application group but their RFC sections ask
-  for a 400 outright — so the split is 13 parse, 22 reject, 14 semantic.
-- `StatusCode::reason`: the reason phrases RFC 3261 §21 registers, plus 422
-  from RFC 4028, so nobody has to invent one.
-- `RawMessage::transaction_lookup_method`: the key §17 matches on. An ACK
-  answers INVITE, since the INVITE server transaction absorbs the ACK to a
-  non-2xx and an ACK to a 2xx finds nothing under that key and belongs to the
-  dialog; a response answers with its `CSeq` method, having none of its own.
-- `crates/sipral`: the facade crate, for now a name reserved for crates.io
-  that exports a version constant. The only crate with `publish = true`.
-- `bindings/dotnet/Sipral`: the .NET package, for now a name reservation
-  published to NuGet as `Sipral` 0.0.1.
-- `docs/12-core-api.md`: the public surface of `sipral-core` as signatures,
-  with register, call, CANCEL-race and fork walkthroughs, a fake-clock test,
-  the C projection, and a record of what was rejected and why. Adds the RFC
-  6026 `Accepted` state to both INVITE machines, which every draft of the
-  surface had missed on the client side.
-- RFC 4475 torture corpus under `fixtures/rfc4475/`: the 49 messages decoded
-  byte for byte from the archive in Appendix A, laid out by RFC section, with
-  a manifest carrying section, title, expected outcome and SHA-256 per file.
-  `scripts/check.sh` verifies the hashes so line-ending normalisation cannot
-  silently alter a test.
-- `SECURITY.md`, pointing at GitHub private vulnerability reporting, and an
-  issue template for commercial licence enquiries. No email address appears
-  anywhere in the repository, by design: `scripts/check.sh` fails on one, in a
-  file or in commit metadata.
+- **`Uri::equivalent` no longer matches a URI whose `maddr` is spelled with an
+  escape.** Parameter and URI header names were compared as written, so
+  `;%6Daddr=198.51.100.66` was an unknown parameter and ignored, and the URI
+  compared equal to the same address without it (RFC 3261 §19.1.4 makes
+  `%6D` the letter `m`).
+
+- **`Uri::equivalent` no longer reads a lone `%` as the start of the escape
+  after it.** `sip:a%%33B@example.com` decoded `%33` to `3`, the lone `%`
+  joined it, and the user compared equal to `sip:a%3B@example.com`, whose
+  user holds a semicolon. A `%` that starts no escape is now the octet `%25`.
+
+- **`Uri::equivalent` compares URI header values with their case.**
+  `?to=sip:Bob%40example.com` matched `?to=sip:bob%40example.com` and
+  `?Call-ID=abc` matched `?Call-ID=ABC`, although RFC 3261 §20 compares both
+  with case; header names still ignore it.
+
+- **A fork opens no more dialogs than `max_dialogs` has room for.** Every
+  distinct `To` tag answering one INVITE of ours opened a dialog, with no
+  bound at all, and each one was looked up by a linear scan of the INVITE's
+  branches, so whoever could answer the INVITE decided how much the endpoint
+  held and how long each response took. The first dialog of an INVITE, and
+  the first 2xx to it, still always open, since a forking proxy can ring one
+  phone and have another answer; each further branch opens only while there
+  is room, and one
+  that finds none is reported without a dialog, or, as a 2xx, is not
+  acknowledged here.
+
+- **`max_dialogs` holds for calls that arrive faster than they are answered.**
+  The ceiling was measured against the dialogs that existed when an INVITE
+  arrived, and an incoming call's dialog is made later, by this end's own 180
+  or 2xx; every INVITE that came in ahead of the first answer was let in, and
+  answering them all took the store past the ceiling by up to
+  `max_server_transactions`. A call now counts from the moment it is let in.
+
+- **An incoming call that rang and was then refused no longer leaves its early
+  dialog behind.** The 487 to a CANCEL, a refusal the application sent, and
+  the 500 after an unacknowledged reliable 180 all left the dialog the 180 had
+  opened standing for the life of the process, so a peer repeating INVITE and
+  CANCEL filled `max_dialogs` and had every later call refused with a 503. The
+  refusal now ends it with `DialogTerminated { Refused }` (RFC 3261 §12.3),
+  including for an INVITE that carried a `To` tag naming no dialog. While a
+  reliable provisional response is still unacknowledged the dialog ends with
+  the INVITE transaction instead, so that a PRACK crossing the refusal is still
+  answered (RFC 3262 §3).
+
+- **An ACK no longer confirms a dialog that no 2xx has confirmed.** An ACK
+  naming the tag of a 180 moved the early dialog to confirmed and was reported
+  as `IncomingAck`, so anyone who saw the ringing could make a call nobody had
+  answered read as up; it is now dropped (RFC 3261 §13.3.1.4).
+
+- **`sdp::parse` had no bound on a session description's size, `m=` count or
+  attribute lists — the message parser has had one since it was written, this
+  did not.** A body arrives inside a message a proxy may have grown on the
+  way, and every line of it becomes an allocation; nothing stopped a hostile
+  peer from writing thousands of `m=` blocks, an attribute flood, or a single
+  line long enough to be the whole body by itself. `sdp::Limits` now bounds
+  body size, line length, `m=` blocks, attributes per section and in total,
+  and formats on one `m=` line, mirroring `msg::Limits`'s shape; exceeding one
+  is a typed `SdpError`, and every default is sized and documented against
+  what a real call plus ICE and SRTP actually carry. `EndpointConfig` gains
+  `sdp_limits`, and every place `sipral-ua` reads a session description off
+  the wire now parses against it instead of an implicit default.
+
+- **A replay recording no longer carries the means to decrypt what it
+  recorded.** SRTP master keys were drawn from the same seeded stream as the
+  branches, tags and `Call-ID`s — and that seed is written into every
+  recording, in clear, under a document promising the file held only what a
+  capture would have held. Anyone handed a recording taken to diagnose
+  something else could derive every key the stack had offered and every key it
+  ever would. The media engine now has a seed of its own, supplied by the
+  application, written nowhere. `MediaEngine::new` takes it as a fourth
+  argument; `sipral_stack_config_t` gains `media_seed` and `media_seed_len`,
+  and `sipral_stack_create` **refuses** the two seeds being equal, because
+  that call is the only place in the library that can see both. The ABI minor
+  moves 8 → 9, so a caller built against the older header is turned away at
+  create rather than running with one generator for both. A key is now one
+  block of `SHA-256(media seed || counter)` rather than two hex tokens, and
+  the block is wiped before it leaves the stack.
+
+- **A debug print of a live stack no longer carries the keys.** `{:?}` on a
+  user agent printed every `a=crypto` line of every call with its master key
+  on it, and every RFC 8599 push token every account held — the one that wakes
+  the device, which §4.1 keeps off every request but REGISTER for exactly that
+  reason. RFC 4568 §9.2 says the SDP "MUST be protected"; a log file is a worse
+  place for a key than an INVITE is, because it is kept. The engine redacted
+  its own copy, but that was a rule every other holder had to remember, and
+  they did not. The redaction now sits on the four types that carry the
+  material — `Attribute` (which keeps the tag and the suite and drops the key),
+  the deprecated `k=` line, `KeySalt`, and the push token — so every holder
+  above them may derive `Debug` freely and none of them can get it wrong.
+  `scripts/check.sh` refuses a build in which one of the four grows a derive
+  or loses its own implementation. The `k=` value is now `sdp::KeyLine` rather
+  than `String`.
+
+- **A mid-call downgrade is no longer answered by a layer that holds no
+  policy.** `SrtpPolicy::Required` promises that a plain re-offer inside a
+  live call is refused rather than accepted, and it was — as long as the
+  re-offer also changed a codec. A re-offer that kept every format the first
+  negotiation settled and moved only the transport profile, or only dropped
+  the `a=crypto` line, read as "the same media" to `sipral-ua`, which answered
+  it itself: 200 OK, from a layer that has never read a crypto line and knows
+  nothing about the account's policy. That is what a B2BUA which has lost its
+  own SRTP sends, and what an attacker in the signalling path would send. The
+  comparison now takes in the transport profile and whether a key is there at
+  all, so both go up to the facade and both are refused with 488 under
+  *required*. The `a=crypto` **value** is deliberately not compared: RFC 4568
+  §7.1.4 makes a re-offer an opportunity to re-key, and a re-key reaches the
+  media session by its own path.
+
+- **An SRTP receiver no longer forgets one source the moment another one
+  speaks.** `Unprotector` kept the rollover counter and the replay list of a
+  single SSRC, and an authenticated packet from any other SSRC under the same
+  master key replaced both. RFC 3711 §3.2.3 names a context by its SSRC and
+  RFC 4568 §6.4.2 lets every source a peer sends share one key, so nothing had
+  to be forged: once a peer had changed its SSRC, a recording of either source
+  was accepted again, and a single packet from a second source cost the running
+  one its rollover counter, so everything it sent after its first wrap was
+  refused as forged. SRTP and SRTCP now keep that state per source, for up to
+  eight sources held in place, and the one heard from least recently is the one
+  that gives way.
+
+- **A copy of a secured packet sent from another address no longer costs the
+  genuine packet its place.** `RtpSession::receive` ran SRTP before the address
+  latch, so a datagram the latch was about to refuse had already had its index
+  recorded in the replay list, and the genuine packet arriving from the peer
+  afterwards was dropped as a replay. Anyone who could see the stream and get a
+  datagram in ahead of it could silence a call packet by packet without holding
+  a key. A stream that has latched now refuses a foreign address before SRTP
+  looks at the datagram. `RtpSession::rtcp_receive` had the same order for
+  SRTCP, so a copied report, a goodbye included, cost the genuine one its
+  index in the same way; a secured stream now refuses a report from a host
+  its origin check would refuse before SRTCP looks at it.
+
+- **A re-offer that writes a lifetime or an identifier beside an unchanged key
+  no longer re-opens the replay window.** The facade decided whether a
+  direction had been re-keyed by comparing the whole `inline:` parameter,
+  lifetime and MKI included, so the same thirty octets with `|2^31` added read
+  as a new master key: the receive context was replaced, its fresh replay list
+  accepted packets the stream had already taken, and a peer whose rollover
+  counter had moved past zero was refused once the 250-packet grace ran out.
+  Only the key and salt are compared now, which are all RFC 3711 §4.3.1 derives
+  the session keys from.

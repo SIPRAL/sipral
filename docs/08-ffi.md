@@ -1930,11 +1930,13 @@ and again through this ABI (`crates/sipral-ffi/src/audio.rs`):
   for the system's route; `sipral_audio_selection` reads back both what was
   asked for and what the role is running on, which differ while a chosen
   device is unplugged: the selection is kept as a preference, the role runs
-  on the system's route meanwhile, and goes back when the device returns. On
-  macOS the microphone and the loudspeaker are the two halves of one unit, so
-  choosing the microphone or a ringer of its own is
-  `SIPRAL_STATUS_NOT_SUPPORTED` there and the ring goes through the
-  loudspeaker; Windows opens a stream per endpoint and takes all three.
+  on the system's route meanwhile, and goes back when the device returns.
+  macOS and Windows take all three: on macOS the microphone is named on the
+  voice-processing unit's input apart from the loudspeaker, without moving
+  the system's default input, and a ringer on another device plays through
+  a plain output unit of its own; Windows opens a stream per endpoint. On
+  iOS the route is the audio session's, so choosing the microphone or the
+  ringer is `SIPRAL_STATUS_NOT_SUPPORTED` there.
 - **A change the engine made and one the operating system made are told
   apart.** `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` (43) carries
   `payload.audio.origin`: `SIPRAL_AUDIO_ORIGIN_SYSTEM` for a device arriving
@@ -1990,12 +1992,13 @@ sending from each call's own socket; on Android, whose devices the library
 does not open, the Kotlin telecom helper's `SipralCallAudios` runs every
 call's `AudioRecord`/`AudioTrack` instead.
 
-## One declaration, and every printed file (the header, the four bindings and the JNI shim)
+## One declaration, and every printed file (the header, the five bindings and the JNI shim)
 
 B7's failure is a C seam declared in several places that have to agree: a
 function added to the Rust and forgotten in one binding produced a build that
 compiled and failed at run time, on one platform, in the field. The answer here
-is that the header and the four bindings are not declarations at all. They are
+is that the header and the five bindings — Swift, .NET, Kotlin, Python and
+Dart — are not declarations at all. They are
 printed, by `tools/abi-gen`, from what `crates/sipral-ffi` declares, and they
 are committed — a consumer of a released library must not have to run a
 generator — and `scripts/check.sh` prints them again and fails when what is
@@ -2060,10 +2063,10 @@ still have to reach C somehow, and the only way to do that is `entry!`, which
 
 **What the descriptor records is the spelling, not the layout.** `usize` becomes
 `size_t` by a rule in the generator, `*const c_char` becomes `const char *`, and
-a rule that is wrong is wrong in the header and all four bindings at once — the
+a rule that is wrong is wrong in the header and all five bindings at once — the
 gate would compare wrong output against wrong output and pass. That is the
 price of one source of truth, and it is the right price: a mistake that is
-everywhere is a mistake somebody finds, where a mistake in one binding of four
+everywhere is a mistake somebody finds, where a mistake in one binding of five
 is the failure B7 exists for.
 
 **The names are read back after they are derived.** Each back end makes names
@@ -2137,9 +2140,9 @@ throw from. See "Kotlin" below for what that costs.
 
 A function, a struct, a union, an enumeration, a constant or an alias added,
 removed or renamed on the Rust side and not reaching the header or any of the
-four bindings. A member appended to a struct, a value added to an enumeration,
+five bindings. A member appended to a struct, a value added to an enumeration,
 a parameter added to a function, a type changed. The number an event kind
-spends, which travels into every printed file (the header, the four
+spends, which travels into every printed file (the header, the five
 bindings and the JNI shim). Every one of those is a difference
 between what is committed under `bindings/` and what the declarations produce,
 and the gate prints which file and says what to run.
@@ -2964,8 +2967,9 @@ anything is read.
 
 ## The freeze (ABI 0.33)
 
-Minor 33 is the last minor before 1.0, and the surface it prints is the one
-1.0 promises. From 1.0 on, for the life of major 1:
+Minor 33 froze the surface: what it prints is what 1.0 promises, and every
+minor after it — 34 is the first, below — only adds to it, under these rules.
+From 1.0 on, for the life of major 1:
 
 - **Names stand.** Every entry point, struct, member, parameter, enumeration,
   enumerator, constant and callback keeps the name it has at 0.33, and every
@@ -3166,3 +3170,34 @@ log at `SIPRAL_LOG_LEVEL_TRACE`, every message the endpoint frames off a
 TCP or TLS connection is traced whole, one line per message, with the far
 end the connection was bound to, or "on a connection" for one bound without
 it; the byte count of each read is no longer written.
+
+**In the layers.** Every idiomatic layer takes the 0.34 surface, and each
+binding's readme has its spelling:
+
+- **No address to name.** A stack given no bind address listens on every
+  interface and advertises `sipral_advertised_address` toward the server of
+  its first account; each later account, and each call's media socket, is
+  advertised at the route toward its own peer. A stack bound at loopback
+  toward a server elsewhere is refused `SIPRAL_STATUS_UNREACHABLE_ADDRESS`
+  rather than registering an address nobody can reach.
+- **A server by its name.** `serverUri` (with `serverNaptr`) in place of the
+  registrar's address; the layer answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED`
+  with a resolver the application may replace: Apple's DNS service, SRV and
+  NAPTR included, in Swift; JNDI's DNS on a JVM and addresses only on
+  Android in Kotlin; a UDP SRV and NAPTR query of its own in .NET; addresses
+  only in Python and Dart. `LOCATED` re-points the account at the address in
+  use.
+- **A pinned certificate.** The layers that run TLS (Swift, Kotlin, .NET,
+  Python) take a trust that pins one certificate by its SHA-256 and compare
+  it themselves, in constant time, inside the platform's own check, because
+  the signalling connection is made before any account exists; an account's
+  `tlsPin` with `checkCertificate` is the ABI's verdict for an application
+  that runs the account's TLS itself (`docs/22-tls.md`).
+- **The rest as they cross.** `keepaliveMs`; SRTP best effort and the
+  stack's suite list; the path MTU and UDP past the limit, with the
+  diagnostic record as JSON; the pseudonym salt and the diagnostic trace, at
+  creation and while the stack runs; and the new statuses, registration
+  failure and events decoded. The React Native client takes them in
+  `Sipral.open` and `addAccount`. What a layer leaves out is in its readme:
+  Dart opens no TLS and no stream, and React Native exposes the stack's pin
+  but not an account's, and no settings readback.

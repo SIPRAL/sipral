@@ -103,8 +103,9 @@ and every one of them is something a client is entitled to assume:
 
 - **B7** — one source of truth for the ABI, with the bindings generated from
   it and `scripts/check.sh` failing when one is missing. It was cheapest before
-  three bindings existed; there are now four (Swift, .NET, Kotlin, Python), all
-  printed from the one source, and the C ABI has roughly doubled since this
+  three bindings existed; there are now five (Swift, .NET, Kotlin, Python,
+  Dart), all printed from the one source, with a React Native package over
+  the Swift and Kotlin layers, and the C ABI has more than doubled since this
   line was written.
 - **D1** — the call's diagnostic record. *Built.* The argument for doing it
   early held: every decision site written before it exists is a site to
@@ -249,11 +250,15 @@ roadmap whose finished items still read as future work is a roadmap nobody
 trusts.
 
 - **A2, A3** — device enumeration with an identity that survives replug, gain,
-  mute and a peak level cheap enough for a meter, *built inside the three
-  device crates*; not yet reachable through `sipral` or `sipral.h`, which is
-  what docs/13 counts. Selection per call is the part that is not, and it is
-  D6's rather than the device layer's; the codec and transport halves of D6
-  are across the ABI, the device half is not.
+  mute and a peak level cheap enough for a meter. *Built*, and reached through
+  `sipral.h`: `sipral-audio` is the built-in engine over CoreAudio, WASAPI and
+  AAudio, and a stack created in device mode (`sipral_stack_config_t::audio`)
+  opens, pumps and mixes the platform's devices itself, with the microphone,
+  the speaker and the ringer chosen per stack (`08-ffi.md`, "The built-in
+  audio engine"). Selection per call is the part that is not, and it is D6's
+  rather than the device layer's; the codec and transport halves of D6 are
+  across the ABI, the device half is not. Linux has no backend in the engine;
+  `sipral-io-pipewire` is there for an application to wire itself.
 - **A5** — call recording: the mixed conversation to one file, started and
   stopped mid-call. *Built.*
 - **A4** — codec enumeration and priority, and what a live call settled on.
@@ -294,15 +299,18 @@ trusts.
   writes for the status it is about to return. The gate now compiles the
   Swift, Kotlin and .NET bindings too (`scripts/check.sh`, step "the bindings
   compile"); it skips a binding whose toolchain is missing from the machine,
-  and a skip does not count as a pass.
+  and a skip does not count as a pass. *Built as platforms* since: every
+  printed binding, the Dart one included, and the React Native package are
+  compiled and their tests run against the library on every gate run.
 - **D6** — device, codec and transport as properties of a call rather than of
   the process. *Built* in Rust, and the codec and transport halves are across
   the ABI: `sipral_call_config_t` carries `codecs` and `transport` beside
-  `media_address` and `srtp`. The device half waits on A2 crossing at all.
+  `media_address` and `srtp`. The device half is A2's per-call selection,
+  which is not built.
 
 **What is built in Rust and cannot be reached through `sipral.h`** — the list
-phase 3 closes before the ABI freezes, because each of these is a shape and a
-shape is permanent once published:
+phase 3 closed before the ABI froze at minor 33, because each of these is a
+shape and a shape is permanent once published:
 
 - one monotonic clock per stack is advanced by every signalling entry point,
   with no room for two threads reading it a moment apart, and it moves even
@@ -373,7 +381,9 @@ property through before it reaches C.
   idiomatic C# namespace (safe handles, events, tasks, PCM as spans) and an
   idiomatic Kotlin layer (coroutines, `ConnectionService`), each with a sample
   application skeleton that makes a call. *Built*: Swift, C#, Kotlin and
-  Python, each with a sample (`bindings/README.md`);
+  Python, each with a sample (`bindings/README.md`), then Dart for Flutter,
+  a React Native package over the Swift and Kotlin layers, and a JVM jar
+  with a Java face over the Kotlin one;
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
   AAR with the shared object for each Android ABI, a NuGet with native runtimes
   (`win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` --
@@ -404,10 +414,16 @@ property through before it reaches C.
   real graph and through a lab call by `scripts/lab.sh pipewire`;
 - the platform echo canceller reached on Windows and Linux through the
   processor seam, with a reference module attachable as an optional crate.
+  *Built*: Windows' own capture processing on every stream `sipral-io-wasapi`
+  declares a communications stream, PipeWire's echo-cancel module where the
+  session loads it, and `sipral-aec-webrtc` attached at the seam anywhere
+  else (`05-media.md`, "Where the canceller itself comes from").
 
 **Exit:** a desktop softphone ships on Sipral with no other SIP stack linked
 into its binary; the lab's flows have run through `sipral.h`; and the ABI is
-frozen only after every item above exists in C.
+frozen only after every item above exists in C. The last two hold: the C
+driver runs every lab flow, and minor 33 froze the surface once the list
+above was across (`08-ffi.md`, "The freeze"). The first is the one left.
 
 ## Phase 4 — mobile
 
@@ -475,8 +491,9 @@ after it. What is left is platform work, and platform work needs the platform.
   restart from either end, in either role, keeps the audio on the old pair
   until the new one is chosen; the relay reaches its server over UDP, TCP or
   TLS, the last two proven from behind a NAT that drops every datagram to the
-  server. What is left is a C ABI entry point for a restart this end starts,
-  which only the Rust API has. Off by default for a desktop
+  server. A restart this end starts is `sipral_call_restart_ice` in C and
+  `restartIce()` or its equivalent in the Swift, Kotlin, .NET and Python
+  layers. Off by default for a desktop
   softphone, where it only adds setup time; on for a phone on a carrier-grade
   NAT, and lite on a public server.
 
@@ -501,8 +518,9 @@ in-process session. *Built* (`docs/07-headless.md#real-media`).
 - **Python**, because that is what voice agents are written in: a package over
   the C ABI (a fifth generated back end, not a second binding of the Rust API),
   with an idiomatic asynchronous layer, PCM as bytes, and a one-file agent
-  as the example. *Built* (`bindings/python`); `pip install` from a registry
-  waits for the freeze;
+  as the example. *Built* (`bindings/python`), with wheels for the host,
+  manylinux x86-64 and aarch64 (`scripts/package/wheels.sh`); `pip install`
+  from a registry waits for 1.0;
 - **a call in sixty seconds with no account**: `cargo run --example call`
   dials a public test IVR, plays the menu through the device crate or into a
   file, presses a digit and hears it read back; the other examples register,
@@ -567,4 +585,7 @@ feasibility.
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping
   the repository public does not wait for the freeze; publishing packages does.
+  All three held at minor 33, whose surface is the one 1.0 promises; minor 34
+  grew it only by appending, as the freeze allows, and packages are published
+  from 1.0.
 - Video waits for 1.0 by decision, not by omission, and is phase 6 after it.

@@ -178,6 +178,28 @@ can send from the far end's own address can still win the latch. Closing both
 is what the candidate exchange is for (`docs/20-security-model.md`), and now
 there is one.
 
+## The address this end advertises
+
+Before any NAT, the address in a `Contact`, a `Via` and an SDP `c=` line has
+to be one the peer can reach from where it is. Two mistakes are common enough
+to be refused rather than documented. **A loopback address is never
+advertised to a peer on another machine**, and the unspecified address never
+in a `Contact`: the request that would carry one is not sent, and the caller
+hears why — `UaError::UnreachableAddress` in Rust,
+`SIPRAL_STATUS_UNREACHABLE_ADDRESS` over the C ABI, and
+`RegistrationFailure::UnreachableContact` for a REGISTER the stack sends on
+its own. **A socket bound on every interface advertises the route's
+address** toward the peer, the one the operating system would send from:
+`sipral::advertised_address(bound, peer)`, `sipral_advertised_address` in C,
+which asks the system for the route and sends nothing. The idiomatic layers build on it: a
+stack given no bind address listens on every interface and advertises the
+route toward its first account's server, each later account the route
+toward its own, and each call's media socket the route toward its far end,
+so an application that names nothing is reached from a PBX on the network
+and from a peer on loopback alike (`docs/08-ffi.md`, "What ABI 0.34 added").
+What the route gives is still the local address; behind a NAT, STUN below
+is what finds the public one.
+
 ## STUN
 
 RFC 8489, and RFC 5389 compatibility for servers that have not moved.

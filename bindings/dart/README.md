@@ -17,7 +17,7 @@ program or a Flutter application.
   in the library `Sipral.open()` opened and checked. Names are Dart's, and a
   reserved word has a `$` after it (`SipralToggle.default$`).
   `package:sipral/sipral_abi.dart` exports it.
-- `lib/src/{idiomatic,stack,account,call,media,events}.dart` are written by
+- `lib/src/{idiomatic,stack,account,call,media,events,locate}.dart` are written by
   hand against it, and are what `package:sipral/sipral.dart` exports:
   `SipralStack`, `SipralAccount`, `SipralCall`, `SipralMedia` and the
   stack's events as a `Stream<SipralStackEvent>`. `SipralStackEvent` copies

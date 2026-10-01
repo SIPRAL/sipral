@@ -9,7 +9,7 @@ Two layers, the way every binding here is two layers:
 
 - `sipral/_sipral_cffi.py` — printed by `tools/abi-gen`'s Python back end
   from `sipral_ffi::abi::SURFACE`, the same declarations the header and the
-  Swift, .NET and Kotlin bindings are printed from. `ffi` and `lib`: a
+  Swift, .NET, Kotlin and Dart bindings are printed from. `ffi` and `lib`: a
   `cffi` ABI-mode `cdef` naming the same types, constants and entry points
   `bindings/c/include/sipral.h` does, and the `dlopen` that turns it into
   `lib`. ABI mode needs no C compiler at install time — cffi lays every
@@ -17,9 +17,9 @@ Two layers, the way every binding here is two layers:
   exact; `tests/test_abi.py` checks it against the layout table the same
   file carries, against the library's own `sipral_abi_struct_size` and
   against the header's own numbers.
-- `sipral/stack.py`, `sipral/account.py`, `sipral/call.py`,
-  `sipral/media.py`, `sipral/audio.py`, `sipral/events.py`,
-  `sipral/enums.py`, `sipral/errors.py` — written by hand against `ffi`/`lib` directly, the way `SipralAbi.swift`
+- every other file in `sipral/` — `stack.py`, `account.py`, `call.py`,
+  `media.py`, `audio.py`, `events.py`, `conference.py`, `locate.py`,
+  `signalling.py` and the rest — written by hand against `ffi`/`lib` directly, the way `SipralAbi.swift`
   is the base the Swift package is written against. `Stack`, `Account` and
   `Call` are what an application reaches for.
 
