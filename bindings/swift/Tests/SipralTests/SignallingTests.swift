@@ -220,16 +220,35 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(failed.detail?.contains("pinned") == true, failed.detail ?? "")
     }
 
-    func testEveryFormAnAdministratorCopiesIsRead() throws {
-        let digest = Array(SHA256.hash(data: Data("a certificate".utf8)))
-        let plain = digest.map { String(format: "%02x", $0) }.joined()
-        let colons = digest.map { String(format: "%02X", $0) }.joined(separator: ":")
-        for text in [plain, plain.uppercased(), colons, "sha-256 \(colons)", "SHA256=\(colons)", "  \(plain)  "] {
-            XCTAssertEqual(try TLSTrust.pinDigest(text), digest, text)
+    /// Every line of `bindings/fixtures/pin-forms.txt`, the list each
+    /// layer's parser is held to.
+    func testEveryFormAnAdministratorCopiesIsRead(here: String = #filePath) throws {
+        let list = URL(fileURLWithPath: here).deletingLastPathComponent()
+            .appendingPathComponent("../../../fixtures/pin-forms.txt")
+        let lines = try String(contentsOf: list, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
+        var digest: [UInt8] = []
+        var checked = 0
+        for line in lines where !line.hasPrefix("#") && !line.isEmpty {
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            let verdict = String(parts[0])
+            let text = parts.count > 1 ? String(parts[1]) : ""
+            switch verdict {
+            case "digest":
+                digest = stride(from: 0, to: text.count, by: 2).compactMap {
+                    UInt8(String(Array(text)[$0...$0 + 1]), radix: 16)
+                }
+            case "accept":
+                XCTAssertEqual(try TLSTrust.pinDigest(text), digest, text)
+                checked += 1
+            default:
+                XCTAssertThrowsError(try TLSTrust.pinDigest(text), text) { error in
+                    XCTAssertEqual((error as? SipralError)?.status, .invalidArgument, text)
+                }
+                checked += 1
+            }
         }
-        for text in [String(plain.dropLast(2)), "sha-1 \(colons)", String(colons.prefix(2)) + String(colons.dropFirst(3)), plain + "00"] {
-            XCTAssertThrowsError(try TLSTrust.pinDigest(text), text)
-        }
+        XCTAssertEqual(digest.count, 32)
+        XCTAssertGreaterThan(checked, 20)
     }
 
     func testACertificateNoTrustedAuthoritySignedIsUntrusted() async throws {
