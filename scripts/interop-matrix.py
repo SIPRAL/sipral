@@ -138,8 +138,9 @@ AGENT_SECTIONS = {
 }
 # Steps where lab.sh prints one `ok`/`FAIL` line per example agent or case,
 # each opening with its name -- SIP over TCP and TLS through the four
-# idiomatic layers, and the three ends of a challenged INVITE too large for a
-# datagram -- mapped to the peer and to the
+# idiomatic layers and a pinned certificate, the four ends of a challenged
+# INVITE too large for a datagram, best-effort SRTP and a server found by
+# name -- mapped to the peer and to the
 # prefixes those lines open with. Each prefix is a flow label of this file's
 # own, and each line that opens with it is a row. A FAIL line that opens with
 # none of them (the certificates could not be made, Asterisk would not
@@ -153,6 +154,8 @@ LAYER_SECTIONS = {
             "Agent.kt over TLS",
             "Sipral.Sample.Agent over TLS",
             "SipralLabAgent over TCP",
+            "a certificate pinned by its SHA-256 fingerprint, over TLS",
+            "another certificate's fingerprint pinned, refused",
         ),
     ),
     "a challenged INVITE past 1300 bytes -- over TCP where Asterisk listens, trimmed or ended where it does not": (
@@ -161,6 +164,21 @@ LAYER_SECTIONS = {
             "a challenged INVITE past 1300 bytes, taken over TCP",
             "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP",
             "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named",
+            "a challenged INVITE past 1300 bytes, sent over UDP anyway",
+        ),
+    ),
+    "SRTP best effort through the Python layer -- straight at Asterisk, SRTP off and SDES on": (
+        "asterisk",
+        (
+            "best-effort SRTP to an endpoint with SRTP off",
+            "best-effort SRTP to an endpoint with SDES on",
+        ),
+    ),
+    "a server by name -- RFC 3263 from the Python layer, straight at Asterisk": (
+        "asterisk",
+        (
+            "a registrar named by its host name, located by its A record through the lab's DNS",
+            "a server named by a domain, located by an SRV record from the application's resolver",
         ),
     ),
 }

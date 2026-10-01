@@ -270,6 +270,30 @@ unit_tested = true
 flows = ["a challenged INVITE past 1300 bytes, taken over TCP", "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP", "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named"]
 
 [[feature]]
+name = "A request past the datagram limit sent over UDP anyway, when the deployment allows it"
+implemented = true
+unit_tested = true
+flows = ["a challenged INVITE past 1300 bytes, sent over UDP anyway"]
+
+[[feature]]
+name = "SRTP best effort (SDES offered on RTP/AVP)"
+implemented = true
+unit_tested = true
+flows = ["best-effort SRTP to an endpoint with SRTP off", "best-effort SRTP to an endpoint with SDES on"]
+
+[[feature]]
+name = "TLS trust pinned to one certificate's fingerprint"
+implemented = true
+unit_tested = true
+flows = ["a certificate pinned by its SHA-256 fingerprint, over TLS", "another certificate's fingerprint pinned, refused"]
+
+[[feature]]
+name = "A server named by a name, located by RFC 3263"
+implemented = true
+unit_tested = true
+flows = ["a registrar named by its host name, located by its A record through the lab's DNS", "a server named by a domain, located by an SRV record from the application's resolver"]
+
+[[feature]]
 name = "Local conference of N calls, each on its own codec"
 implemented = true
 unit_tested = true

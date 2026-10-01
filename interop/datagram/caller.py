@@ -18,16 +18,37 @@ back.
 
 Environment: ``SIPRAL_AOR``, ``SIPRAL_AUTH_USER``, ``SIPRAL_AUTH_PASSWORD``,
 ``SIPRAL_SERVER`` (``host:port``, where the INVITE goes), ``SIPRAL_TARGET``.
-``SIPRAL_SRTP=off`` places the call with no SDES at all (required by
-default); ``SIPRAL_STREAM_FALLBACK=0`` turns the layer's stream fallback off,
-and ``SIPRAL_STREAM_SERVER`` (``host:port``) names where it connects, for a
-server that takes TCP on another port than UDP.
+``SIPRAL_SRTP=off`` places the call with no SDES at all, and
+``SIPRAL_SRTP=best_effort`` offers SDES on plain ``RTP/AVP``, keyed when
+the answer takes a key and plain when it takes none (required by default);
+``SIPRAL_STREAM_FALLBACK=0`` turns the layer's stream fallback off, and
+``SIPRAL_STREAM_SERVER`` (``host:port``) names where it connects, for a
+server that takes TCP on another port than UDP. ``SIPRAL_UDP_ANYWAY_BYTES``
+sends a request up to that many bytes over UDP when no stream is coming
+(the stack's ``datagram_without_stream_bytes``).
+
+``SIPRAL_SERVER_URI`` names the server by a URI for RFC 3263 to locate
+instead (``SIPRAL_SERVER`` then only says which way this host's route
+goes), and the call is placed once it is located; ``SIPRAL_SRV`` is one SRV
+record, ``"<ttl> <priority> <weight> <port> <target>"``, a resolver of this
+script's own answers every SRV query with, the platform's lookup answering
+the rest. ``SIPRAL_REGISTER=1`` registers first, at ``SIPRAL_REGISTRAR``
+or else the URI the server was named by, places the call once registered,
+and takes the binding back at the end; ``SIPRAL_KEEPALIVE_MS`` is the account's own keep-alive
+interval. ``SIPRAL_SIGNALLING=tls`` signals over TLS to ``SIPRAL_SERVER``,
+trusting the one certificate whose SHA-256 fingerprint is
+``SIPRAL_TLS_PIN``.
 
 Lines, one each, flushed as they happen, for the step to read:
 
+    located <targets>
+    locate failed <failure>
+    registration <state>
     wanted <protocol> <destination> <request bytes> <limit bytes>
     transport failed <transport> <error>
+    tls refused <failure>
     confirmed
+    protection <key exchange> <encrypted|plain> <suite>
     media sent <packets> received <packets>
     held
     resumed
@@ -44,8 +65,25 @@ import socket
 
 from sipral import Call, Stack
 from sipral._sipral_cffi import lib
-from sipral.enums import AudioMode, CallEndReason, EventKind
+from sipral.enums import (
+    AudioMode,
+    CallEndReason,
+    EventKind,
+    LocateFailure,
+    RegistrationState,
+    SrtpSuite,
+    TlsFailure,
+    Transport,
+)
 from sipral.errors import SipralError
+from sipral.locate import lookup
+from sipral.signalling import TlsTrust
+
+SRTP_POLICIES = {
+    "off": lib.SIPRAL_SRTP_NOT_OFFERED,
+    "best_effort": lib.SIPRAL_SRTP_BEST_EFFORT,
+    "required": lib.SIPRAL_SRTP_REQUIRED,
+}
 
 
 def route_to(address: str) -> str:
@@ -92,38 +130,101 @@ def say_media(call: Call) -> None:
     print(f"media sent {stats['packets_sent']} received {stats['packets_received']}", flush=True)
 
 
+def say_protection(call: Call) -> None:
+    """How the call's audio is protected, now: the key exchange, whether it
+    is encrypted, and the suite that runs."""
+    if call.media is None:
+        return
+    try:
+        report = call.media.encryption()
+    except SipralError:
+        return
+    for stream in report:
+        suite = SrtpSuite(stream.suite).name if stream.suite else "-"
+        state = "encrypted" if stream.encrypted else "plain"
+        print(f"protection {stream.key_exchange.name} {state} {suite}", flush=True)
+
+
+def resolver_answering_srv(record: str):
+    """A resolver that answers every SRV query with ``record`` and leaves
+    every other query to the platform's lookup: an application's own, the
+    way one that reads SRV is given to the stack."""
+
+    def resolve(name: str, kind: int) -> tuple[int, list[str]]:
+        if kind == lib.SIPRAL_DNS_RECORD_TYPE_SRV:
+            return lib.SIPRAL_DNS_ANSWER_RECORDS, [record]
+        return lookup(name, kind)
+
+    return resolve
+
+
 async def main() -> None:
     server = os.environ["SIPRAL_SERVER"]
+    server_uri = os.environ.get("SIPRAL_SERVER_URI") or None
+    srv = os.environ.get("SIPRAL_SRV") or None
     suites = [suite for suite in os.environ.get("SIPRAL_SUITES", "").split(",") if suite]
     dwell = int(os.environ.get("SIPRAL_DWELL_MS", "2000")) / 1000
     hold_after = int(os.environ.get("SIPRAL_HOLD_AFTER_MS", "0")) / 1000 or dwell
     patience = int(os.environ.get("SIPRAL_PATIENCE_MS", "20000")) / 1000
+    tls = os.environ.get("SIPRAL_SIGNALLING") == "tls"
+    pin = os.environ.get("SIPRAL_TLS_PIN")
     stack = Stack(
         loop=asyncio.get_running_loop(),
         bind_host=route_to(server),
         audio=AudioMode.APPLICATION,
         stream_fallback=os.environ.get("SIPRAL_STREAM_FALLBACK", "1") != "0",
         stream_server=os.environ.get("SIPRAL_STREAM_SERVER") or None,
+        datagram_without_stream_bytes=int(os.environ.get("SIPRAL_UDP_ANYWAY_BYTES", "0")),
+        signalling=Transport.TLS if tls else 0,
+        signalling_server=server if tls else None,
+        tls_trust=TlsTrust.pinned(pin) if tls and pin else None,
+        resolver=resolver_answering_srv(srv) if srv else None,
     )
-    plain = os.environ.get("SIPRAL_SRTP") == "off"
+    policy = os.environ.get("SIPRAL_SRTP", "required")
+    plain = policy == "off"
+    register = os.environ.get("SIPRAL_REGISTER") == "1"
     talking = None
+    account = None
     try:
         account = stack.add_account(
             os.environ["SIPRAL_AOR"],
-            registrar_address=server,
+            registrar_address=None if server_uri else server,
+            server_uri=server_uri,
+            registrar=(os.environ.get("SIPRAL_REGISTRAR") or server_uri) if register else None,
+            keepalive_ms=int(os.environ.get("SIPRAL_KEEPALIVE_MS", "0")),
             display_name=os.environ.get("SIPRAL_DISPLAY_NAME") or None,
             auth_user=os.environ["SIPRAL_AUTH_USER"],
             auth_password=os.environ["SIPRAL_AUTH_PASSWORD"],
-            srtp=lib.SIPRAL_SRTP_NOT_OFFERED if plain else lib.SIPRAL_SRTP_REQUIRED,
+            srtp=SRTP_POLICIES[policy],
             srtp_suites=None if plain else suites or None,
         )
-        call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
-        talking = asyncio.create_task(talk(call))
+        if register:
+            account.register()
+        call = None
+        if not register and not server_uri:
+            call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+            talking = asyncio.create_task(talk(call))
         async with asyncio.timeout(patience + hold_after + dwell):
             while True:
                 event = await stack.events.get()
                 fields = event.fields
-                if event.kind == EventKind.TRANSPORT_WANTED:
+                if event.kind == EventKind.LOCATED:
+                    print(f"located {fields['targets']}", flush=True)
+                    if call is None and not register:
+                        call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+                        talking = asyncio.create_task(talk(call))
+                elif event.kind == EventKind.LOCATE_FAILED:
+                    print(f"locate failed {LocateFailure(fields['failure']).name}", flush=True)
+                    return
+                elif event.kind == EventKind.REGISTRATION_CHANGED:
+                    state = RegistrationState(fields["state"])
+                    print(f"registration {state.name}", flush=True)
+                    if call is None and state == RegistrationState.REGISTERED:
+                        call = stack.place_call(account, os.environ["SIPRAL_TARGET"])
+                        talking = asyncio.create_task(talk(call))
+                    elif call is None and state == RegistrationState.FAILED:
+                        return
+                elif event.kind == EventKind.TRANSPORT_WANTED:
                     print(
                         f"wanted {fields['protocol']} {fields['destination']} "
                         f"{fields['request_bytes']} {fields['limit_bytes']}",
@@ -131,9 +232,14 @@ async def main() -> None:
                     )
                 elif event.kind == EventKind.TRANSPORT_FAILED:
                     print(f"transport failed {fields['transport']} {fields['error']}", flush=True)
+                    if fields.get("tls"):
+                        print(f"tls refused {TlsFailure(fields['tls']).name}", flush=True)
+                elif call is None:
+                    continue
                 elif event.kind == EventKind.CALL_CONFIRMED and event.call == call.handle:
                     print("confirmed", flush=True)
                     await asyncio.sleep(hold_after)
+                    say_protection(call)
                     say_media(call)
                     call.hold()
                 elif event.kind == EventKind.SESSION_CHANGED and event.call == call.handle:
@@ -159,7 +265,30 @@ async def main() -> None:
     finally:
         if talking is not None:
             talking.cancel()
+        if account is not None and register:
+            await unregister(stack, account)
         await asyncio.to_thread(stack.close)
+
+
+async def unregister(stack: Stack, account) -> None:
+    """Take the binding back, and wait a few seconds for the registrar to
+    say so, so that nothing is left registered behind the run."""
+    try:
+        account.unregister()
+    except SipralError:
+        return
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                event = await stack.events.get()
+                if event.kind != EventKind.REGISTRATION_CHANGED:
+                    continue
+                state = RegistrationState(event.fields["state"])
+                print(f"registration {state.name}", flush=True)
+                if state in (RegistrationState.UNREGISTERED, RegistrationState.FAILED):
+                    return
+    except TimeoutError:
+        print("no answer to the unregister", flush=True)
 
 
 if __name__ == "__main__":

@@ -65,7 +65,11 @@
 #                               expired, and saying which; then registered
 #                               and called; the Swift agent over TCP, since
 #                               the lab runs it on Linux, where Swift has no
-#                               TLS (interop/tls/pjsip_local.conf)
+#                               TLS (interop/tls/pjsip_local.conf); then the
+#                               Python layer pinned to the certificate 5061
+#                               presents, by its SHA-256 fingerprint alone,
+#                               calling the echo, and pinned to another
+#                               one's, refused as untrusted
 #   scripts/lab.sh robust       only the field failures that need a network
 #                               to show (docs/11-testing.md's table): a
 #                               link that drops IP fragments, with INVITEs
@@ -87,8 +91,23 @@
 #                               one with UDP alone, the INVITE goes again with
 #                               one suite and fits; and made too large even
 #                               for that, the call ends at once with a 513
-#                               that names the limit (part of a run that names
+#                               that names the limit -- unless the stack was
+#                               told a request up to 1600 bytes may go over
+#                               UDP anyway, when it goes as one datagram and
+#                               the call connects (part of a run that names
 #                               nothing too)
+#   scripts/lab.sh besteffort   only SRTP best effort through the Python
+#                               layer: SDES offered on RTP/AVP to Asterisk's
+#                               tone from an account with SRTP off, which
+#                               comes up plain, and from one with SDES on,
+#                               which comes up keyed (part of `security` and
+#                               of a run that names nothing too)
+#   scripts/lab.sh locate       only RFC 3263 through the Python layer: a
+#                               registrar named by its host name, found by
+#                               the A record the lab's DNS answers, then a
+#                               server named by a domain, found by the SRV
+#                               record a resolver of the application's own
+#                               gives (part of a run that names nothing too)
 #   scripts/lab.sh security     only the SRTP policy per account, through the
 #                               C ABI -- SDES required, DTLS-SRTP required
 #                               and off, set on the account and read back
@@ -100,7 +119,8 @@
 #                               (interop/stir/run.sh): a signed call verified
 #                               and carried, an unsigned one refused 428, one
 #                               signed by an authority nobody trusts refused
-#                               437 (part of a run that names nothing too)
+#                               437; then `besteffort` above (part of a run
+#                               that names nothing too)
 #   scripts/lab.sh nway         only the local conference: three of the
 #                               harness's own stacks registered at Kamailio,
 #                               each on a codec of its own, called by a
@@ -3321,6 +3341,60 @@ robust_stun_failover() {
     return "$status"
 }
 
+# One call from the Python layer's datagram caller
+# (interop/datagram/caller.py), the vehicle of the datagram step below and
+# of the best-effort SRTP, pinned TLS and location steps. Its first use is
+# RFC 3261 §18.1.1 on a challenged call: an account whose INVITE, once it
+# carries Asterisk's `Authorization`, is past 1300 bytes. `$1` is the port
+# the INVITE goes to, `$2` the SDES suites the account offers, `$3` a display
+# name to make it larger, empty for none, `$4` how many seconds the call is
+# up before the hold, empty for the dwell, and anything after it more
+# `docker run` arguments -- the caller's other variables; what the caller
+# printed is left in DATAGRAM_LOG, and what Asterisk took, and over what, in
+# DATAGRAM_SEEN while pjsip's logger is on. Four suites are about 1100 bytes
+# and 1450 answered; one suite and 250 bytes of display name about 1150 and
+# 1500, with no suite to drop. CALLER_ACCOUNT names another of Asterisk's
+# accounts to call from, labuser-big unless set; DATAGRAM_MARK is a file the
+# step made for the call to note where Asterisk's log stood.
+DATAGRAM_SUITES=AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80,AEAD_AES_128_GCM,AES_256_CM_HMAC_SHA1_80
+datagram_call() {
+    local port="$1" suites="$2" display="$3" hold_after="${4:-0}" beside
+    local user="${CALLER_ACCOUNT:-labuser-big}"
+    shift $(( $# < 4 ? $# : 4 ))
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | wc -l > "$DATAGRAM_MARK"
+    DATAGRAM_LOG=$(lab_run "the datagram caller" $((LAB_START_APT_S + LAB_CALL_S + hold_after)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -e SIPRAL_AOR="sip:$user@asterisk" \
+        -e SIPRAL_AUTH_USER="$user" -e SIPRAL_AUTH_PASSWORD=labpass \
+        -e SIPRAL_TARGET=sip:9002@asterisk \
+        -e SIPRAL_SUITES="$suites" \
+        -e SIPRAL_DISPLAY_NAME="$display" \
+        -e SIPRAL_DWELL_MS="$LAB_DWELL_MS" -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
+        -e SIPRAL_HOLD_AFTER_MS=$((hold_after * 1000)) \
+        ${@+"$@"} \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/datagram:/datagram:ro" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=\$(getent hosts asterisk | cut -d' ' -f1)
+            SIPRAL_SERVER=\"\$address:$port\" exec python3 -u /datagram/caller.py" 2>&1)
+    printf '%s\n' "$DATAGRAM_LOG" | sed 's/^/    /'
+    DATAGRAM_SEEN=$( ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) \
+        | tail -n +"$(( $(cat "$DATAGRAM_MARK") + 1 ))" \
+        | grep -o 'Received SIP request ([0-9]* bytes) from [A-Z]*:' || true)
+    printf '%s\n' "$DATAGRAM_SEEN" | sed 's/^/    asterisk: /'
+}
+
+# Whether the caller's own lines say `$1`.
+datagram_said() {
+    printf '%s\n' "$DATAGRAM_LOG" | grep -Eq "$1"
+}
+
 # SIP over TCP and TLS through the four idiomatic layers (docs/22-tls.md,
 # "SIP over TLS in the four layers"): each layer's own lab agent, told to
 # signal over one connection, registered at Asterisk and called by it the
@@ -3509,6 +3583,42 @@ tls_csharp_agent() {
     tls_agent_call csharp labuser-agent-csharp-tls tls 150
 }
 
+# The SHA-256 fingerprint of a certificate's DER, as a pin is written.
+tls_fingerprint() {
+    openssl x509 -in "$1" -outform DER | openssl dgst -sha256 | awk '{print $NF}'
+}
+
+# A TLS trust pinned to one certificate (docs/22-tls.md), through the Python
+# layer's datagram caller over TLS to 5061: pinned to the certificate
+# Asterisk presents there, the call to the echo goes up whatever signed it
+# and whatever name it carries; pinned to the fingerprint of another, the
+# connection is refused as untrusted and no call goes up.
+tls_pin_flow() {
+    local ok=0
+    DATAGRAM_MARK=$(mktemp)
+    CALLER_ACCOUNT=labuser-agent-tls datagram_call 5061 "" "" "" \
+        -e SIPRAL_SRTP=off -e SIPRAL_SIGNALLING=tls \
+        -e SIPRAL_TLS_PIN="$(tls_fingerprint "$SIPRAL_TLS_CERTS/asterisk.pem")"
+    if datagram_said '^confirmed$' && datagram_said '^ended LOCAL_HANGUP ' \
+        && ! datagram_said '^tls refused'; then
+        pass "a certificate pinned by its SHA-256 fingerprint, over TLS: the Python layer trusting Asterisk's certificate by its fingerprint alone, no authority and no name, called the echo over TLS and hung up"
+    else
+        fail "a certificate pinned by its SHA-256 fingerprint, over TLS"
+        ok=1
+    fi
+    CALLER_ACCOUNT=labuser-agent-tls datagram_call 5061 "" "" "" \
+        -e SIPRAL_SRTP=off -e SIPRAL_SIGNALLING=tls \
+        -e SIPRAL_TLS_PIN="$(tls_fingerprint "$SIPRAL_TLS_CERTS/wrong.pem")"
+    if datagram_said '^tls refused UNTRUSTED$' && ! datagram_said '^confirmed$'; then
+        pass "another certificate's fingerprint pinned, refused: the Python layer pinned to a certificate Asterisk does not present refused the connection as untrusted, and no call went up"
+    else
+        fail "another certificate's fingerprint pinned, refused"
+        ok=1
+    fi
+    rm -f "$DATAGRAM_MARK"
+    return "$ok"
+}
+
 tls_swift_agent() {
     tls_agent_start swift labuser-agent-swift-tcp tcp \
         -v "$ROOT:/work:ro" -v "${SWIFT_LIB_DIR:-$ROOT/target/release}:/work/target/release:ro" -- \
@@ -3550,6 +3660,7 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
             else
                 printf '  note  no Swift lab agent was built; see its build step above\n'
             fi
+            tls_pin_flow || true
         fi
         ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
         wait_for asterisk "Asterisk Ready" >/dev/null || true
@@ -3557,52 +3668,6 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
         unset SIPRAL_TLS_CERTS
     fi
 fi
-
-# RFC 3261 §18.1.1 on a challenged call, through the Python layer
-# (interop/datagram/caller.py): an account whose INVITE, once it carries
-# Asterisk's `Authorization`, is past 1300 bytes. `$1` is where the INVITE
-# goes, `$2` the SDES suites the account offers, `$3` a display name to make
-# it larger, empty for none, `$4` how many seconds the call is up before the
-# hold, empty for the dwell; what the caller printed is left in DATAGRAM_LOG,
-# and what Asterisk took, and over what, in DATAGRAM_SEEN: pjsip's logger is
-# on for the run. Four suites are about 1100 bytes and 1450 answered; one
-# suite and 250 bytes of display name about 1150 and 1500, with no suite to
-# drop.
-DATAGRAM_SUITES=AEAD_AES_256_GCM,AES_CM_128_HMAC_SHA1_80,AEAD_AES_128_GCM,AES_256_CM_HMAC_SHA1_80
-datagram_call() {
-    local port="$1" suites="$2" display="$3" hold_after="${4:-0}" beside
-    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
-    ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) | wc -l > "$DATAGRAM_MARK"
-    DATAGRAM_LOG=$(lab_run "the datagram caller" $((LAB_START_APT_S + LAB_CALL_S + hold_after)) \
-        --network "$LAB_NETWORK" \
-        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
-        -e SIPRAL_AOR=sip:labuser-big@asterisk \
-        -e SIPRAL_AUTH_USER=labuser-big -e SIPRAL_AUTH_PASSWORD=labpass \
-        -e SIPRAL_TARGET=sip:9002@asterisk \
-        -e SIPRAL_SUITES="$suites" \
-        -e SIPRAL_DISPLAY_NAME="$display" \
-        -e SIPRAL_DWELL_MS="$LAB_DWELL_MS" -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
-        -e SIPRAL_HOLD_AFTER_MS=$((hold_after * 1000)) \
-        -v "$beside:/lib-sipral:ro" \
-        -v "$ROOT/bindings/python:/python:ro" \
-        -v "$ROOT/interop/datagram:/datagram:ro" \
-        debian:trixie-slim sh -c "
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get -qq update >/dev/null 2>&1
-            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
-            address=\$(getent hosts asterisk | cut -d' ' -f1)
-            SIPRAL_SERVER=\"\$address:$port\" exec python3 -u /datagram/caller.py" 2>&1)
-    printf '%s\n' "$DATAGRAM_LOG" | sed 's/^/    /'
-    DATAGRAM_SEEN=$( ( cd interop && docker compose logs --no-color asterisk 2>/dev/null ) \
-        | tail -n +"$(( $(cat "$DATAGRAM_MARK") + 1 ))" \
-        | grep -o 'Received SIP request ([0-9]* bytes) from [A-Z]*:' || true)
-    printf '%s\n' "$DATAGRAM_SEEN" | sed 's/^/    asterisk: /'
-}
-
-# Whether the caller's own lines say `$1`.
-datagram_said() {
-    printf '%s\n' "$DATAGRAM_LOG" | grep -Eq "$1"
-}
 
 datagram_flow() {
     local ok=0
@@ -3643,13 +3708,29 @@ datagram_flow() {
     fi
 
     # UDP alone, one suite and a long From: nothing to drop, and the call
-    # ends at once, with the limit named
+    # ends at once, with the limit named -- the stack not told it may send
+    # past the limit over UDP
     datagram_call 5070 AES_CM_128_HMAC_SHA1_80 "$(printf 'A%.0s' $(seq 1 250))"
     if datagram_said '^transport failed [0-9]+ 1$' \
         && datagram_said '^ended UNREACHABLE 513 513 request of [0-9]+ bytes is over the 1300-byte datagram limit'; then
-        pass "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named: one suite and a long From over UDP alone, the call ended at once, 513"
+        pass "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named: one suite and a long From over UDP alone, UDP past the limit not allowed, the call ended at once, 513"
     else
         fail "a challenged INVITE past 1300 bytes, nothing to trim, ended with the limit named"
+        ok=1
+    fi
+
+    # The same request, the deployment saying a request of up to 1600 bytes
+    # may go over UDP when no stream is coming: the connection is refused,
+    # the INVITE goes as one datagram past 1300 bytes, and the call connects
+    datagram_call 5070 AES_CM_128_HMAC_SHA1_80 "$(printf 'A%.0s' $(seq 1 250))" "" \
+        -e SIPRAL_UDP_ANYWAY_BYTES=1600
+    if datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
+        && datagram_said '^ended LOCAL_HANGUP ' \
+        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from UDP:' \
+        && ! printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from TCP:'; then
+        pass "a challenged INVITE past 1300 bytes, sent over UDP anyway: one suite and a long From to UDP alone, UDP past the limit allowed up to 1600 bytes, the INVITE went as one datagram and the call was held, resumed and hung up"
+    else
+        fail "a challenged INVITE past 1300 bytes, sent over UDP anyway"
         ok=1
     fi
 
@@ -3668,6 +3749,102 @@ if [ "$WANT" = all ] || [ "$WANT" = datagram ]; then
         fail "the datagram flows: there is no libsipral_ffi for the Python layer to load"
     else
         printf '  note  no libsipral_ffi, so the datagram flows are skipped with the other C flows\n'
+    fi
+fi
+
+# SRTP best effort (SIPRAL_SRTP_BEST_EFFORT) through the Python layer's
+# datagram caller: SDES offered on plain RTP/AVP, the "SRTP optional" of desk
+# phones, straight at Asterisk's tone from an account with no SRTP
+# (labuser) and from one that requires SDES (labuser-srtp). The first comes
+# up plain rather than answered 488, the second keyed -- what the encryption
+# report says once the call is up.
+best_effort_flow() {
+    local ok=0
+    DATAGRAM_MARK=$(mktemp)
+    CALLER_ACCOUNT=labuser datagram_call 5060 "" "" "" -e SIPRAL_SRTP=best_effort
+    if datagram_said '^confirmed$' && datagram_said '^protection [A-Z_]+ plain ' \
+        && datagram_said '^ended LOCAL_HANGUP '; then
+        pass "best-effort SRTP to an endpoint with SRTP off: SDES offered on RTP/AVP, the call came up plain rather than refused, held, resumed and hung up"
+    else
+        fail "best-effort SRTP to an endpoint with SRTP off"
+        ok=1
+    fi
+    CALLER_ACCOUNT=labuser-srtp datagram_call 5060 "" "" "" -e SIPRAL_SRTP=best_effort
+    if datagram_said '^confirmed$' && datagram_said '^protection SDES encrypted ' \
+        && datagram_said '^ended LOCAL_HANGUP '; then
+        pass "best-effort SRTP to an endpoint with SDES on: SDES offered on RTP/AVP, the answer took a key and the call was encrypted, held, resumed and hung up"
+    else
+        fail "best-effort SRTP to an endpoint with SDES on"
+        ok=1
+    fi
+    rm -f "$DATAGRAM_MARK"
+    return "$ok"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = security ] || [ "$WANT" = besteffort ]; then
+    step "SRTP best effort through the Python layer -- straight at Asterisk, SRTP off and SDES on"
+    if [ -n "$HARNESS_C" ]; then
+        best_effort_flow || true
+    elif [ "$WANT" != all ]; then
+        fail "the best-effort SRTP flows: there is no libsipral_ffi for the Python layer to load"
+    else
+        printf '  note  no libsipral_ffi, so the best-effort SRTP flows are skipped with the other C flows\n'
+    fi
+fi
+
+# RFC 3263 through the Python layer's datagram caller, with Asterisk on its
+# datagram listeners (UDP and TCP on 5060, UDP alone on 5070): a registrar
+# named by its host name, found by the A record Docker's own DNS answers for
+# it, registered at and called through; then a server named by a domain
+# nothing resolves, found by the SRV record a resolver of the application's
+# own gives for it -- port 5070 and the host `asterisk` -- and called
+# through. The stack asks; the layer answers with the resolver it was given.
+locate_flow() {
+    local ok=0
+    DATAGRAM_MARK=$(mktemp)
+    ( cd interop && docker compose -f compose.yaml -f datagram/compose.override.yaml up -d asterisk ) \
+        >/dev/null 2>&1 || { fail "Asterisk could not be restarted with its datagram listeners"; return 1; }
+    wait_for asterisk "Asterisk Ready" >/dev/null \
+        || { fail "Asterisk did not come back with its datagram listeners"; return 1; }
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger on' ) >/dev/null 2>&1
+
+    CALLER_ACCOUNT=labuser datagram_call 5060 "" "" "" \
+        -e SIPRAL_SRTP=off -e SIPRAL_SERVER_URI=sip:asterisk -e SIPRAL_REGISTER=1
+    if datagram_said '^located [0-9.]+:5060(,|$)' && datagram_said '^registration REGISTERED$' \
+        && datagram_said '^confirmed$' && datagram_said '^ended LOCAL_HANGUP ' \
+        && datagram_said '^registration UNREGISTERED$'; then
+        pass "a registrar named by its host name, located by its A record through the lab's DNS: registered at the address found, called the tone through it, hung up and unregistered"
+    else
+        fail "a registrar named by its host name, located by its A record through the lab's DNS"
+        ok=1
+    fi
+
+    datagram_call 5070 AES_CM_128_HMAC_SHA1_80 "" "" \
+        -e SIPRAL_SERVER_URI=sip:lab.sipral.test -e "SIPRAL_SRV=60 10 50 5070 asterisk"
+    if datagram_said '^located [0-9.]+:5070(,|$)' && datagram_said '^confirmed$' \
+        && datagram_said '^ended LOCAL_HANGUP ' \
+        && printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from UDP:'; then
+        pass "a server named by a domain, located by an SRV record from the application's resolver: the domain has no address of its own, the record named port 5070 of the lab's Asterisk, and the call went there and was hung up"
+    else
+        fail "a server named by a domain, located by an SRV record from the application's resolver"
+        ok=1
+    fi
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger off' ) >/dev/null 2>&1
+    ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+    wait_for asterisk "Asterisk Ready" >/dev/null || true
+    rm -f "$DATAGRAM_MARK"
+    return "$ok"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = locate ]; then
+    step "a server by name -- RFC 3263 from the Python layer, straight at Asterisk"
+    if [ -n "$HARNESS_C" ]; then
+        locate_flow || true
+    elif [ "$WANT" = locate ]; then
+        fail "the location flows: there is no libsipral_ffi for the Python layer to load"
+    else
+        printf '  note  no libsipral_ffi, so the location flows are skipped with the other C flows\n'
     fi
 fi
 
