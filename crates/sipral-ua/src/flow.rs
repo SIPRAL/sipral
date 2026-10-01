@@ -398,6 +398,28 @@ mod tests {
     }
 
     #[test]
+    fn a_call_before_the_connection_is_refused_and_nothing_goes_over_udp() {
+        let t0 = Instant::now();
+        let (mut agent, _, on_tls) = two_lines(t0);
+        let refused = agent.call(
+            on_tls,
+            &OutgoingCall::new(uri("sips:300@second.example.com")),
+            t0,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(crate::UaError::Send(
+                    sipral_core::endpoint::SendError::UnknownTransport
+                ))
+            ),
+            "{refused:?}"
+        );
+        let (sent, _) = drain(&mut agent);
+        assert!(sent.is_empty(), "nothing over the stack's UDP transport");
+    }
+
+    #[test]
     fn a_registration_whose_connection_never_comes_fails_and_asks_again() {
         let t0 = Instant::now();
         let (mut agent, _, on_tls) = two_lines(t0);

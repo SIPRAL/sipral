@@ -203,6 +203,10 @@ const fn hex(nibble: u8) -> u8 {
     }
 }
 
+/// The transport an account on a connection of its own names until it has
+/// one ([`Account::on_stream`]): a number no transport is bound under.
+const NO_FLOW_YET: TransportId = TransportId(u32::MAX);
+
 /// An identity, where its requests go, how to prove it — and, for every
 /// account but a trunk, the registrar that keeps it reachable.
 #[derive(Clone, Debug)]
@@ -776,10 +780,16 @@ impl Account {
     /// flow, and its calls keep it for every request inside them. Implies
     /// [`Account::transport_protocol`]. A datagram protocol is the account's
     /// own transport as it was given, and changes nothing.
+    ///
+    /// The transport the account was made with is not used meanwhile: until
+    /// a connection is adopted the account names none, and a call it places
+    /// is refused for an unknown transport rather than sent over a datagram
+    /// to a server that expects a stream.
     #[must_use]
     pub const fn on_stream(mut self, protocol: TransportProtocol) -> Self {
         if protocol.is_stream() {
             self.own_stream = Some(protocol);
+            self.transport = NO_FLOW_YET;
         }
         self.protocol = Some(protocol);
         self
