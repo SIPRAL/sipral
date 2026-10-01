@@ -326,6 +326,31 @@ pub(crate) mod hardware {
     /// every count of frames above into a time.
     pub(crate) const PROPERTY_NOMINAL_SAMPLE_RATE: u32 = code(*b"nsrt");
 
+    /// `kAudioDevicePropertyTransportType`: a `UInt32` naming how the device
+    /// is attached.
+    pub(crate) const PROPERTY_TRANSPORT_TYPE: u32 = code(*b"tran");
+
+    /// `kAudioDeviceTransportTypeAggregate`: a device made of other devices.
+    pub(crate) const TRANSPORT_AGGREGATE: u32 = code(*b"grup");
+
+    /// `kAudioAggregateDevicePropertyComposition`: the `CFDictionaryRef` an
+    /// aggregate was made from, which the caller then owns.
+    pub(crate) const PROPERTY_AGGREGATE_COMPOSITION: u32 = code(*b"acom");
+
+    /// `kAudioAggregateDeviceIsPrivateKey`: the composition's entry that is
+    /// non-zero for an aggregate only the process that made it can see.
+    pub(crate) const AGGREGATE_PRIVATE_KEY: &[u8] = b"private";
+
+    /// `kAudioDevicePropertyReferenceStreamEnabled`, asked of the output
+    /// scope: a `UInt32` that is non-zero while the device hands what it
+    /// plays back in as an extra input stream, the reference an echo
+    /// canceller looks for. The voice-processing unit switches it on for
+    /// the output devices it can see.
+    pub(crate) const PROPERTY_REFERENCE_STREAM_ENABLED: u32 = code(*b"tapd");
+
+    /// `kCFNumberSInt32Type`.
+    pub(crate) const NUMBER_SINT32: isize = 3;
+
     /// `kCFStringEncodingUTF8`.
     pub(crate) const ENCODING_UTF8: u32 = 0x0800_0100;
 
