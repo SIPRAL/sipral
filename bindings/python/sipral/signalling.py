@@ -73,9 +73,13 @@ class TlsTrust:
         and nothing else: for a PBX serving a certificate it signed itself.
 
         ``fingerprint`` is written the way ``openssl x509 -fingerprint
-        -sha256`` or RFC 8122 prints it: 64 hexadecimal digits, either case,
-        a colon between each byte or none, optionally after ``sha-256 `` or
-        ``SHA256=``; anything else raises ``ValueError``. The fingerprint is
+        -sha256`` (``sha256 Fingerprint=``, or ``SHA256 Fingerprint=``
+        before OpenSSL 3) or RFC 8122 prints it: 64 hexadecimal digits,
+        either case, colons and spaces between them ignored, optionally
+        after ``sha-256 ``, ``SHA256=`` or ``SHA256 Fingerprint=``, in any
+        case; anything else raises ``ValueError``
+        (``bindings/fixtures/pin-forms.txt`` lists what every layer takes).
+        The fingerprint is
         the whole verdict: no authority, host name or date is consulted, and
         a certificate with any other fingerprint is refused as untrusted
         (`docs/22-tls.md`). It is compared in constant time, over the DER
@@ -131,21 +135,24 @@ class TlsTrust:
         return context
 
 
+#: The prefixes a fingerprint may come after, lower case.
+_PIN_PREFIXES = ("sha256 fingerprint=", "sha-256 ", "sha256=")
+
+
 def parse_pin(fingerprint: str) -> bytes:
     """The 32 bytes a SHA-256 fingerprint names, in any of the forms
     :meth:`TlsTrust.pinned` takes; ``ValueError`` for anything else."""
     text = fingerprint.strip()
-    split = min((at for at in (text.find(" "), text.find("=")) if at >= 0), default=-1)
-    if split >= 0:
-        named, text = text[:split], text[split + 1 :].strip()
-        if named.strip().lower().replace("-", "").replace("_", "") != "sha256":
-            raise ValueError("a certificate pin is a SHA-256 fingerprint")
-    digits = text.replace(":", "")
-    placed = ":" not in text or (
-        len(text) == 95 and all((at % 3 == 2) == (ch == ":") for at, ch in enumerate(text))
-    )
-    if len(digits) != 64 or not placed or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
-        raise ValueError("a certificate pin is 32 bytes of hexadecimal, colons between them or not")
+    for prefix in _PIN_PREFIXES:
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    digits = text.replace(":", "").replace(" ", "")
+    if len(digits) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+        raise ValueError(
+            "a certificate pin is a SHA-256 fingerprint: 64 hexadecimal digits, "
+            "optionally after sha-256, SHA256= or SHA256 Fingerprint="
+        )
     return bytes.fromhex(digits)
 
 

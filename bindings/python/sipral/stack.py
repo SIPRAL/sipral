@@ -32,6 +32,7 @@ from .audio import Audio
 from .call import Call
 from .counters import Counters
 from .enums import AudioMode, Feature, Link, LogLevel, Recovery
+from .errors import PASSING as _PASSING
 from .errors import call as _retry
 from .errors import SipralError, check
 from .locate import Resolver, advertised_address, lookup
@@ -576,6 +577,15 @@ class Stack:
         else:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.bind((bind_host if bind_host is not None else "0.0.0.0", bind_port))
+        self._chosen_port = bind_port
+        #: Whether the last :meth:`move_to` that bound the UDP signalling
+        #: socket again kept its port -- ``bind_port``, or the port in use
+        #: when that was 0. ``False`` when another socket held that port at
+        #: the new address and the system chose one instead, which
+        #: :attr:`bind_address` then names: a peer or a firewall rule that
+        #: only knows the old port has to be told. ``True`` before any move.
+        self.kept_signalling_port = True
+        if not self._streamed:
             self._socket.setblocking(False)
             bound_host, bound_port = self._socket.getsockname()
             if bind_host is None:
@@ -1553,11 +1563,45 @@ class Stack:
             self._report_failure(*classify(refused))
             self._reconnect_later()
 
+    def _signalling_socket(self, host: str) -> socket.socket:
+        """The UDP signalling socket bound again at ``host``, on the port
+        chosen at creation or, when that was 0, the port in use now; on a
+        port the system picks only when that one is held there by another
+        socket, which :attr:`kept_signalling_port` then says. The old socket
+        holds the port itself when it is bound on every interface or at
+        ``host`` already, so it is let go of before the port is tried a
+        second time."""
+        in_use = self._socket.getsockname()[1] if self._socket is not None else 0
+        wanted = self._chosen_port or in_use
+
+        def on(port: int) -> socket.socket | None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.bind((host, port))
+            except OSError:
+                sock.close()
+                return None
+            return sock
+
+        made = on(wanted) if wanted else None
+        if made is None and wanted and in_use == wanted:
+            old, self._socket = self._socket, None
+            try:
+                self._selector.unregister(old)
+            except (KeyError, ValueError, OSError):
+                pass
+            old.close()
+            made = on(wanted)
+        self.kept_signalling_port = made is not None or not wanted
+        if made is None:
+            made = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            made.bind((host, 0))
+        return made
+
     def _move_socket(self, host: str) -> None:
         """The UDP signalling socket bound again at ``host``, and the main
         transport told."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((host, 0))
+        sock = self._signalling_socket(host)
         sock.setblocking(False)
         bound = format_address(*sock.getsockname())
         local = bound.encode("utf-8")
@@ -1583,11 +1627,12 @@ class Stack:
         self._selector.register(sock, selectors.EVENT_READ, data="main")
         self._socket = sock
         self.bind_address = bound
-        try:
-            self._selector.unregister(old)
-        except (KeyError, ValueError, OSError):
-            pass
-        old.close()
+        if old is not None:
+            try:
+                self._selector.unregister(old)
+            except (KeyError, ValueError, OSError):
+                pass
+            old.close()
 
     def call_for(self, handle: int) -> Call | None:
         """The :class:`sipral.call.Call` already made for a call handle."""
@@ -2066,7 +2111,7 @@ class Stack:
             status = lib.sipral_stack_turn_receive(
                 self.handle, local_buf, len(local_bytes), data, len(data), self.now_ms()
             )
-            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+            if status not in _PASSING or self._closed.is_set():
                 break
             time.sleep(0.001)
         if status == lib.SIPRAL_STATUS_STREAM_BROKEN:
@@ -2337,10 +2382,10 @@ class Stack:
             status = lib.sipral_stack_receive_stream(
                 self.handle, transport, data, len(data), self.now_ms()
             )
-            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+            if status not in _PASSING or self._closed.is_set():
                 break
             time.sleep(0.001)
-        if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
+        if status != lib.SIPRAL_STATUS_OK and status not in _PASSING:
             # the framing is lost: the stack retired the transport itself
             self._lose_sip_stream(transport, tell=False)
 
@@ -2584,10 +2629,10 @@ class Stack:
             status = lib.sipral_stack_receive_stream(
                 self.handle, lib.SIPRAL_TRANSPORT_MAIN, data, len(data), self.now_ms()
             )
-            if status != lib.SIPRAL_STATUS_BUSY or self._closed.is_set():
+            if status not in _PASSING or self._closed.is_set():
                 break
             time.sleep(0.001)
-        if status not in (lib.SIPRAL_STATUS_OK, lib.SIPRAL_STATUS_BUSY):
+        if status != lib.SIPRAL_STATUS_OK and status not in _PASSING:
             # the framing is lost: the stack has retired the transport and
             # said so itself
             self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)

@@ -159,6 +159,54 @@ class ACallMovesWithTheNetwork(_Pair):
         self.assertEqual(call.media_address, moved, "a refused move keeps the socket it had")
 
 
+def _free_port(host: str) -> int:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind((host, 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+class TheSignallingPortSurvivesAMove(unittest.TestCase):
+    """``move_to`` binds the UDP signalling socket again on the port chosen
+    at creation, or the one in use when none was, and only a port another
+    socket holds at the new address falls back to one the system picks."""
+
+    def setUp(self) -> None:
+        self.host = _routable_address()
+        if self.host is None or self.host.startswith("127."):
+            self.skipTest("no address besides loopback on this machine to move to")
+
+    def test_the_chosen_port_moves_with_the_address_and_back(self) -> None:
+        chosen = _free_port(self.host)
+        with Stack("127.0.0.1", chosen, audio=AudioMode.APPLICATION) as stack:
+            stack.move_to(self.host)
+            self.assertEqual(stack.bind_address, f"{self.host}:{chosen}")
+            self.assertTrue(stack.kept_signalling_port)
+            stack.move_to("127.0.0.1")
+            self.assertEqual(stack.bind_address, f"127.0.0.1:{chosen}")
+
+    def test_with_none_chosen_the_port_in_use_is_kept(self) -> None:
+        with Stack(audio=AudioMode.APPLICATION) as stack:
+            port = stack.bind_address.rsplit(":", 1)[1]
+            stack.move_to(self.host)
+            self.assertEqual(stack.bind_address, f"{self.host}:{port}")
+            self.assertTrue(stack.kept_signalling_port)
+
+    def test_a_port_taken_at_the_new_address_falls_back_and_says_so(self) -> None:
+        squatter = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(squatter.close)
+        squatter.bind((self.host, 0))
+        taken = squatter.getsockname()[1]
+        with Stack("127.0.0.1", taken, audio=AudioMode.APPLICATION) as stack:
+            stack.move_to(self.host)
+            host, port = stack.bind_address.rsplit(":", 1)
+            self.assertEqual(host, self.host)
+            self.assertNotIn(int(port), (taken, 0))
+            self.assertFalse(stack.kept_signalling_port)
+
+
 class ACallSaysWhichTransformSecuresIt(_Pair):
     srtp = lib.SIPRAL_SRTP_DTLS
 

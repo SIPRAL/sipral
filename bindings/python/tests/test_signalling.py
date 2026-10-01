@@ -33,6 +33,7 @@ import unittest
 
 from sipral import InviteLimit, Stack, TlsTrust
 from sipral._sipral_cffi import lib
+from sipral.errors import SipralError
 from sipral.errors import call as retry_busy
 from sipral.enums import AudioMode, EventKind, RegistrationState, TlsFailure, Transport, TransportError
 
@@ -414,6 +415,26 @@ class AConnectionLostIsMadeAgain(_OverAConnection):
         self.assertTrue(again, "no REGISTER on a second connection")
         self.assertNotEqual(stack.bind_address, first, "a new connection, from a new port")
         self.assertIn(stack.bind_address, _header("Contact", again[0]), "the Contact moved with it")
+
+
+class AClockBehindIsRetriedLikeABusy(unittest.TestCase):
+    """A clock reading the poll thread overtook is read again, as a
+    collision with it is; anything else goes straight through."""
+
+    def test_both_are_waited_out_and_nothing_else(self) -> None:
+        for status in (lib.SIPRAL_STATUS_BUSY, lib.SIPRAL_STATUS_CLOCK_BEHIND):
+            answers = iter((status, status, lib.SIPRAL_STATUS_OK))
+            retry_busy(lambda: next(answers), "a test")
+            self.assertIsNone(next(answers, None), f"{status} was not retried")
+        attempts = []
+
+        def refused() -> int:
+            attempts.append(1)
+            return lib.SIPRAL_STATUS_WRONG_STATE
+
+        with self.assertRaises(SipralError):
+            retry_busy(refused, "a test")
+        self.assertEqual(len(attempts), 1)
 
 
 class TheInviteRateFloor(unittest.IsolatedAsyncioTestCase):

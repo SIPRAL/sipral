@@ -6,14 +6,18 @@
 // calling behind the trust gate (RFC 3325, 3323, 5806, 7044), how the call
 // asked to be answered (RFC 5373, Alert-Info), a 3xx answer, the account's
 // session timer, the SRTP suite a call is keyed with, and a call moved to a
-// new socket after the network changed. Run by IdiomaticCheck.kt's main,
-// under -Xcheck:jni.
+// new socket after the network changed, the signalling port kept across
+// such a change, and a clock reading the poll overtook retried. Run by
+// IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
+import java.net.DatagramSocket
+import java.net.InetAddress
 import kotlinx.coroutines.delay
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -256,7 +260,8 @@ private suspend fun aCallMovedAfterTheNetworkChangedIsHeardAtItsNewSocket(): Str
                 }
                 assertEquals(SipralRecovery.REBUILD, recovery)
                 assertEquals(placed.handle, wanted.call)
-                assertNotEquals(oldSignalling, pair.alice.bindAddress, "the signalling socket stayed where it was")
+                assertEquals(oldSignalling, pair.alice.bindAddress, "the address and the port did not change, so neither did the socket's")
+                assertTrue(pair.alice.keptSignallingPort)
                 assertTrue(pair.aliceAccount.contact.contains(pair.alice.bindAddress))
 
                 val (_, answered) = placed.events.awaitNext(
@@ -287,6 +292,78 @@ private fun aRoamThatKeepsTheAddressMovesNothing(): String {
     return "a roam that kept the address moved nothing"
 }
 
+/** The address the route to the rest of the world leaves from: this
+ * machine's other address beside loopback, which these checks need. */
+private fun otherAddress(): String {
+    val host = routeHost("192.0.2.1:5060")
+    check(host != "127.0.0.1") { "this machine has no address but loopback, and the port checks need one" }
+    return host
+}
+
+private fun freePort(host: String): Int = DatagramSocket(0, InetAddress.getByName(host)).use { it.localPort }
+
+/** The port the application chose survives a move to another address and
+ * back, and with none chosen the port in use does. */
+private fun theSignallingPortSurvivesAMoveToAnotherAddress(): String {
+    val elsewhere = otherAddress()
+    val chosen = freePort(elsewhere)
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", bindPort = chosen).use { client ->
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, elsewhere, interfaceName = "moved"))
+        assertEquals("$elsewhere:$chosen", client.bindAddress)
+        assertTrue(client.keptSignallingPort)
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, "127.0.0.1", interfaceName = "back"))
+        assertEquals("127.0.0.1:$chosen", client.bindAddress)
+    }
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        val port = client.bindAddress.substringAfterLast(':')
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, "127.0.0.1", interfaceName = "moved"))
+        assertEquals("127.0.0.1:$port", client.bindAddress)
+        assertTrue(client.keptSignallingPort)
+    }
+    return "the signalling port survived a move to another address"
+}
+
+/** A port another socket holds at the new address is not fought over: the
+ * system picks one, and the client says so. */
+private fun aPortTakenAtTheNewAddressFallsBackAndSaysSo(): String {
+    val elsewhere = otherAddress()
+    DatagramSocket(0, InetAddress.getByName(elsewhere)).use { squatter ->
+        val taken = squatter.localPort
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", bindPort = taken).use { client ->
+            client.networkChanged(SipralNetwork(SipralLink.WIRED, elsewhere, interfaceName = "moved"))
+            assertEquals(elsewhere, client.bindAddress.substringBeforeLast(':'))
+            val now = client.bindAddress.substringAfterLast(':').toInt()
+            assertNotEquals(taken, now)
+            assertNotEquals(0, now)
+            assertFalse(client.keptSignallingPort)
+        }
+    }
+    return "a port taken at the new address fell back and said so"
+}
+
+/** A clock reading the poll thread overtook is read again, as a collision
+ * with it is; anything else goes straight through. */
+private fun aClockBehindIsRetriedLikeABusy(): String {
+    for (status in listOf(SipralStatus.BUSY, SipralStatus.CLOCK_BEHIND)) {
+        var attempts = 0
+        val answer = retryBusy {
+            attempts++
+            if (attempts < 3) throw SipralException(status, "")
+            attempts
+        }
+        assertEquals(3, answer, "$status was not retried")
+    }
+    var attempts = 0
+    assertFailsWith<SipralException> {
+        retryBusy {
+            attempts++
+            throw SipralException(SipralStatus.WRONG_STATE, "")
+        }
+    }
+    assertEquals(1, attempts)
+    return "a clock behind was retried like a busy"
+}
+
 /** Everything above, for IdiomaticCheck.kt's main. */
 private fun aCallPlacedPastMaxDialogsIsRefused(): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", maxDialogs = 1).use { alice ->
@@ -314,5 +391,8 @@ internal suspend fun signallingChecks(): String = listOf(
     theSuiteASecuredCallRunsHasAName(),
     aCallMovedAfterTheNetworkChangedIsHeardAtItsNewSocket(),
     aRoamThatKeepsTheAddressMovesNothing(),
+    theSignallingPortSurvivesAMoveToAnotherAddress(),
+    aPortTakenAtTheNewAddressFallsBackAndSaysSo(),
+    aClockBehindIsRetriedLikeABusy(),
     aCallPlacedPastMaxDialogsIsRefused(),
 ).joinToString(", ")

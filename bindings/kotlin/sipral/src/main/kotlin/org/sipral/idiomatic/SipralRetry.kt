@@ -21,14 +21,29 @@ import org.sipral.SipralStatus
  * `bindings/python/sipral/errors.py`'s own `call()` gives the same problem.
  * A contention that has not cleared in [deadlineMs] is not ordinary any
  * more and is let through as whatever it still is.
+ *
+ * `SIPRAL_STATUS_CLOCK_BEHIND` gets the same retry, as the .NET layer gives
+ * it: every [action] here reads `nowMs()` afresh on the calling thread right
+ * before the entry point runs, so a reading the stack's last one beat was
+ * overtaken by the poll thread between the two, not stale, and the next
+ * reading can only be later.
  */
+/** A raw status [retryBusy] waits out, thrown so that it does; any other is
+ * returned for the caller to read. */
+internal fun throwIfPassing(status: Int) {
+    if (status == SipralStatus.BUSY.value || status == SipralStatus.CLOCK_BEHIND.value) {
+        throw SipralException(SipralStatus.of(status), "")
+    }
+}
+
 internal fun <T> retryBusy(deadlineMs: Long = 500, action: () -> T): T {
     val deadline = System.nanoTime() / 1_000_000 + deadlineMs
     while (true) {
         try {
             return action()
         } catch (busy: SipralException) {
-            if (busy.status != SipralStatus.BUSY || System.nanoTime() / 1_000_000 >= deadline) {
+            val passing = busy.status == SipralStatus.BUSY || busy.status == SipralStatus.CLOCK_BEHIND
+            if (!passing || System.nanoTime() / 1_000_000 >= deadline) {
                 throw busy
             }
             Thread.sleep(1)
