@@ -57,6 +57,14 @@ public sealed class Call : IDisposable
     /// delivered.</summary>
     public bool Ended { get; private set; }
 
+    /// <summary>What the call's media cost in the end: the record
+    /// <see cref="SipralEventKind.MediaStatistics"/> carries, kept from the
+    /// moment it arrives — right after <see cref="SipralEventKind.CallEnded"/>
+    /// — and <see langword="null"/> before that or for a call whose media
+    /// never started. <see cref="CallMedia.Statistics"/> answers with it too
+    /// once the stream is gone.</summary>
+    public SipralStreamStatistics? FinalStatistics { get; private set; }
+
     /// <summary>Every event this call's handle names, decoded whole, in
     /// order.</summary>
     public IAsyncEnumerable<SipralEventArgs> Events => _events.Reader.ReadAllAsync();
@@ -129,6 +137,11 @@ public sealed class Call : IDisposable
         if (args.Kind == SipralEventKind.CallEnded)
         {
             Ended = true;
+        }
+        if (args.Kind == SipralEventKind.MediaStatistics && args.Media?.Statistics is { } record)
+        {
+            FinalStatistics = record;
+            Media?.EndedWith(record);
         }
 
         // Same guard as `SipralStack.EventReceived`, and for the same

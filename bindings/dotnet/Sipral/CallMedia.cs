@@ -209,13 +209,30 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary><c>sipral_media_statistics</c>.</summary>
+    /// <summary><c>sipral_media_statistics</c>. Once the call has ended the
+    /// stream is gone and the library answers
+    /// <see cref="SipralStatus.WrongState"/>; from the moment the end-of-call
+    /// record has arrived this answers with that record
+    /// (<see cref="Call.FinalStatistics"/>) instead.</summary>
     public SipralStreamStatistics Statistics()
     {
         var stats = SipralStreamStats.Sized();
-        SipralErrors.Call(() => NativeMethods.sipral_media_statistics(Handle, _stack.NowMs, ref stats), "sipral_media_statistics");
+        try
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_media_statistics(Handle, _stack.NowMs, ref stats), "sipral_media_statistics");
+        }
+        catch (SipralException refused) when (refused.Status == SipralStatus.WrongState && _finalStatistics is { } final)
+        {
+            return final;
+        }
         return SipralEventArgs.Statistics(stats);
     }
+
+    private volatile SipralStreamStatistics? _finalStatistics;
+
+    /// <summary>The end-of-call record arrived: what <see cref="Statistics"/>
+    /// answers from now on, when the library no longer can.</summary>
+    internal void EndedWith(SipralStreamStatistics record) => _finalStatistics = record;
 
     /// <summary>Every path this call's ICE agent tried — the candidate
     /// pairs its checklist held, then the relays it held — and what became

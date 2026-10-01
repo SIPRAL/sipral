@@ -142,6 +142,45 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
+    /// <summary>The record <see cref="SipralEventKind.MediaStatistics"/>
+    /// carries is kept on the call, and is what the media answers once the
+    /// library has nothing left and says <c>WRONG_STATE</c>.</summary>
+    [Fact]
+    public async Task TheEndOfCallRecordIsKeptAndStillReadable()
+    {
+        var (aliceCall, bobCall) = await PlaceAndAnswerAsync();
+        try
+        {
+            var media = aliceCall.Media!;
+            var silence = new short[media.FrameSamples];
+            for (var i = 0; i < 5; i++)
+            {
+                media.SendAudio(silence);
+            }
+            var deadline = DateTime.UtcNow + Timeout;
+            while (media.Statistics().PacketsSent < 5 && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            bobCall.Hangup();
+            while (aliceCall.FinalStatistics is null && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+            var record = Assert.IsType<SipralStreamStatistics>(aliceCall.FinalStatistics);
+            Assert.True(record.PacketsSent >= 5, $"{record.PacketsSent} packets sent");
+            var raw = SipralStreamStats.Sized();
+            Assert.Equal(SipralStatus.WrongState, NativeMethods.sipral_media_statistics(media.Handle, 0, ref raw));
+            Assert.Equal(record.PacketsSent, media.Statistics().PacketsSent);
+        }
+        finally
+        {
+            aliceCall.Close();
+            bobCall.Close();
+        }
+    }
+
     /// <summary>The end-of-call record a MEDIA_STATISTICS event carries
     /// copies <c>frames_underrun</c> into
     /// <see cref="SipralStreamStatistics.FramesUnderrun"/>, the member
