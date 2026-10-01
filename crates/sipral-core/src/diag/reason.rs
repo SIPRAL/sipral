@@ -52,6 +52,13 @@ pub enum Reason {
     /// stream could be had, and `DatagramLimit::without_stream_bytes` sent it
     /// over the datagram anyway. Carries the size and that limit.
     TransportKeptOnDatagram,
+    /// The same rule met by writing the request smaller: too large for a
+    /// datagram in full, so it went out in RFC 3261 §7.3.3's compact form
+    /// (`DatagramLimit::compaction`), and without its `Allow` when that was
+    /// not enough. Carries the size it went out at and the limit; the
+    /// promotion or refusal that follows, when it still did not fit, is an
+    /// entry of its own.
+    TransportCompactedBySize,
     /// A transport closed or failed, and everything running on it was failed
     /// with it.
     TransportLost,
@@ -146,6 +153,7 @@ impl Reason {
             Self::TransportPromotedBySize => "transport.promoted.size",
             Self::TransportRefusedBySize => "transport.refused.size",
             Self::TransportKeptOnDatagram => "transport.kept.datagram",
+            Self::TransportCompactedBySize => "transport.compacted.size",
             Self::TransportLost => "transport.lost",
             Self::FlowDead => "transport.flow.dead",
             Self::RequestSent => "request.sent",
@@ -186,11 +194,12 @@ mod tests {
 
     /// Every variant this crate has, so that the tests below cannot silently
     /// stop covering one that was added afterwards.
-    const ALL: [Reason; 28] = [
+    const ALL: [Reason; 29] = [
         Reason::TransportSelected,
         Reason::TransportPromotedBySize,
         Reason::TransportRefusedBySize,
         Reason::TransportKeptOnDatagram,
+        Reason::TransportCompactedBySize,
         Reason::TransportLost,
         Reason::FlowDead,
         Reason::RequestSent,
@@ -257,6 +266,10 @@ mod tests {
             "auth.challenge.answered"
         );
         assert_eq!(Reason::RequestSent.to_string(), "request.sent");
+        assert_eq!(
+            Reason::TransportCompactedBySize.as_str(),
+            "transport.compacted.size"
+        );
         assert_eq!(
             Reason::RequestAnsweredByTimeout.as_str(),
             "request.answered.timeout"

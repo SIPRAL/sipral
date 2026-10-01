@@ -12,8 +12,8 @@ use super::tests::{
     streamed_call, streamed_register, transmits, with,
 };
 use super::{
-    AuthRetryError, DatagramLimit, Endpoint, EndpointConfig, Event, Input, OutgoingInDialogRequest,
-    OutgoingRequest, SendError, TransportId, TransportProtocol,
+    AuthRetryError, Compaction, DatagramLimit, Endpoint, EndpointConfig, Event, Input,
+    OutgoingInDialogRequest, OutgoingRequest, SendError, Transmit, TransportId, TransportProtocol,
 };
 use crate::auth::{Credentials, DigestAlgorithm};
 use crate::dialog::CallId;
@@ -892,6 +892,8 @@ fn cramped(now: Instant) -> Endpoint {
             headroom_bytes: 200,
             max_datagram_bytes: 450,
             without_stream_bytes: None,
+            // the line is drawn for the request written in full
+            compaction: Compaction::Never,
         },
         ..EndpointConfig::default()
     };
@@ -980,6 +982,74 @@ fn a_challenged_request_that_outgrew_a_datagram_goes_once_a_stream_is_open() {
         "00000001",
         "the attempt that never left spent nothing, so this is the first"
     );
+}
+
+/// A REGISTER answered under a datagram limit of `largest` bytes and
+/// `compaction`: what went out with the credentials, and over what.
+fn answered_under(largest: u32, compaction: Compaction, now: Instant) -> Option<Transmit> {
+    let config = EndpointConfig {
+        datagram_limit: DatagramLimit {
+            max_datagram_bytes: largest,
+            compaction,
+            ..DatagramLimit::DEFAULT
+        },
+        ..EndpointConfig::default()
+    };
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TransportId(1),
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            now,
+        )
+        .expect("binding UDP");
+    let id = endpoint
+        .request(&register_request(), now)
+        .expect("the REGISTER goes");
+    let first = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &challenge(&first, 401, "WWW-Authenticate", &digest(NONCE, None)),
+        now,
+    );
+    events(&mut endpoint);
+    endpoint
+        .retry_with_credentials(AnyTransactionId::NonInviteClient(id), &credentials(), now)
+        .ok()?;
+    transmits(&mut endpoint).pop()
+}
+
+#[test]
+fn an_answer_to_a_challenge_over_the_line_goes_compact_when_that_is_enough() {
+    // the request certain to grow is the one carrying credentials, and it is
+    // rebuilt from the refused one: the rebuild is held to the same ladder as
+    // a first send, compact before a stream
+    let t0 = Instant::now();
+    let full = answered_under(1_300, Compaction::Never, t0)
+        .expect("the answer fits the default line")
+        .payload
+        .len();
+    let line = u32::try_from(full - 10).expect("a size");
+    assert!(
+        answered_under(line, Compaction::Never, t0).is_none(),
+        "in full, the answer is over a line ten bytes short of it"
+    );
+    let compact = answered_under(line, Compaction::WhenOversize, t0)
+        .expect("written compact, the answer goes over the datagram");
+    assert_eq!(compact.protocol, TransportProtocol::Udp);
+    assert!(
+        compact.payload.len() <= full - 10,
+        "{}",
+        compact.payload.len()
+    );
+    let text = String::from_utf8_lossy(&compact.payload);
+    assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
+    assert!(!authorization(&compact.payload).is_empty(), "{text}");
+    assert_eq!(count(&compact.payload), "00000001");
 }
 
 #[test]

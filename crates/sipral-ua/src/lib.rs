@@ -179,7 +179,8 @@ pub use sipral_core::endpoint::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
 pub use sipral_core::endpoint::{
-    EndpointConfig, Input, ReceiveError, Transmit, TransportId, TransportProtocol,
+    Compaction, DatagramLimit, EndpointConfig, Input, ReceiveError, Transmit, TransportId,
+    TransportProtocol,
 };
 pub use sipral_core::msg::{StatusCode, Uri};
 /// A TLS server certificate trusted by its SHA-256 fingerprint, per account

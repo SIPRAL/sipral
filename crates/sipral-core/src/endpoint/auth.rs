@@ -434,6 +434,9 @@ impl Endpoint {
 
         let mut message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
+        message = self
+            .written_for_the_datagram(flow, message)
+            .map_err(AuthRetryError::Unsendable)?;
 
         // The credentials are what made it large. §18.1.1 has to be applied
         // here as well as on the first send, or the one request in a call that

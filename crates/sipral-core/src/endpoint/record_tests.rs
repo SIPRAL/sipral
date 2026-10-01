@@ -139,6 +139,7 @@ fn a_request_promoted_to_a_stream_carries_the_size_and_the_limit_together() {
         reasons(&decisions),
         vec![
             "transport.selected",
+            "transport.compacted.size",
             "transport.promoted.size",
             "request.sent"
         ]
@@ -177,13 +178,22 @@ fn a_request_that_cannot_arrive_is_written_down_rather_than_emitted() {
         .collect();
     assert_eq!(
         reasons(&decisions),
-        vec!["transport.selected", "transport.refused.size"]
+        vec![
+            "transport.selected",
+            "transport.compacted.size",
+            "transport.refused.size"
+        ]
     );
     let refused = only(&decisions, "transport.refused.size");
     let measure = refused.measure.expect("a size and a limit");
     assert_eq!(measure.limit, 1_300);
     assert!(measure.size > 1_300);
     assert_eq!(refused.address, Some(peer()));
+    // what was refused is the request at the size it was weighed at: the
+    // compact one, which was still too large
+    let compacted = only(&decisions, "transport.compacted.size");
+    assert_eq!(compacted.measure, Some(measure));
+    assert_eq!(compacted.protocol, Some(TransportProtocol::Udp));
 }
 
 /// An endpoint whose configuration sets §18.1.1 aside, up to `largest`, once

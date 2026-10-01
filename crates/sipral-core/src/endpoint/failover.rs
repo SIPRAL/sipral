@@ -207,6 +207,9 @@ impl Endpoint {
             source: None,
             ..flow
         };
+        // the request was written compact to fit the datagram it first went
+        // in, and the rebuild above writes every field long again
+        let message = self.written_for_the_datagram(moved, message)?;
         self.start_retry(method, message, moved, None, now)
             .map_err(|error| match error {
                 super::error::AuthRetryError::Unsendable(error) => error,

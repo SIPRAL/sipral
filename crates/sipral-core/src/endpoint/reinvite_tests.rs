@@ -5,7 +5,8 @@
 //! ask at once.
 
 use super::tests::{
-    deliver, endpoint, events, header, incoming, invite_request, local, peer, sent, transmits,
+    deliver, endpoint, endpoint_in_full, events, header, incoming, invite_request, local, peer,
+    sent, transmits,
 };
 use super::{
     AckError, DialogEndReason, Endpoint, Event, FailureReason, Input, OutgoingInDialogRequest,
@@ -1140,6 +1141,43 @@ fn a_reinvite_too_big_for_a_datagram_is_treated_like_any_other_request() {
 }
 
 #[test]
+fn a_reinvite_over_the_line_goes_compact_over_the_datagram_when_that_is_enough() {
+    let t0 = Instant::now();
+    let reinvite_with = |endpoint: &mut Endpoint, body_bytes: usize| {
+        let (dialog, _) = call_up(endpoint, t0);
+        let body: Arc<[u8]> = Arc::from(vec![b'x'; body_bytes]);
+        endpoint.reinvite(dialog, &renegotiation().body(b"application/sdp", body), t0)
+    };
+    // how large a re-INVITE is in full, and how much writing it compact
+    // takes off, on a stack that draws its tags and branches as the ones
+    // below do
+    let mut measured = endpoint_in_full(t0);
+    reinvite_with(&mut measured, 800).expect("a re-INVITE that fits");
+    let full = sent(&mut measured);
+    let compact = super::tests::with(&full, |raw| crate::msg::compact_request(raw, &[]))
+        .expect("written compact");
+    let saved = full.len() - compact.len();
+    // in full, half of that over the line; compact, half of it under
+    let body_bytes = 800 + 1_300 + saved / 2 - full.len() + 1;
+
+    let mut in_full = endpoint_in_full(t0);
+    assert_eq!(
+        reinvite_with(&mut in_full, body_bytes),
+        Err(SendError::NeedsStreamTransport),
+        "in full, the re-INVITE is over the line"
+    );
+
+    let mut endpoint = endpoint(t0);
+    reinvite_with(&mut endpoint, body_bytes).expect("the re-INVITE goes");
+    let reinvite = sent(&mut endpoint);
+    assert!(reinvite.starts_with(b"INVITE "));
+    assert!(reinvite.len() <= 1_300, "{}", reinvite.len());
+    let text = String::from_utf8_lossy(&reinvite);
+    assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
+    assert!(text.contains("\r\ni:"), "{text}");
+}
+
+#[test]
 fn a_reinvite_too_big_for_a_datagram_goes_on_the_stream_open_to_the_peer() {
     let t0 = Instant::now();
     let mut endpoint = endpoint(t0);
@@ -1307,9 +1345,11 @@ fn a_prack_too_big_for_a_datagram_keeps_its_handle_until_it_can_go() {
 fn a_request_inside_a_dialog_that_did_not_fit_is_written_down_as_the_first_send_is() {
     // the same two entries, with the same two numbers, as a request that did
     // not fit out of dialog: refused over the datagram, promoted onto the
-    // stream, each with the size and the limit it was decided on
+    // stream, each with the size and the limit it was decided on — the
+    // request written in full, so that the size decided on is the size the
+    // stream carries
     let t0 = Instant::now();
-    let mut endpoint = endpoint(t0);
+    let mut endpoint = endpoint_in_full(t0);
     let (dialog, ok) = answered_from_afar(&mut endpoint, t0);
     endpoint.ack_2xx(dialog, None, t0).ok();
     bind_stream(&mut endpoint, t0);

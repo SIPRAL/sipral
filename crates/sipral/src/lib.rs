@@ -150,6 +150,8 @@
 mod capabilities;
 mod clock;
 mod codec;
+#[cfg(test)]
+mod compact_tests;
 mod counters;
 #[cfg(feature = "redaction")]
 mod diagnostics;
@@ -308,12 +310,13 @@ pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
 pub use sipral_ua::{
-    Account, AccountId, CallEndReason, CallHandle, CallState, Credentials, DtmfError, DtmfInfoForm,
-    EndpointConfig, ForkPolicy, Hold, Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle,
-    MessageSummary, Network, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery,
-    Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
-    StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
-    TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+    Account, AccountId, CallEndReason, CallHandle, CallState, Compaction, Credentials,
+    DatagramLimit, DtmfError, DtmfInfoForm, EndpointConfig, ForkPolicy, Hold, Incoming, Input,
+    Link, MAX_UNSAFE_BODY_BYTES, MessageHandle, MessageSummary, Network, OutgoingCall,
+    OutgoingExtras, Rate, RateError, ReceiveError, Recovery, Refusals, RegistrationFailure,
+    RegistrationState, Replacing, STREAM_WAIT, Screen, Screening, StatusCode, Subscribe,
+    SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
+    TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 pub use sipral_ua::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,

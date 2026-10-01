@@ -39,7 +39,21 @@ pub(super) fn peer() -> SocketAddr {
 
 /// An endpoint with one UDP transport bound, at `t0`.
 pub(super) fn endpoint(now: Instant) -> Endpoint {
-    let mut endpoint = Endpoint::new(EndpointConfig::default(), [7; 32]).unwrap();
+    configured(EndpointConfig::default(), now)
+}
+
+/// The same, writing every request in full whatever its size
+/// (`Compaction::Never`): for a test about RFC 3261 §18.1.1's line itself,
+/// drawn for the request as it was built.
+pub(super) fn endpoint_in_full(now: Instant) -> Endpoint {
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.compaction = super::Compaction::Never;
+    configured(config, now)
+}
+
+/// [`endpoint`], configured otherwise.
+pub(super) fn configured(config: EndpointConfig, now: Instant) -> Endpoint {
+    let mut endpoint = Endpoint::new(config, [7; 32]).unwrap();
     endpoint
         .receive(
             Input::TransportBound {
@@ -1862,7 +1876,7 @@ fn the_move_to_a_stream_happens_at_1301_bytes_and_not_one_byte_sooner() {
     let t0 = Instant::now();
     let mut seen = Vec::new();
     for padding in 940..1_000 {
-        let mut endpoint = endpoint(t0);
+        let mut endpoint = endpoint_in_full(t0);
         endpoint
             .receive(
                 Input::TransportBound {
@@ -1901,6 +1915,246 @@ fn the_move_to_a_stream_happens_at_1301_bytes_and_not_one_byte_sooner() {
             seen.iter().map(|&(size, _)| size).collect::<Vec<_>>()
         );
     }
+}
+
+/// An endpoint writing compact as `compaction` says, bound on UDP.
+fn compacting(compaction: super::Compaction, now: Instant) -> Endpoint {
+    let mut config = EndpointConfig::default();
+    config.datagram_limit.compaction = compaction;
+    configured(config, now)
+}
+
+/// The size an OPTIONS padded with `padding` bytes of `Subject` and carrying
+/// `allow` is, written in full.
+fn full_size(padding: usize, allow: Option<&[u8]>, t0: Instant) -> usize {
+    let mut endpoint = endpoint_in_full(t0);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    endpoint
+        .request(&padded(padding, allow), t0)
+        .expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("one message");
+    String::from_utf8_lossy(&sent.payload)
+        .replacen("SIP/2.0/TCP", "SIP/2.0/UDP", 1)
+        .len()
+}
+
+const ALLOW: &[u8] =
+    b"INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, PRACK, REFER, NOTIFY, MESSAGE, INFO";
+
+fn padded(padding: usize, allow: Option<&[u8]>) -> OutgoingRequest {
+    let request = request(Method::Options);
+    let request = match allow {
+        Some(allow) => request.header(HeaderName::Allow, allow),
+        None => request,
+    };
+    request.header(HeaderName::Subject, &vec![b'x'; padding])
+}
+
+#[test]
+fn a_request_over_the_line_that_fits_once_compact_goes_compact_over_the_datagram() {
+    let t0 = Instant::now();
+    // ten bytes over §18.1.1's 1300 in full
+    let padding = 1_000 + 1_310 - full_size(1_000, None, t0);
+    assert_eq!(full_size(padding, None, t0), 1_310);
+
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .request(&padded(padding, None), t0)
+        .expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("one message");
+    assert_eq!(sent.protocol, TransportProtocol::Udp);
+    assert!(sent.payload.len() <= 1_300, "{}", sent.payload.len());
+    let text = String::from_utf8_lossy(&sent.payload);
+    for line in [
+        "\r\nv:SIP/2.0/UDP ",
+        "\r\nf:",
+        "\r\nt:",
+        "\r\ni:",
+        "\r\ns:x",
+        "\r\nl:0",
+    ] {
+        assert!(text.contains(line), "no {line:?} in {text}");
+    }
+    assert!(
+        !events(&mut endpoint)
+            .iter()
+            .any(|event| matches!(event, Event::TransportWanted { .. })),
+        "no stream is asked for"
+    );
+    let call = crate::dialog::CallId::new(
+        &with(&sent.payload, |m| {
+            m.header(HeaderName::CallId).map(<[u8]>::to_vec)
+        })
+        .expect("a Call-ID"),
+    );
+    let compacted = endpoint
+        .call_record(&call)
+        .expect("the record")
+        .decisions()
+        .find(|decision| decision.reason == crate::diag::Reason::TransportCompactedBySize)
+        .and_then(|decision| decision.measure)
+        .expect("the record says it went compact, and at what size");
+    assert_eq!(
+        (compacted.size, compacted.limit),
+        (sent.payload.len(), 1_300)
+    );
+
+    // the same request in full, configured so, asks for a stream instead
+    let mut in_full = endpoint_in_full(t0);
+    assert_eq!(
+        in_full.request(&padded(padding, None), t0).err(),
+        Some(super::SendError::NeedsStreamTransport)
+    );
+}
+
+#[test]
+fn a_request_that_fits_is_left_as_it_was_built() {
+    let t0 = Instant::now();
+    let padding = 1_000 + 1_300 - full_size(1_000, Some(ALLOW), t0);
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .request(&padded(padding, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("one message");
+    assert_eq!(sent.payload.len(), 1_300);
+    let text = String::from_utf8_lossy(&sent.payload);
+    assert!(text.contains("\r\nVia: SIP/2.0/UDP "), "{text}");
+    assert!(text.contains("\r\nAllow: INVITE, ACK, "), "{text}");
+}
+
+#[test]
+fn allow_is_left_out_only_of_a_request_compact_does_not_fit() {
+    let t0 = Instant::now();
+    // what writing compact takes off this request, `Allow` kept: well under
+    // the line, so that nothing but the names changed
+    let mut always = compacting(super::Compaction::Always, t0);
+    always
+        .request(&padded(800, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let compact = transmits(&mut always)
+        .first()
+        .map(|sent| sent.payload.len())
+        .expect("one message");
+    let saved = full_size(800, Some(ALLOW), t0) - compact;
+
+    // compact, with its `Allow`, it is five bytes over the line
+    let padding = 800 + 1_305 - compact;
+    let mut lean = endpoint(t0);
+    lean.request(&padded(padding, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let out = transmits(&mut lean);
+    let sent = out.first().expect("one message");
+    assert_eq!(sent.protocol, TransportProtocol::Udp);
+    let text = String::from_utf8_lossy(&sent.payload);
+    assert!(!text.contains("Allow"), "{text}");
+    assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
+    assert!(sent.payload.len() <= 1_300);
+
+    // and five bytes under it, compact is enough and `Allow` stays
+    let padding = 800 + 1_295 - compact;
+    assert!(full_size(padding, Some(ALLOW), t0) > 1_300, "{saved}");
+    let mut kept = endpoint(t0);
+    kept.request(&padded(padding, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let out = transmits(&mut kept);
+    let sent = out.first().expect("one message");
+    assert_eq!(sent.payload.len(), 1_295);
+    let text = String::from_utf8_lossy(&sent.payload);
+    assert!(text.contains("\r\nAllow:INVITE,ACK,CANCEL,"), "{text}");
+}
+
+#[test]
+fn a_request_too_large_even_compact_goes_to_the_stream_written_in_full() {
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+    endpoint
+        .request(&padded(1_400, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let sent = out.first().expect("one message");
+    assert_eq!(sent.protocol, TransportProtocol::Tcp);
+    let text = String::from_utf8_lossy(&sent.payload);
+    assert!(text.contains("\r\nVia: SIP/2.0/TCP "), "{text}");
+    assert!(text.contains("\r\nAllow: INVITE, ACK, "), "{text}");
+    assert!(text.contains("\r\nSubject: x"), "{text}");
+}
+
+#[test]
+fn always_writes_a_datagram_compact_and_a_stream_never() {
+    let t0 = Instant::now();
+    let mut endpoint = compacting(super::Compaction::Always, t0);
+    endpoint
+        .request(&padded(10, Some(ALLOW)), t0)
+        .expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let small = out.first().expect("one message");
+    let text = String::from_utf8_lossy(&small.payload);
+    assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
+    assert!(
+        text.contains("\r\nAllow:INVITE,ACK,"),
+        "a request that fits keeps its Allow: {text}"
+    );
+    let call = crate::dialog::CallId::new(
+        &with(&small.payload, |m| {
+            m.header(HeaderName::CallId).map(<[u8]>::to_vec)
+        })
+        .expect("a Call-ID"),
+    );
+    assert!(
+        !endpoint
+            .call_record(&call)
+            .expect("the record")
+            .decisions()
+            .any(|decision| decision.reason == crate::diag::Reason::TransportCompactedBySize),
+        "nothing about its size made it compact"
+    );
+
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: TCP,
+                protocol: TransportProtocol::Tcp,
+                local: local(),
+                remote: Some(peer()),
+            },
+            t0,
+        )
+        .expect("binding TCP");
+    transmits(&mut endpoint);
+    let over_tcp = OutgoingRequest::new(Method::Options, uri("sip:bob@example.com"), TCP, peer())
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@example.com>");
+    endpoint.request(&over_tcp, t0).expect("the request goes");
+    let out = transmits(&mut endpoint);
+    let streamed = out.first().expect("one message");
+    assert_eq!(streamed.protocol, TransportProtocol::Tcp);
+    let text = String::from_utf8_lossy(&streamed.payload);
+    assert!(text.contains("\r\nVia: SIP/2.0/TCP "), "{text}");
 }
 
 #[test]
@@ -1943,7 +2197,7 @@ fn the_request_that_did_not_fit_is_reported_at_its_size_on_the_wire() {
     // the failure this exists for read as "authentication is broken" for two
     // days, because nothing anywhere said 1785 and nothing said 1300
     let t0 = Instant::now();
-    let mut endpoint = endpoint(t0);
+    let mut endpoint = endpoint_in_full(t0);
     let padding = vec![b'x'; 1_400];
     let big = request(Method::Options).header(HeaderName::Subject, &padding);
     assert!(endpoint.request(&big, t0).is_err());
@@ -3766,6 +4020,39 @@ fn a_request_that_found_no_server_is_kept_and_sent_elsewhere_as_itself() {
             .is_none(),
         "the right server's answer"
     );
+}
+
+/// A request that only fitted its datagram compact goes to the next server
+/// compact too: it is rebuilt there, every field long again, and held to the
+/// same ladder as its first send rather than sent over the line.
+#[test]
+fn a_request_sent_elsewhere_is_written_compact_again_when_it_has_to_be() {
+    let t0 = Instant::now();
+    let padding = 1_000 + 1_310 - full_size(1_000, None, t0);
+    let mut endpoint = endpoint(t0);
+    let elsewhere: SocketAddr = "198.51.100.7:5060".parse().unwrap();
+    let message = OutgoingRequest::new(Method::Message, uri("sip:bob@example.com"), UDP, peer())
+        .to(b"<sip:bob@example.com>")
+        .from(b"Alice <sip:alice@example.com>")
+        .header(HeaderName::Subject, &vec![b'x'; padding]);
+    let id = endpoint.request(&message, t0).unwrap();
+    let first = sent(&mut endpoint);
+    assert!(first.len() <= 1_300, "{}", first.len());
+    deliver(
+        &mut endpoint,
+        &respond_to(&first, 503, "Service Unavailable", None),
+        t0,
+    );
+    let failed = AnyTransactionId::NonInviteClient(id);
+    endpoint
+        .send_elsewhere(failed, elsewhere, t0)
+        .expect("sent again");
+    let out = transmits(&mut endpoint);
+    let moved = out.last().expect("sent again");
+    assert_eq!(moved.destination, elsewhere);
+    assert!(moved.payload.len() <= 1_300, "{}", moved.payload.len());
+    let text = String::from_utf8_lossy(&moved.payload);
+    assert!(text.contains("\r\nv:SIP/2.0/UDP "), "{text}");
 }
 
 /// Timer F and timer B keep what timed out, an INVITE among them.

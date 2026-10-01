@@ -32,7 +32,7 @@ mod via;
 
 pub use addr::{ContactIter, Contacts, NameAddrRef};
 pub use auth::{AuthParams, ChallengeRef, CredentialsRef};
-pub use builder::{BuildError, RequestBuilder, ResponseBuilder};
+pub use builder::{BuildError, RequestBuilder, ResponseBuilder, compact_request};
 pub use error::{HeaderError, ParseError};
 pub use events::{EventRef, SubscriptionStateRef, Substate};
 pub use framer::{Framed, StreamFramer};
