@@ -27,6 +27,36 @@ fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
 skip() { printf '  skip  %s\n' "$1"; }
 step() { printf '\n%s\n' "$1"; }
 
+# One `cargo test` run, quiet when it passes and named when it does not. The
+# whole output goes to a log under target/check-logs, one file per run, kept
+# whatever the outcome: a test that fails only when the machine is loaded
+# fails once in twenty gates, and a run whose output went to /dev/null has
+# nothing left to say which test it was. On failure the names of the failing
+# tests are printed under the FAIL line, with the log's path.
+# Usage: cargo_test "<what the FAIL line says>" <cargo test arguments...>
+TEST_LOGS="$ROOT/target/check-logs"
+cargo_test() {
+    local label="$1"
+    shift
+    mkdir -p "$TEST_LOGS"
+    local log
+    log="$TEST_LOGS/$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120).log"
+    if cargo test "$@" >"$log" 2>&1; then
+        pass "$label"
+        return 0
+    fi
+    fail "$label"
+    local failed
+    failed=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log" | sort -u)
+    if [ -n "$failed" ]; then
+        printf '%s\n' "$failed" | sed 's/^/        failed: /'
+    else
+        grep -E '^error(\[|:)' "$log" | head -5 | sed 's/^/        /'
+    fi
+    printf '        the whole output: %s\n' "${log#$ROOT/}"
+    return 1
+}
+
 SELF="scripts/check.sh"
 
 # --others too: a file that is new and not yet staged is exactly the one a
@@ -669,8 +699,7 @@ cargo fmt --all --check >/dev/null 2>&1 && pass "cargo fmt" || fail "cargo fmt -
 # would ever lint it
 cargo clippy --workspace --all-targets --all-features -- -D warnings >/dev/null 2>&1 \
     && pass "cargo clippy" || fail "cargo clippy --workspace --all-targets --all-features"
-cargo test --workspace --all-features >/dev/null 2>&1 \
-    && pass "cargo test" || fail "cargo test --workspace --all-features"
+cargo_test "cargo test --workspace --all-features" --workspace --all-features
 # rustdoc is a compiler nothing else here runs, and the mistakes only it sees
 # are the ones a reader hits: a public doc linking something private, a link
 # that resolves to nothing, an RFC quotation whose angle brackets read as
@@ -981,9 +1010,7 @@ if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
         printf '        %s\n' "$lic_out"
         printf '        regenerate it: cargo run -p sipral-license-gen -- --aec\n'
     fi
-    cargo test --manifest-path "$manifest" >/dev/null 2>&1 \
-        && pass "cargo test --manifest-path $manifest" \
-        || fail "cargo test --manifest-path $manifest"
+    cargo_test "cargo test --manifest-path $manifest" --manifest-path "$manifest"
     cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings >/dev/null 2>&1 \
         && pass "cargo clippy --manifest-path $manifest --all-targets" \
         || fail "cargo clippy --manifest-path $manifest --all-targets -- -D warnings"
@@ -1009,12 +1036,9 @@ cargo build -p sipral --no-default-features >/dev/null 2>&1 \
     && pass "cargo build -p sipral" || fail "cargo build -p sipral --no-default-features"
 cargo build -p sipral-ffi --no-default-features >/dev/null 2>&1 \
     && pass "cargo build -p sipral-ffi" || fail "cargo build -p sipral-ffi --no-default-features"
-cargo test -p sipral-media --no-default-features >/dev/null 2>&1 \
-    && pass "cargo test -p sipral-media" || fail "cargo test -p sipral-media --no-default-features"
-cargo test -p sipral --no-default-features >/dev/null 2>&1 \
-    && pass "cargo test -p sipral" || fail "cargo test -p sipral --no-default-features"
-cargo test -p sipral-ffi --no-default-features >/dev/null 2>&1 \
-    && pass "cargo test -p sipral-ffi" || fail "cargo test -p sipral-ffi --no-default-features"
+cargo_test "cargo test -p sipral-media --no-default-features" -p sipral-media --no-default-features
+cargo_test "cargo test -p sipral --no-default-features" -p sipral --no-default-features
+cargo_test "cargo test -p sipral-ffi --no-default-features" -p sipral-ffi --no-default-features
 # `dtls` is off to keep the handshake's RustCrypto crates out
 # (crates/sipral/Cargo.toml), and nothing else the facade links by default
 # may bring them back. AES-GCM is not among them: sipral-rtp carries it for
@@ -1034,9 +1058,8 @@ fi
 # which an answer copied from the wrong crate's flag lies about a codec the
 # build can negotiate. Every C-side answer about Opus is read from the
 # catalogue so that this passes.
-cargo test -p sipral-ffi --no-default-features --features sipral/opus >/dev/null 2>&1 \
-    && pass "cargo test -p sipral-ffi over sipral/opus" \
-    || fail "cargo test -p sipral-ffi --no-default-features --features sipral/opus"
+cargo_test "cargo test -p sipral-ffi --no-default-features --features sipral/opus" \
+    -p sipral-ffi --no-default-features --features sipral/opus
 
 # The cfg-ed code has lints of its own -- the `Result` that is always `Ok`
 # where no codec refuses anything is one, and it needed an allow -- and
@@ -1061,17 +1084,15 @@ cargo clippy -p sipral-ffi --no-default-features --features sipral/opus --all-ta
 # encrypted calls, and the carrier deployment behind a TLS SIP transport wants
 # the codec and has no use for an elliptic curve.
 for combination in dtls opus; do
-    cargo test -p sipral --no-default-features --features "$combination" >/dev/null 2>&1 \
-        && pass "cargo test -p sipral with $combination alone" \
-        || fail "cargo test -p sipral --no-default-features --features $combination"
+    cargo_test "cargo test -p sipral --no-default-features --features $combination" \
+        -p sipral --no-default-features --features "$combination"
     cargo clippy -p sipral --no-default-features --features "$combination" --all-targets \
         -- -D warnings >/dev/null 2>&1 \
         && pass "cargo clippy -p sipral with $combination alone" \
         || fail "cargo clippy -p sipral --no-default-features --features $combination"
 done
-cargo test -p sipral-ffi --no-default-features --features dtls >/dev/null 2>&1 \
-    && pass "cargo test -p sipral-ffi with dtls alone" \
-    || fail "cargo test -p sipral-ffi --no-default-features --features dtls"
+cargo_test "cargo test -p sipral-ffi --no-default-features --features dtls" \
+    -p sipral-ffi --no-default-features --features dtls
 cargo clippy -p sipral-ffi --no-default-features --features dtls --all-targets \
     -- -D warnings >/dev/null 2>&1 \
     && pass "cargo clippy -p sipral-ffi with dtls alone" \
