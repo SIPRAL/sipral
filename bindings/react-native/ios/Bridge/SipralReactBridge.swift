@@ -113,6 +113,26 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.setDiagnosticTrace(on) }
     }
 
+    @objc public func setCallGain(
+        _ call: String, direction: String, gain: Double, resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) { try self.core.setCallGain(call, direction, gain) }
+    }
+
+    @objc public func setCallMuted(
+        _ call: String, direction: String, muted: Bool, resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) { try self.core.setCallMuted(call, direction, muted) }
+    }
+
+    @objc public func callAudio(_ call: String, direction: String, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.callAudio(call, direction) }
+    }
+
+    @objc public func settings(resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.settings() }
+    }
+
     /// Close the stack when React Native tears the module down.
     @objc public func invalidate() {
         queue.async { self.core.close() }
@@ -122,7 +142,9 @@ public final class SipralReactBridge: NSObject {
         queue.async {
             do {
                 let result = try action()
-                resolve(result as? String)
+                // a handle or an address as a string, a record as a
+                // dictionary, and nothing for an action that returns none
+                resolve((result as? String) ?? (result as? [String: Any]))
             } catch {
                 let refused = SipralReactCore.refusal(of: error)
                 reject(refused.code, refused.message, error)

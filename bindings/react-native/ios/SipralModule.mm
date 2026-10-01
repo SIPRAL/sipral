@@ -87,6 +87,9 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
     put(given, @"diagnosticTrace", @(options.diagnosticTrace().value()));
   }
   put(given, @"tlsPin", options.tlsPin());
+  if (options.systemEchoCancellation().has_value()) {
+    put(given, @"systemEchoCancellation", @(options.systemEchoCancellation().value()));
+  }
   [_bridge open:given resolve:resolve reject:reject];
 }
 
@@ -117,6 +120,8 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   if (options.expiresSeconds().has_value()) {
     put(given, @"expiresSeconds", @(options.expiresSeconds().value()));
   }
+  put(given, @"streamProtocol", options.streamProtocol());
+  put(given, @"tlsPin", options.tlsPin());
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 
@@ -226,6 +231,37 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
 - (void)setDiagnosticTrace:(BOOL)on resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
 {
   [_bridge setDiagnosticTrace:on resolve:resolve reject:reject];
+}
+
+- (void)setCallGain:(NSString *)call
+          direction:(NSString *)direction
+               gain:(double)gain
+            resolve:(RCTPromiseResolveBlock)resolve
+             reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setCallGain:call direction:direction gain:gain resolve:resolve reject:reject];
+}
+
+- (void)setCallMuted:(NSString *)call
+           direction:(NSString *)direction
+               muted:(BOOL)muted
+             resolve:(RCTPromiseResolveBlock)resolve
+              reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setCallMuted:call direction:direction muted:muted resolve:resolve reject:reject];
+}
+
+- (void)callAudio:(NSString *)call
+        direction:(NSString *)direction
+          resolve:(RCTPromiseResolveBlock)resolve
+           reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge callAudio:call direction:direction resolve:resolve reject:reject];
+}
+
+- (void)settings:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge settingsWithResolve:resolve reject:reject];
 }
 
 @end

@@ -13,6 +13,7 @@ import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.WritableMap
 import org.sipral.idiomatic.SipralAndroidAudio
 import org.sipral.reactnative.core.SipralAccountOptions
 import org.sipral.reactnative.core.SipralOpenOptions
@@ -43,6 +44,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 pseudonymSalt = options.text("pseudonymSalt"),
                 diagnosticTrace = options.flag("diagnosticTrace"),
                 tlsPin = options.text("tlsPin"),
+                systemEchoCancellation = options.flag("systemEchoCancellation"),
             ),
         )
     }
@@ -63,6 +65,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 authUser = options.text("authUser"),
                 authPassword = options.text("authPassword"),
                 expiresSeconds = options.number("expiresSeconds")?.toLong() ?: 0,
+                streamProtocol = options.text("streamProtocol"),
+                tlsPin = options.text("tlsPin"),
             ),
         )
     }
@@ -104,14 +108,30 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     override fun setDiagnosticTrace(on: Boolean, promise: Promise) = settle(promise) { core.setDiagnosticTrace(on) }
 
+    override fun setCallGain(call: String, direction: String, gain: Double, promise: Promise) =
+        settle(promise) { core.setCallGain(call, direction, gain) }
+
+    override fun setCallMuted(call: String, direction: String, muted: Boolean, promise: Promise) =
+        settle(promise) { core.setCallMuted(call, direction, muted) }
+
+    override fun callAudio(call: String, direction: String, promise: Promise) =
+        settle(promise) { written(core.callAudio(call, direction)) }
+
+    override fun settings(promise: Promise) = settle(promise) { written(core.settings()) }
+
     override fun invalidate() {
         worker.shutdown { core.close() }
         super.invalidate()
     }
 
     private fun forward(event: Map<String, Any>) {
+        emitOnEvent(written(event))
+    }
+
+    /** A flat map the core made, as the bridge's own. */
+    private fun written(record: Map<String, Any>): WritableMap {
         val map = Arguments.createMap()
-        for ((key, value) in event) {
+        for ((key, value) in record) {
             when (value) {
                 is String -> map.putString(key, value)
                 is Boolean -> map.putBoolean(key, value)
@@ -119,7 +139,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 is Double -> map.putDouble(key, value)
             }
         }
-        emitOnEvent(map)
+        return map
     }
 
     private fun settle(promise: Promise, action: () -> Any) =

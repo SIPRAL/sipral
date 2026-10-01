@@ -126,6 +126,41 @@ export interface OpenOptions {
    * the native half is asked, and handed to it as bare digits.
    */
   tlsPin?: string;
+  /**
+   * False opens the microphone and the speaker past the platform's echo
+   * cancellation -- the voice-processing unit's processing bypassed on iOS,
+   * the voice-recognition preset rather than the voice-communication one on
+   * Android -- for a headset, which has no echo to cancel, or an application
+   * that cancels it on each call itself. On unless said otherwise.
+   */
+  systemEchoCancellation?: boolean;
+}
+
+/** Which way one call's audio goes: what the microphone sends it, or what it plays. */
+export type AudioDirection = 'input' | 'output';
+
+/** One call's own controls in one direction. */
+export interface CallAudio {
+  /** 1 is unity, 0.5 halves, 2 doubles. */
+  gain: number;
+  muted: boolean;
+  /** The meter after the call's own gain and mute, 0 to 1. */
+  level: number;
+}
+
+/** What the stack runs with, every default filled in. */
+export interface Settings {
+  transport: Signalling;
+  codecCount: number;
+  frameMs: number;
+  /** The SRTP suites the calls offer and accept, in order, by their RFC 4568 and RFC 7714 names. */
+  srtpSuites: string[];
+  /** Whether a pseudonym salt was given; the salt itself is never read back. */
+  pseudonymSalted: boolean;
+  /** Whether the trace writes whole messages now. */
+  diagnosticTrace: boolean;
+  /** Whether the platform's echo cancellation is asked for. */
+  systemEchoCancellation: boolean;
 }
 
 export interface AccountOptions {
@@ -151,6 +186,21 @@ export interface AccountOptions {
   authPassword?: string;
   /** Zero, or left out, for the library's own default. */
   expiresSeconds?: number;
+  /**
+   * "tcp" or "tls": a connection of the account's own to its server, beside
+   * accounts on the client's UDP socket to other servers, so that one client
+   * holds an account on UDP with one PBX and another on TCP or TLS with a
+   * second. The native half opens it when the stack asks, and the REGISTER
+   * and every call of the account go over it. Only on a client signalling
+   * over "udp".
+   */
+  streamProtocol?: 'tcp' | 'tls';
+  /**
+   * The SHA-256 fingerprint of the one certificate the account's own TLS
+   * connection trusts, in any form `pinDigest` reads; it needs
+   * `streamProtocol` "tls".
+   */
+  tlsPin?: string;
 }
 
 export interface PlaceCallOptions {

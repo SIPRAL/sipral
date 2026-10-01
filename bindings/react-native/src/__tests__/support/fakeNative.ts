@@ -124,4 +124,24 @@ export class FakeNative implements Spec {
   setDiagnosticTrace(...args: Parameters<Spec['setDiagnosticTrace']>) {
     return this.settle('setDiagnosticTrace', args, undefined);
   }
+  setCallGain(...args: Parameters<Spec['setCallGain']>) {
+    return this.settle('setCallGain', args, undefined);
+  }
+  setCallMuted(...args: Parameters<Spec['setCallMuted']>) {
+    return this.settle('setCallMuted', args, undefined);
+  }
+  callAudio(...args: Parameters<Spec['callAudio']>) {
+    return this.settle('callAudio', args, {gain: 0.5, muted: true, level: 0});
+  }
+  settings() {
+    return this.settle('settings', [], {
+      transport: 'udp',
+      codecCount: 4,
+      frameMs: 20,
+      srtpSuites: '2,1',
+      pseudonymSalted: true,
+      diagnosticTrace: false,
+      systemEchoCancellation: false,
+    });
+  }
 }

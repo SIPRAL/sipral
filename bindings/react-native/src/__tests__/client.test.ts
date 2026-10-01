@@ -220,6 +220,30 @@ describe('accounts', () => {
     expect(native.methods()).toEqual(['open', 'addAccount', 'removeAccount']);
   });
 
+  it('crosses an account on a connection of its own with its pin read, and refuses one that cannot be', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({
+      aor: 'sip:bob@carrier.example',
+      registrarAddress: '198.51.100.20:5061',
+      streamProtocol: 'tls',
+      tlsPin: 'SHA256 Fingerprint=' + 'AB:'.repeat(31) + 'AB',
+    });
+    expect(native.calls[1].args[0]).toMatchObject({streamProtocol: 'tls', tlsPin: 'ab'.repeat(32)});
+    const before = native.calls.length;
+    const base = {aor: 'sip:bob@carrier.example', registrarAddress: '198.51.100.20:5061'};
+    expect((await refusal(client.addAccount({...base, streamProtocol: 'sctp' as 'tcp'}))).code).toBe('invalidArgument');
+    expect((await refusal(client.addAccount({...base, streamProtocol: 'tcp', tlsPin: 'ab'.repeat(32)}))).code).toBe(
+      'invalidArgument',
+    );
+    expect(native.calls).toHaveLength(before);
+
+    await client.close();
+    open = [];
+    const tlsClient = await Sipral.open({signalling: 'tls', signallingServer: '198.51.100.20:5061'}, new FakeNative());
+    open.push(tlsClient);
+    expect((await refusal(tlsClient.addAccount({...base, streamProtocol: 'tcp'}))).code).toBe('invalidArgument');
+  });
+
   it('refuses an account with no address before crossing', async () => {
     const {client, native} = await opened();
     expect((await refusal(client.addAccount({aor: '', registrarAddress: '203.0.113.5:5060'}))).code).toBe(
@@ -443,6 +467,40 @@ describe('digits and audio', () => {
     native.emit({kind: 'digitReceived', call: call.id, digit: '#'});
     expect(onCall).toEqual(['5', '#']);
     expect(onClient).toEqual(['5', '#']);
+  });
+
+  it('sets, mutes and reads one call\'s own audio, refusing a bad direction or gain before crossing', async () => {
+    const {native, call} = await confirmedCall();
+    await call.audio.setGain('output', 0.5);
+    await call.audio.setMuted('input', true);
+    expect(await call.audio.read('output')).toEqual({gain: 0.5, muted: true, level: 0});
+    expect(native.calls.slice(-3)).toEqual([
+      {method: 'setCallGain', args: [call.id, 'output', 0.5]},
+      {method: 'setCallMuted', args: [call.id, 'input', true]},
+      {method: 'callAudio', args: [call.id, 'output']},
+    ]);
+    const before = native.calls.length;
+    expect((await refusal(call.audio.setGain('sideways' as 'input', 1))).code).toBe('invalidArgument');
+    expect((await refusal(call.audio.setGain('input', -1))).code).toBe('invalidArgument');
+    expect(native.calls).toHaveLength(before);
+    native.failNext('setCallMuted', 'wrongState', 'the call\'s audio has not started');
+    expect((await refusal(call.audio.setMuted('input', false))).code).toBe('wrongState');
+  });
+
+  it('passes the echo switch through, and reads the settings back with the suites named', async () => {
+    const native = new FakeNative();
+    const client = await Sipral.open({bindHost: '192.0.2.10', systemEchoCancellation: false}, native);
+    open.push(client);
+    expect(native.calls[0].args[0]).toMatchObject({systemEchoCancellation: false});
+    expect(await client.settings()).toEqual({
+      transport: 'udp',
+      codecCount: 4,
+      frameMs: 20,
+      srtpSuites: ['AES_CM_128_HMAC_SHA1_32', 'AES_CM_128_HMAC_SHA1_80'],
+      pseudonymSalted: true,
+      diagnosticTrace: false,
+      systemEchoCancellation: false,
+    });
   });
 
   it('activates, deactivates and mutes through the native half', async () => {

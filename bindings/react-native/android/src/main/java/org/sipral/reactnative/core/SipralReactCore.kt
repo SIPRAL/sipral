@@ -65,6 +65,8 @@ data class SipralOpenOptions(
     val diagnosticTrace: Boolean? = null,
     /** The fingerprint of the one certificate a TLS connection trusts. */
     val tlsPin: String? = null,
+    /** False opens the devices past the platform's echo cancellation. */
+    val systemEchoCancellation: Boolean? = null,
 )
 
 /** What `addAccount` takes, the fields of NativeAccountOptions. */
@@ -81,6 +83,11 @@ data class SipralAccountOptions(
     val authUser: String? = null,
     val authPassword: String? = null,
     val expiresSeconds: Long = 0,
+    /** "tcp" or "tls": a connection of the account's own to its server. */
+    val streamProtocol: String? = null,
+    /** The fingerprint, as bare hexadecimal, of the one certificate that
+     * connection trusts. */
+    val tlsPin: String? = null,
 )
 
 /**
@@ -136,6 +143,7 @@ class SipralReactCore(
             datagramWithoutStreamBytes = options.datagramWithoutStreamBytes,
             pseudonymSalt = options.pseudonymSalt?.let(::bytes),
             diagnosticTrace = options.diagnosticTrace,
+            systemEchoCancellation = options.systemEchoCancellation,
         )
         val collecting = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         collecting.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -161,6 +169,12 @@ class SipralReactCore(
     }
 
     fun addAccount(options: SipralAccountOptions): String = guarded {
+        val stream = when (options.streamProtocol) {
+            null -> null
+            "tcp" -> SipralTransport.TCP
+            "tls" -> SipralTransport.TLS
+            else -> throw SipralRefusal("invalidArgument", "streamProtocol is tcp or tls, not ${options.streamProtocol}")
+        }
         val account = open().addAccount(
             aor = options.aor,
             registrarAddress = options.registrarAddress,
@@ -173,6 +187,8 @@ class SipralReactCore(
             authUser = options.authUser,
             authPassword = options.authPassword,
             expiresSeconds = options.expiresSeconds,
+            tlsPin = options.tlsPin,
+            streamProtocol = stream,
         )
         val id = account.handle.toString()
         accounts[id] = account
@@ -268,6 +284,46 @@ class SipralReactCore(
 
     fun setDiagnosticTrace(on: Boolean) = guarded { open().setDiagnosticTrace(on) }
 
+    /** One call's own gain in one direction, "input" or "output". */
+    fun setCallGain(call: String, direction: String, gain: Double) = guarded {
+        devices().setGain(callOf(call), direction(direction), gain)
+    }
+
+    fun setCallMuted(call: String, direction: String, muted: Boolean) = guarded {
+        devices().setMuted(callOf(call), direction(direction), muted)
+    }
+
+    /** One call's own gain, mute and meter in one direction, as the spec's
+     * NativeCallAudio. */
+    fun callAudio(call: String, direction: String): Map<String, Any> = guarded {
+        val audio = devices()
+        val kept = callOf(call)
+        val way = direction(direction)
+        mapOf(
+            "gain" to audio.gain(kept, way),
+            "muted" to audio.isMuted(kept, way),
+            "level" to audio.level(kept, way),
+        )
+    }
+
+    /** What the stack runs with, as the spec's NativeSettings. */
+    fun settings(): Map<String, Any> = guarded {
+        val read = open().settings()
+        mapOf(
+            "transport" to when (read.transport) {
+                SipralTransport.TCP -> "tcp"
+                SipralTransport.TLS -> "tls"
+                else -> "udp"
+            },
+            "codecCount" to read.codecCount,
+            "frameMs" to read.frameMs.toInt(),
+            "srtpSuites" to read.srtpSuites.joinToString(",") { it.value.toString() },
+            "pseudonymSalted" to read.pseudonymSalted,
+            "diagnosticTrace" to read.diagnosticTrace,
+            "systemEchoCancellation" to read.systemEchoCancellation,
+        )
+    }
+
     private fun deliver(event: SipralEvent) {
         val id = event.call.toString()
         when (event.kind) {
@@ -320,6 +376,13 @@ class SipralReactCore(
         }
 
         /** The bytes [hex] writes, two digits each. */
+        /** A direction by the name JavaScript gives it. */
+        fun direction(named: String): SipralAudioDirection = when (named) {
+            "input" -> SipralAudioDirection.INPUT
+            "output" -> SipralAudioDirection.OUTPUT
+            else -> throw SipralRefusal("invalidArgument", "a direction is input or output, not $named")
+        }
+
         fun bytes(hex: String): ByteArray {
             if (hex.length % 2 != 0 || hex.any { it.digitToIntOrNull(16) == null }) {
                 throw SipralRefusal("invalidArgument", "pseudonymSalt is bytes as hexadecimal")

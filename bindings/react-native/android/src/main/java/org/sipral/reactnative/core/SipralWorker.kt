@@ -27,14 +27,16 @@ class SipralWorker(name: String = "sipral-react-native") {
     }
 
     fun settle(
-        resolve: (String?) -> Unit,
+        resolve: (Any?) -> Unit,
         reject: (code: String, message: String, cause: Throwable) -> Unit,
         action: () -> Any,
     ) {
         try {
             executor.execute {
                 try {
-                    resolve(action() as? String)
+                    // a handle or an address as a string, a record as a map,
+                    // and nothing for an action that returns none
+                    resolve(action().takeUnless { it is Unit })
                 } catch (refused: SipralRefusal) {
                     reject(refused.code, refused.message ?: "", refused)
                 } catch (failed: Exception) {

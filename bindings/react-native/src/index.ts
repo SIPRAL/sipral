@@ -33,6 +33,8 @@ export type {Subscription} from './emitter';
 export type {NativeEvent, Spec as NativeSipralSpec} from './NativeSipral';
 export type {
   AccountOptions,
+  AudioDirection,
+  CallAudio,
   CallDirection,
   CallState,
   EndReason,
@@ -41,6 +43,7 @@ export type {
   PlaceCallOptions,
   RegistrationFailure,
   RegistrationState,
+  Settings,
   Signalling,
   Srtp,
 } from './types';

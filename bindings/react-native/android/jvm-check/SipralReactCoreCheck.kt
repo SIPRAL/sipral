@@ -11,17 +11,23 @@
 
 package org.sipral.reactnative.core
 
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.Collections
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.sipral.Sipral
+import org.sipral.SipralAudioActivation
 import org.sipral.idiomatic.SipralAudioMode
 
-private class Phone(name: String) {
+private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application) {
     val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
-    val core = SipralReactCore(emit = { events += it }, audio = { SipralAudioMode.Application })
+    val core = SipralReactCore(emit = { events += it }, audio = { mode })
     val address = core.open(SipralOpenOptions(bindHost = "127.0.0.1"))
     val aor = "sip:$name@sipral.invalid"
 
@@ -235,6 +241,97 @@ private fun aCallThatEndedBeforeItWasKeptIsClosed(): String {
     return "a call that ended before it was kept was closed, and remembered ends are bounded"
 }
 
+/** ABI 0.35: an account on a TCP connection of its own, beside the UDP
+ * socket, registers over a connection the core opened; a protocol that is
+ * neither is refused; and the settings come back as the spec's
+ * NativeSettings, the echo switch among them. */
+private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
+    ServerSocket(0, 4, InetAddress.getLoopbackAddress()).use { registrar ->
+        val register = CompletableFuture.supplyAsync {
+            registrar.accept().use { connection ->
+                connection.soTimeout = 10_000
+                val held = StringBuilder()
+                val buffer = ByteArray(4096)
+                while (!held.contains("\r\n\r\n")) {
+                    val read = connection.getInputStream().read(buffer)
+                    if (read < 0) break
+                    held.append(String(buffer, 0, read, Charsets.UTF_8))
+                }
+                held.toString()
+            }
+        }
+        val core = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
+        try {
+            core.open(
+                SipralOpenOptions(
+                    bindHost = "127.0.0.1", systemEchoCancellation = false,
+                    srtpSuites = "AES_CM_128_HMAC_SHA1_32,AES_CM_128_HMAC_SHA1_80",
+                ),
+            )
+            val address = "127.0.0.1:${registrar.localPort}"
+            refusal("invalidArgument") {
+                core.addAccount(SipralAccountOptions(aor = "sip:alice@sipral.invalid", registrarAddress = address, streamProtocol = "sctp"))
+            }
+            val line = core.addAccount(
+                SipralAccountOptions(
+                    aor = "sip:alice@sipral.invalid", registrar = "sip:sipral.invalid", registrarAddress = address,
+                    streamProtocol = "tcp",
+                ),
+            )
+            core.register(line)
+            val message = register.get(10, TimeUnit.SECONDS)
+            assertTrue(message.startsWith("REGISTER "), message)
+            assertTrue("Via: SIP/2.0/TCP " in message, message)
+            assertTrue(";transport=tcp" in message, message)
+            val settings = core.settings()
+            assertEquals("udp", settings["transport"])
+            assertEquals("2,1", settings["srtpSuites"])
+            assertEquals(false, settings["systemEchoCancellation"])
+            assertEquals(false, settings["pseudonymSalted"])
+            assertTrue((settings["codecCount"] as Int) > 0)
+        } finally {
+            core.close()
+        }
+    }
+    return "an account on a TCP connection of its own registered over it, and the settings read back"
+}
+
+/** A call's own gain and mute through the core, on a client in device mode
+ * whose devices stay closed under manual activation; a direction that is
+ * neither is refused, and so is a core in application mode. */
+private fun aCallsOwnAudioIsSetAndReadBack(): String {
+    if (Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE == 0L) {
+        return "no audio engine in this build for a call's own audio"
+    }
+    val alice = Phone("alice", SipralAudioMode.Device(SipralAudioActivation.MANUAL))
+    val bob = Phone("bob")
+    try {
+        val line = alice.core.addAccount(SipralAccountOptions(aor = alice.aor, registrarAddress = bob.address))
+        bob.core.addAccount(SipralAccountOptions(aor = bob.aor, registrarAddress = alice.address))
+        val call = alice.core.placeCall(line, "sip:bob@${bob.address}", destination = null, codecs = null)
+        val rang = bob.await("the incoming call") { it["kind"] == "incomingCall" }
+        val taken = rang["call"] as String
+        bob.core.answer(taken)
+        alice.await("the media") { it["kind"] == "mediaStarted" && it["call"] == call }
+        assertTrue(
+            waitUntil { runCatching { alice.core.setCallGain(call, "output", 0.5) }.isSuccess },
+            "the engine never took the call's media",
+        )
+        alice.core.setCallMuted(call, "input", true)
+        val output = alice.core.callAudio(call, "output")
+        assertEquals(0.5, output["gain"])
+        assertEquals(false, output["muted"])
+        assertEquals(0.0, output["level"])
+        assertEquals(true, alice.core.callAudio(call, "input")["muted"])
+        refusal("invalidArgument") { alice.core.setCallMuted(call, "sideways", true) }
+        refusal("notSupported") { bob.core.setCallGain(taken, "output", 1.0) }
+    } finally {
+        alice.core.close()
+        bob.core.close()
+    }
+    return "a call's own gain and mute set and read back"
+}
+
 /** An action after the worker was shut down is rejected as closed rather
  * than thrown at its caller; the close itself runs after what was queued. */
 private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
@@ -256,7 +353,8 @@ private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
 fun main() {
     val said = try {
         everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
-            aSettleAfterShutdownIsRejectedNotThrown()
+            aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
+            "; " + aCallsOwnAudioIsSetAndReadBack()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

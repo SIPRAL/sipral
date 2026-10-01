@@ -14,9 +14,9 @@ private final class Phone: @unchecked Sendable {
     let aor: String
     var address = ""
 
-    init(_ name: String) throws {
+    init(_ name: String, audio: AudioMode = .application) throws {
         aor = "sip:\(name)@sipral.invalid"
-        core = SipralReactCore(emit: { [weak self] event in self?.record(event) }, audio: { _ in .application })
+        core = SipralReactCore(emit: { [weak self] event in self?.record(event) }, audio: { _ in audio })
         address = try core.open(SipralOpenOptions(bindHost: "127.0.0.1"))
     }
 
@@ -46,6 +46,68 @@ private final class Phone: @unchecked Sendable {
         }
         XCTFail("\(aor) never saw \(what); saw \(events.map { $0["kind"] as? String ?? "?" })", file: file, line: line)
         throw SipralRefusal("timedOut", what)
+    }
+}
+
+/// Whether `condition` came true within `seconds`.
+private func waitFor(_ seconds: Double, _ condition: () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if condition() { return true }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+    return condition()
+}
+
+/// A registrar that takes one TCP connection on loopback and keeps the
+/// first request on it.
+private final class OneRegister: @unchecked Sendable {
+    private let listener: Int32
+    private let lock = NSLock()
+    private var request: String?
+    let address: String
+
+    init() throws {
+        let made = socket(AF_INET, SOCK_STREAM, 0)
+        listener = made
+        var bound = sockaddr_in()
+        bound.sin_family = sa_family_t(AF_INET)
+        bound.sin_addr.s_addr = inet_addr("127.0.0.1")
+        bound.sin_port = 0
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let ready = withUnsafeMutablePointer(to: &bound) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { at in
+                bind(made, at, length) == 0 && listen(made, 4) == 0 && getsockname(made, at, &length) == 0
+            }
+        }
+        guard ready else { throw SipralRefusal("platform", "the registrar could not listen") }
+        address = "127.0.0.1:\(UInt16(bigEndian: bound.sin_port))"
+        Thread { [self] in serve() }.start()
+    }
+
+    deinit { close(listener) }
+
+    private func serve() {
+        let connection = accept(listener, nil, nil)
+        guard connection >= 0 else { return }
+        defer { close(connection) }
+        var held = [UInt8]()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while !String(decoding: held, as: UTF8.self).contains("\r\n\r\n") {
+            let read = recv(connection, &buffer, buffer.count, 0)
+            guard read > 0 else { break }
+            held += buffer[0..<read]
+        }
+        lock.withLock { request = String(decoding: held, as: UTF8.self) }
+    }
+
+    func first(within seconds: Double) -> String? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let seen = lock.withLock({ request }) { return seen }
+            usleep(10_000)
+        }
+        return nil
     }
 }
 
@@ -224,6 +286,70 @@ final class SipralReactCoreTests: XCTestCase {
         let targets = try XCTUnwrap(located?["targets"] as? String)
         XCTAssertTrue(targets.split(separator: ",").contains("127.0.0.1:5999"), targets)
         XCTAssertEqual(located?["account"] as? String, line)
+    }
+
+    /// ABI 0.35: an account on a TCP connection of its own, beside the UDP
+    /// socket, registers over a connection the core opened; a protocol that
+    /// is neither is refused; and the settings come back as the spec's
+    /// NativeSettings, the echo switch among them.
+    func testAnAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() async throws {
+        let registrar = try OneRegister()
+        let core = SipralReactCore(emit: { _ in }, audio: { _ in .application })
+        defer { core.close() }
+        _ = try core.open(SipralOpenOptions([
+            "bindHost": "127.0.0.1", "systemEchoCancellation": NSNumber(value: false),
+            "srtpSuites": "AES_CM_128_HMAC_SHA1_32,AES_CM_128_HMAC_SHA1_80",
+        ]))
+        refusal("invalidArgument") {
+            _ = try core.addAccount(SipralAccountOptions([
+                "aor": "sip:alice@sipral.invalid", "registrarAddress": registrar.address, "streamProtocol": "sctp",
+            ]))
+        }
+        let line = try core.addAccount(SipralAccountOptions([
+            "aor": "sip:alice@sipral.invalid", "registrar": "sip:sipral.invalid",
+            "registrarAddress": registrar.address, "streamProtocol": "tcp",
+        ]))
+        try core.register(line)
+        let register = try XCTUnwrap(registrar.first(within: 10), "no REGISTER over a connection")
+        XCTAssertTrue(register.hasPrefix("REGISTER "), register)
+        XCTAssertTrue(register.contains("Via: SIP/2.0/TCP "), register)
+        XCTAssertTrue(register.contains(";transport=tcp"), register)
+
+        let settings = try core.settings()
+        XCTAssertEqual(settings["transport"] as? String, "udp")
+        XCTAssertEqual(settings["srtpSuites"] as? String, "2,1")
+        XCTAssertEqual(settings["systemEchoCancellation"] as? Bool, false)
+        XCTAssertEqual(settings["pseudonymSalted"] as? Bool, false)
+        XCTAssertGreaterThan(settings["codecCount"] as? Int ?? 0, 0)
+    }
+
+    /// A call's own gain and mute through the core, on a stack in device mode
+    /// whose devices stay closed under manual activation; a direction that is
+    /// neither is refused, and so is a core in application mode.
+    func testACallsOwnAudioIsSetAndReadBack() async throws {
+        guard try Sipral.capabilities().features & Sipral.featureAudioDevice != 0 else {
+            throw XCTSkip("this build has no audio engine for this platform")
+        }
+        let alice = try Phone("alice", audio: .device(activation: .manual))
+        let bob = try Phone("bob")
+        defer { alice.core.close(); bob.core.close() }
+        let line = try alice.core.addAccount(SipralAccountOptions(aor: alice.aor, registrarAddress: bob.address))
+        _ = try bob.core.addAccount(SipralAccountOptions(aor: bob.aor, registrarAddress: alice.address))
+        let call = try alice.core.placeCall(line, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
+        let rang = try await bob.await("the incoming call") { $0["kind"] as? String == "incomingCall" }
+        let taken = try XCTUnwrap(rang["call"] as? String)
+        try bob.core.answer(taken)
+        _ = try await alice.await("the media") { $0["kind"] as? String == "mediaStarted" && $0["call"] as? String == call }
+        let carried = await waitFor(5) { (try? alice.core.setCallGain(call, "output", 0.5)) != nil }
+        XCTAssertTrue(carried, "the engine never took the call's media")
+        try alice.core.setCallMuted(call, "input", true)
+        let output = try alice.core.callAudio(call, "output")
+        XCTAssertEqual(output["gain"] as? Double, 0.5)
+        XCTAssertEqual(output["muted"] as? Bool, false)
+        XCTAssertEqual(output["level"] as? Double, 0)
+        XCTAssertEqual(try alice.core.callAudio(call, "input")["muted"] as? Bool, true)
+        refusal("invalidArgument") { try alice.core.setCallMuted(call, "sideways", true) }
+        refusal("notSupported") { try bob.core.setCallGain(taken, "output", 1) }
     }
 
     /// A status reaches JavaScript by its name, and one this build has no

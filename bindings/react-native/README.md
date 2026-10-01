@@ -107,11 +107,19 @@ it.
 | `signallingServer` | `host:port`, required for TCP and TLS |
 | `stunServer` | `host:port` of a STUN server |
 | `audioActivation` | `"automatic"` (the default) or `"manual"` |
+| `systemEchoCancellation` | `false` opens the devices past the platform's echo cancellation |
 
 With `"manual"`, the devices open only between `client.audio.activate()`
 and `client.audio.deactivate()`, which is what CallKit's audio session
 callbacks and Android's audio focus are for. `client.audio.setMuted(true)`
 sends silence in place of the microphone, on every call.
+`systemEchoCancellation: false` bypasses the voice-processing unit's
+processing on iOS and opens the microphone with the voice-recognition preset
+on Android, for a headset, which has no echo to cancel, or an application
+that cancels it on each call itself. `client.settings()` reads back what the
+stack runs with: the transport, the codecs' count and frame, the SRTP suites
+the calls offer in order by name, whether a pseudonym salt was given,
+whether the diagnostic trace is whole now, and the echo switch.
 
 ### Where the phone is reached, and where its server is
 
@@ -133,10 +141,9 @@ SHA-256 fingerprint, whoever signed it. `srtp: 'bestEffort'` offers SDES on
 plain RTP/AVP; `srtpSuites`, `pathMtu`, `datagramWithoutStreamBytes` (a
 request over UDP anyway once no stream to a UDP-only server can be had),
 `pseudonymSalt` (hexadecimal) and `diagnosticTrace`
-(`client.setDiagnosticTrace`) reach the library as given. Two things the
-other layers have are not exposed here: an account's own pin (`tlsPin` with
-`checkCertificate`, for an application running the account's TLS itself) and
-the stack's settings read back.
+(`client.setDiagnosticTrace`) reach the library as given. What is not
+exposed here is an account's `checkCertificate`, for an application running
+the account's TLS itself: the native halves run it.
 
 ### Accounts
 
@@ -144,6 +151,16 @@ the stack's settings read back.
 `unregister()`, `registerAndWait()`, `remove()`, and `registrationState`,
 which follows the events. Without `registrar` the account never registers,
 and `registrarAddress` is only where requests go.
+
+`streamProtocol: 'tcp'` or `'tls'` puts an account on a connection of its
+own to its server, beside accounts on the client's UDP socket to other
+servers: one client holds an account on UDP with one PBX and another on TCP
+or TLS with a second. The native half opens the connection when the stack
+asks for it, the REGISTER and every call of the account go over it, and one
+that closes is opened again. `tlsPin` beside `'tls'` trusts the one
+certificate with that fingerprint, read in TypeScript as `pinDigest` reads
+it; without one, the platform's authorities. Only on a client signalling
+over `"udp"`.
 
 ### Calls
 
@@ -163,6 +180,14 @@ these:
 
 What a call cannot do in the state it is in is refused before anything
 crosses to native code, with the `wrongState` the library would answer.
+
+`call.audio` is the call's own audio on top of the client's:
+`setGain(direction, gain)` (1 is unity), `setMuted(direction, muted)` and
+`read(direction)` (its gain, mute and meter), `direction` being `'input'`,
+what the microphone sends this call alone, or `'output'`, how loud it is in
+the speaker beside the other calls. They hold from the moment the call's
+audio starts to its end, and the native half answers `wrongState` outside
+that.
 
 ### Events
 

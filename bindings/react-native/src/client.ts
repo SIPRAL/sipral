@@ -17,6 +17,8 @@ import type {Subscription} from './emitter';
 import {pinDigest} from './pin';
 import type {
   AccountOptions,
+  AudioDirection,
+  CallAudio,
   CallDirection,
   CallState,
   EndReason,
@@ -25,6 +27,8 @@ import type {
   PlaceCallOptions,
   RegistrationFailure,
   RegistrationState,
+  Settings,
+  Signalling,
 } from './types';
 
 export interface RegistrationChangedEvent {
@@ -136,6 +140,28 @@ export interface AccountEvents {
 }
 
 const DTMF = /^[0-9A-Da-d*#]+$/;
+
+/** The SRTP suites by their `SipralSrtpSuite` numbers, as RFC 4568 and RFC 7714 name them. */
+const SUITES = [
+  'unknown',
+  'AES_CM_128_HMAC_SHA1_80',
+  'AES_CM_128_HMAC_SHA1_32',
+  'F8_128_HMAC_SHA1_80',
+  'AES_256_CM_HMAC_SHA1_80',
+  'AES_256_CM_HMAC_SHA1_32',
+  'AEAD_AES_128_GCM',
+  'AEAD_AES_256_GCM',
+];
+
+function suiteName(number: number): string {
+  return SUITES[number] ?? `suite ${number}`;
+}
+
+function audioDirection(direction: string): void {
+  if (direction !== 'input' && direction !== 'output') {
+    throw new SipralError('invalidArgument', 'a direction is "input" or "output"');
+  }
+}
 
 async function crossing<T>(action: () => Promise<T>): Promise<T> {
   try {
@@ -281,6 +307,44 @@ export class SipralCall {
   on<K extends keyof CallEvents>(name: K, listener: (payload: CallEvents[K]) => void): Subscription {
     return this.emitter.on(name, listener);
   }
+
+  /**
+   * The call's own audio on top of the client's: `input` is what the
+   * microphone sends this call alone, `output` how loud it is in the speaker
+   * beside the other calls. Mute the call being spoken about in a
+   * consultation, turn one down. They last from the moment the call's audio
+   * starts to its end, through a hold and back; before and after, the native
+   * half refuses them as `wrongState`.
+   */
+  readonly audio = {
+    setGain: (direction: AudioDirection, gain: number): Promise<void> =>
+      this.client.run(
+        () => {
+          this.alive();
+          audioDirection(direction);
+          if (!(gain >= 0)) {
+            throw new SipralError('invalidArgument', 'a gain is a factor of zero or more');
+          }
+        },
+        (native) => native.setCallGain(this.id, direction, gain),
+      ),
+    setMuted: (direction: AudioDirection, muted: boolean): Promise<void> =>
+      this.client.run(
+        () => {
+          this.alive();
+          audioDirection(direction);
+        },
+        (native) => native.setCallMuted(this.id, direction, muted),
+      ),
+    read: (direction: AudioDirection): Promise<CallAudio> =>
+      this.client.run(
+        () => {
+          this.alive();
+          audioDirection(direction);
+        },
+        (native) => native.callAudio(this.id, direction),
+      ),
+  };
 
   /** Answer a call that arrived. The audio runs on the phone's own devices. */
   async answer(): Promise<void> {
@@ -466,6 +530,7 @@ export class SipralClient {
   private subscription: EventSubscription | undefined;
   private closed = false;
   private address = '';
+  private signalling: Signalling = 'udp';
 
   private constructor(private readonly native: Spec) {}
 
@@ -492,6 +557,7 @@ export class SipralClient {
       throw new SipralError('invalidArgument', 'pseudonymSalt is at least 16 bytes, as hexadecimal');
     }
     const client = new SipralClient(native);
+    client.signalling = signalling;
     SipralClient.opened = client;
     client.subscription = native.onEvent((event) => client.dispatch(event));
     try {
@@ -511,6 +577,7 @@ export class SipralClient {
         pseudonymSalt: options.pseudonymSalt,
         diagnosticTrace: options.diagnosticTrace,
         tlsPin,
+        systemEchoCancellation: options.systemEchoCancellation,
       });
     } catch (failure) {
       client.release();
@@ -537,6 +604,7 @@ export class SipralClient {
   }
 
   async addAccount(options: AccountOptions): Promise<SipralAccount> {
+    let tlsPin: string | undefined;
     const id = await this.run(
       () => {
         if (options.aor.trim() === '') {
@@ -546,8 +614,18 @@ export class SipralClient {
         if (named.length !== 1) {
           throw new SipralError('invalidArgument', 'an account names its server by registrarAddress or by serverUri, one of the two');
         }
+        if (options.streamProtocol !== undefined && options.streamProtocol !== 'tcp' && options.streamProtocol !== 'tls') {
+          throw new SipralError('invalidArgument', 'streamProtocol is "tcp" or "tls"');
+        }
+        if (options.streamProtocol !== undefined && this.signalling !== 'udp') {
+          throw new SipralError('invalidArgument', 'an account on a connection of its own sits beside a client signalling over "udp"');
+        }
+        if (options.tlsPin !== undefined && options.streamProtocol !== 'tls') {
+          throw new SipralError('invalidArgument', 'tlsPin is the certificate the account\'s own TLS connection trusts: it needs streamProtocol "tls"');
+        }
+        tlsPin = options.tlsPin === undefined ? undefined : pinDigest(options.tlsPin);
       },
-      (native) => native.addAccount({...options}),
+      (native) => native.addAccount({...options, tlsPin}),
     );
     const account = new SipralAccount(this, id, options.aor);
     this.accounts.set(id, account);
@@ -586,6 +664,25 @@ export class SipralClient {
    */
   setDiagnosticTrace(on: boolean): Promise<void> {
     return this.run(() => undefined, (native) => native.setDiagnosticTrace(on));
+  }
+
+  /**
+   * What the stack runs with, every default filled in: the transport, the
+   * codecs' count and frame, the SRTP suites the calls offer in order,
+   * whether a pseudonym salt was given, whether the diagnostic trace is whole
+   * now, and whether the platform's echo cancellation is asked for.
+   */
+  async settings(): Promise<Settings> {
+    const read = await this.run(() => undefined, (native) => native.settings());
+    return {
+      transport: read.transport as Signalling,
+      codecCount: read.codecCount,
+      frameMs: read.frameMs,
+      srtpSuites: read.srtpSuites === '' ? [] : read.srtpSuites.split(',').map((one) => suiteName(Number(one))),
+      pseudonymSalted: read.pseudonymSalted,
+      diagnosticTrace: read.diagnosticTrace,
+      systemEchoCancellation: read.systemEchoCancellation,
+    };
   }
 
   /** The audio devices: the library runs them, this only says when and whether the microphone is heard. */

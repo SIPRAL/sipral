@@ -39,6 +39,8 @@ export type NativeOpenOptions = {
   diagnosticTrace?: boolean;
   /** The SHA-256 fingerprint of the one certificate a TLS connection trusts. */
   tlsPin?: string;
+  /** False opens the devices past the platform's echo cancellation. */
+  systemEchoCancellation?: boolean;
 };
 
 export type NativeAccountOptions = {
@@ -54,6 +56,31 @@ export type NativeAccountOptions = {
   authUser?: string;
   authPassword?: string;
   expiresSeconds?: CodegenTypes.Double;
+  /** "tcp" or "tls": a connection of the account's own to its server. */
+  streamProtocol?: string;
+  /** The SHA-256 fingerprint, as bare hexadecimal, of the one certificate the account's own TLS connection trusts. */
+  tlsPin?: string;
+};
+
+/** One call's own controls in one direction, read back. */
+export type NativeCallAudio = {
+  gain: CodegenTypes.Double;
+  muted: boolean;
+  /** The meter, 0 to 1. */
+  level: CodegenTypes.Double;
+};
+
+/** What the stack runs with, every default filled in. */
+export type NativeSettings = {
+  /** "udp", "tcp" or "tls". */
+  transport: string;
+  codecCount: CodegenTypes.Int32;
+  frameMs: CodegenTypes.Int32;
+  /** The SRTP suites the calls offer, in order, as `SipralSrtpSuite` numbers, comma-separated. */
+  srtpSuites: string;
+  pseudonymSalted: boolean;
+  diagnosticTrace: boolean;
+  systemEchoCancellation: boolean;
 };
 
 export type NativeCallOptions = {
@@ -120,6 +147,11 @@ export interface Spec extends TurboModule {
   deactivateAudio(): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
   setDiagnosticTrace(on: boolean): Promise<void>;
+  /** One call's own gain in one direction, "input" or "output", 1 for unity. */
+  setCallGain(call: string, direction: string, gain: CodegenTypes.Double): Promise<void>;
+  setCallMuted(call: string, direction: string, muted: boolean): Promise<void>;
+  callAudio(call: string, direction: string): Promise<NativeCallAudio>;
+  settings(): Promise<NativeSettings>;
 
   readonly onEvent: CodegenTypes.EventEmitter<NativeEvent>;
 }

@@ -46,6 +46,8 @@ public struct SipralOpenOptions {
     public var diagnosticTrace: Bool?
     /// The fingerprint of the one certificate a TLS connection trusts.
     public var tlsPin: String?
+    /// False opens the devices past the platform's echo cancellation.
+    public var systemEchoCancellation: Bool?
 
     public init(bindHost: String? = nil) {
         self.bindHost = bindHost
@@ -68,6 +70,7 @@ public struct SipralOpenOptions {
         pseudonymSalt = options["pseudonymSalt"] as? String
         diagnosticTrace = (options["diagnosticTrace"] as? NSNumber)?.boolValue
         tlsPin = options["tlsPin"] as? String
+        systemEchoCancellation = (options["systemEchoCancellation"] as? NSNumber)?.boolValue
     }
 }
 
@@ -85,6 +88,11 @@ public struct SipralAccountOptions {
     public var authUser: String?
     public var authPassword: String?
     public var expiresSeconds: UInt64 = 0
+    /// "tcp" or "tls": a connection of the account's own to its server.
+    public var streamProtocol: String?
+    /// The fingerprint, as bare hexadecimal, of the one certificate that
+    /// connection trusts.
+    public var tlsPin: String?
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -104,6 +112,8 @@ public struct SipralAccountOptions {
         authUser = options["authUser"] as? String
         authPassword = options["authPassword"] as? String
         expiresSeconds = UInt64(max(0, (options["expiresSeconds"] as? NSNumber)?.doubleValue ?? 0))
+        streamProtocol = options["streamProtocol"] as? String
+        tlsPin = options["tlsPin"] as? String
     }
 }
 
@@ -174,7 +184,8 @@ public final class SipralReactCore: @unchecked Sendable {
                     pathMtu: options.pathMtu,
                     datagramWithoutStreamBytes: options.datagramWithoutStreamBytes,
                     pseudonymSalt: try options.pseudonymSalt.map(Self.bytes(hex:)),
-                    diagnosticTrace: options.diagnosticTrace
+                    diagnosticTrace: options.diagnosticTrace,
+                    systemEchoCancellation: options.systemEchoCancellation
                 )
                 let events = opened.events()
                 reader = Task { [weak self] in
@@ -207,12 +218,21 @@ public final class SipralReactCore: @unchecked Sendable {
 
     public func addAccount(_ options: SipralAccountOptions) throws -> String {
         try guarded {
+            var stream: SipralTransport?
+            switch options.streamProtocol {
+            case nil: stream = nil
+            case "tcp": stream = .tcp
+            case "tls": stream = .tls
+            case let other?: throw SipralRefusal("invalidArgument", "streamProtocol is tcp or tls, not \(other)")
+            }
             let account = try open().addAccount(
                 aor: options.aor,
                 registrarAddress: options.registrarAddress,
                 serverUri: options.serverUri,
                 serverNaptr: options.serverNaptr,
                 keepaliveMs: options.keepaliveMs,
+                tlsPin: options.tlsPin,
+                streamProtocol: stream,
                 registrar: options.registrar,
                 contact: options.contact,
                 displayName: options.displayName,
@@ -338,6 +358,61 @@ public final class SipralReactCore: @unchecked Sendable {
 
     public func setDiagnosticTrace(_ on: Bool) throws {
         try guarded { try open().setDiagnosticTrace(on) }
+    }
+
+    /// One call's own gain in one direction, "input" or "output".
+    public func setCallGain(_ call: String, _ direction: String, _ gain: Double) throws {
+        try guarded { try devices().setGain(gain, for: try Self.direction(direction), of: try callOf(call)) }
+    }
+
+    public func setCallMuted(_ call: String, _ direction: String, _ muted: Bool) throws {
+        try guarded { try devices().setMuted(muted, for: try Self.direction(direction), of: try callOf(call)) }
+    }
+
+    /// One call's own gain, mute and meter in one direction, as the spec's
+    /// NativeCallAudio.
+    public func callAudio(_ call: String, _ direction: String) throws -> [String: Any] {
+        try guarded {
+            let audio = try devices()
+            let kept = try callOf(call)
+            let way = try Self.direction(direction)
+            return [
+                "gain": try audio.gain(for: way, of: kept),
+                "muted": try audio.isMuted(way, of: kept),
+                "level": try audio.level(for: way, of: kept),
+            ]
+        }
+    }
+
+    /// What the stack runs with, as the spec's NativeSettings.
+    public func settings() throws -> [String: Any] {
+        try guarded {
+            let read = try open().settings()
+            let transport: String
+            switch read.transport {
+            case .tcp?: transport = "tcp"
+            case .tls?: transport = "tls"
+            default: transport = "udp"
+            }
+            return [
+                "transport": transport,
+                "codecCount": read.codecCount,
+                "frameMs": Int(read.frameMs),
+                "srtpSuites": read.srtpSuites.map { String($0.rawValue) }.joined(separator: ","),
+                "pseudonymSalted": read.pseudonymSalted,
+                "diagnosticTrace": read.diagnosticTrace,
+                "systemEchoCancellation": read.systemEchoCancellation,
+            ]
+        }
+    }
+
+    /// A direction by the name JavaScript gives it.
+    static func direction(_ named: String) throws -> SipralAudioDirection {
+        switch named {
+        case "input": return .input
+        case "output": return .output
+        default: throw SipralRefusal("invalidArgument", "a direction is input or output, not \(named)")
+        }
     }
 
     /// Every SRTP policy, by the name JavaScript gives it.
