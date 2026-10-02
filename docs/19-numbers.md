@@ -1055,10 +1055,12 @@ Read together:
   72 KB the 29 September harness held per call at five thousand: the
   example's socket per call and its echo buffer are in it.
 
-The same run on the Apple M2 (macOS, 24 GB) that day brought all thousand
-calls up too, but the machine was swapping, 12 GB of its 13 GB of swap in
-use, and both processes stalled for 18 and 36 seconds in two runs with their
-memory paged out; no figure from it is given.
+The same run on the Apple M2 (macOS, 24 GB) that day was tried twice while
+the machine was swapping, 12 GB of its 13 GB of swap in use: both processes
+stalled together with their memory paged out, for 36 seconds in the first
+run, which brought 784 of the thousand calls up, and for nearly 19 in the
+second, which brought all thousand up and then lost their audio. No figure
+from it is given.
 
 ## What would make these numbers worse
 
