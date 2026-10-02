@@ -72,6 +72,10 @@ data class SipralOpenOptions(
     /** What a party this end holds is sent: "silence" or "application";
      * null for silence. */
     val heldAudio: String? = null,
+    /** The most calls held at once, 0 for 128. */
+    val maxDialogs: Long = 0,
+    /** The most requests from other ends worked on at once, 0 for 256. */
+    val maxServerTransactions: Long = 0,
 )
 
 /** What `addAccount` takes, the fields of NativeAccountOptions. */
@@ -158,6 +162,8 @@ class SipralReactCore(
             diagnosticTrace = options.diagnosticTrace,
             systemEchoCancellation = options.systemEchoCancellation,
             heldAudio = heldAudio,
+            maxDialogs = options.maxDialogs,
+            maxServerTransactions = options.maxServerTransactions,
         )
         val collecting = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         collecting.launch(start = CoroutineStart.UNDISPATCHED) {

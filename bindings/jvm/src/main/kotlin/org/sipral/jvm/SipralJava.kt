@@ -88,6 +88,18 @@ object SipralJava {
             heldAudio = heldAudio,
         )
 
+    /** [SipralClient.open] in application mode, holding up to [maxDialogs]
+     * calls at once (0 for 128; past it a call that arrives is answered 503
+     * with `Retry-After: 2`) and working on up to [maxServerTransactions]
+     * requests from other ends (0 for 256): what a server raises past a
+     * hundred calls, the second to three a call and 256 more. */
+    @JvmStatic
+    fun open(bindHost: String, bindPort: Int, userAgent: String?, maxDialogs: Long, maxServerTransactions: Long): SipralClient =
+        SipralClient.open(
+            bindHost = bindHost, bindPort = bindPort, userAgent = userAgent, audio = SipralAudioMode.Application,
+            maxDialogs = maxDialogs, maxServerTransactions = maxServerTransactions,
+        )
+
     /**
      * [SipralClient.addAccount]: [registrarAddress] is where requests go,
      * `host:port`; with [registrar] the account can register there, as

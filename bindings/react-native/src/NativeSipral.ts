@@ -43,6 +43,10 @@ export type NativeOpenOptions = {
   systemEchoCancellation?: boolean;
   /** What a party this end holds is sent: "silence" or "application"; left out, silence. */
   heldAudio?: string;
+  /** The most calls held at once, 0 to 4 294 967 295; left out or 0, 128. */
+  maxDialogs?: CodegenTypes.Double;
+  /** The most requests from other ends worked on at once; left out or 0, 256. */
+  maxServerTransactions?: CodegenTypes.Double;
 };
 
 export type NativeAccountOptions = {

@@ -91,6 +91,12 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
     put(given, @"systemEchoCancellation", @(options.systemEchoCancellation().value()));
   }
   put(given, @"heldAudio", options.heldAudio());
+  if (options.maxDialogs().has_value()) {
+    put(given, @"maxDialogs", @(options.maxDialogs().value()));
+  }
+  if (options.maxServerTransactions().has_value()) {
+    put(given, @"maxServerTransactions", @(options.maxServerTransactions().value()));
+  }
   [_bridge open:given resolve:resolve reject:reject];
 }
 

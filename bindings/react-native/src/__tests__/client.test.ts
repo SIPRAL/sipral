@@ -171,6 +171,20 @@ describe('opening', () => {
     expect(other.calls).toEqual([]);
   });
 
+  it('passes the ceilings on calls and requests through, and refuses one that is no count', async () => {
+    const native = new FakeNative();
+    const client = await Sipral.open({bindHost: '192.0.2.10', maxDialogs: 1000, maxServerTransactions: 3256}, native);
+    open.push(client);
+    expect(native.calls[0].args[0]).toMatchObject({maxDialogs: 1000, maxServerTransactions: 3256});
+    await client.close();
+    open = [];
+    const other = new FakeNative();
+    expect((await refusal(Sipral.open({maxDialogs: -1}, other))).code).toBe('invalidArgument');
+    expect((await refusal(Sipral.open({maxDialogs: 1.5}, other))).code).toBe('invalidArgument');
+    expect((await refusal(Sipral.open({maxServerTransactions: 2 ** 32}, other))).code).toBe('invalidArgument');
+    expect(other.calls).toEqual([]);
+  });
+
   it('looks the native module up as Sipral', () => {
     expect(asked).toEqual(['Sipral']);
   });

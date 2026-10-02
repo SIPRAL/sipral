@@ -75,6 +75,12 @@ and `SipralMedia` carries each call's PCM. `SipralJava.addAccount` takes a
 `SipralTransport.TCP` or `TLS` (and a certificate pin) after the
 credentials, for an account on a connection of its own beside the client's
 UDP socket; `client.settings()` is a plain method.
+`SipralJava.open(host, port, userAgent, maxDialogs, maxServerTransactions)`
+raises the ceilings a server meets first: 128 calls at once, past which a
+call that arrives is answered 503 with `Retry-After: 2`, and 256 requests
+from other ends worked on at once; a server holding `N` calls gives the
+second three a call and 256 more (`docs/08-ffi.md`, "Limits, and what went
+out twice").
 
 
 ## Tests

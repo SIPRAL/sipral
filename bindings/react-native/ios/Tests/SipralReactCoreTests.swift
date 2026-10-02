@@ -399,6 +399,23 @@ final class SipralReactCoreTests: XCTestCase {
         refusal("notSupported") { try bob.core.setCallGain(taken, "output", 1) }
     }
 
+    /// maxDialogs reaches the library through the core: at a ceiling of one
+    /// call, a second placed while the first still rings is refused as
+    /// limitReached.
+    func testACallPlacedPastMaxDialogsIsRefused() async throws {
+        let capped = SipralReactCore(emit: { _ in }, audio: { _ in .application })
+        let bob = try Phone("bob")
+        defer { capped.close(); bob.core.close() }
+        let address = try capped.open(SipralOpenOptions(["bindHost": "127.0.0.1", "maxDialogs": NSNumber(value: 1)]))
+        let line = try capped.addAccount(SipralAccountOptions(aor: "sip:capped@sipral.invalid", registrarAddress: bob.address))
+        _ = try bob.core.addAccount(SipralAccountOptions(aor: bob.aor, registrarAddress: address))
+        _ = try capped.placeCall(line, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
+        _ = try await bob.await("the first call") { $0["kind"] as? String == "incomingCall" }
+        refusal("limitReached") {
+            _ = try capped.placeCall(line, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
+        }
+    }
+
     /// A status reaches JavaScript by its name, and one this build has no
     /// name for as the platform's, as the Android half says it.
     func testALibraryRefusalIsNamedByItsStatus() {

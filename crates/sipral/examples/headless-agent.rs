@@ -26,7 +26,7 @@
 //! ```text
 //! cargo run --example headless-agent -- --register agent@pbx.example \
 //!     --registrar 192.0.2.10:5060 --pass secret [--call sip:9000@pbx.example] [--ice] \
-//!     [--codecs PCMU,PCMA] [--invite-burst 200]
+//!     [--codecs PCMU,PCMA] [--max-calls 1000] [--invite-burst 200]
 //! ```
 //!
 //! Registered, `--host` defaults to whichever of this host's addresses the
@@ -41,8 +41,45 @@
 //! default, and `--invite-burst` lets that many INVITEs from one address
 //! arrive at once where the stack's own guard against scanners lets ten
 //! (`sipral::Rate`): an agent whose PBX is the only thing that calls it, and
-//! calls it a hundred times at once, is the switchboard that guard names. A
-//! request the stack will not put in a UDP datagram (RFC 3261
+//! calls it a hundred times at once, is the switchboard that guard names.
+//!
+//! **How many calls at once.** The agent holds 128 calls at once unless
+//! `--max-calls` says otherwise: the stack's default ceiling
+//! (`EndpointConfig::max_dialogs`), past which an incoming call is answered
+//! `503 Service Unavailable` with `Retry-After: 2` before it rings, so that a
+//! proxy in front of several agents sends it to another and comes back once a
+//! call here has ended. `--max-calls N` raises the ceiling to `N` (ten
+//! thousand calls on one machine are measured in `docs/19-numbers.md`), and
+//! with it what has to grow for `N` calls to stand: the server transactions
+//! the stack may hold, to three a call and the default 256 besides, since an
+//! answered INVITE keeps its transaction for 32 seconds (RFC 6026's timer
+//! L) and a BYE over UDP keeps its own as long (timer J), so a ceiling's
+//! worth of calls set up, ended and set up again inside that half minute
+//! holds three each. With `--max-calls` and no `--invite-burst`, the guard
+//! against scanners follows the ceiling too: twice `N` INVITEs from one
+//! address at once — a full ceiling, ended, and a second full one straight
+//! after it — and `N` more a second after that, so the agent's own guard
+//! never turns a call away that the ceiling would have let in.
+//! `--invite-burst` given as well is taken as it is, and the guard then
+//! refuses with 480 whatever it would refuse at that rate. Each call holds
+//! a UDP socket for its audio, two when the far end keeps RTCP apart, so
+//! the process's open-file limit (`ulimit -n`) has to allow twice `N` and a
+//! few more; a call the agent cannot open a socket for is refused 503 and
+//! said on standard error.
+//!
+//! **What it is told.** A line on standard input is a command: `netchange`
+//! says the network changed. The agent reads the route to the registrar
+//! again at once rather than at its next half-second look, and tells the
+//! stack (`UserAgent::network_changed`) even when the address is where it
+//! was — the platform knows of a change the address does not show, such as
+//! a new path behind the same one, so the stack registers again — and moves
+//! everything when the address did change. It prints one line of what it
+//! did. `quit` hangs every call up, gives the registration up and exits
+//! once both are done or five seconds have passed. The end of standard
+//! input is not a command: under a service manager with standard input
+//! closed, the agent goes on answering.
+//!
+//! A request the stack will not put in a UDP datagram (RFC 3261
 //! §18.1.1: over 1300 bytes with no known path MTU) is said on one line,
 //! `transport wanted`, since this agent opens no stream transport to carry
 //! it. Every call's end prints one line of
@@ -78,14 +115,16 @@ mod wall_clock;
 
 use std::collections::HashMap;
 use std::env;
+use std::io::BufRead;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use sipral::{
     Account, AccountId, CallHandle, CodecCatalog, Credentials, EndpointConfig, Event, Link,
     MediaConfig, MediaEngine, MediaEvent, Network, OutgoingCall, Quality, Rate, Recovery,
-    StreamStatistics, UaEvent, Uri, UserAgent,
+    StatusCode, StreamStatistics, UaEvent, Uri, UserAgent,
 };
 
 use sipral_core::endpoint::Event as CoreEvent;
@@ -103,6 +142,18 @@ const ROUTE_CHECK: Duration = Duration::from_millis(500);
 /// let through every this often: the stack's own default interval, so the
 /// flag changes how many calls may arrive together and nothing else.
 const INVITE_REFILL: Duration = Duration::from_secs(2);
+
+/// How long `quit` waits for the calls it hung up and the registration it
+/// gave up to be answered before the process exits regardless: a BYE or a
+/// REGISTER nobody answers would otherwise hold it for the 32 seconds of
+/// RFC 3261's timer F.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Server transactions per call that `--max-calls` makes room for: the
+/// INVITE's own, kept 32 seconds after it is answered (RFC 6026's timer L),
+/// the BYE's, kept as long over UDP (RFC 3261's timer J), and the next
+/// call's INVITE arriving inside that half minute.
+const TRANSACTIONS_PER_CALL: usize = 3;
 
 /// Where to register: `--register user@domain --registrar ip:port --pass
 /// secret`.
@@ -133,6 +184,37 @@ struct Args {
     /// before the stack's rate limit answers the rest 480; the stack's own
     /// default when absent.
     invite_rate: Option<Rate>,
+    /// `--max-calls`: the most calls held at once; the stack's own ceiling,
+    /// 128, when absent.
+    max_calls: Option<u32>,
+}
+
+impl Args {
+    /// The endpoint's configuration: the stack's defaults, with the
+    /// ceilings `--max-calls` raises raised.
+    fn endpoint_config(&self) -> EndpointConfig {
+        let mut config = EndpointConfig::default();
+        if let Some(calls) = self.max_calls {
+            let calls = usize::try_from(calls).unwrap_or(usize::MAX);
+            config.max_dialogs = calls;
+            config.max_server_transactions = calls
+                .saturating_mul(TRANSACTIONS_PER_CALL)
+                .saturating_add(EndpointConfig::DEFAULT.max_server_transactions);
+        }
+        config
+    }
+
+    /// The guard against one source offering calls too fast, when it is not
+    /// the stack's own default: `--invite-burst` as given, or else, with
+    /// `--max-calls N`, twice `N` at once and `N` a second after that.
+    fn invite_guard(&self) -> Option<Rate> {
+        if self.invite_rate.is_some() {
+            return self.invite_rate;
+        }
+        let calls = self.max_calls?;
+        let every = Duration::from_nanos((1_000_000_000 / u64::from(calls)).max(1));
+        Rate::new(calls.saturating_mul(2), every).ok()
+    }
 }
 
 fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
@@ -145,6 +227,7 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut ice = false;
     let mut codecs = None;
     let mut invite_rate = None;
+    let mut max_calls = None;
     let mut raw = raw.into_iter();
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -196,6 +279,15 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
                         .map_err(|error| format!("--invite-burst: {error}"))?,
                 );
             }
+            "--max-calls" => {
+                let calls: u32 = value()?
+                    .parse()
+                    .map_err(|_| "--max-calls takes a count".to_owned())?;
+                if calls == 0 {
+                    return Err("--max-calls 0 would refuse every call".to_owned());
+                }
+                max_calls = Some(calls);
+            }
             "--ice" if cfg!(feature = "ice") => ice = true,
             "--ice" => return Err("--ice needs a build with the `ice` feature".to_owned()),
             other => return Err(format!("unrecognised argument: {other}")),
@@ -222,7 +314,59 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
         ice,
         codecs,
         invite_rate,
+        max_calls,
     })
+}
+
+/// A line on standard input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    /// `netchange`: the platform says the network changed.
+    NetChange,
+    /// `quit`: hang up, give the registration up, exit.
+    Quit,
+}
+
+impl Command {
+    /// `None` for a blank line; `Some(Err)` names a line that is no command.
+    fn parse(line: &str) -> Option<Result<Self, String>> {
+        match line.trim() {
+            "" => None,
+            "netchange" => Some(Ok(Self::NetChange)),
+            "quit" => Some(Ok(Self::Quit)),
+            other => Some(Err(format!(
+                "unknown command {other:?}: the commands are netchange and quit"
+            ))),
+        }
+    }
+}
+
+/// Read commands off `input` on a thread of their own, so that the loop
+/// carrying the calls never waits on it. The end of `input` ends the thread
+/// and nothing else: an agent under a service manager has standard input
+/// closed from the start, and must go on answering.
+fn commands(input: impl BufRead + Send + 'static) -> mpsc::Receiver<Command> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in input.lines() {
+            let Ok(line) = line else {
+                return;
+            };
+            let command = match Command::parse(&line) {
+                Some(Ok(command)) => command,
+                Some(Err(message)) => {
+                    eprintln!("{message}");
+                    continue;
+                }
+                None => continue,
+            };
+            // the loop it was for has gone, which only happens on the way out
+            if sender.send(command).is_err() {
+                return;
+            }
+        }
+    });
+    receiver
 }
 
 /// The catalogue every call is offered and answered from: this build's
@@ -278,6 +422,17 @@ impl Route {
         if now < self.next_check {
             return None;
         }
+        self.reread(now, probe)
+    }
+
+    /// [`Route::moved`] without waiting for its interval: what being told
+    /// the network changed asks for. The next scheduled look is put back by
+    /// a whole interval, since this one has just been taken.
+    fn reread(
+        &mut self,
+        now: Instant,
+        probe: impl FnOnce(SocketAddr) -> IpAddr,
+    ) -> Option<(IpAddr, IpAddr)> {
         self.next_check = now + ROUTE_CHECK;
         let here = probe(self.registrar);
         if here == self.current || here.is_loopback() || here.is_unspecified() {
@@ -358,9 +513,92 @@ struct Agent {
     route: Option<Route>,
     call: Option<String>,
     echoes: Echoes,
+    /// Set by `quit`: when the process exits whether or not everything it
+    /// hung up and gave up has been answered by then.
+    leaving: Option<Instant>,
+    /// `quit` gave the registration up and the registrar has not answered.
+    unregistering: bool,
 }
 
 impl Agent {
+    /// A command read off standard input.
+    fn obey(&mut self, command: Command, now: Instant) {
+        match command {
+            Command::NetChange => self.told(now, udp_endpoint::route_to),
+            Command::Quit => self.quit(now),
+        }
+    }
+
+    /// `netchange`: read the route again now, and tell the stack the network
+    /// changed whether or not the address did. `probe` is
+    /// [`udp_endpoint::route_to`] outside a test.
+    fn told(&mut self, now: Instant, probe: impl FnOnce(SocketAddr) -> IpAddr) {
+        if let Some(route) = self.route.as_mut()
+            && let Some((from, to)) = route.reread(now, probe)
+        {
+            let recovery = self.move_to(from, to, now);
+            println!("told the network changed: moved from {from} to {to}: {recovery}");
+            return;
+        }
+        // Told, and finding the address where it was, the agent cannot see
+        // what changed: the path behind the address, a NAT in front of it, a
+        // link of another kind. It takes the platform at its word — the
+        // network it was on is gone and this one came up at the same
+        // address — and `Recovery::choose` answers that with a registration
+        // proved again: the transports stand, and what is upstream of them
+        // may not.
+        let here = self.endpoint.local.ip();
+        let recovery = self.endpoint.agent.network_changed(
+            &Network::new(Link::Down).address(here).resolves(true),
+            &Network::new(Link::Wired).address(here).resolves(true),
+            now,
+        );
+        let registration = if self.registration.is_some() {
+            ""
+        } else {
+            " (no registration to prove)"
+        };
+        println!("told the network changed: still at {here}: {recovery}{registration}");
+    }
+
+    /// `quit`: every call hung up, the registration given up, and the
+    /// process gone once both are answered or [`QUIT_GRACE`] has passed.
+    fn quit(&mut self, now: Instant) {
+        if self.leaving.is_some() {
+            return;
+        }
+        self.leaving = Some(now + QUIT_GRACE);
+        let calls = self.endpoint.agent.calls();
+        for call in &calls {
+            if let Err(error) = self.endpoint.agent.hangup(*call, now) {
+                eprintln!("cannot hang {call:?} up: {error}");
+            }
+        }
+        if self.registration.is_some() {
+            match self.endpoint.agent.unregister(self.account, now) {
+                Ok(()) => self.unregistering = true,
+                Err(error) => eprintln!("cannot give the registration up: {error}"),
+            }
+        }
+        println!(
+            "quitting: {} calls hung up{}",
+            calls.len(),
+            if self.unregistering {
+                ", the registration given up"
+            } else {
+                ""
+            }
+        );
+    }
+
+    /// Whether `quit` has finished: nothing left to be answered, or no more
+    /// time to wait for it.
+    fn finished(&self, now: Instant) -> bool {
+        self.leaving.is_some_and(|deadline| {
+            now >= deadline || (self.endpoint.agent.calls().is_empty() && !self.unregistering)
+        })
+    }
+
     /// Place `--call`, once.
     fn place(&mut self, now: Instant) {
         let Some(target) = self.call.take() else {
@@ -387,18 +625,29 @@ impl Agent {
     /// at it. Every call the stack then names in `CallAddressWanted` is
     /// offered again from there by [`tick`].
     fn follow(&mut self, now: Instant) {
-        let (Some(route), Some(registration)) = (self.route.as_mut(), self.registration.as_ref())
-        else {
+        let Some(route) = self.route.as_mut() else {
             return;
         };
         let Some((from, to)) = route.moved(now, udp_endpoint::route_to) else {
             return;
         };
+        let recovery = self.move_to(from, to, now);
+        println!("moved from {from} to {to}: {recovery}");
+    }
+
+    /// The address the registrar is reached from is `to` now, where it was
+    /// `from`: the SIP socket bound there, the change reported, the account
+    /// pointed at it. What the stack decided is the answer, or `Nothing`
+    /// when the socket could not be bound and nothing was reported.
+    fn move_to(&mut self, from: IpAddr, to: IpAddr, now: Instant) -> Recovery {
+        let Some(registration) = self.registration.as_ref() else {
+            return Recovery::Nothing;
+        };
         let local = match self.endpoint.rebind_sip(to, now) {
             Ok(local) => local,
             Err(error) => {
                 eprintln!("cannot bind at {to}: {error}");
-                return;
+                return Recovery::Nothing;
             }
         };
         let recovery = self.endpoint.agent.network_changed(
@@ -425,7 +674,7 @@ impl Agent {
                 eprintln!("cannot point the account at {local}: {error}");
             }
         }
-        println!("moved from {from} to {to}: {recovery}");
+        recovery
     }
 }
 
@@ -442,16 +691,38 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
             }
             Event::Signalling(UaEvent::RegistrationFailed { reason, status, .. }) => {
                 println!("registration failed: {reason} ({status:?})");
+                agent.unregistering = false;
+            }
+            Event::Signalling(UaEvent::Unregistered { .. }) => {
+                println!("unregistered");
+                agent.unregistering = false;
+            }
+            Event::Signalling(UaEvent::IncomingCall { call, .. }) if agent.leaving.is_some() => {
+                let _ = agent
+                    .endpoint
+                    .agent
+                    .reject(call, StatusCode::SERVICE_UNAVAILABLE, now);
             }
             Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
-                if let Ok(local) = agent.endpoint.open_media(call, now) {
-                    match agent
-                        .endpoint
-                        .engine
-                        .answer(&mut agent.endpoint.agent, call, local, now)
-                    {
+                match agent.endpoint.open_media(call, now) {
+                    Ok(local) => match agent.endpoint.engine.answer(
+                        &mut agent.endpoint.agent,
+                        call,
+                        local,
+                        now,
+                    ) {
                         Ok(()) => println!("answered {call:?}"),
                         Err(error) => eprintln!("cannot answer {call:?}: {error}"),
+                    },
+                    // most often the open-file limit: a socket a call, two
+                    // when the far end keeps RTCP apart
+                    Err(error) => {
+                        eprintln!("cannot open a media socket for {call:?}, refused 503: {error}");
+                        let _ =
+                            agent
+                                .endpoint
+                                .agent
+                                .reject(call, StatusCode::SERVICE_UNAVAILABLE, now);
                     }
                 }
             }
@@ -521,7 +792,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "usage: headless-agent [--host IP] [--port N] [--register USER@DOMAIN \
                  --registrar IP:PORT --pass SECRET] [--call SIP-URI] [--ice] \
-                 [--codecs NAME,NAME] [--invite-burst N]"
+                 [--codecs NAME,NAME] [--max-calls N (128)] [--invite-burst N]\n\
+                 standard input: netchange, quit"
             );
             return ExitCode::FAILURE;
         }
@@ -544,8 +816,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 udp_endpoint::route_to(registration.registrar)
             })
     });
-    let mut agent = UserAgent::new(EndpointConfig::default(), entropy::seed()?)?;
-    if let Some(rate) = args.invite_rate {
+    let mut agent = UserAgent::new(args.endpoint_config(), entropy::seed()?)?;
+    if let Some(rate) = args.invite_guard() {
         agent.limit_invites(rate);
     }
     let engine = MediaEngine::new(
@@ -609,9 +881,21 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         route,
         call: args.call,
         echoes: Echoes::new(),
+        leaving: None,
+        unregistering: false,
     };
+    let told = commands(std::io::BufReader::new(std::io::stdin()));
     loop {
-        if !tick(&mut agent, Instant::now()) {
+        let now = Instant::now();
+        while let Ok(command) = told.try_recv() {
+            agent.obey(command, now);
+        }
+        let busy = tick(&mut agent, now);
+        if agent.finished(now) {
+            println!("bye");
+            return Ok(());
+        }
+        if !busy {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -621,7 +905,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use sipral::{Account, OutgoingCall, Uri};
+    use sipral::{Account, OutgoingCall, RegistrationState, Uri};
 
     use super::*;
     use sipral::WallClock;
@@ -702,6 +986,8 @@ mod tests {
             route: None,
             call: None,
             echoes: Echoes::new(),
+            leaving: None,
+            unregistering: false,
         };
 
         let mut caller_endpoint = Endpoint::bind(
@@ -842,6 +1128,7 @@ mod tests {
                 ice: true,
                 codecs: Some(vec!["PCMU".to_owned(), "PCMA".to_owned()]),
                 invite_rate: Some(Rate::new(200, Duration::from_secs(2)).unwrap()),
+                max_calls: None,
             }
         );
         assert!(parse_args(words("--register agent@pbx --pass secret")).is_err());
@@ -863,6 +1150,415 @@ mod tests {
         assert_eq!(plain.registration, None);
         assert_eq!(plain.codecs, None);
         assert_eq!(plain.invite_rate, None);
+        assert_eq!(plain.max_calls, None);
+    }
+
+    #[test]
+    fn max_calls_raises_the_ceiling_what_grows_with_it_and_the_guard() {
+        let plain = parse_args(words("--host 127.0.0.1")).unwrap();
+        let config = plain.endpoint_config();
+        assert_eq!(config.max_dialogs, 128);
+        assert_eq!(config.max_server_transactions, 256);
+        assert_eq!(plain.invite_guard(), None, "the stack's own guard");
+
+        let raised = parse_args(words("--max-calls 1000")).unwrap();
+        assert_eq!(raised.max_calls, Some(1000));
+        let config = raised.endpoint_config();
+        assert_eq!(config.max_dialogs, 1000);
+        assert_eq!(config.max_server_transactions, 3 * 1000 + 256);
+        assert_eq!(
+            raised.invite_guard(),
+            Some(Rate::new(2000, Duration::from_millis(1)).unwrap()),
+            "two ceilings' worth at once, and a ceiling's worth a second after"
+        );
+
+        // --invite-burst given as well is taken as it is
+        let both = parse_args(words("--max-calls 1000 --invite-burst 50")).unwrap();
+        assert_eq!(both.endpoint_config().max_dialogs, 1000);
+        assert_eq!(
+            both.invite_guard(),
+            Some(Rate::new(50, INVITE_REFILL).unwrap())
+        );
+
+        // below the default it lowers the ceiling, and the transactions keep
+        // the default's room for everything that is not a call
+        let small = parse_args(words("--max-calls 4")).unwrap();
+        assert_eq!(small.endpoint_config().max_dialogs, 4);
+        assert_eq!(small.endpoint_config().max_server_transactions, 3 * 4 + 256);
+
+        assert!(parse_args(words("--max-calls 0")).is_err());
+        assert!(parse_args(words("--max-calls many")).is_err());
+        assert!(parse_args(words("--max-calls")).is_err());
+        let huge = parse_args(words("--max-calls 4294967295")).unwrap();
+        assert_eq!(
+            huge.invite_guard(),
+            Some(Rate::new(u32::MAX, Duration::from_nanos(1)).unwrap()),
+            "an interval too short to count rounds up to a nanosecond, not to no limit"
+        );
+    }
+
+    #[test]
+    fn standard_input_says_netchange_and_quit_and_its_end_says_nothing() {
+        assert_eq!(Command::parse("netchange"), Some(Ok(Command::NetChange)));
+        assert_eq!(Command::parse("  quit \r"), Some(Ok(Command::Quit)));
+        assert_eq!(Command::parse(""), None);
+        assert!(matches!(Command::parse("reboot"), Some(Err(_))));
+
+        let told = commands(std::io::Cursor::new(
+            b"netchange\n\nnonsense\nquit\n".to_vec(),
+        ));
+        let wait = Duration::from_secs(5);
+        assert_eq!(told.recv_timeout(wait), Ok(Command::NetChange));
+        assert_eq!(told.recv_timeout(wait), Ok(Command::Quit));
+        // the end of the input ends the reading thread, and is no command
+        assert_eq!(
+            told.recv_timeout(wait),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    /// The agent `run` makes from `args`, on loopback: registered at the
+    /// registrar `args` names, if it names one, and following the route to it.
+    fn agent_on_loopback(args: &Args, seed: u8) -> Agent {
+        let now = Instant::now();
+        let mut user_agent = UserAgent::new(args.endpoint_config(), [seed; 32]).unwrap();
+        if let Some(rate) = args.invite_guard() {
+            user_agent.limit_invites(rate);
+        }
+        let mut endpoint = Endpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            user_agent,
+            MediaEngine::new(
+                CodecCatalog::with_order(&["PCMU"]).unwrap(),
+                MediaConfig::default(),
+                WallClock::from_unix(now, 0, 0),
+                [seed.wrapping_add(1); 32],
+            ),
+            now,
+        )
+        .unwrap();
+        let local = endpoint.local;
+        let (account, route) = if let Some(registration) = &args.registration {
+            let account = endpoint.add_account(
+                Account::new(
+                    Uri::parse_str(&format!(
+                        "sip:{}@{}",
+                        registration.user, registration.domain
+                    ))
+                    .unwrap(),
+                    Uri::parse_str(&format!("sip:{}", registration.domain)).unwrap(),
+                    Uri::parse_str(&format!("sip:{}@{local}", registration.user)).unwrap(),
+                    endpoint.transport,
+                    registration.registrar,
+                )
+                .credentials(Credentials::new(&registration.user, &registration.pass)),
+            );
+            endpoint.agent.register(account, now).unwrap();
+            (
+                account,
+                Some(Route::new(registration.registrar, local.ip(), now)),
+            )
+        } else {
+            let identity = Uri::parse_str(&format!("sip:agent@{local}")).unwrap();
+            let account = endpoint.add_account(Account::unregistered(
+                identity.clone(),
+                identity,
+                endpoint.transport,
+                local,
+            ));
+            (account, None)
+        };
+        Agent {
+            endpoint,
+            account,
+            registration: args.registration.as_ref().map(|registration| Registration {
+                user: registration.user.clone(),
+                domain: registration.domain.clone(),
+                registrar: registration.registrar,
+                pass: registration.pass.clone(),
+            }),
+            route,
+            call: None,
+            echoes: Echoes::new(),
+            leaving: None,
+            unregistering: false,
+        }
+    }
+
+    /// What the calling end of a test has seen of its calls.
+    #[derive(Default)]
+    struct Tally {
+        confirmed: std::collections::HashSet<CallHandle>,
+        /// Each ended call's status and, for a refusal, the response whole.
+        ended: HashMap<CallHandle, (Option<u16>, String)>,
+    }
+
+    /// Turn the caller and the agent until `done` says so, or twenty seconds
+    /// pass; whether `done` did.
+    fn drive(
+        caller: &mut Endpoint,
+        agent: &mut Agent,
+        tally: &mut Tally,
+        mut done: impl FnMut(&Agent, &Tally) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let turn = Instant::now();
+            for event in caller.pump(turn) {
+                match event {
+                    Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
+                        tally.confirmed.insert(call);
+                    }
+                    Event::Signalling(UaEvent::CallEnded {
+                        call,
+                        status,
+                        response,
+                        ..
+                    }) => {
+                        let text = response.map_or_else(String::new, |response| {
+                            String::from_utf8_lossy(&response.bytes()).into_owned()
+                        });
+                        tally
+                            .ended
+                            .insert(call, (status.map(StatusCode::get), text));
+                    }
+                    _ => {}
+                }
+            }
+            let agent_read = tick(agent, turn);
+            caller.timers(turn);
+            let caller_read = caller.read_sip(turn);
+            if done(agent, tally) {
+                return true;
+            }
+            if !agent_read && !caller_read {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        false
+    }
+
+    /// A ceiling's worth of calls, ended and placed again at once, with one
+    /// more in between: every one of the two ceilings' worth is let in —
+    /// neither the guard against scanners, nor the server transactions the
+    /// first round still holds, turn any away — and the one past the
+    /// ceiling is refused 503 with a `Retry-After`. 150 is past both of the
+    /// stack's defaults: 128 calls, and 256 transactions where the second
+    /// round meets 300 still held from the first.
+    #[test]
+    fn two_full_bursts_back_to_back_meet_neither_the_guard_nor_the_ceiling() {
+        const CALLS: usize = 150;
+        let args = parse_args(words(&format!("--max-calls {CALLS}"))).unwrap();
+        let mut agent = agent_on_loopback(&args, 0x31);
+        let agent_address = agent.endpoint.local;
+        let now = Instant::now();
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        // where the caller says its audio goes, read by nobody: the caller
+        // carries no audio, so it needs no socket a call of its own
+        let sink = std::net::UdpSocket::bind(loopback).unwrap();
+        let sink_address = sink.local_addr().unwrap();
+        let mut roomy = EndpointConfig::default();
+        roomy.max_dialogs = 4 * CALLS;
+        roomy.max_server_transactions = 8 * CALLS;
+        let mut caller = Endpoint::bind(
+            loopback,
+            UserAgent::new(roomy, [0x41; 32]).unwrap(),
+            MediaEngine::new(
+                CodecCatalog::with_order(&["PCMU"]).unwrap(),
+                MediaConfig::default(),
+                WallClock::from_unix(now, 0, 0),
+                [0x42; 32],
+            ),
+            now,
+        )
+        .unwrap();
+        let contact = Uri::parse_str(&format!("sip:caller@{}", caller.local)).unwrap();
+        let account = caller.add_account(Account::unregistered(
+            Uri::parse_str("sip:caller@invalid.example").unwrap(),
+            contact,
+            caller.transport,
+            agent_address,
+        ));
+        let place = |caller: &mut Endpoint| {
+            let target = Uri::parse_str(&format!("sip:agent@{agent_address}")).unwrap();
+            let transport = caller.transport;
+            caller
+                .engine
+                .place(
+                    &mut caller.agent,
+                    account,
+                    OutgoingCall::new(target).to_address(transport, agent_address),
+                    sink_address,
+                    Instant::now(),
+                )
+                .unwrap()
+        };
+        let mut tally = Tally::default();
+
+        let first: Vec<CallHandle> = (0..CALLS).map(|_| place(&mut caller)).collect();
+        assert!(
+            drive(&mut caller, &mut agent, &mut tally, |_, tally| {
+                tally.confirmed.len() == CALLS || !tally.ended.is_empty()
+            }),
+            "the first round did not come up"
+        );
+        assert_eq!(tally.confirmed.len(), CALLS, "refused: {:?}", tally.ended);
+
+        let one_more = place(&mut caller);
+        assert!(drive(&mut caller, &mut agent, &mut tally, |_, tally| {
+            tally.ended.contains_key(&one_more)
+        }));
+        let (status, refusal) = tally.ended.get(&one_more).cloned().unwrap();
+        assert_eq!(status, Some(503), "{refusal}");
+        assert!(refusal.contains("\r\nRetry-After: 2\r\n"), "{refusal}");
+
+        for call in &first {
+            caller.agent.hangup(*call, Instant::now()).unwrap();
+        }
+        assert!(
+            drive(&mut caller, &mut agent, &mut tally, |agent, tally| {
+                tally.ended.len() == CALLS + 1 && agent.endpoint.agent.calls().is_empty()
+            }),
+            "the first round did not end"
+        );
+
+        let second: Vec<CallHandle> = (0..CALLS).map(|_| place(&mut caller)).collect();
+        assert!(
+            drive(&mut caller, &mut agent, &mut tally, |_, tally| {
+                tally.confirmed.len() == 2 * CALLS || tally.ended.len() > CALLS + 1
+            }),
+            "the second round did not come up"
+        );
+        let refused: Vec<_> = second
+            .iter()
+            .filter_map(|call| tally.ended.get(call))
+            .collect();
+        assert!(refused.is_empty(), "refused: {refused:?}");
+        assert_eq!(tally.confirmed.len(), 2 * CALLS);
+        assert_eq!(
+            agent.endpoint.agent.refusals(),
+            sipral::Refusals::default(),
+            "the guard turned nothing away"
+        );
+    }
+
+    /// Answer one REGISTER waiting on `registrar` with a 200, the binding
+    /// granted for five minutes or, for one with `expires` of zero, given
+    /// up; the request, when there was one.
+    fn answer_register(registrar: &std::net::UdpSocket) -> Option<String> {
+        let mut inbox = [0_u8; 4_096];
+        let (length, from) = registrar.recv_from(&mut inbox).ok()?;
+        let request = String::from_utf8_lossy(inbox.get(..length)?).into_owned();
+        if !request.starts_with("REGISTER ") {
+            return None;
+        }
+        let lower = request.to_ascii_lowercase();
+        let removing = lower.contains("\r\nexpires: 0\r\n") || lower.contains("expires=0");
+        let mut reply = String::from("SIP/2.0 200 OK\r\n");
+        for line in request.split("\r\n").skip(1) {
+            let name = line
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            match name.as_str() {
+                "via" | "v" | "from" | "f" | "call-id" | "i" | "cseq" => {
+                    reply.push_str(line);
+                    reply.push_str("\r\n");
+                }
+                "to" | "t" => {
+                    reply.push_str(line);
+                    if !line.contains(";tag=") {
+                        reply.push_str(";tag=registrar");
+                    }
+                    reply.push_str("\r\n");
+                }
+                "contact" | "m" if !removing => {
+                    reply.push_str(line);
+                    reply.push_str(";expires=300\r\n");
+                }
+                _ => {}
+            }
+        }
+        reply.push_str("Content-Length: 0\r\n\r\n");
+        registrar.send_to(reply.as_bytes(), from).ok()?;
+        Some(request)
+    }
+
+    /// Turn the agent, answering every REGISTER it sends and counting them
+    /// in `registers`, until `done` says so or ten seconds pass; whether
+    /// `done` did.
+    fn turn_until(
+        agent: &mut Agent,
+        registrar: &std::net::UdpSocket,
+        registers: &mut usize,
+        done: impl Fn(&Agent) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !done(agent) {
+            tick(agent, Instant::now());
+            if answer_register(registrar).is_some() {
+                *registers += 1;
+            }
+        }
+        done(agent)
+    }
+
+    #[test]
+    fn told_the_network_changed_it_registers_again_and_quit_gives_everything_up() {
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let registrar = std::net::UdpSocket::bind(loopback).unwrap();
+        registrar
+            .set_read_timeout(Some(Duration::from_millis(2)))
+            .unwrap();
+        let args = parse_args(words(&format!(
+            "--register agent@registrar.invalid --registrar {} --pass secret",
+            registrar.local_addr().unwrap()
+        )))
+        .unwrap();
+        let mut agent = agent_on_loopback(&args, 0x51);
+        let account = agent.account;
+        let mut registers = 0;
+        let registered = |agent: &Agent| {
+            agent.endpoint.agent.registration_state(account) == Some(RegistrationState::Registered)
+        };
+        assert!(
+            turn_until(&mut agent, &registrar, &mut registers, registered),
+            "never registered"
+        );
+        assert_eq!(registers, 1);
+
+        // told, with the route where it was: the stack proves the
+        // registration again, and the agent goes on
+        let here = agent.endpoint.local.ip();
+        agent.told(Instant::now(), |_| here);
+        assert_ne!(
+            agent.endpoint.agent.registration_state(account),
+            Some(RegistrationState::Registered),
+            "the binding stopped being evidence the moment the change was told"
+        );
+        assert!(
+            turn_until(&mut agent, &registrar, &mut registers, registered),
+            "never registered again"
+        );
+        assert_eq!(registers, 2, "one REGISTER for being told");
+        assert_eq!(agent.endpoint.local.ip(), here);
+        assert!(!agent.finished(Instant::now()), "being told is not leaving");
+
+        // quit: nothing to hang up, the registration given up, and finished
+        // once the registrar says so
+        agent.quit(Instant::now());
+        assert!(agent.unregistering);
+        assert!(!agent.finished(Instant::now()));
+        assert!(turn_until(
+            &mut agent,
+            &registrar,
+            &mut registers,
+            |agent| { agent.finished(Instant::now()) }
+        ));
+        assert_eq!(registers, 3, "one REGISTER giving the binding up");
+        assert!(!agent.unregistering);
     }
 
     #[test]

@@ -46,6 +46,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 tlsPin = options.text("tlsPin"),
                 systemEchoCancellation = options.flag("systemEchoCancellation"),
                 heldAudio = options.text("heldAudio"),
+                maxDialogs = options.number("maxDialogs")?.toLong() ?: 0,
+                maxServerTransactions = options.number("maxServerTransactions")?.toLong() ?: 0,
             ),
         )
     }

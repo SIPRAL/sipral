@@ -91,6 +91,13 @@ here, so the library opens no device: a call's own gain and mute and the
 platform's echo cancellation are the device engine's, and the application
 scales or mutes the PCM it hands `SipralMedia.sendAudio` itself.
 
+A stack holds 128 calls at once unless `maxDialogs` says otherwise: past
+it an incoming call is answered 503 with `Retry-After: 2` and `placeCall`
+throws a `SipralException` with `SipralStatus.limitReached`.
+`maxServerTransactions` (256) is the ceiling beside it that a server
+raising `maxDialogs` raises too, zero for the default each
+(`docs/08-ffi.md`, "Limits, and what went out twice").
+
 ## Where a stack is reached, and where its server is
 
 `SipralStack.open()` with no `bindHost` listens on every interface and
@@ -143,7 +150,8 @@ SIPRAL_LIBRARY=../../target/release dart test
 `dart:ffi` lays out to the length `sipral_abi_struct_size` reports for it.
 `test/loopback_test.dart` places a call between two stacks on 127.0.0.1:
 answered, confirmed, RTP both ways, audio heard as frames, three digits, a
-hang-up ended on both ends; a refused call; and a failing call's error text.
+hang-up ended on both ends; a refused call; a call placed past `maxDialogs`;
+and a failing call's error text.
 `test/account_stream_test.dart` registers an account over TLS and one over
 UDP with two loopback registrars and places a call through each, opens an
 account's TCP connection again when its registrar drops it, and reads the

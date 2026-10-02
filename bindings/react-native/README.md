@@ -145,7 +145,10 @@ SHA-256 fingerprint, whoever signed it. `srtp: 'bestEffort'` offers SDES on
 plain RTP/AVP; `srtpSuites`, `pathMtu`, `datagramWithoutStreamBytes` (a
 request over UDP anyway once no stream to a UDP-only server can be had),
 `pseudonymSalt` (hexadecimal) and `diagnosticTrace`
-(`client.setDiagnosticTrace`) reach the library as given. What is not
+(`client.setDiagnosticTrace`) reach the library as given, and so do
+`maxDialogs` (the most calls held at once, 128 when left out: past it a call
+that arrives is answered 503 with `Retry-After: 2` and `placeCall` rejects
+with `limitReached`) and `maxServerTransactions` (256). What is not
 exposed here is an account's `checkCertificate`, for an application running
 the account's TLS itself: the native halves run it.
 
