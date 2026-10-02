@@ -90,7 +90,8 @@ out twice").
   running JVM loads its own pair once.
 - `LoopbackCallKotlinIT` and `LoopbackCallJavaIT`: two stacks on loopback in
   one JVM, one calling the other, RTP both ways, three digits, a hang-up;
-  and, from Java, an account on a TCP connection of its own registering;
+  and, from Java, an account on a TCP connection of its own registering,
+  and the ceilings `SipralJava.open` raises read back from the library;
   run by failsafe against the packaged jar under `-Xcheck:jni`.
   `jvm.sh` without `--dry-run` runs all three again on an arm64 JVM under
   qemu.
