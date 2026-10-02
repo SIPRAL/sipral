@@ -6,6 +6,15 @@
 # workspace with `publish = true`.
 #
 #   scripts/package/crate.sh --out DIR [--dry-run] [--publish]
+#   scripts/package/crate.sh --out DIR --crates-io [--dry-run] [--publish]
+#
+# No release publishes it. What Sipral releases are the C library and the
+# language packages over it; the Rust crates are not part of the 1.0
+# publication, their API makes no compatibility promise, and the `sipral`
+# name on crates.io is a reservation at 0.0.1 that stays what it is
+# (docs/11-testing.md, "Releasing"). So without --crates-io this script
+# refuses, saying that, and builds nothing. --crates-io runs the checks
+# below, for the day a release does publish the crates:
 #
 # crates.io takes a crate only when every dependency it names with a
 # version is already on crates.io, dev-dependencies included. `sipral`
@@ -50,15 +59,25 @@ finish() {
 OUT=""
 DRY_RUN=0
 PUBLISH=0
+CRATES_IO=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
+        --crates-io) CRATES_IO=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$OUT" ] && { printf 'usage: crate.sh --out DIR [--dry-run] [--publish]\n' >&2; exit 2; }
+[ -z "$OUT" ] && { printf 'usage: crate.sh --out DIR [--crates-io] [--dry-run] [--publish]\n' >&2; exit 2; }
+if [ "$CRATES_IO" -eq 0 ]; then
+    printf 'crate.sh: refused. The Rust crates are not part of the Sipral %s publication:\n' "$(scripts/version.sh)" >&2
+    printf '  the release is the C library and the language packages over it, and the\n' >&2
+    printf '  crates'"'"' API makes no compatibility promise. The sipral name on crates.io is\n' >&2
+    printf '  reserved with 0.0.1 and stays so (docs/11-testing.md, "Releasing").\n' >&2
+    printf '  --crates-io checks the crates as a publication there would need them.\n' >&2
+    exit 1
+fi
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 

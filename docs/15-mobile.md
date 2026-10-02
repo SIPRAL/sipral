@@ -533,7 +533,10 @@ package's test suite beside it. Every slice is built for iOS 15.0 and macOS
 the printed `platforms:` line repeats, and the script reads every object in
 each archive — libopus's too, in the `--with-opus` variant, which cmake would
 otherwise build for the Mac's own SDK — and fails on one built for a newer
-release. `bindings/Package.swift` itself stays the
+release. What an application adds is the repository's root
+`Package.swift`, the same module over the zip of that XCFramework a release
+carries as an asset, by URL and checksum (`scripts/package/xcframework.sh
+--release`, `docs/11-testing.md`, "Releasing"). `bindings/Package.swift` itself stays the
 macOS and Linux package the gate and the lab build: its tests link the
 library `cargo` leaves in `target/release`, which is a macOS or Linux
 library and nothing an iOS target can link. So the suite runs on iOS

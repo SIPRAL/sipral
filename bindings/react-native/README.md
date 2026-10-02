@@ -17,8 +17,10 @@ Kotlin layer (`bindings/kotlin`, `org.sipral.idiomatic`) on Android and the
 Swift layer (`bindings/swift`) on iOS. So this package speaks whatever ABI
 those two speak, and moves when they do.
 
-Nothing is published yet. The package's version is the workspace's
-(`Cargo.toml`), and the gate checks that they agree.
+The package's version is the release's, the workspace's (`Cargo.toml`),
+and `scripts/version.sh --check` holds the two together. It goes to npm
+after the AAR and the Swift package it resolves are published
+(`docs/11-testing.md`, "Releasing").
 
 ## In an application
 
@@ -26,10 +28,10 @@ Nothing is published yet. The package's version is the workspace's
 npm install sipral-react-native
 ```
 
-**Android.** The module depends on `org.sipral:sipral`, the archive
-`scripts/package/aar.sh` builds. Until it is on a Maven host, add the local
-repository `scripts/package/android.sh` writes to the application's
-`settings.gradle`:
+**Android.** The module depends on `org.sipral:sipral` at the package's own
+version, the archive `scripts/package/aar.sh` builds. To build against one
+made locally, or one not yet on a Maven repository, add the local repository
+`scripts/package/android.sh` writes to the application's `settings.gradle`:
 
 ```kotlin
 dependencyResolutionManagement {
@@ -45,12 +47,14 @@ asks for `INTERNET`, `RECORD_AUDIO`, `MODIFY_AUDIO_SETTINGS` and
 `BLUETOOTH_CONNECT`; the application still asks the user for the microphone
 at run time before the first call.
 
-**iOS.** The pod takes the Sipral Swift package that
-`scripts/package/xcframework.sh` writes, from wherever
-`SIPRAL_SWIFT_PACKAGE` says it is, a directory or a git URL:
+**iOS.** The pod takes the Sipral Swift package from Sipral's own
+repository, at exactly the package's version: the root `Package.swift`,
+whose binary target is the XCFramework the release carries as an asset.
+`SIPRAL_SWIFT_PACKAGE` names another place for it, a directory or a git URL,
+such as the package `scripts/package/xcframework.sh` writes:
 
 ```sh
-SIPRAL_SWIFT_PACKAGE=/path/to/xcframework-out bundle exec pod install
+SIPRAL_SWIFT_PACKAGE=/path/to/xcframework-out/spm bundle exec pod install
 ```
 
 The application's `Info.plist` carries `NSMicrophoneUsageDescription`, and

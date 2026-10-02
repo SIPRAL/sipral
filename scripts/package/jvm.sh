@@ -45,7 +45,7 @@
 #
 # --with-opus builds the variant carrying libopus, as sipral-jvm-opus;
 # features.sh says why the default leaves it out. The group id is
-# bindings/jvm/pom.xml's placeholder unless SIPRAL_GROUP_ID names another;
+# bindings/jvm/pom.xml's, org.sipral, unless SIPRAL_GROUP_ID names another;
 # nothing is installed into a Maven repository and nothing is published.
 # DIR receives the jar, its sources jar, its POM (the flattened one, with the
 # group id and version written out), the SBOM, and the build's own working
@@ -153,7 +153,7 @@ elif xmllint --noout "$POM_SOURCE" 2>"$OUT/pom-lint.log"; then
         pass "no address in the POM"
     fi
     group_id=$(xmllint --xpath "string(//*[local-name()='properties']/*[local-name()='sipral.groupId'])" "$POM_SOURCE" 2>/dev/null)
-    note "group id: ${SIPRAL_GROUP_ID:-$group_id}$([ -z "${SIPRAL_GROUP_ID:-}" ] && printf ', the placeholder until the owner sets sipral.groupId (or SIPRAL_GROUP_ID)')"
+    note "group id: ${SIPRAL_GROUP_ID:-$group_id}$([ -n "${SIPRAL_GROUP_ID:-}" ] && printf ', from SIPRAL_GROUP_ID in place of the POM'"'"'s %s' "$group_id")"
 else
     fail "bindings/jvm/pom.xml is not well-formed:"; sed 's/^/        /' "$OUT/pom-lint.log"
 fi

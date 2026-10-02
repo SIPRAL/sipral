@@ -8,9 +8,9 @@ The JVM server artefact: bindings/kotlin's classes, compiled for a plain JVM,
 with libsipral_ffi.so and libsipral_jni.so for linux-x64 and linux-arm64
 inside the jar and a loader that picks the pair the running JVM needs.
 
-The group id is a property the owner sets once it is decided
-(-Dsipral.groupId=...); the placeholder below is never meant to be
-published. The version is the workspace's, handed over by
+The group id is one property, org.sipral, which the AAR's POM reads as
+well (scripts/package/aar.sh); -Dsipral.groupId=... names another for one
+build. The version is the workspace's, handed over by
 scripts/package/jvm.sh as -Drevision. The natives are staged by that script
 under ${sipral.natives}; a build without them compiles and runs the loader's
 own tests, and the loopback tests then fail at the first native call.
@@ -54,8 +54,8 @@ own tests, and the loopback tests then fail at the first native call.
     </scm>
 
     <properties>
-        <sipral.groupId>org.sipral.placeholder</sipral.groupId>
-        <revision>0.0.1</revision>
+        <sipral.groupId>org.sipral</sipral.groupId>
+        <revision>1.0.0</revision>
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.release>17</java.release>

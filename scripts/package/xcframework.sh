@@ -8,12 +8,31 @@
 # place of bindings/Package.swift's source target, for a consumer who links
 # the built library rather than compiling this workspace.
 #
-#   scripts/package/xcframework.sh --out DIR             the real artefact
-#   scripts/package/xcframework.sh --out DIR --dry-run   same, minus the zip
-#                                                         and checksum a host
-#                                                         would publish
+#   scripts/package/xcframework.sh --out DIR             the real artefact,
+#                                                         its zip and the
+#                                                         zip's checksum
+#   scripts/package/xcframework.sh --out DIR --dry-run   the same, the zip
+#                                                         left in DIR/_stage
+#                                                         and the root
+#                                                         Package.swift
+#                                                         written only to a
+#                                                         copy there
+#   scripts/package/xcframework.sh --out DIR --release   the real artefact,
+#                                                         and the root
+#                                                         Package.swift
+#                                                         pointed at the zip
 #   ... --with-opus                                       the variant that
 #                                                         carries libopus
+#
+# The Swift package an application adds is the root Package.swift: the
+# Sipral module from bindings/swift/Sources/Sipral over a binaryTarget whose
+# URL is the zip's place among the release's assets,
+# REPOSITORY/releases/download/vVERSION/CSipral.xcframework.zip, and whose
+# checksum is what `swift package compute-checksum` says of that zip.
+# --release writes both into it; every run checks that it still reads and
+# still names the platforms apple.sh builds for. The package carries the
+# default variant, so --release refuses --with-opus: the zip with libopus is
+# an asset an application points its own binaryTarget at.
 #
 # Without --with-opus the library is built without sipral-ffi's `opus`
 # feature and every other default kept (features.sh says why and how);
@@ -39,17 +58,27 @@ OUT=""
 DRY_RUN=0
 PUBLISH=0
 WITH_OPUS=0
+RELEASE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --with-opus) WITH_OPUS=1; shift ;;
+        --release) RELEASE=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 if [ -z "$OUT" ]; then
-    printf 'usage: xcframework.sh --out DIR [--dry-run] [--publish] [--with-opus]\n' >&2
+    printf 'usage: xcframework.sh --out DIR [--dry-run | --release] [--publish] [--with-opus]\n' >&2
+    exit 2
+fi
+if [ "$RELEASE" -eq 1 ] && [ "$DRY_RUN" -eq 1 ]; then
+    printf 'xcframework.sh: --release writes the zip it builds into Package.swift, and --dry-run builds none to publish\n' >&2
+    exit 2
+fi
+if [ "$RELEASE" -eq 1 ] && [ "$WITH_OPUS" -eq 1 ]; then
+    printf 'xcframework.sh: the root Package.swift carries the default variant; --release does not take --with-opus\n' >&2
     exit 2
 fi
 . "$ROOT/scripts/package/features.sh"
@@ -62,6 +91,7 @@ OUT="$(cd "$OUT" && pwd)"
 FAIL=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAIL=1; }
+note() { printf '  note  %s\n' "$1"; }
 step() { printf '\n%s\n' "$1"; }
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -73,6 +103,9 @@ command -v lipo >/dev/null 2>&1 || { fail "lipo not found"; exit 1; }
 
 step "one version"
 "$ROOT/scripts/version.sh" --check || { printf '\nxcframework.sh: failed\n'; exit 1; }
+VERSION="$("$ROOT/scripts/version.sh")"
+REPOSITORY=$(sed -n 's/^repository = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
+RELEASE_URL="$REPOSITORY/releases/download/v$VERSION/CSipral.xcframework.zip"
 
 CRATE="sipral-ffi"
 LIBNAME="libsipral_ffi.a"
@@ -278,11 +311,10 @@ cat >"$SPM/Package.swift" <<EOF
 // Variant: $VARIANT_LABEL.
 // sipral-ffi features: $FFI_FEATURES.
 //
-// The binaryTarget's path is local, which is what a package still under
-// development at 0.0.1, with nowhere public to host a zip yet, can commit to.
-// Publishing this package means replacing that path with a remote zip URL
-// and the checksum this script prints beside it -- the owner's step, once
-// there is a host to put the zip on.
+// The binaryTarget's path is local: this package is for running the suite
+// against the artefact. What an application adds is the repository's root
+// Package.swift, whose binaryTarget names the release's zip by URL and
+// checksum (scripts/package/xcframework.sh --release).
 
 import PackageDescription
 
@@ -308,22 +340,92 @@ else
     tail -20 "$STAGE/dump-package.log" | sed 's/^/        /'
 fi
 
-ZIP=""
-if [ "$DRY_RUN" -eq 0 ]; then
-    step "zip and checksum, for a remote binaryTarget"
-    ZIP="$OUT/CSipral$VARIANT_SUFFIX.xcframework.zip"
-    rm -f "$ZIP"
-    ( cd "$OUT" && ditto -c -k --sequesterRsrc --keepParent CSipral.xcframework "$ZIP" ) \
-        && pass "$(basename "$ZIP") written" || fail "ditto -c -k, CSipral.xcframework"
-    if [ -f "$ZIP" ]; then
-        CHECKSUM=$(xcrun --toolchain default swift package compute-checksum "$ZIP" 2>"$STAGE/checksum.log")
-        if [ -n "$CHECKSUM" ]; then
-            pass "checksum: $CHECKSUM"
-            printf '%s\n' "$CHECKSUM" >"$ZIP.checksum"
+# The zip and its checksum, for a remote binaryTarget. A dry run makes them
+# too, in the stage directory, so that the release path below runs on a copy
+# of the manifest; only a real run leaves the zip where a host would take it.
+step "zip and checksum, for a remote binaryTarget"
+ZIP="$OUT/CSipral$VARIANT_SUFFIX.xcframework.zip"
+[ "$DRY_RUN" -eq 1 ] && ZIP="$STAGE/CSipral$VARIANT_SUFFIX.xcframework.zip"
+CHECKSUM=""
+rm -f "$ZIP"
+( cd "$OUT" && ditto -c -k --sequesterRsrc --keepParent CSipral.xcframework "$ZIP" ) \
+    && pass "$(basename "$ZIP") written" || fail "ditto -c -k, CSipral.xcframework"
+if [ -f "$ZIP" ]; then
+    CHECKSUM=$(xcrun --toolchain default swift package compute-checksum "$ZIP" 2>"$STAGE/checksum.log")
+    if [ -n "$CHECKSUM" ]; then
+        pass "checksum: $CHECKSUM"
+        printf '%s\n' "$CHECKSUM" >"$ZIP.checksum"
+    else
+        fail "swift package compute-checksum, $ZIP:"
+        tail -10 "$STAGE/checksum.log" | sed 's/^/        /'
+    fi
+fi
+
+# The root Package.swift: the two constants a release writes, each on its
+# own line, and the platforms apple.sh built every archive for.
+MANIFEST="$ROOT/Package.swift"
+manifest_value() {
+    sed -n "s/^let $1 = \"\(.*\)\"\$/\1/p" "$2"
+}
+stamp_manifest() {
+    awk -v url="$2" -v sum="$3" '
+        /^let csipralURL = "/ { print "let csipralURL = \"" url "\""; next }
+        /^let csipralChecksum = "/ { print "let csipralChecksum = \"" sum "\""; next }
+        { print }
+    ' "$1" >"$1.new" && mv "$1.new" "$1"
+}
+dump_manifest() {
+    xcrun --toolchain default swift package dump-package --package-path "$(dirname "$1")" \
+        >"$STAGE/dump-root.json" 2>"$STAGE/dump-root.log"
+}
+step "the release manifest, Package.swift"
+platforms=".macOS(.v${APPLE_MACOS_MIN%%.*}), .iOS(.v${APPLE_IOS_MIN%%.*})"
+url_lines=$(grep -c '^let csipralURL = "' "$MANIFEST" || true)
+sum_lines=$(grep -c '^let csipralChecksum = "' "$MANIFEST" || true)
+if [ "$url_lines" -ne 1 ] || [ "$sum_lines" -ne 1 ]; then
+    fail "Package.swift: $url_lines csipralURL and $sum_lines csipralChecksum lines, one of each expected"
+else
+    pass "Package.swift: one csipralURL and one csipralChecksum line for --release to write"
+fi
+grep -qF "platforms: [$platforms]" "$MANIFEST" \
+    && pass "Package.swift: platforms [$platforms], as apple.sh builds" \
+    || fail "Package.swift does not say platforms: [$platforms], which every archive above was built for"
+if dump_manifest "$MANIFEST" && grep -q '"bindings/swift/Sources/Sipral"' "$STAGE/dump-root.json"; then
+    pass "swift package dump-package, Package.swift: the Sipral module from bindings/swift/Sources/Sipral"
+else
+    fail "swift package dump-package, Package.swift:"; tail -20 "$STAGE/dump-root.log" | sed 's/^/        /'
+fi
+have_url=$(manifest_value csipralURL "$MANIFEST")
+have_sum=$(manifest_value csipralChecksum "$MANIFEST")
+if [ -z "$have_sum" ]; then
+    pass "Package.swift names no release yet: CSipral is target/xcframework/CSipral.xcframework"
+elif ! printf '%s\n' "$have_sum" | grep -Eq '^[0-9a-f]{64}$'; then
+    fail "Package.swift: csipralChecksum '$have_sum' is not a SHA-256 in hex"
+elif [ "$have_url" = "$RELEASE_URL" ]; then
+    pass "Package.swift names this version's zip, $have_url"
+else
+    note "Package.swift names $have_url, the last release's zip; --release writes $VERSION's"
+fi
+
+if [ -n "$CHECKSUM" ] && [ "$WITH_OPUS" -eq 0 ]; then
+    if [ "$RELEASE" -eq 1 ]; then
+        target_manifest="$MANIFEST"
+    else
+        mkdir -p "$STAGE/release-manifest"
+        target_manifest="$STAGE/release-manifest/Package.swift"
+        cp "$MANIFEST" "$target_manifest"
+    fi
+    stamp_manifest "$target_manifest" "$RELEASE_URL" "$CHECKSUM"
+    if [ "$(manifest_value csipralURL "$target_manifest")" = "$RELEASE_URL" ] \
+        && [ "$(manifest_value csipralChecksum "$target_manifest")" = "$CHECKSUM" ] \
+        && dump_manifest "$target_manifest" && grep -q "\"$CHECKSUM\"" "$STAGE/dump-root.json"; then
+        if [ "$RELEASE" -eq 1 ]; then
+            pass "Package.swift written: CSipral from $RELEASE_URL, checksum $CHECKSUM"
         else
-            fail "swift package compute-checksum, $ZIP:"
-            tail -10 "$STAGE/checksum.log" | sed 's/^/        /'
+            pass "a copy of Package.swift written as --release would, and read back ($target_manifest)"
         fi
+    else
+        fail "Package.swift as --release writes it does not read back:"; tail -20 "$STAGE/dump-root.log" | sed 's/^/        /'
     fi
 fi
 
@@ -349,10 +451,10 @@ fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
-    printf '  not run: the owner publishes. Upload %s\n' "$(basename "$OUT")/CSipral$VARIANT_SUFFIX.xcframework.zip"
-    printf '  to the release, point spm/Package.swift'"'"'s binaryTarget at its URL with\n'
-    printf '  the checksum printed above, and tag the Swift package'"'"'s repository\n'
-    printf '  (docs/11-testing.md, "Releasing").\n'
+    printf '  not run: the owner publishes. Commit the root Package.swift that --release\n'
+    printf '  wrote, put the tag v%s on that commit, and upload\n' "$VERSION"
+    printf '  %s to the release v%s as an asset, so that it is at\n' "$ZIP" "$VERSION"
+    printf '  %s (docs/11-testing.md, "Releasing").\n' "$RELEASE_URL"
 fi
 
 printf '\n'

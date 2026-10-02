@@ -7,6 +7,9 @@
 #
 #   scripts/package/pub.sh --out DIR [--dry-run] [--publish]
 #
+# DIR is outside any git work tree: dart pub applies the enclosing tree's
+# ignore rules to the package it validates.
+#
 # bindings/dart/pubspec.yaml carries `publish_to: none`, so that a
 # `dart pub publish` run by mistake in the checkout goes nowhere. What
 # publishes is a staged copy, DIR/sipral: the package's committed files, the
@@ -46,6 +49,13 @@ done
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 STAGE="$OUT/sipral"
+# dart pub validates a package inside a git work tree against that tree's
+# ignore rules, so a stage under this repository's ignored target/ would be
+# a package with every file hidden
+if git -C "$OUT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'pub.sh: %s is inside a git work tree, whose ignore rules dart pub applies to the staged package; name a directory outside it\n' "$OUT" >&2
+    exit 2
+fi
 
 step "one version"
 scripts/version.sh --check || FAIL=1

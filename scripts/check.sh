@@ -46,7 +46,8 @@ areas:
   abi      the C library and its symbols, bindings/c/smoke.c linked and run,
            the C against glibc, abi-gen --check, the version rule, and the
            layout and offsets on every target.
-  swift    bindings/ (SwiftPM) built and tested, xcframework.sh --dry-run.
+  swift    bindings/ (SwiftPM) built and tested, xcframework.sh --dry-run
+           and the root Package.swift.
   dotnet   bindings/dotnet built and tested, nuget.sh collect and pack.
   kotlin   bindings/kotlin compiled, the JNI shims, the checks on a JVM
            (the React Native package's Android logic among them),
@@ -54,9 +55,9 @@ areas:
   jvm      bindings/jvm's loader and Java layer and their tests, jvm.sh.
   python   bindings/python imported and tested, wheels.sh --dry-run, the
            linux-arm64 cross path.
-  dart     bindings/dart analysed, formatted and tested.
+  dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
-           with Gradle, the iOS half.
+           with Gradle, the iOS half, npm.sh --dry-run.
   site     the documentation site built and its links checked.
 
 --changed reads `git diff` against BASE (default: the merge base with
@@ -319,20 +320,14 @@ step_rfc4475_corpus() {
     fi
 }
 
+# Every copy of the release version -- the crates' dependencies on each
+# other and the lockfiles, the .NET project and SipralInfo.cs, the Python
+# project and __version__, the Dart, React Native and JVM manifests --
+# against the workspace's, which scripts/version.sh owns: the list of where
+# a copy lives is kept there and nowhere else.
 step_one_version() {
-    step "one version everywhere"
-    ws=$(awk -F'"' '/^\[workspace.package\]/{p=1} p && /^version = /{print $2; exit}' Cargo.toml)
-    cs=$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' bindings/dotnet/Sipral/Sipral.csproj 2>/dev/null)
-    ci=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' bindings/dotnet/Sipral/SipralInfo.cs 2>/dev/null)
-    py=$(sed -n 's/^version = "\(.*\)"$/\1/p' bindings/python/pyproject.toml 2>/dev/null)
-    # the React Native package's, which its Android half also reads to name the
-    # org.sipral:sipral it depends on
-    rn=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' bindings/react-native/package.json 2>/dev/null)
-    if [ "$ws" = "$cs" ] && [ "$ws" = "$ci" ] && [ "$ws" = "$py" ] && [ "$ws" = "$rn" ]; then
-        pass "workspace, csproj, SipralInfo.cs, pyproject.toml and the React Native package.json all say $ws"
-    else
-        fail "version drift: workspace=$ws csproj=$cs SipralInfo.cs=$ci pyproject.toml=$py react-native=$rn"
-    fi
+    step "one version everywhere (scripts/version.sh --check)"
+    scripts/version.sh --check || FAIL=1
 }
 
 step_no_addresses() {
@@ -2404,6 +2399,25 @@ step_nuget() {
         scripts/package/nuget.sh pack --out "$PKG_WORK/nuget" --staging "$PKG_WORK/nuget-natives" --dry-run
 }
 
+# The Dart package as pub.dev would take it: a staged copy without the
+# publish_to guard, validated by `dart pub publish --dry-run`. Nothing is
+# uploaded. Staged outside the checkout, since dart pub applies the ignore
+# rules of the git work tree a package sits in, and target/ is ignored.
+step_pub() {
+    step "package --dry-run: the Dart package"
+    local pub_out
+    pub_out=$(mktemp -d)
+    pkg_run "pub.sh --dry-run" scripts/package/pub.sh --out "$pub_out" --dry-run
+    rm -rf "$pub_out"
+}
+
+# The React Native tarball as npm would pack it, its listing held to what
+# the package has to carry and must not. Nothing is uploaded.
+step_npm() {
+    step "package --dry-run: the React Native package"
+    pkg_run "npm.sh --dry-run" scripts/package/npm.sh --out "$PKG_WORK/npm" --dry-run
+}
+
 # sipral.aar, which the rn area's Gradle build takes as well: made once per
 # run under $PREP/aar, by whichever of the two asks first.
 assemble_aar() {
@@ -2615,7 +2629,6 @@ area_hygiene() {
     step_security_policy
     step_rfc4475_corpus
     step_one_version
-    step "every copy of the version (scripts/version.sh --check)"; scripts/version.sh --check || FAIL=1
     step_no_addresses
     step_language
     step_provenance
@@ -2654,8 +2667,8 @@ area_dotnet() { need_library; step_dotnet_compiles; step_dotnet_tests; step_nuge
 area_kotlin() { need_library; step_kotlin_compiles; step_kotlin_on_a_jvm; step_aar; }
 area_jvm() { need_library; step_jvm; step_jvm_package; }
 area_python() { need_library; step_python; step_wheels; step_linux_arm64; }
-area_dart() { need_library; step_dart; }
-area_rn() { need_library; step_react_native; }
+area_dart() { need_library; step_dart; step_pub; }
+area_rn() { need_library; step_react_native; step_npm; }
 area_site() { step_site; }
 
 # --changed: which areas a path reaches. Each line of $ROUTES is
@@ -2712,6 +2725,8 @@ route() {
             route_to abi "C the abi area compiles" ;;
         bindings/Package.swift|bindings/swift/*)
             route_to "swift rn" "the Swift layer, which the React Native iOS half builds over" ;;
+        Package.swift)
+            route_to "swift rn" "the Swift package a release publishes, which the React Native pod resolves" ;;
         bindings/dotnet/*)
             route_to dotnet "the .NET layer" ;;
         bindings/kotlin/*)
@@ -2742,6 +2757,10 @@ route() {
             route_to "kotlin rn" "the Android packaging, whose sipral.aar the React Native build takes" ;;
         scripts/package/jvm.sh)
             route_to jvm "the server jar's packaging" ;;
+        scripts/package/pub.sh)
+            route_to dart "the Dart package's packaging" ;;
+        scripts/package/npm.sh)
+            route_to rn "the React Native package's packaging" ;;
         scripts/site.sh|site/*|docs/*)
             route_to site "the documentation site" ;;
         *.md|THIRD-PARTY-*|scripts/*|interop/*|assets/*|.github/*|LICENSE*|AUTHORS|SECURITY.md|.gitignore|.gitattributes|.gitleaksignore)

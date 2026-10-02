@@ -1306,7 +1306,7 @@ The mapping errs towards running more:
 | any other crate, `tools/`, `fixtures/`, `fuzz/`, `interop/harness`, `deny.toml` | rust |
 | `bindings/fixtures` | rust and every layer |
 | `bindings/c`, `interop/harness-c` | abi (and swift, for `bindings/c/sipral.c`) |
-| `bindings/swift`, `bindings/Package.swift` | swift and rn |
+| `bindings/swift`, `bindings/Package.swift`, the root `Package.swift` | swift and rn |
 | `bindings/kotlin` | kotlin, jvm and rn |
 | `bindings/react-native`'s Android core and its JVM check | rn and kotlin |
 | any other layer's directory | that layer |
@@ -1429,7 +1429,15 @@ holds every copy to it. Each packaging script runs that check first and
 stops on a tree that disagrees with itself. The version is three numbers and
 nothing after them, since a pre-release suffix is spelled one way on
 crates.io, NuGet and npm and another on PyPI. The C header's version macros
-are the ABI's (`docs/08-ffi.md`) and move only with it.
+are the ABI's (`docs/08-ffi.md`, "Versioning") and move only with it: the
+1.0.0 release is at ABI 0.36.
+
+**What a release publishes** is the C library and the language packages
+over it: the table below, every row but the crates. The Rust crates are not
+part of it. Their API makes no compatibility promise, and the `sipral` name
+on crates.io is a reservation at 0.0.1 that stays what it is; `crate.sh`
+refuses, saying so, unless it is asked with `--crates-io` to check the crates
+as a publication there would need them.
 
 Each script under `scripts/package/` takes `--dry-run`, which runs on the
 Mac this gate is developed on and says, in a `note` line, what it left to
@@ -1439,47 +1447,70 @@ uploads anything.
 
 | Artefact | Registry | Built by | On |
 |---|---|---|---|
-| `sipral` and the workspace crates it names | crates.io | `crate.sh` | any host |
+| `sipral` and the workspace crates it names: not published by a release | crates.io | `crate.sh --crates-io` | any host |
 | `Sipral`, `Sipral.Opus` | NuGet | `nuget.sh collect` per RID, then `nuget.sh pack` | the Mac (osx-arm64, osx-x64), Windows under Git Bash (win-x64, win-arm64), a Docker host (linux-x64, linux-arm64); the pack anywhere with the .NET SDK |
-| `CSipral.xcframework.zip` and the Swift package over it | a release of the Swift package's repository | `xcframework.sh` | a Mac with Xcode |
+| `CSipral.xcframework.zip`, and the root `Package.swift` pointed at it | an asset of this repository's release `vX.Y.Z`; the Swift package is this repository | `xcframework.sh --release` | a Mac with Xcode |
 | `sipral`, `sipral-opus` wheels | PyPI | `wheels.sh` | the Mac (`macosx_12_0_arm64`), an Intel Mac (`macosx_12_0_x86_64`), Windows under Git Bash (`win_amd64`), a Docker host (`--manylinux`, `--linux-arm64`) |
 | `sipral.aar`, `sipral-opus.aar`, their POM and sources jar | Maven | `android.sh`, whose image runs `aar.sh` | a Docker host |
 | `sipral-jvm`, `sipral-jvm-opus`, their POM and sources jar | Maven | `jvm.sh` | a Linux host with Docker, Maven and a JDK |
 | `sipral` (Dart and Flutter) | pub.dev | `pub.sh` | any host with the Dart SDK |
 | `sipral-react-native` | npm | `npm.sh` | any host with npm |
 
-The two Maven artefacts take one group id, the property `sipral.groupId` in
-`bindings/jvm/pom.xml` (`SIPRAL_GROUP_ID` names another for one run). It is
-a placeholder until the project decides it, and nothing is published under
-a placeholder. The React Native package's Android half and the telecom
-helper depend on the AAR as `org.sipral:sipral`, so a group id other than
-`org.sipral` is written there too, and in the local Maven repository
-`android.sh` builds them against.
+The two Maven artefacts take one group id, `org.sipral`: the property
+`sipral.groupId` in `bindings/jvm/pom.xml`, which `aar.sh` reads for the
+AAR's POM as well (`SIPRAL_GROUP_ID` names another for one run). The React
+Native package's Android half and the telecom helper depend on the AAR as
+`org.sipral:sipral`, and the local Maven repository `android.sh` builds them
+against says the same.
+
+**The Swift package is this repository.** SwiftPM reads a package from the
+root of a git repository, so the root `Package.swift` is the one an
+application adds, by this repository's URL and the release's version: the
+`Sipral` module from `bindings/swift/Sources/Sipral` over a `binaryTarget`
+named by two constants, `csipralURL` and `csipralChecksum`. Between
+releases they are empty and the target is the XCFramework
+`xcframework.sh --out target/xcframework` leaves in the checkout.
+`xcframework.sh --release` builds the zip, has `swift package
+compute-checksum` read it, and writes both: the URL is the zip's place among
+the release's assets, `REPOSITORY/releases/download/vX.Y.Z/CSipral.xcframework.zip`.
+Every run of the script, `--dry-run` included, checks that the manifest
+still reads, that it names the platforms `apple.sh` builds every archive
+for, and that the constants are where `--release` writes them; a dry run
+writes them into a copy, from a zip it makes and keeps in its stage
+directory. The package carries the default variant; the zip with libopus is
+an asset an application points its own `binaryTarget` at. The React Native
+podspec asks for the same package, from this repository at exactly its own
+version, unless `SIPRAL_SWIFT_PACKAGE` names another place.
 
 What has to be true before anything is built for a release:
 
-1. `./scripts/check.sh` exits zero with no FAIL and no skip, on the commit
-   that will be tagged.
+1. `./scripts/check.sh` exits zero with no FAIL and no skip, on the release
+   commit of step 3.
 2. `./scripts/lab.sh` on the Linux lab machine, and the live-PBX procedure
    above, recorded in the matrix; `scripts/fuzz.sh` overnight.
 3. `scripts/version.sh X.Y.Z`, then `scripts/version.sh --check`;
    `CHANGELOG.md`'s `[Unreleased]` becomes `[X.Y.Z]` with the date; the
    package READMEs say nothing that was only true before the release; one
-   commit, tagged `vX.Y.Z`.
-4. Every script above run without `--dry-run`, for both variants where it
-   has `--with-opus`, from that tag, on the machines the table names, and
-   each one's output gathered on the machine that packs or uploads it.
+   commit, the release commit.
+4. On the Mac, from the release commit, `xcframework.sh --out DIR
+   --release`, then one commit of the root `Package.swift` it wrote and
+   nothing else. That commit changes nothing a library is built from, and it
+   is the one tagged `vX.Y.Z`: SwiftPM reads the manifest at the tag, so the
+   tag has to carry the checksum. `./scripts/check.sh --only swift` on it.
+5. Every other script above run without `--dry-run`, for both variants
+   where it has `--with-opus`, from that tag, on the machines the table
+   names, and each one's output gathered on the machine that packs or
+   uploads it.
 
 Then the order of publication, each step only once the one before it is
 live, so that no package is ever published naming one that is not there yet:
 
-1. The crates, with the one `cargo publish` invocation `crate.sh --publish`
-   prints: cargo uploads them in dependency order.
-2. The packages that carry the native library and depend on no other
+1. The packages that carry the native library and depend on no other
    Sipral package: NuGet (`dotnet nuget push`), PyPI (`twine upload` of
-   every wheel), the XCFramework zip with the Swift package tagged over it,
-   and the two Maven artefacts, signed.
-3. What resolves those by name: `sipral-react-native` on npm, whose Android
+   every wheel), the tag pushed with the release `vX.Y.Z` made on it and
+   `CSipral.xcframework.zip` attached to it (and the `--with-opus` zip
+   beside it), and the two Maven artefacts, signed.
+2. What resolves those by name: `sipral-react-native` on npm, whose Android
    half asks Maven for the AAR and whose iOS half asks for the Swift
    package; and the Dart package on pub.dev, which carries no native and can
    go at any point in this step.
@@ -1490,16 +1521,10 @@ script's own checks come first and the uploads last.
 
 What is open, and stops the steps it names until it is settled:
 
-- **The crates.** crates.io takes `sipral` only when every crate it names is
-  already there, and `sipral` names eleven of this workspace's, each
-  `publish = false` today and licensed with a `LicenseRef-` crates.io
-  refuses. `crate.sh` fails and names each one until they are published
-  with it or folded into it.
-- **The Swift package's home.** SwiftPM reads a package from the root of a
-  git repository, and `xcframework.sh` writes it to `spm/` with a local
-  `binaryTarget`; the release points that target at the zip's URL and
-  checksum, in a repository of its own or at this one's root. The React
-  Native podspec reads the same place from `SIPRAL_SWIFT_PACKAGE`.
+- **The repository's visibility.** The Swift package, its release asset and
+  every package's repository link are read from this repository, which is
+  private until the visibility is flipped (`10-roadmap.md`, "Ordering
+  constraints"); a private release asset is not one SwiftPM can download.
 - **Maven Central.** Both artefacts need a signature per file and a javadoc
   jar beside the sources jar; the Kotlin sources have no Javadoc of their
   own to put in it.

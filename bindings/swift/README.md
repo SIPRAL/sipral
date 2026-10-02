@@ -127,8 +127,11 @@ full Xcode does).
 `target/release`. For iOS, `scripts/package/xcframework.sh --out DIR`
 builds `DIR/CSipral.xcframework` (macOS, iOS device, iOS Simulator) and
 prints `DIR/spm/Package.swift` over it, carrying this whole module and its
-test suite on a `binaryTarget`. An application depends on `DIR/spm`; the
-suite runs on a simulator from there:
+test suite on a `binaryTarget`. An application adds the Swift package by
+this repository's URL and a release's version: the root `Package.swift`,
+the same module over the XCFramework that release carries as an asset
+(`docs/11-testing.md`, "Releasing"). `DIR/spm` is the same package built
+here, and the suite runs on a simulator from there:
 
 ```sh
 UDID=$(xcrun simctl create sipral-test "iPhone 17" com.apple.CoreSimulator.SimRuntime.iOS-26-5)

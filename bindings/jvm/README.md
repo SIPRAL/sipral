@@ -93,8 +93,9 @@ UDP socket; `client.settings()` is a plain method.
 
 Nothing here publishes. The POM carries what Maven Central asks for (name,
 description, URL, licences, developer, SCM, a sources jar) but no
-`distributionManagement`, no signing and no javadoc jar. The group id is the
-property `sipral.groupId`, a placeholder until the owner decides it
-(`-Dsipral.groupId=...`, or `SIPRAL_GROUP_ID` for `jvm.sh`); Maven warns that
+`distributionManagement`, no signing and no javadoc jar. The group id is
+`org.sipral`, the property `sipral.groupId`, which the AAR's POM reads too
+(`-Dsipral.groupId=...`, or `SIPRAL_GROUP_ID` for `jvm.sh`, names another
+for one build); the artefact is `org.sipral:sipral-jvm`. Maven warns that
 a group id is an expression, and the POM `jvm.sh` writes beside the jar is
 the flattened one, with the group id and version written out.
