@@ -3054,12 +3054,77 @@ fn a_call_past_the_dialog_ceiling_is_refused_before_it_rings() {
         "{}",
         String::from_utf8_lossy(&refusal)
     );
+    // §21.5.4: full, not broken — told when to come back rather than read as
+    // a 500, and soon, since room returns the moment any call ends
+    assert_eq!(
+        header(&refusal, HeaderName::RetryAfter),
+        b"2",
+        "{}",
+        String::from_utf8_lossy(&refusal)
+    );
     assert!(
         !events(&mut endpoint)
             .iter()
             .any(|event| matches!(*event, Event::IncomingInvite { .. })),
         "the application was not troubled with a call it has no room for"
     );
+}
+
+#[test]
+fn an_invite_past_the_dialog_ceiling_is_told_when_to_retry_and_a_flood_is_not() {
+    let t0 = Instant::now();
+    let mut endpoint = Endpoint::new(
+        EndpointConfig {
+            max_dialogs: 1,
+            max_server_transactions: 2,
+            ..EndpointConfig::DEFAULT
+        },
+        [15; 32],
+    )
+    .unwrap();
+    endpoint
+        .receive(
+            Input::TransportBound {
+                transport: UDP,
+                protocol: TransportProtocol::Udp,
+                local: local(),
+                remote: None,
+            },
+            t0,
+        )
+        .expect("binding a transport");
+
+    // the one call there is room for is let in, and the next one is not
+    deliver(&mut endpoint, &incoming("INVITE", "first", ""), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+    deliver(&mut endpoint, &incoming("INVITE", "second", ""), t0);
+    let full = sent(&mut endpoint);
+    assert!(
+        full.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&full)
+    );
+    assert_eq!(header(&full, HeaderName::RetryAfter), b"2");
+
+    // a request that would only start one transaction too many is the
+    // flood's ceiling, not the calls': no Retry-After goes with it
+    deliver(&mut endpoint, &incoming("MESSAGE", "m1", ""), t0);
+    transmits(&mut endpoint);
+    events(&mut endpoint);
+    deliver(&mut endpoint, &incoming("MESSAGE", "m2", ""), t0);
+    let flooded = sent(&mut endpoint);
+    assert!(
+        flooded.starts_with(b"SIP/2.0 503 "),
+        "{}",
+        String::from_utf8_lossy(&flooded)
+    );
+    assert!(
+        header(&flooded, HeaderName::RetryAfter).is_empty(),
+        "{}",
+        String::from_utf8_lossy(&flooded)
+    );
+    assert_eq!(endpoint.refused(), 2);
 }
 
 #[test]

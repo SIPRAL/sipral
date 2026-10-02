@@ -144,6 +144,18 @@ export interface OpenOptions {
    * itself.
    */
   heldAudio?: 'silence' | 'application';
+  /**
+   * The most calls the client holds at once, either way; left out or 0,
+   * 128. Past it a call that arrives is answered 503 with `Retry-After: 2`
+   * and `placeCall` rejects with `limitReached`.
+   */
+  maxDialogs?: number;
+  /**
+   * The most requests from other ends the client works on at once; left out
+   * or 0, 256. Raised beside `maxDialogs` past a few hundred calls, to three
+   * a call and 256 more (`docs/08-ffi.md`, "Limits, and what went out twice").
+   */
+  maxServerTransactions?: number;
 }
 
 /** Which way one call's audio goes: what the microphone sends it, or what it plays. */

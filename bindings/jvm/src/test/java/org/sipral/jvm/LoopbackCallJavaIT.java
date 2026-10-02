@@ -103,6 +103,17 @@ class LoopbackCallJavaIT {
      * UDP socket, added from Java: its REGISTER reaches a registrar that
      * takes TCP alone, over a connection the client opened. */
     @Test
+    void theCeilingsAServerRaisesReachTheLibrary() throws Exception {
+        try (SipralClient plain = SipralJava.open("127.0.0.1");
+             SipralClient roomy = SipralJava.open("127.0.0.1", 0, null, 1_000L, 3_256L)) {
+            assertEquals(128L, plain.settings().getMaxDialogs());
+            assertEquals(256L, plain.settings().getMaxServerTransactions());
+            assertEquals(1_000L, roomy.settings().getMaxDialogs());
+            assertEquals(3_256L, roomy.settings().getMaxServerTransactions());
+        }
+    }
+
+    @Test
     void anAccountOnAConnectionOfItsOwnRegistersOverTcp() throws Exception {
         try (ServerSocket registrar = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
              SipralClient client = SipralJava.open("127.0.0.1")) {

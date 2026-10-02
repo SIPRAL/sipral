@@ -577,6 +577,11 @@ export class SipralClient {
     if (options.heldAudio !== undefined && options.heldAudio !== 'silence' && options.heldAudio !== 'application') {
       throw new SipralError('invalidArgument', 'heldAudio is "silence" or "application"');
     }
+    for (const [name, value] of [['maxDialogs', options.maxDialogs], ['maxServerTransactions', options.maxServerTransactions]] as const) {
+      if (value !== undefined && !(Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) {
+        throw new SipralError('invalidArgument', `${name} is a whole number from 0 to 4294967295`);
+      }
+    }
     const client = new SipralClient(native);
     client.signalling = signalling;
     SipralClient.opened = client;
@@ -600,6 +605,8 @@ export class SipralClient {
         tlsPin,
         systemEchoCancellation: options.systemEchoCancellation,
         heldAudio: options.heldAudio,
+        maxDialogs: options.maxDialogs,
+        maxServerTransactions: options.maxServerTransactions,
       });
     } catch (failure) {
       client.release();

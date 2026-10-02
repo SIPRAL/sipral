@@ -402,11 +402,32 @@ private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
     return "a settle after the module was invalidated was rejected as closed"
 }
 
+/** maxDialogs reaches the library through the core: at a ceiling of one
+ * call, a second placed while the first still rings is refused as
+ * limitReached. */
+private fun aCallPlacedPastMaxDialogsIsRefused(): String {
+    val capped = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
+    val bob = Phone("bob")
+    try {
+        val address = capped.open(SipralOpenOptions(bindHost = "127.0.0.1", maxDialogs = 1))
+        val line = capped.addAccount(SipralAccountOptions(aor = "sip:capped@sipral.invalid", registrarAddress = bob.address))
+        bob.core.addAccount(SipralAccountOptions(aor = bob.aor, registrarAddress = address))
+        capped.placeCall(line, "sip:bob@${bob.address}", destination = null, codecs = null)
+        bob.await("the first call") { it["kind"] == "incomingCall" }
+        refusal("limitReached") { capped.placeCall(line, "sip:bob@${bob.address}", destination = null, codecs = null) }
+    } finally {
+        capped.close()
+        bob.core.close()
+    }
+    return "a call placed past maxDialogs was refused"
+}
+
 fun main() {
     val said = try {
         everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
-            "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary()
+            "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
+            aCallPlacedPastMaxDialogsIsRefused()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

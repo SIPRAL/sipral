@@ -51,6 +51,10 @@ public struct SipralOpenOptions {
     /// What a party this end holds is sent: "silence" or "application";
     /// nil for silence.
     public var heldAudio: String?
+    /// The most calls held at once, 0 for 128.
+    public var maxDialogs: UInt32 = 0
+    /// The most requests from other ends worked on at once, 0 for 256.
+    public var maxServerTransactions: UInt32 = 0
 
     public init(bindHost: String? = nil) {
         self.bindHost = bindHost
@@ -75,6 +79,8 @@ public struct SipralOpenOptions {
         tlsPin = options["tlsPin"] as? String
         systemEchoCancellation = (options["systemEchoCancellation"] as? NSNumber)?.boolValue
         heldAudio = options["heldAudio"] as? String
+        maxDialogs = UInt32(clamping: (options["maxDialogs"] as? NSNumber)?.int64Value ?? 0)
+        maxServerTransactions = UInt32(clamping: (options["maxServerTransactions"] as? NSNumber)?.int64Value ?? 0)
     }
 }
 
@@ -191,6 +197,8 @@ public final class SipralReactCore: @unchecked Sendable {
                     codecs: options.codecs,
                     srtp: srtp,
                     stunServer: options.stunServer,
+                    maxDialogs: options.maxDialogs,
+                    maxServerTransactions: options.maxServerTransactions,
                     signalling: signalling,
                     signallingServer: options.signallingServer,
                     tlsTrust: trust,

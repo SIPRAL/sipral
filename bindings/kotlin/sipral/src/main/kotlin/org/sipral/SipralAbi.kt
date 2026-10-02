@@ -6067,13 +6067,15 @@ class SipralStackConfig(
      * — until it ends or is refused.
      *
      * An INVITE that arrives past it is answered `503 Service
-     * Unavailable` before it rings, with no `Retry-After`: RFC 3261
-     * §21.5.4 has the client try another server either way, and a
-     * `Retry-After` would also have a proxy send this stack nothing at
-     * all for that long, every call refused for one too many. A
-     * call placed past it is `SIPRAL_STATUS_LIMIT_REACHED` and nothing
-     * goes out. A media server built on this library raises it to what
-     * its machine can carry; `docs/19-numbers.md` has what one costs.
+     * Unavailable` before it rings, with `Retry-After: 2`: RFC 3261
+     * §21.5.4 has a client that gets no `Retry-After` act as if it got a
+     * 500, where this stack is full rather than broken, and room comes
+     * back the moment any call ends, so the delay a proxy then keeps
+     * away for is short. A call placed past it is
+     * `SIPRAL_STATUS_LIMIT_REACHED` and nothing goes out. A media server
+     * built on this library raises it to what its machine can carry,
+     * with `max_server_transactions` beside it; `docs/19-numbers.md` has
+     * what a call costs.
      */
     val maxDialogs: Long = 0,
     /**

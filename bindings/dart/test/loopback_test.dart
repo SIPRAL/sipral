@@ -185,6 +185,48 @@ void main() {
     call.close();
   });
 
+  test('a call placed past maxDialogs is refused, and the ceiling is read '
+      'back', () async {
+    final capped = await SipralStack.open(maxDialogs: 1);
+    addTearDown(capped.close);
+    expect(alice.settings().maxDialogs, 128);
+    expect(alice.settings().maxServerTransactions, 256);
+    expect(capped.settings().maxDialogs, 1);
+    final fromCapped = capped.addAccount(
+      'sip:capped@sipral.invalid',
+      registrarAddress: bob.bindAddress,
+    );
+    // bob lets the first call ring, so its room is not given back
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: capped.bindAddress,
+    );
+    final first = await capped.placeCall(
+      fromCapped,
+      'sip:bob@${bob.bindAddress}',
+    );
+    addTearDown(first.close);
+    await expectLater(
+      capped.placeCall(fromCapped, 'sip:bob@${bob.bindAddress}'),
+      throwsA(
+        isA<SipralException>().having(
+          (error) => error.status,
+          'status',
+          SipralStatus.limitReached,
+        ),
+      ),
+    );
+
+    final roomy = await SipralStack.open(
+      maxDialogs: 1000,
+      maxServerTransactions: 3256,
+    );
+    addTearDown(roomy.close);
+    expect(roomy.settings().maxDialogs, 1000);
+    expect(roomy.settings().maxServerTransactions, 3256);
+    await expectLater(SipralStack.open(maxDialogs: -1), throwsArgumentError);
+  });
+
   test('a library call that fails throws with the library\'s own words', () {
     expect(
       () => alice.addAccount('not a uri', registrarAddress: 'nowhere'),

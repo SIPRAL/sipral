@@ -81,6 +81,18 @@ const MAX_DIALOG_NON_INVITE_TRANSACTIONS: usize = 16;
 /// short because the load it answers is a burst inside a call that is
 /// otherwise healthy, not a stranger to be sent away.
 const DIALOG_BUSY_RETRY_AFTER_SECONDS: u32 = 1;
+/// `Retry-After` on the 503 an INVITE gets at
+/// [`super::EndpointConfig::max_dialogs`] (RFC 3261 §21.5.4, §20.33).
+///
+/// Room comes back the moment any one call ends. At the default ceiling, 128
+/// calls of three minutes each, that is every 1.4 seconds on average, and
+/// sooner at any ceiling raised past it; two seconds is that, rounded up to
+/// the whole seconds the header counts in. Longer would have a proxy that
+/// honours it (§21.5.4: it "SHOULD NOT forward any other requests to that
+/// server for the duration") send callers elsewhere while room is already
+/// here; with no value at all, the same section has the client "act as if it
+/// had received a 500", which says broken where the truth is full.
+const DIALOG_CEILING_RETRY_AFTER_SECONDS: u32 = 2;
 
 impl Endpoint {
     pub(super) fn on_datagram(
@@ -783,11 +795,15 @@ impl Endpoint {
     /// stranger's request is the remaining case, and
     /// past the ceiling it gets §21.5.4's 503 — "temporarily unable to
     /// process the request due to a temporary overloading" — written straight
-    /// to the flow, because the point of refusing is not to keep anything. No
-    /// `Retry-After` goes with it: §21.5.4 has a client that gets none treat
-    /// it as a 500 and try somewhere else, which is what should happen, while
-    /// one that names a delay asks a proxy to stop sending here for that
-    /// long.
+    /// to the flow, because the point of refusing is not to keep anything.
+    ///
+    /// An INVITE refused because the calls held reached `max_dialogs` carries
+    /// a `Retry-After` of [`DIALOG_CEILING_RETRY_AFTER_SECONDS`]: this end is
+    /// full rather than broken, and is sure to have room again as soon as a
+    /// call ends. A refusal for want of server transactions alone carries
+    /// none: that ceiling is met by a flood, and §21.5.4 then has the sender
+    /// treat the 503 as a 500 and go elsewhere, which is what should happen,
+    /// rather than be told when to come back.
     fn refuse_when_full(&mut self, request: &RawMessage<'_>, flow: Flow) -> bool {
         // and neither is a CANCEL that matches something: §9.2 makes answering
         // one a MUST, and it ends a transaction rather than starting one worth
@@ -839,10 +855,13 @@ impl Endpoint {
         // so a retransmission of the request earns a second refusal with a
         // second tag, which is what a stateless answer costs
         let tag = self.mint_tag();
-        let built = ResponseBuilder::for_request(request, StatusCode::SERVICE_UNAVAILABLE)
-            .to_tag(&tag)
-            .build();
-        if let Ok(message) = built {
+        let seconds = DIALOG_CEILING_RETRY_AFTER_SECONDS.to_string();
+        let mut builder =
+            ResponseBuilder::for_request(request, StatusCode::SERVICE_UNAVAILABLE).to_tag(&tag);
+        if dialogs {
+            builder = builder.header(HeaderName::RetryAfter, seconds.as_bytes());
+        }
+        if let Ok(message) = builder.build() {
             self.queue(flow.transmit(message.bytes()));
         }
         true

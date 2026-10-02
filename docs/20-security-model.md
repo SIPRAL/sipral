@@ -253,7 +253,10 @@ call this end has already given up. Underneath that per-dialog ceiling sit the
 endpoint-wide ones, `max_server_transactions` (256) and `max_dialogs` (128,
 counted from the moment an INVITE is let in, not from the dialog it eventually
 makes), past which a stranger's request is answered 503 statelessly — refusing
-costs nothing more than the response itself (`docs/03-core-signalling.md`).
+costs nothing more than the response itself (`docs/03-core-signalling.md`). The
+503 for a call past `max_dialogs` carries `Retry-After: 2`; the one for want of
+transactions, the ceiling a flood meets, tells the sender nothing about when to
+come back.
 
 **What a STIR verifier holds a request to.** `crates/sipral-stir` checks a
 PASSporT's `iat` against a freshness window, sixty seconds by default (RFC

@@ -264,7 +264,7 @@ the interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `tests/test_nat.py` proves both on the wire.
 
 A stack holds 128 calls at once unless `max_dialogs` says otherwise: past
-it an incoming call is answered 503 and `place_call` raises with
+it an incoming call is answered 503 with `Retry-After: 2` and `place_call` raises with
 `SIPRAL_STATUS_LIMIT_REACHED`. `max_server_transactions` (256),
 `diagnostic_decisions` (64) and `diagnostic_records` (32) are the other
 ceilings, zero for the default each (`docs/08-ffi.md`, "Limits, and what

@@ -1065,7 +1065,7 @@ same four, read back with the default filled in:
 
 | Member | Default | Past it |
 |---|---|---|
-| `max_dialogs` | 128 | An INVITE that arrives is answered `503 Service Unavailable` before it rings. A call placed with `sipral_call_place` is `SIPRAL_STATUS_LIMIT_REACHED` (16), and nothing goes out. |
+| `max_dialogs` | 128 | An INVITE that arrives is answered `503 Service Unavailable` with `Retry-After: 2` before it rings. A call placed with `sipral_call_place` is `SIPRAL_STATUS_LIMIT_REACHED` (16), and nothing goes out. |
 | `max_server_transactions` | 256 | A request from another end that would start one more server transaction is answered `503` statelessly. A request inside a call is held to that call's own share instead, and a BYE never is. |
 | `diagnostic_decisions` | 64 | The oldest decision of that call's D1 record goes, and the record counts it. Nothing is refused. |
 | `diagnostic_records` | 32 | The record written longest ago goes, and the stack counts it. Nothing is refused. |
@@ -1084,13 +1084,30 @@ call has taken the room in between, the retry is not sent and the call ends
 as the refusal that challenged it; the stack never holds one call past
 `max_dialogs`.
 
-Neither `503` carries a `Retry-After`. RFC 3261 §21.5.4 has the client try
-another server either way; what the header would add is a proxy that sends
-this stack nothing at all for that long (the same section's "SHOULD NOT
-forward any other requests to that server for the duration"), so one call
-too many would shut out every call behind it. A deployment that wants a
-proxy to back off for a while says so at the proxy. Every `503` either limit
-sends is counted in `sipral_counters_t::requests_refused_at_limit`.
+The `503` for a call past `max_dialogs` carries `Retry-After: 2`. RFC 3261
+§21.5.4 has a client that gets a `503` with none "act as if it had received
+a 500", which says broken where the truth is full, and a stack at its
+ceiling has room again the moment any one of its calls ends: at 128 calls
+of three minutes each, every 1.4 seconds on average, sooner at any ceiling
+raised past it. Two seconds is that rounded up to the whole seconds the
+header counts in, short enough that a proxy honouring the same section's
+"SHOULD NOT forward any other requests to that server for the duration"
+sends callers elsewhere only while there is no room here. The `503` for
+want of server transactions carries none: that ceiling is met by a flood,
+and the sender is better told nothing than when to come back. Every `503`
+either limit sends is counted in
+`sipral_counters_t::requests_refused_at_limit`.
+
+A server raising `max_dialogs` raises `max_server_transactions` beside it.
+An INVITE answered with a 2xx keeps its server transaction for 32 seconds
+(RFC 6026's timer L), and a BYE over UDP keeps its own as long (RFC 3261's
+timer J), so a stack whose calls are set up, ended and set up again inside
+half a minute holds three server transactions a call at once; three a call
+and the default 256 besides is what `crates/sipral/examples/headless-agent.rs`
+sets for `--max-calls`, and what its test of two full rounds back to back
+needs. The INVITE guard below is the third thing to raise: past a ceiling of
+128 calls its voice-agent preset turns a rush away with `480` before the
+ceiling is reached.
 
 `sipral_counters_t` appends four totals, each only ever growing:
 

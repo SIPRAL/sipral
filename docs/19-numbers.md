@@ -878,9 +878,10 @@ calls and 64 more, `max_server_transactions` to twice the calls and 256 more.
 At the defaults, 128 and 256, the 129th call is refused both ways: one placed
 is `SendError::LimitReached` in Rust and `SIPRAL_STATUS_LIMIT_REACHED` (16)
 over the C ABI, with nothing sent, and an INVITE that arrives is answered
-`503 Service Unavailable` with no `Retry-After`, counted in
-`sipral_counters_t::requests_refused_at_limit` (`docs/08-ffi.md`, "Limits, and
-what went out twice", says why no `Retry-After`).
+`503 Service Unavailable`, counted in
+`sipral_counters_t::requests_refused_at_limit`; it carried no `Retry-After`
+when this was run, and carries `Retry-After: 2` since 2 October
+(`docs/08-ffi.md`, "Limits, and what went out twice", says why).
 
 The Linux x86-64 lab machine (Intel Xeon E5-2698 v4 at 2.2 GHz, 32 vCPUs,
 Debian 13, kernel 6.12, socket buffers at the default 212 992 bytes), the
@@ -1006,6 +1007,60 @@ one core a second, per call.
 
 Not measured again: five and ten thousand calls held (`bench.sh scale`,
 29 September), which wants the machine to itself.
+
+## 2 October 2026 — `1.0.0`, the headless agent holding a thousand calls
+
+`crates/sipral/examples/headless-agent.rs` as shipped, one process with one
+thread for its signalling and every call's audio, started with
+`--host 127.0.0.1 --max-calls 1000` and standard input closed, and called by
+the lab harness's `scale` flow (`interop/harness/src/scale.rs`) on the same
+machine: a thousand calls placed at 500 a second, G.711 with a tone sent on
+each every twenty milliseconds, held thirty seconds once all were up and
+hung up. The agent echoes what it hears. Its resident memory and processor
+time were read with `ps` every two seconds; the caller's figures are its own
+report.
+
+The Linux x86-64 lab machine (Intel Xeon E5-2698 v4 at 2.2 GHz, 32 vCPUs,
+Debian 13, kernel 6.12), both built with `rustc 1.95.0` in `rust:1.95-trixie`,
+release profile, and run on the host with nothing else running.
+
+| | A thousand calls |
+|---|---|
+| Calls up | 1 000 of 1 000, every one ended by its BYE |
+| Setup, INVITE to 2xx, at the caller: p50, p90, max | 12.7, 74.4, 132.1 ms, 480 calls a second |
+| The agent's resident memory | 6.3 MB before the first call, 94.8 MB with the thousand held: about 88 KB a call |
+| The agent's processor time while it holds them | 0.92 of one core |
+| Packets a second at the caller, out and in (due: 50 000) | 50 000, 50 016 |
+| Frames the caller played with its buffer run dry | 7 418 of 1 500 000 (0.5 %) |
+| SIP sent again, either way; transactions timed out | none; none |
+
+Read together:
+
+- **The flag is what lets them in.** Without `--max-calls` the agent stops
+  at the stack's 128 calls and answers the rest `503`, now with
+  `Retry-After: 2` (the comparison run of `docs/23-compared-with-pjsip.md`
+  met that ceiling the same day with two hundred calls offered); the
+  agent's own test (`two_full_bursts_back_to_back_meet_neither_the_guard_nor_the_ceiling`)
+  shows both the ceiling and the server transactions raised with it are
+  needed for a ceiling's worth of calls, ended, and a second one straight
+  after.
+- **One thread is the agent's limit, not the library's.** The example reads
+  every call's socket on each turn of one loop, so its processor time is
+  mostly system calls and grows with the calls held: a thousand take nine
+  tenths of a core, which is about where one thread runs out. The library
+  itself carries ten thousand calls on one machine when the audio is spread
+  over threads (`bench.sh scale`, 29 September above); an agent meant for
+  thousands of calls is written that way.
+- **A call costs the agent about 88 KB of resident memory**, against the
+  72 KB the 29 September harness held per call at five thousand: the
+  example's socket per call and its echo buffer are in it.
+
+The same run on the Apple M2 (macOS, 24 GB) that day was tried twice while
+the machine was swapping, 12 GB of its 13 GB of swap in use: both processes
+stalled together with their memory paged out, for 36 seconds in the first
+run, which brought 784 of the thousand calls up, and for nearly 19 in the
+second, which brought all thousand up and then lost their audio. No figure
+from it is given.
 
 ## What would make these numbers worse
 

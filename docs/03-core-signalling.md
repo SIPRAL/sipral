@@ -215,7 +215,12 @@ the socket.
   order of magnitude past what a softphone reaches (256 and 128), and past
   either one a request that belongs to no dialog we already hold is answered
   §21.5.4's 503 — statelessly, so that refusing costs nothing — and counted, so
-  that an operator can watch the number climb. An incoming call counts against
+  that an operator can watch the number climb. The 503 for an INVITE past
+  `max_dialogs` carries `Retry-After: 2`: a full endpoint has room again the
+  moment any call ends, and §21.5.4 has a client that gets no `Retry-After`
+  treat the 503 as a 500, which says broken where the truth is full. The 503
+  for want of transactions carries none, since that ceiling is a flood's. An
+  incoming call counts against
   `max_dialogs` from the moment its INVITE is let in, not from the 180 or 2xx
   that makes its dialog, so INVITEs that arrive faster than they are answered
   cannot all be let in and then answered past the ceiling. A call this end

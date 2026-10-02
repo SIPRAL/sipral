@@ -75,6 +75,12 @@ and `SipralMedia` carries each call's PCM. `SipralJava.addAccount` takes a
 `SipralTransport.TCP` or `TLS` (and a certificate pin) after the
 credentials, for an account on a connection of its own beside the client's
 UDP socket; `client.settings()` is a plain method.
+`SipralJava.open(host, port, userAgent, maxDialogs, maxServerTransactions)`
+raises the ceilings a server meets first: 128 calls at once, past which a
+call that arrives is answered 503 with `Retry-After: 2`, and 256 requests
+from other ends worked on at once; a server holding `N` calls gives the
+second three a call and 256 more (`docs/08-ffi.md`, "Limits, and what went
+out twice").
 
 
 ## Tests
@@ -84,7 +90,8 @@ UDP socket; `client.settings()` is a plain method.
   running JVM loads its own pair once.
 - `LoopbackCallKotlinIT` and `LoopbackCallJavaIT`: two stacks on loopback in
   one JVM, one calling the other, RTP both ways, three digits, a hang-up;
-  and, from Java, an account on a TCP connection of its own registering;
+  and, from Java, an account on a TCP connection of its own registering,
+  and the ceilings `SipralJava.open` raises read back from the library;
   run by failsafe against the packaged jar under `-Xcheck:jni`.
   `jvm.sh` without `--dry-run` runs all three again on an arm64 JVM under
   qemu.

@@ -775,7 +775,9 @@ pub struct EndpointConfig {
     pub keepalive_interval: Option<Duration>,
     /// The ceiling on what a peer can make this endpoint hold. Past either
     /// one, a request from outside every dialog we already have is answered
-    /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so. Defaults
+    /// 503 statelessly (§21.5.4) and `Event::Overloaded` says so; an INVITE
+    /// past `max_dialogs` with `Retry-After: 2`, since room comes back when
+    /// any call ends. Defaults
     /// 256 and 128 — an order of magnitude past what a softphone reaches. An
     /// incoming call counts against `max_dialogs` from the moment its INVITE
     /// is let in, not from the response of ours that makes its dialog, and a

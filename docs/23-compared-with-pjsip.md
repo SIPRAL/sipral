@@ -101,6 +101,16 @@ same thing:
   documentation says to loosen it for; left at the default, 90 of the
   hundred were refused. The flag changes the burst and nothing else.
 
+The agent holds 128 calls at once, the stack's default ceiling
+(`EndpointConfig::max_dialogs`): a second run on 2 October, with Asterisk
+offering two hundred calls at once, brought 128 up and answered the other
+72 `503 Service Unavailable`, and its INVITE guard at `--invite-burst 200`
+refused 40 of the two hundred with 480 when they came within a second of
+the hundred-call row. The agent has since taken `--max-calls N`, which
+raises the ceiling and what grows with it, and lets the guard's burst
+follow it when `--invite-burst` is not given (the agent's own
+documentation); the refusal at the ceiling now carries `Retry-After: 2`.
+
 ## Results
 
 ### Registering and calling
@@ -227,13 +237,35 @@ recovers in 126 ms once its console's `I` ("IP change") is typed, which is
 what an application built on PJSIP does when the platform tells it the
 network changed. Told the same thing, both do the same work; pjsua's
 re-INVITE comes first and its registration after, Sipral's the other way
-round.
+round. The agent has since taken the same word from its platform: a line
+`netchange` on its standard input reads the route at once rather than at the
+next half-second look, and tells the stack the network changed even when the
+address did not (it registers again then).
+
+**Read from the cut.** Counting from the new address existing leaves out the
+time the link was down, and a client that moved before the measurement's own
+clock started reads as faster than it was. The 2 October run read the move a
+second way off the same captures: from the last audio packet that reached the
+client before the first silence over 100 ms — the cut — to the first SIP and
+the first audio heard at the new address. The 190–240 ms Docker takes to
+give the container its new address is inside every figure alike.
+
+| From the cut, two runs | Sipral | pjsua, left alone | pjsua, told (`I`) |
+|---|---|---|---|
+| First SIP from the new address | 197, 219 ms, a REGISTER | never | 349, 388 ms, a re-INVITE |
+| First audio received there again | 220, 240 ms | never | 360, 400 ms |
+
+Read from the new address existing, the same runs gave the agent's first
+REGISTER 17 ms after it and its audio back at 38 ms: the half-second poll
+happened to fall just after the move, which is why the cut is the fairer
+clock for it.
 
 ### The INVITE with ICE
 
 | | Sipral | pjsua |
 |---|---|---|
 | Every default codec, ICE | 1034 bytes, 1 candidate; with credentials 1333 bytes, not sent over UDP | 1570 bytes, 2 candidates, sent over UDP as two IP fragments; call set up in 6.1 ms |
+| The same, 2 October | 1088 bytes, 1 candidate; with credentials **1236 bytes, sent over UDP whole**; call set up in 8.0–8.4 ms | 1570 bytes; with credentials 1868 bytes; both sent as IP fragments |
 | G.711 alone, ICE | 954 bytes, 1 candidate; call set up in 9.2 ms | 1164 bytes, 2 candidates; call set up in 4.1 ms |
 
 Sipral offers one candidate per stream because it multiplexes RTCP with RTP
@@ -259,7 +291,13 @@ is over the datagram limit compact first (RFC 3261 §7.3.3,
 `docs/03-core-signalling.md`), then without its `Allow`, and asks for a
 stream only if it is still over. Against the live PBX in
 `docs/11-testing.md`, that took a challenged INVITE from 1389 bytes to 1239,
-sent over UDP with no stream asked for.
+sent over UDP with no stream asked for. The same scenarios run again on
+2 October (the agent at `bb8435b`, the same `pjsua`, the same lab) read the
+authenticated INVITE with ICE and every default codec at 1236 bytes: under
+1300, so it went over UDP in one datagram, unfragmented, and the call came
+up from the agent with no TCP asked for. Its first INVITE was 1088 bytes;
+without ICE, 923 and 1222. pjsua's authenticated INVITE left in IP
+fragments in that run with ICE (1868 bytes) and without it (1670).
 
 ## What is not compared
 

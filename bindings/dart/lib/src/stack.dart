@@ -60,6 +60,15 @@ final class SipralStack {
   /// microphone's; `SipralHeldAudio.application` sends the frames the
   /// application sends (hold music, an announcement, a voice agent's own
   /// speech).
+  ///
+  /// [maxDialogs] is the most calls the stack holds at once, either way (0
+  /// for 128): past it an incoming call is answered 503 with `Retry-After:
+  /// 2` before it rings, and [placeCall] throws a [SipralException] with
+  /// `SipralStatus.limitReached`. [maxServerTransactions] is the most
+  /// requests from other ends it works on at once (0 for 256); a server
+  /// raising [maxDialogs] raises it beside, to three a call and 256 more,
+  /// since an answered INVITE and a BYE each hold one for 32 seconds over
+  /// UDP (`docs/08-ffi.md`, "Limits, and what went out twice").
   static Future<SipralStack> open({
     String? bindHost,
     int bindPort = 0,
@@ -74,7 +83,17 @@ final class SipralStack {
     SipralResolver? resolver,
     String? tlsServerName,
     int heldAudio = SipralHeldAudio.default$,
+    int maxDialogs = 0,
+    int maxServerTransactions = 0,
   }) async {
+    for (final (name, value) in [
+      ('maxDialogs', maxDialogs),
+      ('maxServerTransactions', maxServerTransactions),
+    ]) {
+      if (value < 0 || value > 0xFFFFFFFF) {
+        throw ArgumentError.value(value, name, 'is 0 to 4294967295');
+      }
+    }
     final sipral = library ?? _library();
     final socket = await RawDatagramSocket.bind(
       bindHost ?? InternetAddress.anyIPv4,
@@ -102,6 +121,8 @@ final class SipralStack {
         pseudonymSalt: pseudonymSalt,
         diagnosticTrace: diagnosticTrace,
         heldAudio: heldAudio,
+        maxDialogs: maxDialogs,
+        maxServerTransactions: maxServerTransactions,
       );
     } catch (_) {
       stack._release();
@@ -192,6 +213,8 @@ final class SipralStack {
     required List<int>? pseudonymSalt,
     required bool? diagnosticTrace,
     required int heldAudio,
+    required int maxDialogs,
+    required int maxServerTransactions,
   }) {
     _callback = ffi.NativeCallable<SipralEventCallback>.isolateLocal(_onEvent);
     using((arena) {
@@ -237,7 +260,9 @@ final class SipralStack {
         ..pseudonymSalt = salt.isEmpty ? ffi.nullptr : saltBytes
         ..pseudonymSaltLen = salt.length
         ..diagnosticTrace = _toggle(diagnosticTrace)
-        ..heldAudio = heldAudio;
+        ..heldAudio = heldAudio
+        ..maxDialogs = maxDialogs
+        ..maxServerTransactions = maxServerTransactions;
       final out = arena<SipralHandle>();
       _clock.start();
       _check(_sipral, 'sipral_stack_create', _sipral.stackCreate(config, out));
