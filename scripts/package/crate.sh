@@ -148,8 +148,8 @@ done <"$OUT/set.txt"
 if [ "$blocked" -gt 0 ]; then
     note "$blocked of the ${#SET[@]} crates above stop \`cargo publish -p sipral\`: crates.io would"
     note "refuse sipral for naming a crate it does not have. Publishing them all is a"
-    note "name and a compatibility promise per crate; docs/11-testing.md, \"Releasing\","
-    note "lists this as the owner's decision."
+    note "name and a compatibility promise per crate, which no release makes yet"
+    note "(docs/11-testing.md, \"Releasing\")."
 fi
 
 step "what the sipral .crate carries"

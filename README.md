@@ -40,7 +40,7 @@ async def main():
     with Stack(loop=asyncio.get_running_loop()) as stack:  # device mode: the library opens mic and speaker
         account = stack.add_account(
             "sip:alice@example.com", registrar="sip:example.com",
-            server_uri="sip:example.com",  # located by RFC 3263: SRV, then A/AAAA
+            server_uri="sip:example.com",  # RFC 3263: A/AAAA here, SRV with Stack(resolver=...)
             auth_user="alice", auth_password="secret")
         account.register()
         while account.registration_state != RegistrationState.REGISTERED:
@@ -97,8 +97,9 @@ an exact minor: a package goes with the native library of its own release.
 The Rust crates are not part of the release and their API promises nothing;
 the `sipral` name on crates.io stays the 0.0.1 reservation it is. Security
 fixes reach the current minor release and the one before it
-([`SECURITY.md`](SECURITY.md)). The artefacts in the table above are built
-by `scripts/package/`, and
+([`SECURITY.md`](SECURITY.md)). The artefacts in the table above, the
+Swift package over the XCFramework, the Dart package and the React Native
+package are built by `scripts/package/`, and
 [`docs/11-testing.md`, "Releasing"](docs/11-testing.md#releasing) is the
 order they are published in.
 
