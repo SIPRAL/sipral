@@ -20,6 +20,14 @@
 # the helper, the sample and those tests is held to deny.toml's licences.
 #
 #   scripts/package/android.sh --out DIR --accept-android-sdk-licenses [--with-opus]
+#   scripts/package/android.sh --out DIR --dry-run [--with-opus]
+#
+# --dry-run installs nothing and needs no Docker, so it asks for no licence:
+# it runs aar.sh assemble --dry-run on this host (the classes, the manifest,
+# the archive's layout with no native in it, the POM and the sources jar) and
+# checks that the Gradle build the image would run is pinned. The natives,
+# the telecom helper, the sample and their checks are the image's, and the
+# run says so.
 #
 # Without --with-opus the natives are built without sipral-ffi's `opus`
 # feature and every other default kept (scripts/package/features.sh says why
@@ -53,6 +61,7 @@ step() { printf '\n%s\n' "$1"; }
 
 usage() {
     printf 'usage: android.sh --out DIR --accept-android-sdk-licenses [--with-opus]\n' >&2
+    printf '       android.sh --out DIR --dry-run [--with-opus]\n' >&2
     exit 2
 }
 
@@ -66,10 +75,12 @@ OUT=""
 ACCEPTED=0
 IMAGE="sipral-android-build"
 WITH_OPUS=0
+DRY_RUN=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
         --accept-android-sdk-licenses) ACCEPTED=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
         --image) IMAGE="$2"; shift 2 ;;
         --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; usage ;;
@@ -96,6 +107,36 @@ ELF_EXPECTED=(arm64-v8a:183:64 armeabi-v7a:40:32 x86_64:62:64)
 # the other native beside it. Anything else -- libc++_shared.so, most
 # likely -- would have to ship in the archive too, and does not.
 SYSTEM_LIBS="libc.so libm.so libdl.so liblog.so"
+
+if [ "$MODE" = "host" ] && [ "$DRY_RUN" -eq 1 ]; then
+    step "$AAR_NAME on this host, aar.sh assemble --dry-run"
+    mkdir -p "$OUT/no-natives"
+    if scripts/package/aar.sh assemble --out "$OUT/aar" --natives "$OUT/no-natives" --dry-run \
+        ${VARIANT_ARGS[@]+"${VARIANT_ARGS[@]}"} >"$OUT/assemble.out" 2>&1; then
+        pass "aar.sh assemble --dry-run: $(tail -1 "$OUT/assemble.out" | sed 's/^aar.sh assemble: //')"
+    else
+        fail "aar.sh assemble --dry-run:"
+        sed 's/^/        /' "$OUT/assemble.out"
+    fi
+    step "the Gradle build the image runs, bindings/kotlin/android"
+    wrapper="$ROOT/bindings/kotlin/android/gradle/wrapper/gradle-wrapper.properties"
+    if grep -q '^distributionUrl=.*/gradle-.*-bin\.zip$' "$wrapper" 2>/dev/null \
+        && grep -q '^distributionSha256Sum=[0-9a-f]\{64\}$' "$wrapper"; then
+        pass "Gradle pinned by version and checksum ($(sed -n 's|^distributionUrl=.*/gradle-\(.*\)-bin\.zip$|\1|p' "$wrapper"))"
+    else
+        fail "$wrapper does not pin Gradle by version and SHA-256"
+    fi
+    for f in Dockerfile settings.gradle.kts build.gradle.kts telecom/build.gradle.kts sample/build.gradle.kts; do
+        [ -f "$ROOT/bindings/kotlin/android/$f" ] && pass "bindings/kotlin/android/$f" || fail "bindings/kotlin/android/$f is missing"
+    done
+    printf '  note  not run here, the build image'"'"'s (Docker, and the Android SDK licence):\n'
+    printf '        the natives for arm64-v8a, armeabi-v7a and x86_64, sipral-telecom.aar,\n'
+    printf '        %s, their checks and the licence audit of what Gradle resolved\n' "$APK_NAME"
+    printf '        (android.sh --out DIR --accept-android-sdk-licenses)\n'
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'android.sh: done (dry-run), %s\n' "$OUT"; exit 0; }
+    printf 'android.sh: failed\n'; exit 1
+fi
 
 if [ "$MODE" = "host" ]; then
     if [ "$ACCEPTED" -ne 1 ]; then

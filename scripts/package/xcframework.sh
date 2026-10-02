@@ -71,6 +71,9 @@ fi
 command -v xcodebuild >/dev/null 2>&1 || { fail "xcodebuild not found (Xcode, not just the Command Line Tools)"; exit 1; }
 command -v lipo >/dev/null 2>&1 || { fail "lipo not found"; exit 1; }
 
+step "one version"
+"$ROOT/scripts/version.sh" --check || { printf '\nxcframework.sh: failed\n'; exit 1; }
+
 CRATE="sipral-ffi"
 LIBNAME="libsipral_ffi.a"
 HEADER="$ROOT/bindings/c/include/sipral.h"
@@ -346,11 +349,10 @@ fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
-    printf '  not run: nothing under bindings/ ships to a registry before the ABI\n'
-    printf '  freezes (docs/08-ffi.md), and this repo has no public host for the zip\n'
-    printf '  yet. What the owner runs once both exist: tag this commit, upload\n'
-    printf '  %s to that release, and point spm/Package.swift'"'"'s\n' "$(basename "$OUT")/CSipral$VARIANT_SUFFIX.xcframework.zip"
-    printf '  binaryTarget at the release URL with the checksum printed above.\n'
+    printf '  not run: the owner publishes. Upload %s\n' "$(basename "$OUT")/CSipral$VARIANT_SUFFIX.xcframework.zip"
+    printf '  to the release, point spm/Package.swift'"'"'s binaryTarget at its URL with\n'
+    printf '  the checksum printed above, and tag the Swift package'"'"'s repository\n'
+    printf '  (docs/11-testing.md, "Releasing").\n'
 fi
 
 printf '\n'

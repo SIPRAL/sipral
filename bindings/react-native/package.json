@@ -1,7 +1,15 @@
 {
   "name": "sipral-react-native",
   "version": "0.0.1",
-  "description": "The Sipral SIP stack for React Native: accounts, registration, calls and events over the New Architecture.",
+  "description": "Sipral - Session Initiation Protocol Rust Audio Layer. The SIP stack for React Native: accounts, registration, calls and events over the New Architecture.",
+  "keywords": [
+    "sip",
+    "voip",
+    "rtp",
+    "telephony",
+    "softphone",
+    "react-native"
+  ],
   "license": "AGPL-3.0-only OR LicenseRef-Sipral-Commercial",
   "author": "Tiberiu Balasea",
   "homepage": "https://sipral.org",
@@ -22,7 +30,8 @@
     "ios/*.mm",
     "ios/Bridge/*.swift",
     "sipral-react-native.podspec",
-    "README.md"
+    "README.md",
+    "LICENSE-COMMERCIAL.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

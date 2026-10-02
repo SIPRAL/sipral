@@ -23,6 +23,12 @@
 # that wheel and running bindings/python/tests against the same native --
 # both under qemu, both in a container with no extra capability and no
 # --privileged.
+#
+# --dry-run on a host without Docker proves what that host can, and takes
+# --native as optional: smoke.c compiled (not linked) for aarch64 against
+# glibc's own headers with `zig cc`, and, when --native names a file, its
+# ELF header read for an aarch64 shared object. The glibc check, the link
+# and the run under qemu are a Docker host's, and the run says so.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -46,14 +52,50 @@ while [ $# -gt 0 ]; do
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$NATIVE" ] && { printf 'usage: qemu-verify.sh --native SO_PATH --out DIR [--wheel WHEEL_PATH] [--dry-run]\n' >&2; exit 2; }
-[ -s "$NATIVE" ] || { printf 'no such native library: %s\n' "$NATIVE" >&2; exit 2; }
+HAVE_DOCKER=0
+command -v docker >/dev/null 2>&1 && HAVE_DOCKER=1
+if [ -z "$NATIVE" ] && { [ "$DRY_RUN" -eq 0 ] || [ "$HAVE_DOCKER" -eq 1 ]; }; then
+    printf 'usage: qemu-verify.sh --native SO_PATH --out DIR [--wheel WHEEL_PATH] [--dry-run]\n' >&2; exit 2
+fi
+[ -z "$NATIVE" ] || [ -s "$NATIVE" ] || { printf 'no such native library: %s\n' "$NATIVE" >&2; exit 2; }
 [ -z "$OUT" ] && { printf 'qemu-verify.sh needs --out DIR\n' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
-NATIVE="$(cd "$(dirname "$NATIVE")" && pwd)/$(basename "$NATIVE")"
+[ -z "$NATIVE" ] || NATIVE="$(cd "$(dirname "$NATIVE")" && pwd)/$(basename "$NATIVE")"
 
-command -v docker >/dev/null 2>&1 || { fail "docker not found"; printf '\nqemu-verify.sh: failed\n'; exit 1; }
+if [ "$HAVE_DOCKER" -eq 0 ] && [ "$DRY_RUN" -eq 1 ]; then
+    step "--dry-run on a host without Docker"
+    if [ -z "$NATIVE" ]; then
+        printf '  note  no --native given: no aarch64 library to read\n'
+    else
+        # EI_CLASS 2 (64-bit), e_type 3 (ET_DYN), e_machine 183 (EM_AARCH64)
+        magic=$(od -An -tx1 -N4 "$NATIVE" | tr -d ' \n')
+        class=$(od -An -tu1 -j4 -N1 "$NATIVE" | tr -d ' \n')
+        etype=$(od -An -tu1 -j16 -N1 "$NATIVE" | tr -d ' \n')
+        machine=$(od -An -tu1 -j18 -N2 "$NATIVE" | awk '{print $1 + 256 * $2}')
+        if [ "$magic" = "7f454c46" ] && [ "$class" = "2" ] && [ "$etype" = "3" ] && [ "$machine" = "183" ]; then
+            pass "$(basename "$NATIVE") is a 64-bit ELF shared object for aarch64"
+        else
+            fail "$(basename "$NATIVE") is not a 64-bit ELF shared object for aarch64"
+        fi
+    fi
+    if ! command -v zig >/dev/null 2>&1; then
+        fail "zig not found (brew install zig): nothing else here reads C the way glibc does"
+    elif zig cc -target aarch64-linux-gnu.2.28 -std=c11 -Wall -Wextra -Werror -O2 \
+        -I "$ROOT/bindings/c/include" -c -o "$OUT/smoke-aarch64.o" "$ROOT/bindings/c/smoke.c" \
+        >"$OUT/smoke-cc.log" 2>&1; then
+        pass "bindings/c/smoke.c compiles for aarch64 against glibc 2.28's headers (zig cc, not linked)"
+    else
+        fail "bindings/c/smoke.c does not compile for aarch64 against glibc 2.28:"
+        sed 's/^/        /' "$OUT/smoke-cc.log"
+    fi
+    printf '  note  not run here, a Docker host'"'"'s: the glibc symbol check, smoke.c linked\n'
+    printf '        in the aarch64 cross image, and the run under qemu-aarch64\n'
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'qemu-verify.sh: done (dry-run, no Docker), %s\n' "$OUT"; exit 0; }
+    printf 'qemu-verify.sh: failed\n'; exit 1
+fi
+[ "$HAVE_DOCKER" -eq 1 ] || { fail "docker not found"; printf '\nqemu-verify.sh: failed\n'; exit 1; }
 
 # shellcheck source=aarch64-cross.sh
 . "$ROOT/scripts/package/aarch64-cross.sh"
