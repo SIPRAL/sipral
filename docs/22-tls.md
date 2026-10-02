@@ -1048,6 +1048,17 @@ React Native client takes it as `tlsPin` beside `signalling: 'tls'`. The name ch
 `tls_server_name` (`tlsServerName`), the host part of the server's address
 when it is left out.
 
+**An account on a TLS connection of its own.** On a stack that signals over
+UDP, an account added with its own stream protocol (`stream_protocol` in
+Python, the account's transport in the other layers, the Dart layer
+included) gets a connection of its own to its own server, which the layer
+opens, binds and opens again when it closes (`docs/04-ua.md`, "A server by
+its name, a flow kept open, an address a peer can reach"). Over TLS that
+connection is held to the account's `tls_pin` when it has one, by the
+library's own verdict (`sipral_account_check_certificate`), and to the
+stack's trust otherwise — the platform's authorities in the Dart layer —
+under `tls_server_name` or the server's host.
+
 **When the connection fails.** The first attempt is made before the
 constructor returns and every later one on a thread of the layer's own;
 each one that fails is told to the stack with

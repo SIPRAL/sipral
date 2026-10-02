@@ -2807,12 +2807,15 @@ poll and each call's frame clock are timers, and the event callback is a
 as a `Stream`, and `SipralStack.onRawEvent` is handed each one whole, as the
 printed `SipralEvent`, while it is still the library's, for any payload arm
 the typed copy does not carry. The application carries each call's audio,
-as in application mode everywhere. Signalling is UDP only: unlike the four layers above, this
-one does not answer `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, so a request too
-large for a datagram gets the ten seconds an application that says nothing
-gets. `bindings/dart/test/loopback_test.dart` places a call between
-two stacks on loopback, and `scripts/check.sh`'s `the dart bindings` step
-runs both test files against the library it built.
+as in application mode everywhere. Signalling is the stack's UDP socket,
+with an account's own TCP or TLS connection beside it when the account asks
+for one (`streamProtocol`, `bindings/dart/README.md`). Unlike the four layers
+above, this one does not answer a `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` for a
+request that outgrew a datagram, so such a request gets the ten seconds an
+application that says nothing gets. `bindings/dart/test/loopback_test.dart`
+places a call between two stacks on loopback, and `scripts/check.sh`'s `the
+dart bindings` step runs every test file under `bindings/dart/test` against
+the library it built.
 
 ## React Native
 
@@ -2850,9 +2853,10 @@ is what they mean:
 
 - **major**, when a declaration that was published changes meaning, changes
   shape or goes away. Nothing built against one major works against another.
-  While it is 0 the ABI is not frozen and no minor promises anything about
-  another, so `sipral_abi_check` takes an exact match; from 1.0 a binding
-  built against an earlier minor of the same major keeps working.
+  While it is 0, `sipral_abi_check` takes an exact match: the surface frozen
+  at minor 33 ("The freeze", below) is what 1.0 promises, and no 0.x minor
+  promises anything about another. From 1.0 a binding built against an
+  earlier minor of the same major keeps working.
 - **minor**, for anything the header gains: a function, a struct member, an
   enumerator, a published constant, a type alias — everything the generator
   prints, and not only the function and the struct member the rule used to
@@ -2934,8 +2938,8 @@ to the regenerated `bindings/`. The gate forces the regeneration — committed
 output against what the declarations print — and nothing but a reader forces
 the bump, which is why the rule is written here rather than left to be
 inferred from the constant. Within one block of surface work the bump is
-taken **once, at the end**: nothing is published, so no build in the world is
-on an intermediate minor, and a bump per task costs a full gate run and a
+taken **once, at the end**: nothing is published before the block is, so no
+build in the world is on an intermediate minor, and a bump per task costs a full gate run and a
 regenerated binding set for a version nobody can have.
 
 **Checked at load is a promise four runtimes keep four different ways, not

@@ -77,7 +77,7 @@ whether it is met; *in part* is followed by what is missing.
 |---|---|---|---|
 | 3550 | RTP and RTCP | sipral-rtp | phase 1 (send/receive), phase 2 (adaptive buffer) |
 | 3551 | RTP profile for audio and video | sipral-rtp | phase 1 |
-| 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one | sipral-rtp, sipral | phase 2 |
+| 4733 | RTP payload for DTMF, both directions. The packet and the timestamp rules are `sipral-rtp`'s; the schedule is the facade's, because a packet per captured frame needs a frame boundary and the layer that writes the packet never sees one. `telephone-event` is offered on the clock of each codec offered, and no other | sipral-rtp, sipral | phase 2 |
 | 3711 | SRTP | sipral-rtp | phase 2 |
 | 6188 | `AES_192_CM`/`_256_CM` and the `AES_192_CM_PRF`/`_256_CM_PRF` key derivation. Only the 256-bit suites are implemented — `AES_192_CM_HMAC_SHA1_80`/`_32` are not offered or accepted — since a peer that wants a step up from AES-128 asks for 256, and 192 has no distinct interop story here. Proved against §7's own AES-256-CM keystream and `AES_256_CM_PRF` test vectors | sipral-rtp | phase 2; done |
 | 4568 | SDES key exchange in SDP | sipral-core | phase 2 |

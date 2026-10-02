@@ -50,7 +50,7 @@ than write themselves is generated.
 | Kotlin and Java | [`kotlin/README.md`](kotlin/README.md), [`jvm/README.md`](jvm/README.md) | Android (AAR), a JVM (jar for linux-x64 and linux-arm64) | device mode on Android from API level 28, application mode anywhere; a `ConnectionService` helper |
 | .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux | device or application mode |
 | Python | [`python/README.md`](python/README.md) | macOS, Windows, Linux | device or application mode |
-| Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP |
+| Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP with an account's own TCP or TLS connection beside it |
 | React Native | [`react-native/README.md`](react-native/README.md) | iOS, Android | device mode, over the Swift and Kotlin layers |
 
 Device mode is wherever the library has an audio backend: CoreAudio on macOS

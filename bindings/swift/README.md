@@ -21,7 +21,7 @@ Two layers, the way every binding here is two layers:
   `Media.swift`, `SipralEvent.swift`, `AudioDevices.swift`,
   `CallerIdentity.swift`, `UDPSocket.swift`, `CStrings.swift`,
   `CallKitBridge.swift`, `CallKitAdapter.swift`, `PushKitBridge.swift`,
-  `PushKitAdapter.swift` — written by hand against the printed layer
+  `PushKitAdapter.swift` and the rest beside them — written by hand against the printed layer
   directly, the way `bindings/python/sipral/stack.py` is written against
   `ffi`/`lib`. `SipralStack`, `Account`, `Call` and `Media` are what an
   application reaches for; `stack.audio` is the library's own audio engine.

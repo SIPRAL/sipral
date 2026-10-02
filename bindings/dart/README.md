@@ -111,12 +111,14 @@ addresses; an application whose server publishes SRV records passes a
 resolver that reads them. `located` (`event.locatedTargets`) says where the
 server was found and `locateFailed` (`event.locateFailure`) why not.
 
-`keepaliveMs` keeps an account's flow to its server open; this layer has no
-TLS, and an account's `tlsPin` with `SipralAccount.checkCertificate` is the
-verdict for an application that runs the account's TLS itself. `srtp`
+`keepaliveMs` keeps an account's flow to its server open; this layer's only
+TLS is an account's own connection (above), and an account's `tlsPin` with
+`SipralAccount.checkCertificate` is the verdict there, as it is for an
+application that runs the account's TLS itself. `srtp`
 (`SipralSrtp.bestEffort` offers SDES on plain RTP/AVP), `srtpSuites`,
 `pathMtu`, `datagramWithoutStreamBytes` (UDP anyway up to that size: this
-layer opens no stream, and `diagnosticsJson()` says `transport.kept.datagram`),
+layer opens no stream for a request that outgrew a datagram, and
+`diagnosticsJson()` says `transport.kept.datagram`),
 `pseudonymSalt` and `diagnosticTrace` (`setDiagnosticTrace`) reach the
 library as `sipral_stack_config_t` takes them.
 
@@ -145,4 +147,7 @@ hang-up ended on both ends; a refused call; and a failing call's error text.
 `test/account_stream_test.dart` registers an account over TLS and one over
 UDP with two loopback registrars and places a call through each, opens an
 account's TCP connection again when its registrar drops it, and reads the
-settings back.
+settings back. `test/reachability_test.dart` covers the advertised address,
+the loopback refusal, RFC 3263 location over an SRV answer and the platform
+lookup, the keep-alive and best-effort SRTP; `test/forms_test.dart` reads
+every certificate pin form in `bindings/fixtures/pin-forms.txt`.

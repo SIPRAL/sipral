@@ -14,6 +14,17 @@ tagged with the requirement they answer, so that a phase can be read as a list
 of things somebody is waiting for rather than a list of things that sounded
 interesting.
 
+## Where 1.0 falls
+
+1.0 is a promise about the C ABI rather than the end of a phase: the surface
+frozen at minor 33 holds for the whole of major 1 (`08-ffi.md`, "The
+freeze"), later minors only appending to it. It does not wait for what only
+a third party can supply — a paid carrier account (phase 1), real phones and
+the two stores (phase 4), a public registry the packages are pulled from
+(phase 5) — nor for what each phase below still names as left: the
+adversarial review of DTLS-SRTP (phase 2), a device chosen per call (phase
+3), and video (phase 6), which comes after 1.0 by decision.
+
 ## Phase 0 — design
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the
@@ -36,12 +47,14 @@ session timers, PRACK, REFER for blind and attended transfer.
 
 **Status: written, and seven of the eight exit criteria met.** Every line of the
 phase is in the tree — `sipral-core`, `sipral-ua`, `sipral-rtp` and
-`sipral-media` — and the lab's flows run against three servers whenever
-`scripts/lab.sh` is run, twice: once through `sipral::MediaEngine`, the join an
-application links, and once through `sipral.h` from a C driver. That was the
+`sipral-media` — and the lab's flows run against Kamailio, FreeSWITCH,
+Asterisk and OpenSIPS whenever `scripts/lab.sh` is run, twice: once through
+`sipral::MediaEngine`, the join an application links, and once through
+`sipral.h` from a C driver. That was the
 criterion added after the tree was read end to end, because until then the lab
 drove the stack through a media join written for the lab, and what it proved
-was the harness. What is left is one paid carrier account.
+was the harness. What is left is one paid carrier account, which needs a
+contract rather than code and which 1.0 does not wait for.
 
 The criteria are demonstrations rather than code, and they earned their place
 on the first day they ran: a call a PBX challenges was acknowledged and then
@@ -60,8 +73,11 @@ unit suite had ever asked.
   messages rejected without a panic;
 - **met** — the parser survives 24 hours on each fuzz target with no crash and
   no timeout, which is the gate `11-testing.md` sets for this criterion: 24
-  CPU-hours on all thirty targets, the newest four between 25 and 27
-  September 2026, about 61 billion executions, nothing found;
+  CPU-hours on each of the thirty targets there were on 27 September 2026,
+  the last four of them between 25 and 27 September, about 61 billion
+  executions, nothing found. The four added on 29 September (`stir_identity`,
+  `multipart`, `rtt`, `rtcp_fb`) are built and seeded, and their own 24 hours
+  are still to run;
 - **met** — blind and attended transfer complete against both FreeSWITCH and
   Asterisk;
 - **met** — the same flows, plus DTMF in both forms, run through
@@ -255,7 +271,9 @@ trusts.
   AAudio, and a stack created in device mode (`sipral_stack_config_t::audio`)
   opens, pumps and mixes the platform's devices itself, with the microphone,
   the speaker and the ringer chosen per stack (`08-ffi.md`, "The built-in
-  audio engine"). Selection per call is the part that is not, and it is D6's
+  audio engine"). Each call has its own gain, mute and level in that engine
+  as well (`sipral_audio_call_set_gain`, `_set_muted`, `_level`). Selection
+  per call is the part that is not, and it is D6's
   rather than the device layer's; the codec and transport halves of D6 are
   across the ABI, the device half is not. Linux has no backend in the engine;
   `sipral-io-pipewire` is there for an application to wire itself.
@@ -577,15 +595,16 @@ feasibility.
   over the whole history, and the licence set, SPDX headers and `cargo deny`
   in place, which they are from commit zero.
 - No crate is published to a registry before the ABI in `08-ffi.md` is frozen.
-  A published crate name is a promise about compatibility. The exceptions are
-  name reservations: `Sipral` 0.0.1 on NuGet, a stub assembly that implements
-  nothing, and the `sipral` name on crates.io, reserved the same way by a
-  pre-release version of the one crate with `publish = true`.
+  A published crate name is a promise about compatibility. The exception is
+  a name reservation: `Sipral` 0.0.1 on NuGet, a stub assembly that implements
+  nothing. The `sipral` name on crates.io is to be reserved the same way, by a
+  pre-release version of the one crate with `publish = true`; that upload has
+  not happened.
 - The ABI is not frozen before every entry the desktop client needs exists in
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping
   the repository public does not wait for the freeze; publishing packages does.
-  All three held at minor 33, whose surface is the one 1.0 promises; minor 34
-  grew it only by appending, as the freeze allows, and packages are published
-  from 1.0.
+  All three held at minor 33, whose surface is the one 1.0 promises; every
+  minor since grew it only by appending, as the freeze allows, and packages
+  are published from 1.0.
 - Video waits for 1.0 by decision, not by omission, and is phase 6 after it.
