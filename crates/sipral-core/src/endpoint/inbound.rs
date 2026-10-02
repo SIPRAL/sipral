@@ -1835,6 +1835,15 @@ impl Endpoint {
             return;
         };
         let client = id.role() == Role::Client;
+        // the ACK a refusal gets is the one request a transaction builds
+        // itself, out of the INVITE (§17.1.1.3), and is held to the
+        // datagram's form like every request the endpoint builds
+        let message = if client && message.bytes().starts_with(b"ACK ") {
+            self.written_for_the_datagram(flow, message.clone())
+                .unwrap_or(message)
+        } else {
+            message
+        };
         let reason = match (client, repeat) {
             (true, false) => Reason::RequestSent,
             (true, true) => Reason::RequestRetransmitted,
@@ -1990,6 +1999,11 @@ impl Endpoint {
         let request = entry.machine.request().clone();
         let reason = self.cancel_reasons.get(&invite).cloned();
         let message = cancel_for_request(&request.as_raw(), reason.as_deref())?;
+        // held to the datagram's form like every request the endpoint
+        // builds: a CANCEL is small, so only `Compaction::Always` changes it
+        let message = self
+            .written_for_the_datagram(flow, message.clone())
+            .unwrap_or(message);
         // §9.1 has a CANCEL retransmitted by its own transaction. One that is
         // already running carries this branch and this method, and a second
         // under that key would take its responses and leave it retransmitting

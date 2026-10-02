@@ -2104,6 +2104,54 @@ fn a_request_too_large_even_compact_goes_to_the_stream_written_in_full() {
     assert!(text.contains("\r\nSubject: x"), "{text}");
 }
 
+/// Under `Compaction::Always` the requests the endpoint writes out of an
+/// INVITE it already sent — the ACK its transaction gives a refusal
+/// (§17.1.1.3) and the CANCEL (§9.1) — go compact too: every request on a
+/// datagram does, not only the ones built afresh.
+#[test]
+fn always_writes_a_refusals_ack_and_a_cancel_compact_too() {
+    let t0 = Instant::now();
+    let compact = |bytes: &[u8]| {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        for line in ["\r\nv:SIP/2.0/UDP ", "\r\nf:", "\r\nt:", "\r\ni:"] {
+            assert!(text.contains(line), "{line:?} missing from {text}");
+        }
+        for long in ["\r\nVia:", "\r\nFrom:", "\r\nTo:", "\r\nCall-ID:"] {
+            assert!(!text.contains(long), "{long:?} written long in {text}");
+        }
+    };
+    let mut endpoint = compacting(super::Compaction::Always, t0);
+
+    endpoint
+        .invite(&request(Method::Invite), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut endpoint);
+    compact(&invite);
+    deliver(
+        &mut endpoint,
+        &respond_to(&invite, 486, "Busy Here", Some("desk")),
+        t0,
+    );
+    let ack = sent(&mut endpoint);
+    assert!(ack.starts_with(b"ACK "));
+    compact(&ack);
+
+    let id = endpoint
+        .invite(&request(Method::Invite), t0)
+        .expect("the second INVITE goes");
+    let invite = sent(&mut endpoint);
+    deliver(
+        &mut endpoint,
+        &respond_to(&invite, 180, "Ringing", Some("desk")),
+        t0,
+    );
+    events(&mut endpoint);
+    endpoint.cancel(id, t0).expect("the CANCEL goes");
+    let cancel = sent(&mut endpoint);
+    assert!(cancel.starts_with(b"CANCEL "));
+    compact(&cancel);
+}
+
 #[test]
 fn always_writes_a_datagram_compact_and_a_stream_never() {
     let t0 = Instant::now();

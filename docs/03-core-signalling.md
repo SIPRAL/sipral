@@ -158,8 +158,9 @@ the socket.
   then goes without its `Allow`, which §20.5 lets a UA leave out and §13.2.1
   asks an INVITE to carry; only what is still over after that moves to a
   stream, where it is written in full again. The first send, the answer to a
-  challenge, a request inside a dialog and a request moved to another server
-  are all held to this. `DatagramLimit::compaction` turns it off
+  challenge, a request inside a dialog, a request moved to another server,
+  the ACK a refusal gets from its transaction and a CANCEL are all held to
+  this. `DatagramLimit::compaction` turns it off
   (`Compaction::Never`) or on for every datagram (`Compaction::Always`, for
   a path known to be narrower than the line, a 1280-byte tunnel say); each
   request written compact because of its size is recorded as
