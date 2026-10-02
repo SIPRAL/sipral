@@ -364,7 +364,7 @@ interval, 1 000 to 120 000; nothing goes while the stack is suspended.
 `NatCheck.kt` proves both on the wire.
 
 A client holds 128 calls at once unless `maxDialogs` says otherwise: past
-it an incoming call is answered 503 and `placeCall` throws with
+it an incoming call is answered 503 with `Retry-After: 2` and `placeCall` throws with
 `LIMIT_REACHED`. `maxServerTransactions` (256), `diagnosticDecisions` (64)
 and `diagnosticRecords` (32) are the other ceilings, zero for the default
 each (`docs/08-ffi.md`, "Limits, and what went out twice").

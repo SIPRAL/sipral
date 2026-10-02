@@ -794,8 +794,9 @@ fn a_stranger_is_refused_503_while_the_calls_this_end_placed_fill_the_ceiling() 
     let answer = sent(&mut endpoint);
     assert!(answer.starts_with(b"SIP/2.0 503 "), "{answer:?}");
     assert!(
-        !String::from_utf8_lossy(&answer).contains("Retry-After"),
-        "an endpoint-wide refusal names no delay"
+        String::from_utf8_lossy(&answer).contains("Retry-After: 2\r\n"),
+        "a refusal for want of room for a call names when to come back: {}",
+        String::from_utf8_lossy(&answer)
     );
     assert_eq!(endpoint.refused(), 1);
 }

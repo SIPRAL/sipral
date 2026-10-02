@@ -2884,6 +2884,7 @@ it.
 
 ### Changed
 
+- **A call past `max_dialogs` is answered 503 with `Retry-After: 2`.** RFC 3261 §21.5.4 has a client that gets a 503 with no `Retry-After` act as if it got a 500, which said broken where the stack is full, and room comes back the moment any call ends; two seconds is the time between call endings at the default ceiling, rounded up, so a proxy that honours it sends callers elsewhere only briefly. The 503 for want of server transactions, the ceiling a flood meets, still carries none.
 - **The documentation describes the release.** The README's status is 1.0.0 at ABI 0.36 and what that promises, every line of it held to what the tree does; `docs/08-ffi.md` says the library's version and the ABI's are two numbers, and that while the ABI's major is 0 a binding loads only against the minor it was printed at; `docs/10-roadmap.md` says where 1.0 falls and what it does not wait for; `docs/12-core-api.md` no longer promises compatibility for `sipral-ua`, and lists what ABI 0.36 added in Rust; `docs/19-numbers.md` has the release's own measurements, and the per-frame cost the in-band digit detector adds on a call that negotiated no telephone event.
 - **The Maven group id is `org.sipral`**, one property in `bindings/jvm/pom.xml` that the AAR's POM reads as well, where it was a placeholder.
 - **`scripts/package/crate.sh` refuses, and says why**: the Rust crates are not part of the release, and the `sipral` name on crates.io stays the 0.0.1 reservation. `--crates-io` runs the checks a publication there would need.

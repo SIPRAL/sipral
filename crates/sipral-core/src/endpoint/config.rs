@@ -200,6 +200,10 @@ pub struct EndpointConfig {
     /// every INVITE that arrived before the first of them was answered would
     /// be let in, and answering them would pass the ceiling.
     ///
+    /// An INVITE that finds no room is answered 503 with `Retry-After: 2`
+    /// (RFC 3261 §21.5.4): this end is full rather than broken, and has room
+    /// again the moment any call ends.
+    ///
     /// A call this end places counts from its INVITE on, for the same reason:
     /// it is a dialog the moment anything answers it. One placed when the
     /// dialogs, the calls let in and the calls placed and not yet answered

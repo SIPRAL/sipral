@@ -878,9 +878,10 @@ calls and 64 more, `max_server_transactions` to twice the calls and 256 more.
 At the defaults, 128 and 256, the 129th call is refused both ways: one placed
 is `SendError::LimitReached` in Rust and `SIPRAL_STATUS_LIMIT_REACHED` (16)
 over the C ABI, with nothing sent, and an INVITE that arrives is answered
-`503 Service Unavailable` with no `Retry-After`, counted in
-`sipral_counters_t::requests_refused_at_limit` (`docs/08-ffi.md`, "Limits, and
-what went out twice", says why no `Retry-After`).
+`503 Service Unavailable`, counted in
+`sipral_counters_t::requests_refused_at_limit`; it carried no `Retry-After`
+when this was run, and carries `Retry-After: 2` since 2 October
+(`docs/08-ffi.md`, "Limits, and what went out twice", says why).
 
 The Linux x86-64 lab machine (Intel Xeon E5-2698 v4 at 2.2 GHz, 32 vCPUs,
 Debian 13, kernel 6.12, socket buffers at the default 212 992 bytes), the
