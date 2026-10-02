@@ -645,6 +645,9 @@ the generator itself — never the block, which the next run overwrites.
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | blind transfer (C ABI) | pass | 2026-10-02 |
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | attended transfer (C ABI) | pass | 2026-10-02 |
 | Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | DTLS-SRTP, held and resumed (C ABI) | pass | 2026-10-02 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | held, the application's audio sent on (C ABI) | pass | 2026-10-02 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | a server under two realms, both named (C ABI) | pass | 2026-10-02 |
+| Kamailio → FreeSWITCH | 6.1.4 (proxy) / 1.10.12 (FreeSWITCH) | a server under two realms, one unnamed, declined (C ABI) | pass | 2026-10-02 |
 | Kamailio, routing to three sipral stacks registered at it | 6.1.4 (proxy) | N-way local conference, three calls through the proxy | pass | 2026-10-02 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | register | pass | 2026-10-02 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | call | pass | 2026-10-02 |
@@ -659,6 +662,7 @@ the generator itself — never the block, which the next run overwrites.
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | blind transfer (C ABI) | pass | 2026-10-02 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | attended transfer (C ABI) | pass | 2026-10-02 |
 | OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | DTLS-SRTP, held and resumed (C ABI) | pass | 2026-10-02 |
+| OpenSIPS → FreeSWITCH | 4.0.2 (proxy) / 1.10.12 (FreeSWITCH) | held, the application's audio sent on (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | register | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | call | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | hold and resume | pass | 2026-10-02 |
@@ -690,14 +694,15 @@ the generator itself — never the block, which the next run overwrites.
 | Asterisk | 22.10.1 | message waiting indication (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | G.729, echoed (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | DTLS-SRTP, held and resumed (C ABI) | pass | 2026-10-02 |
+| Asterisk | 22.10.1 | held, the application's audio sent on (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | local conference (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | Python agent example | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | headless socket agent example | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | Swift agent example | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | Kotlin agent example | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | .NET agent example | pass | 2026-10-02 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2030 ms, nothing after it (C ABI) | pass | 2026-10-02 |
-| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 61 ms (C ABI) | pass | 2026-10-02 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referraloff — refused 403 in 2022 ms, nothing after it (C ABI) | pass | 2026-10-02 |
+| Asterisk | 22.10.1 | a REFER from outside any call, referral — 202, then 3 NOTIFYs from 100 to 200 in 50 ms (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | SDES required by the account (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | DTLS-SRTP required by the account (C ABI) | pass | 2026-10-02 |
 | Asterisk | 22.10.1 | SRTP off on the account (C ABI) | pass | 2026-10-02 |
@@ -814,6 +819,8 @@ the generator itself — never the block, which the next run overwrites.
 | Requests written in the compact form (RFC 3261 §7.3.3) | yes | yes | yes |
 | A far end's hold, resume and refresh answered on the SDES line in force | yes | yes | yes |
 | The password answers only its own server's realm | yes | yes | yes |
+| The realms a password answers, named for a server under two, and a decline said | yes | yes | yes |
+| What a party this end holds is sent: silence, or the application's audio | yes | yes | yes |
 | Local conference of N calls, each on its own codec | yes | yes | yes |
 
 <!-- END GENERATED interop-matrix -->
@@ -953,6 +960,22 @@ is off on every extension, so a hold from the far extension stays at the
 PBX, which plays its own music to the SDES leg and sends that end nothing
 to answer. A far end that re-offers an SDES call itself, on the line it took
 second, is the container lab's `farhold` flow against FreeSWITCH.
+
+Later on 2 October 2026 the tree at ABI 0.36 — the realms a password
+answers taken from every REGISTER challenge or named, a declined challenge
+said, and what a held party is sent — ran against the same PBX, the same
+way and with its configuration untouched: the library and the C harness
+built on the second lab machine from this tree, the Python layer from it
+too, each run in a container on the PBX host's network, from two of the
+extensions the earlier runs used, neither with SRTP, every call to the echo
+test. Nothing was left registered afterwards.
+
+| Flow | Driven by | Result |
+|---|---|---|
+| register, the realm learned from the REGISTER challenge, and the binding given back; each of the two calls below registered the same way first, on a stack of its own | C harness | pass: five challenges on the wire in the three, the REGISTERs and the two INVITEs, every one for the realm `asterisk` and every one answered |
+| a call held and resumed from this end, the stack told nothing about held audio (silence, as a device-mode stack sends), what leaves through the hold read off the wire | C harness | pass: every G.711 frame sent through the hold silent; 119 sent, 119 back |
+| the same with `SIPRAL_HELD_AUDIO_APPLICATION`: the application's tone sent on through the hold | C harness | pass: the tone's frames left through the hold as the application wrote them; 120 sent, 124 back |
+| registered, Opus, PCMU and PCMA offered, `1` and `2` sent as named events 3 s in, held 10 s in from this end, resumed and hung up | Python layer's datagram caller | pass: PCMU, unencrypted; the `1` started the echo and the `2` came back from it as a named event; held, resumed, 1055 packets sent and 1050 received; the binding taken back |
 
 Known peer behaviours worth writing down rather than rediscovering:
 
