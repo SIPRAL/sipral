@@ -422,4 +422,26 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(SipralReactCore.refusal(of: SipralError(status: .busy, message: "")).code, "busy")
         XCTAssertEqual(SipralReactCore.refusal(of: SipralError(code: 999, message: "")).code, "platform")
     }
+
+    /// The check the Swift layer under this module makes at load keeps the
+    /// 1.x rule, and a refusal of it reaches JavaScript as
+    /// `unsupportedVersion` naming the caller's version: within this major
+    /// every minor up to the library's own is served -- a binding the
+    /// library is newer than -- and a later minor, another major or any 0.x
+    /// is refused.
+    func testTheAbiCheckKeepsTheOneXRule() throws {
+        let library = try Sipral.abiVersion()
+        XCTAssertEqual(library.major, Sipral.abiVersionMajor)
+        XCTAssertGreaterThanOrEqual(library.minor, Sipral.abiVersionMinor)
+        for minor in 0...library.minor {
+            XCTAssertNoThrow(try Sipral.abiCheck(major: library.major, minor: minor), "\(library.major).\(minor)")
+        }
+        for (major, minor) in [(library.major, library.minor + 1), (library.major + 1, 0), (0, 36)] {
+            XCTAssertThrowsError(try Sipral.abiCheck(major: major, minor: minor), "\(major).\(minor) was served") {
+                let refused = SipralReactCore.refusal(of: $0)
+                XCTAssertEqual(refused.code, "unsupportedVersion")
+                XCTAssertTrue(refused.message.contains("\(major).\(minor)"), refused.message)
+            }
+        }
+    }
 }

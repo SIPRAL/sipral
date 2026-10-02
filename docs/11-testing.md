@@ -1430,7 +1430,7 @@ stops on a tree that disagrees with itself. The version is three numbers and
 nothing after them, since a pre-release suffix is spelled one way on
 crates.io, NuGet and npm and another on PyPI. The C header's version macros
 are the ABI's (`docs/08-ffi.md`, "Versioning") and move only with it: the
-1.0.0 release is at ABI 0.36.
+1.0.0 release is at ABI 1.0.
 
 **What a release publishes** is the C library and the language packages
 over it: the table below, every row but the crates. The Rust crates are not

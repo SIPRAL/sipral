@@ -112,6 +112,53 @@ class StructSizesMatchTheLayouts(unittest.TestCase):
             self.assertIn(name, RECORD_LAYOUTS)
 
 
+class TheAbiCheckKeepsTheOneXRule(unittest.TestCase):
+    """The check `_sipral_cffi.py` makes at import, asked of the library it
+    loaded about other versions than its own: within one major a binding
+    built against an earlier or equal minor is served, and one built against
+    a later minor, another major or any 0.x is refused, naming the caller's
+    version."""
+
+    def _library(self) -> tuple[int, int]:
+        version = ffi.new("sipral_abi_version_t *")
+        version.size = ffi.sizeof("sipral_abi_version_t")
+        self.assertEqual(lib.sipral_abi_version(version), lib.SIPRAL_STATUS_OK)
+        return version.major, version.minor
+
+    def _refused(self, major: int, minor: int) -> None:
+        from sipral.errors import SipralError, check
+
+        with self.assertRaises(SipralError) as raised:
+            check(lib.sipral_abi_check(major, minor), "sipral_abi_check")
+        self.assertEqual(raised.exception.status, lib.SIPRAL_STATUS_UNSUPPORTED_VERSION)
+        self.assertIn(f"{major}.{minor}", str(raised.exception))
+
+    def test_the_library_is_at_this_bindings_major_and_no_earlier_minor(self) -> None:
+        major, minor = self._library()
+        self.assertEqual(major, lib.SIPRAL_ABI_VERSION_MAJOR)
+        self.assertGreaterEqual(minor, lib.SIPRAL_ABI_VERSION_MINOR)
+
+    def test_the_minor_this_binding_was_printed_against_is_served(self) -> None:
+        status = lib.sipral_abi_check(lib.SIPRAL_ABI_VERSION_MAJOR, lib.SIPRAL_ABI_VERSION_MINOR)
+        self.assertEqual(status, lib.SIPRAL_STATUS_OK)
+
+    def test_a_binding_built_against_an_earlier_minor_is_served(self) -> None:
+        """A library newer than its binding: every earlier minor of this
+        major is a binding the library in hand is newer than."""
+        major, library_minor = self._library()
+        for minor in range(library_minor + 1):
+            with self.subTest(minor=minor):
+                self.assertEqual(lib.sipral_abi_check(major, minor), lib.SIPRAL_STATUS_OK)
+
+    def test_a_binding_built_against_a_later_minor_is_refused(self) -> None:
+        major, minor = self._library()
+        self._refused(major, minor + 1)
+
+    def test_another_major_is_refused(self) -> None:
+        self._refused(lib.SIPRAL_ABI_VERSION_MAJOR + 1, 0)
+        self._refused(0, 36)
+
+
 class SrtpSuitesHaveNames(unittest.TestCase):
     """`SrtpSuite` names every transform the stack runs, RFC 6188's and
     RFC 7714's included, so a MEDIA_SECURED event's `suite` reads as one."""

@@ -25,6 +25,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
+import org.sipral.Sipral;
+import org.sipral.SipralAbiVersion;
 import org.sipral.SipralCallState;
 import org.sipral.SipralEventKind;
 import org.sipral.SipralException;
@@ -158,6 +160,33 @@ class LoopbackCallJavaIT {
                 client, "sip:bob@example.invalid", "127.0.0.1:5060", null, null, null, null, null,
                 List.of("registrar.example", "sbc\texample")));
             assertSame(SipralStatus.INVALID_ARGUMENT, refused.getStatus());
+        }
+    }
+
+    /** The check the binding makes at load, asked from Java about other
+     * versions than its own: within this major every minor up to the
+     * library's own is served -- a binding the library is newer than --
+     * and a later minor, another major or any 0.x is refused, naming the
+     * caller's version. */
+    @Test
+    void theAbiCheckKeepsTheOneXRule() {
+        SipralAbiVersion library = Sipral.INSTANCE.abiVersion();
+        assertEquals(Sipral.ABI_VERSION_MAJOR, library.getMajor());
+        assertTrue(library.getMinor() >= Sipral.ABI_VERSION_MINOR, "library minor " + library.getMinor());
+        for (long minor = 0; minor <= library.getMinor(); minor++) {
+            Sipral.INSTANCE.abiCheck(library.getMajor(), minor);
+        }
+        long[][] refusedVersions = {
+            {library.getMajor(), library.getMinor() + 1},
+            {library.getMajor() + 1, 0},
+            {0, 36},
+        };
+        for (long[] version : refusedVersions) {
+            SipralException refused = assertThrows(SipralException.class,
+                () -> Sipral.INSTANCE.abiCheck(version[0], version[1]));
+            assertSame(SipralStatus.UNSUPPORTED_VERSION, refused.getStatus());
+            String named = version[0] + "." + version[1];
+            assertTrue(refused.getMessage().contains(named), refused.getMessage());
         }
     }
 

@@ -165,15 +165,24 @@ fun main() {
 private fun everything(): String {
     // Touching SipralNative ran its check against the version it was printed
     // from, or this line would be an ExceptionInInitializerError. The same
-    // check asked about a minor this library does not have says so, with
-    // both versions named.
-    val newer = Sipral.ABI_VERSION_MINOR + 1
-    val refused = assertFailsWith<SipralException> {
-        SipralNative.agree(Sipral.ABI_VERSION_MAJOR, newer)
+    // check asked about other versions keeps the 1.x rule: within this
+    // major every minor up to the library's own is served -- a binding the
+    // library is newer than -- and a later minor, another major or any 0.x
+    // is refused with the caller's version named.
+    val library = Sipral.abiVersion()
+    assertEquals(Sipral.ABI_VERSION_MAJOR, library.major)
+    assertTrue(library.minor >= Sipral.ABI_VERSION_MINOR, "library minor ${library.minor}")
+    for (minor in 0L..library.minor) {
+        SipralNative.agree(library.major, minor)
     }
-    assertEquals(SipralStatus.UNSUPPORTED_VERSION, refused.status)
-    val sentence = assertNotNull(refused.message)
-    assertTrue(sentence.contains("${Sipral.ABI_VERSION_MAJOR}.$newer"), sentence)
+    for ((major, minor) in listOf(library.major to library.minor + 1, library.major + 1 to 0L, 0L to 36L)) {
+        val refused = assertFailsWith<SipralException>("$major.$minor was served") {
+            SipralNative.agree(major, minor)
+        }
+        assertEquals(SipralStatus.UNSUPPORTED_VERSION, refused.status)
+        val sentence = assertNotNull(refused.message)
+        assertTrue(sentence.contains("$major.$minor"), sentence)
+    }
 
     // A stack built out of a class. The bind address is text and the two
     // seeds are arrays, so a member copied wrong is a refusal here.

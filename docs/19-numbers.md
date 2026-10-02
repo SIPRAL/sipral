@@ -966,7 +966,7 @@ load average above a hundred on eight cores, so the per-frame and set-up
 times above were not measured again: a wall-clock figure read on it would
 say more about the machine than about the library.
 
-## 2 October 2026 — `1.0.0`, the release, at ABI 0.36
+## 2 October 2026 — `1.0.0`, the release, at ABI 1.0 (0.36's surface)
 
 Apple M-series, macOS, `rustc 1.95.0`, release profile, `./scripts/bench.sh`
 as it stands, on the release tree (the code the `v1.0.0` tag carries). The
