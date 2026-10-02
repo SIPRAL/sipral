@@ -101,4 +101,25 @@ final class EventDecodingTests: XCTestCase {
         XCTAssertEqual(resolve.host, host)
         XCTAssertEqual(resolve.port, 5061)
     }
+
+    /// A challenge an account's password was not given to says why, who
+    /// asked, and every realm it was asked for, one per line in C.
+    func testADeclinedChallengeCarriesWhoAskedAndForWhat() throws {
+        let server = "203.0.113.9:5060"
+        let realms = "sbc.example\ncallee, inc."
+        let told = try server.withCString { serverText in
+            try realms.withCString { realmsText in
+                var event = raw(.challengeDeclined)
+                event.payload.challenge.refusal = SipralChallengeRefusal.notTheAccountsRealm.rawValue
+                event.payload.challenge.server = serverText
+                event.payload.challenge.server_len = server.utf8.count
+                event.payload.challenge.realms = realmsText
+                event.payload.challenge.realms_len = realms.utf8.count
+                return try XCTUnwrap(SipralEventDecoder.decode(event).challengeData)
+            }
+        }
+        XCTAssertEqual(told.refusal, .notTheAccountsRealm)
+        XCTAssertEqual(told.server, server)
+        XCTAssertEqual(told.realms, ["sbc.example", "callee, inc."])
+    }
 }

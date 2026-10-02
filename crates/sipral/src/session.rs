@@ -184,6 +184,27 @@ pub enum Playback {
     Silence,
 }
 
+/// What a session sends a party this end holds, in place of what
+/// [`MediaSession::capture`] is handed ([`MediaConfig::held_audio`]).
+///
+/// RFC 3264 §8.4 leaves a held stream `sendonly`, so something goes on
+/// being sent; which of the two is a matter of where the frames come from,
+/// which only the application knows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HeldAudio {
+    /// Silence: the party on hold hears nothing of the room it was put on
+    /// hold from. For frames that come from a microphone — the C ABI's
+    /// device mode, and any application that hands the microphone over as
+    /// it is.
+    #[default]
+    Silence,
+    /// The frames the application hands over, as they are: hold music, an
+    /// announcement, a voice agent's own speech. For an application that
+    /// writes what the held party is to hear itself.
+    Captured,
+}
+
 /// How a session behaves, as against what it negotiated.
 ///
 /// Everything here is a choice rather than a consequence of the offer and the
@@ -247,6 +268,11 @@ pub struct MediaConfig {
     /// the parties have to be told is a matter of where they are, and the
     /// application's to decide.
     pub consent_tone: Option<ConsentTone>,
+    /// What a party this end holds is sent. [`HeldAudio::Silence`] unless
+    /// told otherwise: this crate cannot tell a microphone from hold music,
+    /// and the microphone reaching a party on hold is the mistake that
+    /// cannot be undone.
+    pub held_audio: HeldAudio,
 }
 
 impl Default for MediaConfig {
@@ -261,6 +287,7 @@ impl Default for MediaConfig {
             dtmf_detection: DtmfDetection::Auto,
             progress: None,
             consent_tone: None,
+            held_audio: HeldAudio::Silence,
         }
     }
 }
@@ -342,10 +369,11 @@ pub struct StreamEncryption {
 /// What this end's frames carry to the far end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Carries {
-    /// The microphone, as the processor left it.
+    /// What the application captured, as the processor left it.
     Microphone,
-    /// Silence: this end holds the far end.
-    Silence,
+    /// What this end holding the far end sends: silence, or what the
+    /// application captured, as [`MediaConfig::held_audio`] says.
+    Held,
 }
 
 /// One call's media.
@@ -393,10 +421,13 @@ pub struct MediaSession {
     /// A captured frame as it goes out when a digit or a beep has been
     /// written into it, held rather than allocated.
     shaped: Vec<i16>,
-    /// What this end's frames carry: silence while this end holds the far
-    /// end (RFC 3264 §8.4), when the stream still sends, so the far end keeps
-    /// hearing that the call is there, but not the microphone.
+    /// What this end's frames carry: while this end holds the far end (RFC
+    /// 3264 §8.4) the stream still sends, so the far end keeps hearing that
+    /// the call is there — silence, or the application's own frames, as
+    /// `held_audio` says.
     carries: Carries,
+    /// What a party this end holds is sent ([`MediaConfig::held_audio`]).
+    held_audio: HeldAudio,
     /// The frame of silence that goes out in place of the microphone while
     /// this end holds the far end, held rather than allocated.
     hush: Vec<i16>,
@@ -623,6 +654,7 @@ impl MediaSession {
             ),
             shaped: Vec::new(),
             carries: Carries::Microphone,
+            held_audio: config.held_audio,
             hush: Vec::new(),
             echo: None,
             render_delay: config.render_delay,
@@ -779,18 +811,32 @@ impl MediaSession {
         matches!(self.direction(), Direction::SendRecv | Direction::RecvOnly)
     }
 
-    /// Whether this end holds the far end, and so sends it silence in place
-    /// of the microphone ([`MediaSession::capture`]).
+    /// Whether this end holds the far end, and so sends it what
+    /// [`MediaSession::held_audio`] says in place of what
+    /// [`MediaSession::capture`] is handed.
     #[must_use]
     pub const fn is_holding(&self) -> bool {
-        matches!(self.carries, Carries::Silence)
+        matches!(self.carries, Carries::Held)
+    }
+
+    /// What a party this end holds is sent ([`MediaConfig::held_audio`]).
+    #[must_use]
+    pub const fn held_audio(&self) -> HeldAudio {
+        self.held_audio
+    }
+
+    /// Send a party this end holds `held` from now on, in place of what the
+    /// configuration said: one call's choice, where the engine's is for
+    /// every call. Takes effect on the next frame, held or not.
+    pub const fn set_held_audio(&mut self, held: HeldAudio) {
+        self.held_audio = held;
     }
 
     /// Take up the hold the signalling settled: `true` once this end's hold
     /// is in force, `false` once it has resumed.
     pub(crate) const fn set_holding(&mut self, holding: bool) {
         self.carries = if holding {
-            Carries::Silence
+            Carries::Held
         } else {
             Carries::Microphone
         };
@@ -1836,10 +1882,12 @@ impl MediaSession {
             None => samples,
         };
         // a far end this end holds hears nothing of the room it was put on
-        // hold from. The processor above still ran on the microphone, so it
-        // keeps its measure of the room for the resume; what goes on is
-        // silence, which a digit or the consent beep is still written into
-        let samples = if self.is_holding() {
+        // hold from, unless the application said its frames are what the
+        // held party is to hear. The processor above still ran on the
+        // microphone, so it keeps its measure of the room for the resume;
+        // what goes on is silence, which a digit or the consent beep is
+        // still written into
+        let samples = if self.is_holding() && self.held_audio == HeldAudio::Silence {
             hush.clear();
             hush.resize(samples.len(), 0);
             hush.as_slice()

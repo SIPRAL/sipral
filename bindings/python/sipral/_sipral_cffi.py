@@ -63,7 +63,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 35
+#define SIPRAL_ABI_VERSION_MINOR 36
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -547,6 +547,7 @@ typedef struct sipral_presence_event sipral_presence_event_t;
 typedef struct sipral_transport_failed_event sipral_transport_failed_event_t;
 typedef struct sipral_local_conference_event sipral_local_conference_event_t;
 typedef struct sipral_locate_event sipral_locate_event_t;
+typedef struct sipral_challenge_event sipral_challenge_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -2209,6 +2210,24 @@ enum {
      * stays in use meanwhile. `account` is the account.
      */
     SIPRAL_EVENT_KIND_LOCATE_FAILED = 57,
+    /**
+     * A request of an account's was challenged by somebody its
+     * password is not for, and the challenge was not answered (ABI
+     * 0.36): RFC 3261 §22.1 gives each protection domain its own
+     * password, and every answer is material for an offline search of
+     * it by whoever chose the nonce.
+     *
+     * `payload.challenge` says why — `refusal` — and who asked:
+     * `server`, where the challenged request went, and `realms`, what
+     * it was challenged for. Raised before the refusal settles the way
+     * any unanswered challenge does — a call ending with the 401 or
+     * 407, a registration failing with `BAD_CREDENTIALS`, a request
+     * inside a call refused — so the application knows why first. A
+     * server that answers under a realm the account was never told of
+     * is what `sipral_account_config_t::realms` is for. `account` is
+     * the account.
+     */
+    SIPRAL_EVENT_KIND_CHALLENGE_DECLINED = 58,
 };
 
 /**
@@ -4139,6 +4158,55 @@ enum {
 };
 
 /**
+ * Why an account's password did not answer a challenge. Names for
+ * `sipral_challenge_event_t::refusal`.
+ */
+typedef uint32_t sipral_challenge_refusal_t;
+enum {
+    /**
+     * Never written by this build.
+     */
+    SIPRAL_CHALLENGE_REFUSAL_UNKNOWN = 0,
+    /**
+     * The challenged request went somewhere other than the account's
+     * own server — its registrar, or the outbound proxy of an account
+     * that does not register — so whoever asked is the far end of a
+     * call, or a peer reached directly.
+     */
+    SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_SERVER = 1,
+    /**
+     * The account's server asked for a realm that is not the
+     * account's: not one of `sipral_account_config_t::realms`, or, with
+     * none named, neither the one its server first challenged with nor
+     * one its REGISTERs were challenged with. A proxy passing on a far
+     * end's own challenge looks like this, and so does an SBC that
+     * challenges calls under a realm of its own.
+     */
+    SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_REALM = 2,
+};
+
+/**
+ * What a party this end holds is sent:
+ * `sipral_stack_config_t::held_audio`.
+ */
+typedef uint32_t sipral_held_audio_t;
+enum {
+    /**
+     * Silence, in either mode.
+     */
+    SIPRAL_HELD_AUDIO_DEFAULT = 0,
+    /**
+     * Silence: the party on hold hears nothing of the room it was put
+     * on hold from.
+     */
+    SIPRAL_HELD_AUDIO_SILENCE = 1,
+    /**
+     * The frames the application hands over, as they are.
+     */
+    SIPRAL_HELD_AUDIO_APPLICATION = 2,
+};
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -5026,6 +5094,22 @@ struct sipral_stack_config {
      * Zero.
      */
     uint32_t reserved_35;
+    /**
+     * A sipral_held_audio_t: what a party this end holds is sent while
+     * the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
+     * `sendonly`, so something goes on being sent. Zero is silence in
+     * either mode: in application mode the frames handed
+     * `sipral_media_capture` may be a microphone's as well, and the
+     * room a party was put on hold from is not sent unless asked for.
+     * `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
+     * hands over as they are, for a voice agent or an application
+     * playing its own hold music or announcement to the held party.
+     */
+    sipral_held_audio_t held_audio;
+    /**
+     * Zero.
+     */
+    uint32_t reserved_36;
 };
 
 /**
@@ -5668,6 +5752,29 @@ struct sipral_account_config {
      * Zero.
      */
     uint32_t reserved_35;
+    /**
+     * The realms the password answers, each on a line of its own,
+     * separated by line feeds (a realm may hold a comma, and never a
+     * line break), or null for the default (ABI 0.36).
+     *
+     * The password answers the account's own server and nobody else
+     * (RFC 3261 §22.1). With none named the account takes the realms
+     * its server first challenges it with, and every realm its
+     * registrar challenges a REGISTER with, and answers those and no
+     * others: a proxy passing on a far end's own 401 under a realm of
+     * its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+     * says so. A server whose calls are challenged under a realm its
+     * REGISTERs never meet — an SBC or an outbound proxy at the
+     * registrar's address with a realm of its own — needs both named
+     * here; named, these and no others are answered, REGISTERs
+     * included. An empty line is skipped; a realm is compared exactly,
+     * case included, as RFC 3261 §22.1 compares it.
+     */
+    const char *realms;
+    /**
+     * How many bytes of it.
+     */
+    size_t realms_len;
 };
 
 /**
@@ -7938,6 +8045,36 @@ struct sipral_locate_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_CHALLENGE_DECLINED carries: who asked for
+ * the account's password, and why it was not given (ABI 0.36).
+ */
+struct sipral_challenge_event {
+    /**
+     * A sipral_challenge_refusal_t.
+     */
+    sipral_challenge_refusal_t refusal;
+    /**
+     * Where the challenged request went, and the refusal came from, as
+     * `host:port`. Not NUL-terminated.
+     */
+    const char *server;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_len;
+    /**
+     * The realms it was challenged for, each on a line of its own,
+     * separated by line feeds: a realm may hold a comma, and never a
+     * line break. UTF-8, not NUL-terminated.
+     */
+    const char *realms;
+    /**
+     * How many bytes of it.
+     */
+    size_t realms_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * The whole union is zeroed before that one arm is written, so every
@@ -8051,6 +8188,10 @@ union sipral_event_payload {
      * and SIPRAL_EVENT_KIND_LOCATE_FAILED.
      */
     sipral_locate_event_t locate;
+    /**
+     * For SIPRAL_EVENT_KIND_CHALLENGE_DECLINED.
+     */
+    sipral_challenge_event_t challenge;
 };
 
 /**
@@ -13062,11 +13203,11 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_abi_version_t": (24, 20, 20),
     "sipral_capabilities_t": (24, 16, 16),
     "sipral_counters_t": (232, 228, 232),
-    "sipral_stack_config_t": (424, 288, 296),
+    "sipral_stack_config_t": (432, 296, 304),
     "sipral_poll_result_t": (48, 28, 32),
     "sipral_stack_settings_t": (136, 128, 136),
     "sipral_header_t": (32, 16, 16),
-    "sipral_account_config_t": (448, 248, 256),
+    "sipral_account_config_t": (464, 256, 264),
     "sipral_call_config_t": (152, 84, 84),
     "sipral_codec_info_t": (32, 28, 28),
     "sipral_codec_candidate_t": (24, 20, 20),
@@ -13101,6 +13242,7 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_transport_failed_event_t": (32, 24, 24),
     "sipral_local_conference_event_t": (40, 40, 40),
     "sipral_locate_event_t": (48, 32, 32),
+    "sipral_challenge_event_t": (40, 20, 20),
     "sipral_event_payload_t": (328, 208, 216),
     "sipral_event_t": (384, 248, 264),
     "sipral_suspending_t": (32, 16, 16),

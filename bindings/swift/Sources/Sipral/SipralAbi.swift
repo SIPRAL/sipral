@@ -1213,6 +1213,22 @@ public enum SipralEventKind: UInt32, Sendable {
     /// failed as well, and backs off; an address an earlier answer named
     /// stays in use meanwhile. `account` is the account.
     case locateFailed = 57
+    /// A request of an account's was challenged by somebody its
+    /// password is not for, and the challenge was not answered (ABI
+    /// 0.36): RFC 3261 §22.1 gives each protection domain its own
+    /// password, and every answer is material for an offline search of
+    /// it by whoever chose the nonce.
+    ///
+    /// `payload.challenge` says why — `refusal` — and who asked:
+    /// `server`, where the challenged request went, and `realms`, what
+    /// it was challenged for. Raised before the refusal settles the way
+    /// any unanswered challenge does — a call ending with the 401 or
+    /// 407, a registration failing with `BAD_CREDENTIALS`, a request
+    /// inside a call refused — so the application knows why first. A
+    /// server that answers under a realm the account was never told of
+    /// is what `sipral_account_config_t::realms` is for. `account` is
+    /// the account.
+    case challengeDeclined = 58
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2343,6 +2359,37 @@ public enum SipralLocateFailure: UInt32, Sendable {
     case unsupported = 3
 }
 
+/// Why an account's password did not answer a challenge. Names for
+/// `sipral_challenge_event_t::refusal`.
+public enum SipralChallengeRefusal: UInt32, Sendable {
+    /// Never written by this build.
+    case unknown = 0
+    /// The challenged request went somewhere other than the account's
+    /// own server — its registrar, or the outbound proxy of an account
+    /// that does not register — so whoever asked is the far end of a
+    /// call, or a peer reached directly.
+    case notTheAccountsServer = 1
+    /// The account's server asked for a realm that is not the
+    /// account's: not one of `sipral_account_config_t::realms`, or, with
+    /// none named, neither the one its server first challenged with nor
+    /// one its REGISTERs were challenged with. A proxy passing on a far
+    /// end's own challenge looks like this, and so does an SBC that
+    /// challenges calls under a realm of its own.
+    case notTheAccountsRealm = 2
+}
+
+/// What a party this end holds is sent:
+/// `sipral_stack_config_t::held_audio`.
+public enum SipralHeldAudio: UInt32, Sendable {
+    /// Silence, in either mode.
+    case `default` = 0
+    /// Silence: the party on hold hears nothing of the room it was put
+    /// on hold from.
+    case silence = 1
+    /// The frames the application hands over, as they are.
+    case application = 2
+}
+
 /// What a call across the boundary answered, when it did not answer
 /// `ok`. The message is the calling thread's last error, read before
 /// anything else on this thread could replace it.
@@ -2883,7 +2930,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 35
+    public static let abiVersionMinor: UInt32 = 36
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3292,11 +3339,11 @@ public enum Sipral {
         ("sipral_abi_version_t", MemoryLayout<sipral_abi_version_t>.size, 24, 20, 20),
         ("sipral_capabilities_t", MemoryLayout<sipral_capabilities_t>.size, 24, 16, 16),
         ("sipral_counters_t", MemoryLayout<sipral_counters_t>.size, 232, 228, 232),
-        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 424, 288, 296),
+        ("sipral_stack_config_t", MemoryLayout<sipral_stack_config_t>.size, 432, 296, 304),
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 448, 248, 256),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 464, 256, 264),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 152, 84, 84),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
@@ -3331,6 +3378,7 @@ public enum Sipral {
         ("sipral_transport_failed_event_t", MemoryLayout<sipral_transport_failed_event_t>.size, 32, 24, 24),
         ("sipral_local_conference_event_t", MemoryLayout<sipral_local_conference_event_t>.size, 40, 40, 40),
         ("sipral_locate_event_t", MemoryLayout<sipral_locate_event_t>.size, 48, 32, 32),
+        ("sipral_challenge_event_t", MemoryLayout<sipral_challenge_event_t>.size, 40, 20, 20),
         ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 328, 208, 216),
         ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
         ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),

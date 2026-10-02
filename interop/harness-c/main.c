@@ -89,6 +89,19 @@
 /* How long a call that is up carries audio before it is judged. */
 #define DWELL_MS 2500u
 
+/* How long a hold this end asked for is watched, and how many frames of
+ * the kind asked for -- the application's tone, or silence -- have to leave
+ * in that time: more than a whole spurt and pause of the tone, and a fifth
+ * of the frames sent in it. */
+#define HELD_WATCH_MS 2000u
+#define HELD_FRAMES 20u
+
+/* interop/kamailio/kamailio.cfg's user whose INVITEs the proxy challenges
+ * under SECOND_REALM, and the lab's own realm its REGISTERs meet. */
+#define SECOND_REALM_EXTENSION "realm-elsewhere"
+#define SECOND_REALM "elsewhere.test"
+#define LAB_REALMS "sipral.test\n" SECOND_REALM
+
 /* The buffer one frame of playback goes into. The real number is
  * `sipral_media_info_t::frame_samples`, asked of the library per call; this is
  * only the ceiling. */
@@ -455,6 +468,11 @@ struct seen {
     char verified_orig[32];
     /* and the verdict the incoming call's own event carried */
     uint32_t incoming_verification;
+    /* ABI 0.36: a challenge the account's password did not answer -- why,
+     * and the realms it named, one per line */
+    int challenge_declined;
+    uint32_t declined_refusal;
+    char declined_realms[256];
     int events;
     char fault[192];
 };
@@ -588,6 +606,12 @@ static void on_event(const sipral_event_t *event, void *user_data)
             keep(seen->media_public, sizeof seen->media_public, event->payload.nat.mapped,
                  event->payload.nat.mapped_len);
         }
+        break;
+    case SIPRAL_EVENT_KIND_CHALLENGE_DECLINED:
+        seen->challenge_declined = 1;
+        seen->declined_refusal = event->payload.challenge.refusal;
+        keep(seen->declined_realms, sizeof seen->declined_realms,
+             event->payload.challenge.realms, event->payload.challenge.realms_len);
         break;
     case SIPRAL_EVENT_KIND_SESSION_CHANGED:
         /* hold and resume are this one event with the flag turned over, and
@@ -798,6 +822,12 @@ struct endpoint {
      * says back, frame for frame, instead of the tone -- the echo the
      * caller judges the path by */
     int echoing;
+    /* while a hold this end asked for is in force: the G.711 frames this end
+     * sent with sound in them, and the ones that were silence -- one byte
+     * repeated, which is what either law makes of a silent frame */
+    int watching_hold;
+    unsigned held_loud;
+    unsigned held_quiet;
 
     struct seen seen;
 };
@@ -863,6 +893,14 @@ static const uint8_t *stir_key_for_this_flow;
 static size_t stir_key_len_for_this_flow;
 static const char *stir_url_for_this_flow;
 static uint32_t stir_verification_for_this_flow;
+
+/* ABI 0.36: what a party the flow being opened holds is sent, a
+ * `SIPRAL_HELD_AUDIO_*` (zero, silence, on every flow but
+ * `FLOW_HOLD_APPLICATION`), and the realms its account's password answers,
+ * one per line (NULL, the ones its REGISTERs meet, on every flow but
+ * `FLOW_TWO_REALMS`). */
+static uint32_t held_audio_for_this_flow;
+static const char *realms_for_this_flow;
 
 /* Whether SIPRAL_REGISTRAR_KEEPALIVE says `off`. */
 static int keepalive_off(void)
@@ -1156,6 +1194,46 @@ static void note_given_back(struct endpoint *end, const uint8_t *data, size_t le
  * is waiting. A driver that skips the last is a call that is up with no audio
  * and no error.
  */
+/* One frame this end sent while it held the call: counted loud or quiet if
+ * it is a G.711 frame in the clear (payload type 0 or 8, RFC 3551 section 6),
+ * left alone otherwise. A silent frame is one byte repeated; the tone, or the
+ * pause between its spurts, is told apart by the payload alone. */
+static void note_held_frame(struct endpoint *end, const uint8_t *rtp, size_t len)
+{
+    size_t header;
+    size_t at;
+    uint8_t type;
+    int varied = 0;
+    if (len <= 12u || (rtp[0] & 0xC0u) != 0x80u) {
+        return;
+    }
+    type = (uint8_t)(rtp[1] & 0x7Fu);
+    if (type != 0u && type != 8u) {
+        return;
+    }
+    header = 12u + 4u * (size_t)(rtp[0] & 0x0Fu);
+    if ((rtp[0] & 0x10u) != 0u) {
+        if (len < header + 4u) {
+            return;
+        }
+        header += 4u + 4u * (((size_t)rtp[header + 2u] << 8) | rtp[header + 3u]);
+    }
+    if (len <= header + 1u) {
+        return;
+    }
+    for (at = header + 1u; at < len; at++) {
+        if (rtp[at] != rtp[header]) {
+            varied = 1;
+            break;
+        }
+    }
+    if (varied) {
+        end->held_loud++;
+    } else {
+        end->held_quiet++;
+    }
+}
+
 static void run_media(struct endpoint *end, uint64_t now)
 {
     static uint8_t in[DATAGRAM];
@@ -1260,6 +1338,9 @@ static void run_media(struct endpoint *end, uint64_t now)
         if (sipral_media_capture(end->media, now, samples, room, &packet)
                 == SIPRAL_STATUS_OK
             && packet.len > 0) {
+            if (end->watching_hold) {
+                note_held_frame(end, out, packet.len);
+            }
             send_marked(end, out, packet.len, destination, packet.protocol, now);
             end->sent++;
             end->media_over = packet.protocol;
@@ -1743,6 +1824,7 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     config.media_clock_unix_seconds = (uint64_t)time(NULL);
     config.ice = ice_for_this_flow;
     config.referrals = referrals_for_this_flow;
+    config.held_audio = held_audio_for_this_flow;
     /* the registrar keep-alive behind a NAT is the stack's default; the lab's
      * `nat-idle` step turns it off once, with SIPRAL_REGISTRAR_KEEPALIVE=off,
      * to show the call it exists for is lost without it */
@@ -1815,6 +1897,10 @@ static int open_endpoint(struct endpoint *end, unsigned which, const char *serve
     account.registrar_address_len = strlen(registrar_address);
     account.srtp = account_srtp_for_this_flow;
     account.stir_verification = stir_verification_for_this_flow;
+    if (realms_for_this_flow != NULL) {
+        account.realms = realms_for_this_flow;
+        account.realms_len = strlen(realms_for_this_flow);
+    }
     if (stir_key_for_this_flow != NULL && stir_url_for_this_flow != NULL) {
         /* a signing account needs the wall clock, paired with this
          * program's own `now_ms`: a stack that only signs gives it with no
@@ -1957,6 +2043,17 @@ enum flow {
     FLOW_ACCOUNT_SDES,
     FLOW_ACCOUNT_DTLS,
     FLOW_ACCOUNT_OFF,
+    /* ABI 0.36: held with `SIPRAL_HELD_AUDIO_APPLICATION`, the tone this end
+     * sends going on through the hold, where FLOW_HOLD's stack, told
+     * nothing, sends silence. Every server, like FLOW_HOLD. */
+    FLOW_HOLD_APPLICATION,
+    /* ABI 0.36: interop/kamailio/kamailio.cfg's `realm-elsewhere`, which
+     * the proxy challenges under a realm of its own while the registrar
+     * challenges REGISTERs under the lab's: answered when the account names
+     * both realms, declined -- and the decline said -- when it names none.
+     * Through Kamailio alone. */
+    FLOW_TWO_REALMS,
+    FLOW_REALM_UNNAMED,
     FLOW_COUNT
 };
 
@@ -2031,6 +2128,12 @@ static const char *flow_name(enum flow which)
         return "DTLS-SRTP required by the account";
     case FLOW_ACCOUNT_OFF:
         return "SRTP off on the account";
+    case FLOW_HOLD_APPLICATION:
+        return "held, the application's audio sent on";
+    case FLOW_TWO_REALMS:
+        return "a server under two realms, both named";
+    case FLOW_REALM_UNNAMED:
+        return "a server under two realms, one unnamed, declined";
     case FLOW_COUNT:
     default:
         return "?";
@@ -2086,6 +2189,12 @@ static const char *flow_key(enum flow which)
         return "acctdtls";
     case FLOW_ACCOUNT_OFF:
         return "acctoff";
+    case FLOW_HOLD_APPLICATION:
+        return "holdapp";
+    case FLOW_TWO_REALMS:
+        return "tworealms";
+    case FLOW_REALM_UNNAMED:
+        return "realmunnamed";
     case FLOW_COUNT:
     default:
         return "?";
@@ -2309,6 +2418,11 @@ static int runs_against(enum flow which, const char *server, int for_baresip)
     case FLOW_PEER_SRTP:
     case FLOW_PEER_DTLS:
         return for_baresip;
+    case FLOW_TWO_REALMS:
+    case FLOW_REALM_UNNAMED:
+        /* the proxy's own second realm: not the phone-to-phone run, which
+         * reads "kamailio" too */
+        return strcmp(server, "kamailio") == 0 && !for_baresip;
     case FLOW_PEER_HANGUP: {
         /* its own gate, never `for_baresip`: scripts/lab.sh's own
          * `flows_baresip_hangup` names this peer to keep its own hangup
@@ -2409,6 +2523,9 @@ static const char *extension_for(enum flow which, const char *named)
         return "baresip-dtls";
     case FLOW_PEER_HANGUP:
         return "baresip-hangup";
+    case FLOW_TWO_REALMS:
+    case FLOW_REALM_UNNAMED:
+        return SECOND_REALM_EXTENSION;
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -2464,6 +2581,9 @@ static uint32_t srtp_for(enum flow which)
     case FLOW_DTLS:
     case FLOW_PEER_DTLS:
         return (uint32_t)SIPRAL_SRTP_DTLS_REQUIRED;
+    case FLOW_HOLD_APPLICATION:
+        /* in the clear, so what leaves through the hold can be read */
+        return (uint32_t)SIPRAL_SRTP_NOT_OFFERED;
     case FLOW_REGISTER:
     case FLOW_CALL:
     case FLOW_HOLD:
@@ -3338,6 +3458,96 @@ static int account_policy_held(struct endpoint *end, enum flow which)
     return 0;
 }
 
+/* `FLOW_REALM_UNNAMED`: registered, so the account has taken the lab's realm,
+ * then a call the proxy challenges under SECOND_REALM. The password is not
+ * given to it: the call ends on the challenge, and the event says why and
+ * for which realm before it does. */
+static int flow_realm_unnamed(struct endpoint *end, const char *server)
+{
+    sipral_status_t status = sipral_account_register(end->stack, end->account, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_account_register", status);
+        return -1;
+    }
+    if (!wait_until(end, registered, FLOW_PATIENCE_MS)
+        || end->seen.registration != SIPRAL_REGISTRATION_STATE_REGISTERED) {
+        wrong_text("not registered, so the account has no realm of its own yet");
+        return -1;
+    }
+    if (place(end, server, SECOND_REALM_EXTENSION, 0u, &end->call) != 0) {
+        return -1;
+    }
+    if (!wait_until(end, hung_up, FLOW_PATIENCE_MS)) {
+        wrong_text("the call challenged for another realm never ended");
+        return -1;
+    }
+    if (end->seen.confirmed) {
+        wrong_text("the call went through on a realm the account never named");
+        return -1;
+    }
+    if (!end->seen.challenge_declined) {
+        wrong_text("the challenge for the second realm was not reported declined");
+        return -1;
+    }
+    if (end->seen.declined_refusal != SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_REALM
+        || strstr(end->seen.declined_realms, SECOND_REALM) == NULL) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "the decline said refusal %u for realms \"%.160s\"",
+                       (unsigned)end->seen.declined_refusal, end->seen.declined_realms);
+        return -1;
+    }
+    return 0;
+}
+
+/* A hold this end asked for, agreed, carried for a while with what leaves
+ * watched, and undone: FLOW_HOLD and FLOW_HOLD_APPLICATION. `loud` says
+ * which of the two the frames sent through it have to be -- the
+ * application's tone, or silence -- and HELD_FRAMES of them at least. A
+ * call that agreed SRTP sends nothing this can read, and only
+ * FLOW_HOLD_APPLICATION, which never offers it, insists. */
+static int hold_watched(struct endpoint *end, int loud)
+{
+    sipral_status_t status;
+    int readable = !secured(end);
+    if (loud && !readable) {
+        wrong_text("the call agreed SRTP, so what leaves through the hold cannot be read");
+        return -1;
+    }
+    dwell(end, 500u);
+    status = sipral_call_hold(end->stack, end->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_hold", status);
+        return -1;
+    }
+    if (!wait_until(end, held, FLOW_PATIENCE_MS) || end->seen.ended) {
+        wrong_text("the hold was never agreed");
+        return -1;
+    }
+    end->watching_hold = readable;
+    dwell(end, HELD_WATCH_MS);
+    end->watching_hold = 0;
+    if (readable
+        && (loud ? end->held_loud < HELD_FRAMES
+                 : end->held_loud != 0u || end->held_quiet < HELD_FRAMES)) {
+        (void)snprintf(trouble, sizeof trouble,
+                       "through the hold this end sent %u frames with sound and %u silent, "
+                       "where %s was asked for",
+                       end->held_loud, end->held_quiet,
+                       loud ? "the application's audio" : "silence");
+        return -1;
+    }
+    status = sipral_call_resume(end->stack, end->call, now_ms());
+    if (status != SIPRAL_STATUS_OK) {
+        wrong("sipral_call_resume", status);
+        return -1;
+    }
+    if (!wait_until(end, resumed, FLOW_PATIENCE_MS) || end->seen.ended) {
+        wrong_text("the resume was never agreed");
+        return -1;
+    }
+    return 0;
+}
+
 static int run_flow(enum flow which, struct endpoint *end, const char *server,
                     const char *extension, const char *other)
 {
@@ -3358,6 +3568,9 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
     }
     if (which == FLOW_MWI) {
         return flow_mwi(end, server);
+    }
+    if (which == FLOW_REALM_UNNAMED) {
+        return flow_realm_unnamed(end, server);
     }
     if (up_and_talking(end, server, extension_for(which, extension), srtp_for(which))
         != 0) {
@@ -3401,29 +3614,18 @@ static int run_flow(enum flow which, struct endpoint *end, const char *server,
         }
         break;
 
-    case FLOW_HOLD: {
-        sipral_status_t status;
-        dwell(end, 500u);
-        status = sipral_call_hold(end->stack, end->call, now_ms());
-        if (status != SIPRAL_STATUS_OK) {
-            wrong("sipral_call_hold", status);
-            return -1;
-        }
-        if (!wait_until(end, held, FLOW_PATIENCE_MS) || end->seen.ended) {
-            wrong_text("the hold was never agreed");
-            return -1;
-        }
-        status = sipral_call_resume(end->stack, end->call, now_ms());
-        if (status != SIPRAL_STATUS_OK) {
-            wrong("sipral_call_resume", status);
-            return -1;
-        }
-        if (!wait_until(end, resumed, FLOW_PATIENCE_MS) || end->seen.ended) {
-            wrong_text("the resume was never agreed");
+    case FLOW_HOLD:
+    case FLOW_HOLD_APPLICATION:
+        if (hold_watched(end, which == FLOW_HOLD_APPLICATION) != 0) {
             return -1;
         }
         break;
-    }
+
+    case FLOW_TWO_REALMS:
+        /* answered under the second realm, which only the named list let
+         * the password answer: the tone from FreeSWITCH behind the proxy */
+        dwell(end, DWELL_MS);
+        break;
 
     case FLOW_BLIND: {
         char target[192];
@@ -3717,6 +3919,7 @@ static int audio_holds(const struct endpoint *end, enum flow which)
 {
     const char *required = getenv("SIPRAL_REQUIRE_AUDIO");
     if (which != FLOW_CALL && which != FLOW_SRTP && which != FLOW_NAT
+        && which != FLOW_TWO_REALMS
         && which != FLOW_NAT_INCOMING && which != FLOW_G729 && which != FLOW_PEER_HANGUP
         && which != FLOW_ACCOUNT_SDES && which != FLOW_ACCOUNT_OFF) {
         return 1;
@@ -5549,6 +5752,10 @@ int main(int argc, char **argv)
                                  : NULL;
         calling_a_peer = flow == FLOW_ICE_NAT;
         codecs_for_this_flow = flow == FLOW_G729 ? "G729" : NULL;
+        held_audio_for_this_flow = flow == FLOW_HOLD_APPLICATION
+                                       ? (uint32_t)SIPRAL_HELD_AUDIO_APPLICATION
+                                       : 0u;
+        realms_for_this_flow = flow == FLOW_TWO_REALMS ? LAB_REALMS : NULL;
         account_srtp_for_this_flow = flow == FLOW_ACCOUNT_SDES
                                          ? (uint32_t)SIPRAL_SRTP_REQUIRED
                                      : flow == FLOW_ACCOUNT_DTLS

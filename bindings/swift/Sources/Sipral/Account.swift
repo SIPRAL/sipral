@@ -201,6 +201,7 @@ public final class Account: @unchecked Sendable {
         sessionTimer: SessionTimer,
         privacy: Privacy,
         trustedPeers: [String],
+        realms: [String],
         security: AccountSecurity
     ) throws -> Account {
         let given = contact
@@ -209,11 +210,13 @@ public final class Account: @unchecked Sendable {
             parameters: contactParameters(streamProtocol, stack: stack)
         )
         let peers = trustedPeers.isEmpty ? nil : trustedPeers.joined(separator: ",")
+        let named = realms.isEmpty ? nil : realms.joined(separator: "\n")
         let suites = security.srtpSuites.isEmpty ? nil : security.srtpSuites.joined(separator: ",")
         let key = security.stirKey ?? []
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
-             suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin]
+             suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin,
+             named]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -239,6 +242,10 @@ public final class Account: @unchecked Sendable {
             config.server_naptr = serverNaptr ? SipralToggle.on.rawValue : 0
             config.keepalive_ms = keepaliveMs
             config.stream_protocol = streamProtocol?.rawValue ?? 0
+            if let realmsPointer = parts[14].pointer {
+                config.realms = realmsPointer
+                config.realms_len = parts[14].count
+            }
             if let displayNamePointer = parts[4].pointer {
                 config.display_name = displayNamePointer
                 config.display_name_len = parts[4].count

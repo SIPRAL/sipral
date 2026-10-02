@@ -45,6 +45,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 diagnosticTrace = options.flag("diagnosticTrace"),
                 tlsPin = options.text("tlsPin"),
                 systemEchoCancellation = options.flag("systemEchoCancellation"),
+                heldAudio = options.text("heldAudio"),
             ),
         )
     }
@@ -67,6 +68,7 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 expiresSeconds = options.number("expiresSeconds")?.toLong() ?: 0,
                 streamProtocol = options.text("streamProtocol"),
                 tlsPin = options.text("tlsPin"),
+                realms = options.text("realms"),
             ),
         )
     }

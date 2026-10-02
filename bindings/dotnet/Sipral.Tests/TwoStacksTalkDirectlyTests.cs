@@ -228,6 +228,83 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
+    /// <summary>The loudest sample a held party hears of a tone sent on a
+    /// call held from the other end, on stacks whose <c>heldAudio</c> is
+    /// <paramref name="heldAudio"/>.</summary>
+    private static async Task<int> LoudestHeardOnHoldAsync(SipralHeldAudio heldAudio)
+    {
+        using var alice = new SipralStack(audio: SipralAudio.Application, heldAudio: heldAudio);
+        using var bob = new SipralStack(audio: SipralAudio.Application, heldAudio: heldAudio);
+        var aliceAccount = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+        bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
+        var aliceCall = alice.PlaceCall(aliceAccount, $"sip:bob@{bob.BindAddress}");
+        var incoming = await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
+        var bobCall = bob.AnswerCall(incoming);
+        try
+        {
+            using (var cts = new CancellationTokenSource(Timeout))
+            {
+                Assert.NotNull(await aliceCall.WaitForMediaAsync(cts.Token));
+                Assert.NotNull(await bobCall.WaitForMediaAsync(cts.Token));
+            }
+            aliceCall.Hold();
+            await FirstMatchingAsync(
+                aliceCall.Events, e => e.Kind == SipralEventKind.SessionChanged && e.CallInfo!.HeldHere, Timeout);
+
+            var tone = new short[aliceCall.Media!.FrameSamples * 40];
+            Array.Fill(tone, (short)8000);
+            aliceCall.Media.SendAudio(tone);
+            var loudest = 0;
+            using var listening = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+            try
+            {
+                await foreach (var frame in bobCall.Media!.Frames.WithCancellation(listening.Token))
+                {
+                    foreach (var sample in frame)
+                    {
+                        loudest = Math.Max(loudest, Math.Abs((int)sample));
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            return loudest;
+        }
+        finally
+        {
+            aliceCall.Close();
+            bobCall.Close();
+        }
+    }
+
+    /// <summary>A party this end holds hears silence by default, in
+    /// application mode too, where the frames sent may be a microphone's;
+    /// it hears what the application sends — hold music, an announcement, a
+    /// voice agent — on a stack told
+    /// <see cref="SipralHeldAudio.Application"/>.</summary>
+    [Fact]
+    public async Task AHeldPartyHearsSilenceUnlessTheStackSaysTheApplication()
+    {
+        Assert.True(await LoudestHeardOnHoldAsync(SipralHeldAudio.Default) < 100,
+            "the held party heard the application on a stack told nothing");
+        Assert.True(await LoudestHeardOnHoldAsync(SipralHeldAudio.Application) > 1000,
+            "the held party did not hear what the application sent");
+    }
+
+    /// <summary>The realms a password answers reach the stack one per line:
+    /// a realm with a comma of its own is one realm, and one with a control
+    /// byte is refused there.</summary>
+    [Fact]
+    public void TheRealmsAPasswordAnswersReachTheStackOnePerLine()
+    {
+        _alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: "127.0.0.1:5060", authUser: "alice",
+            authPassword: "open sesame", realms: new[] { "registrar.example", "sbc, inc." });
+        var refused = Assert.Throws<SipralException>(() => _alice.AddAccount("sip:bob@sipral.invalid",
+            registrarAddress: "127.0.0.1:5060", realms: new[] { "registrar.example", "sbc\texample" }));
+        Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
+    }
+
     [Fact]
     public async Task HangupEndsTheCallAtBothEnds()
     {

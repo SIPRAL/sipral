@@ -3353,3 +3353,70 @@ Dart layer runs every call's audio in the application, where there is no
 engine to ask); the echo switch at creation; and the settings read back,
 the suites as `sipral_srtp_suite_t` values in order. Each layer's README says
 how.
+
+## What ABI 0.36 added
+
+Grown as 0.35 was: every member appended after the last one its struct had,
+every pin and every 0.35 member's offset where it was on all three layouts,
+one event kind and one union arm added, and nothing removed. A 0.35 header is
+refused at load by the exact-minor rule; a struct declared at its 0.35 length
+is taken, its new members read as zero.
+
+**The realms a password answers** (`sipral_account_config_t`, after
+`reserved_35`):
+
+- `realms`, `realms_len` — the realms the account's password answers, one
+  per line, separated by line feeds: a realm may hold a comma and never a
+  line break. Named, these and no others are answered, REGISTERs included.
+  Null keeps the default, which takes the realms the account's server first
+  challenges it with and every realm its REGISTERs are challenged with
+  (`docs/04-ua.md`). A list that names no realm, or a realm with a control
+  byte other than the line feed between two, is
+  `SIPRAL_STATUS_INVALID_ARGUMENT`.
+
+**A challenge declined, said** (`SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`, 58,
+with `sipral_event_payload_t::challenge`, a `sipral_challenge_event_t`):
+`refusal`, a `sipral_challenge_refusal_t` — the request went somewhere other
+than the account's server, or the server asked for a realm that is not the
+account's; `server`, where the challenged request went, `host:port`; and
+`realms`, what it was challenged for, one per line. `account` is the
+account. It comes before the refusal settles as any unanswered challenge
+does, so the application reads why before the call ends or the registration
+fails.
+
+**What a held party is sent** (`sipral_stack_config_t`, after
+`reserved_35`):
+
+- `held_audio` — a `sipral_held_audio_t`. `SIPRAL_HELD_AUDIO_DEFAULT` and
+  `SIPRAL_HELD_AUDIO_SILENCE` are silence in either mode, since in
+  application mode too the frames handed `sipral_media_capture` may be a
+  microphone's; `SIPRAL_HELD_AUDIO_APPLICATION` sends those frames as they
+  are, for a voice agent or an application playing its own hold music to
+  the held party. Any other value is `SIPRAL_STATUS_INVALID_ARGUMENT`
+  (`docs/05-media.md`).
+- `reserved_36`.
+
+**Behaviour below the same declarations:**
+
+- **A registrar that moves to another realm is followed.** A challenge to
+  the account's own REGISTER is always answered, whatever realm it names,
+  and its realms join the ones the account answers; the first realm taken
+  used to be kept for the life of the account.
+- **The account's server is compared in canonical form**: an IPv4 address
+  and its IPv4-mapped IPv6 form are one server.
+- **A PASSporT is a replay in another request, not on another line.**
+  STIR's replay check remembers the request a PASSporT came in and the
+  account it reached, so a branch of one INVITE that reaches a second
+  account of the stack after the first branch's transaction is gone
+  verifies there, while the same PASSporT in another request is still
+  refused. A branch arriving while that transaction is kept (parallel
+  forking, or a hunt within five seconds over UDP) is still answered 482 by
+  RFC 3261 §8.2.2.2 (`docs/04-ua.md`).
+
+**In the layers.** Every idiomatic layer spells the three: the realms as a
+list on adding an account, joined one per line on the way down; the held
+audio at creation; and the declined challenge read back with its realms as a
+list (Swift `SipralEvent.challengeData`, .NET `SipralEventArgs.Challenge`,
+Python `fields["realms"]`, Dart `SipralStackEvent.challengeRealms`, Kotlin
+and the JVM jar `declinedChallengeOf`, React Native the `challengeDeclined`
+event on the client and the account).

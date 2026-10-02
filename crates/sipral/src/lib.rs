@@ -248,7 +248,9 @@ pub use record::{RecordingFormat, RecordingLayout, RecordingOptions, RecordingSi
 #[cfg(feature = "ice")]
 pub use relay::{Relay, RelayDatagram, RelayEvent, Relays};
 pub use route::{AdvertiseError, advertised_address, route_to};
-pub use session::{Arrival, Datagram, MediaConfig, MediaSession, Playback, StreamEncryption};
+pub use session::{
+    Arrival, Datagram, HeldAudio, MediaConfig, MediaSession, Playback, StreamEncryption,
+};
 pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// Why a STUN transaction ended without an address, as
 /// [`MappingEvent::Unanswered`] reports it.

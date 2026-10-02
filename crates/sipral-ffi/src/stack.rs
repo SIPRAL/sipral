@@ -109,7 +109,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
-use sipral::{Event, MediaConfig, MediaEngine, MediaEvent, WallClock};
+use sipral::{Event, HeldAudio, MediaConfig, MediaEngine, MediaEvent, WallClock};
 use sipral_core::endpoint::{EndpointConfig, Input, Transmit, TransportId, TransportProtocol};
 use sipral_core::transaction::{DialogId, TimerConfig};
 use sipral_ua::{
@@ -729,6 +729,48 @@ record! {
         pub system_echo_cancellation: Number<SipralToggle>,
         /// Zero.
         pub reserved_35: u32,
+        /// A [`SipralHeldAudio`]: what a party this end holds is sent while
+        /// the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
+        /// `sendonly`, so something goes on being sent. Zero is silence in
+        /// either mode: in application mode the frames handed
+        /// `sipral_media_capture` may be a microphone's as well, and the
+        /// room a party was put on hold from is not sent unless asked for.
+        /// `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
+        /// hands over as they are, for a voice agent or an application
+        /// playing its own hold music or announcement to the held party.
+        pub held_audio: Number<SipralHeldAudio>,
+        /// Zero.
+        pub reserved_36: u32,
+    }
+}
+
+codes! {
+    /// What a party this end holds is sent:
+    /// `sipral_stack_config_t::held_audio`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralHeldAudio: u32 {
+        /// Silence, in either mode.
+        Default = 0,
+        /// Silence: the party on hold hears nothing of the room it was put
+        /// on hold from.
+        Silence = 1,
+        /// The frames the application hands over, as they are.
+        Application = 2,
+    }
+}
+
+/// What `held_audio` asks for, in either mode.
+fn held_audio_of(held_audio: u32) -> Result<HeldAudio, Fail> {
+    match held_audio {
+        0 | 1 => Ok(HeldAudio::Silence),
+        2 => Ok(HeldAudio::Captured),
+        other => Err(fail(
+            SipralStatus::InvalidArgument,
+            format!(
+                "held_audio is {other}, and what a held party is sent is 0 or 1 for \
+                 silence, or 2 for the application's frames"
+            ),
+        )),
     }
 }
 
@@ -1704,6 +1746,7 @@ fn media_for(config: &SipralStackConfig) -> Result<MediaConfig, Fail> {
         stall_after,
         silence_suppression: toggled(config.silence_suppression, "silence_suppression", false)?,
         dtmf_detection: crate::inband::detection_of(config.dtmf_detection, "dtmf_detection")?,
+        held_audio: held_audio_of(config.held_audio)?,
         ..default
     })
 }
@@ -3333,6 +3376,8 @@ pub(crate) mod tests {
             reserved: 0,
             system_echo_cancellation: 0,
             reserved_35: 0,
+            held_audio: 0,
+            reserved_36: 0,
             dtmf_detection: 0,
         }
     }
@@ -4631,6 +4676,20 @@ pub(crate) mod tests {
             unsafe { sipral_stack_destroy(handle) },
             SipralStatus::StaleHandle
         );
+    }
+
+    /// `held_audio`'s default is silence, whatever the mode: an
+    /// application-mode stack fed by a microphone does not send the room to
+    /// a party it holds unless the application asks for its own frames.
+    #[test]
+    fn a_held_party_is_sent_silence_unless_the_application_is_named() {
+        use super::SipralHeldAudio;
+        use sipral::HeldAudio;
+        let of = |held: SipralHeldAudio| super::held_audio_of(held as u32).ok();
+        assert_eq!(of(SipralHeldAudio::Default), Some(HeldAudio::Silence));
+        assert_eq!(of(SipralHeldAudio::Silence), Some(HeldAudio::Silence));
+        assert_eq!(of(SipralHeldAudio::Application), Some(HeldAudio::Captured));
+        assert!(super::held_audio_of(3).is_err());
     }
 
     #[test]

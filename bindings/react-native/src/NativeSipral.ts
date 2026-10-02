@@ -41,6 +41,8 @@ export type NativeOpenOptions = {
   tlsPin?: string;
   /** False opens the devices past the platform's echo cancellation. */
   systemEchoCancellation?: boolean;
+  /** What a party this end holds is sent: "silence" or "application"; left out, silence. */
+  heldAudio?: string;
 };
 
 export type NativeAccountOptions = {
@@ -60,6 +62,8 @@ export type NativeAccountOptions = {
   streamProtocol?: string;
   /** The SHA-256 fingerprint, as bare hexadecimal, of the one certificate the account's own TLS connection trusts. */
   tlsPin?: string;
+  /** The realms the password answers, one per line. */
+  realms?: string;
 };
 
 /** One call's own controls in one direction, read back. */
@@ -117,6 +121,12 @@ export type NativeEvent = {
   targets?: string;
   /** Why it was not, in lower camel case: "notFound", "unanswered", "unsupported". */
   locateFailure?: string;
+  /** Why a challenge was declined, in lower camel case: "notTheAccountsServer", "notTheAccountsRealm". */
+  challengeRefusal?: string;
+  /** Where the declined challenge's request went, host:port. */
+  challengeServer?: string;
+  /** The realms it was challenged for, one per line. */
+  challengeRealms?: string;
 };
 
 export interface Spec extends TurboModule {

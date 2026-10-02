@@ -21,7 +21,7 @@ import unittest
 
 from sipral import SipralError, Stack
 from sipral._sipral_cffi import ffi, lib
-from sipral.enums import AudioMode, CallState, EventKind
+from sipral.enums import AudioMode, CallState, EventKind, HeldAudio
 from sipral.events import _statistics
 
 
@@ -165,6 +165,82 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
     async def _close_calls(self, *calls) -> None:
         for call in calls:
             call.close()
+
+
+class WhatAHeldPartyHears(unittest.IsolatedAsyncioTestCase):
+    """A party this end holds hears silence by default, in application mode
+    too, and what the application sends -- hold music, an announcement, a
+    voice agent -- on a stack told ``held_audio=HeldAudio.APPLICATION``."""
+
+    async def _loudest_heard_on_hold(self, held_audio: int) -> int:
+        loop = asyncio.get_running_loop()
+        alice = Stack(loop=loop, audio=AudioMode.APPLICATION, held_audio=held_audio)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION, held_audio=held_audio)
+        try:
+            account = alice.add_account("sip:alice@sipral.invalid", registrar_address=bob.bind_address)
+            bob.add_account("sip:bob@sipral.invalid", registrar_address=alice.bind_address)
+            alice_call = alice.place_call(account, f"sip:bob@{bob.bind_address}")
+            bob_call = None
+            while bob_call is None:
+                event = await asyncio.wait_for(bob.events.get(), timeout=5)
+                if event.kind == EventKind.INCOMING_CALL:
+                    bob_call = bob.answer_call(event)
+            while alice_call.media is None:
+                await asyncio.wait_for(alice_call.events.get(), timeout=5)
+            while bob_call.media is None:
+                await asyncio.wait_for(bob_call.events.get(), timeout=5)
+
+            alice_call.hold()
+            held = False
+            while not held:
+                event = await asyncio.wait_for(alice_call.events.get(), timeout=5)
+                held = bool(event.fields.get("held_here"))
+
+            samples = alice_call.media.frame_samples * 40
+            alice_call.media.send_audio(int(8_000).to_bytes(2, "little", signed=True) * samples)
+            loudest = 0
+            deadline = loop.time() + 1.5
+            while loop.time() < deadline:
+                try:
+                    frame = await asyncio.wait_for(bob_call.media.frames.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+                for at in range(0, len(frame), 2):
+                    loudest = max(loudest, abs(int.from_bytes(frame[at : at + 2], "little", signed=True)))
+            alice_call.close()
+            bob_call.close()
+            return loudest
+        finally:
+            alice.close()
+            bob.close()
+
+    async def test_the_held_party_hears_silence_unless_the_stack_says_the_application(self) -> None:
+        by_default = await self._loudest_heard_on_hold(HeldAudio.DEFAULT)
+        self.assertLess(by_default, 100, "the held party heard the application on a stack told nothing")
+        application = await self._loudest_heard_on_hold(HeldAudio.APPLICATION)
+        self.assertGreater(application, 1_000, "the held party did not hear what the application sent")
+
+
+class TheRealmsAPasswordAnswers(unittest.IsolatedAsyncioTestCase):
+    async def test_the_realms_reach_the_stack_one_per_line(self) -> None:
+        loop = asyncio.get_running_loop()
+        stack = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.addCleanup(stack.close)
+        stack.add_account(
+            "sip:alice@sipral.invalid",
+            registrar_address="127.0.0.1:5060",
+            auth_user="alice",
+            auth_password="open sesame",
+            realms=["registrar.example", "sbc, inc."],
+        )
+        # a control byte inside a realm reaches the stack, which refuses it
+        with self.assertRaises(SipralError) as raised:
+            stack.add_account(
+                "sip:bob@sipral.invalid",
+                registrar_address="127.0.0.1:5060",
+                realms=["registrar.example", "sbc\texample"],
+            )
+        self.assertEqual(raised.exception.status, lib.SIPRAL_STATUS_INVALID_ARGUMENT)
 
 
 class ACeilingOnCalls(unittest.IsolatedAsyncioTestCase):

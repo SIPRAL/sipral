@@ -67,6 +67,9 @@ final class SipralStackEvent {
     this.subscriptionStatusCode,
     this.transferStatusCode,
     this.statistics,
+    this.challengeRefusal,
+    this.challengeServer,
+    this.challengeRealms,
   });
 
   factory SipralStackEvent._read(SipralEvent event) {
@@ -80,6 +83,10 @@ final class SipralStackEvent {
         _subscriptionArm.contains(kind) ? event.payload.subscription : null;
     final transfer =
         _transferArm.contains(kind) ? event.payload.transfer : null;
+    final challenge =
+        kind == SipralEventKind.challengeDeclined
+            ? event.payload.challenge
+            : null;
     final record =
         kind == SipralEventKind.mediaStatistics
             ? event.payload.media.statistics
@@ -111,6 +118,18 @@ final class SipralStackEvent {
       subscriptionState: told?.state,
       subscriptionStatusCode: told?.statusCode,
       transferStatusCode: transfer?.statusCode,
+      challengeRefusal: challenge?.refusal,
+      challengeServer:
+          challenge == null
+              ? null
+              : text(challenge.server, challenge.serverLen),
+      challengeRealms:
+          challenge == null
+              ? null
+              : (text(challenge.realms, challenge.realmsLen) ?? '')
+                  .split('\n')
+                  .where((realm) => realm.isNotEmpty)
+                  .toList(),
       statistics:
           record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
     );
@@ -130,6 +149,18 @@ final class SipralStackEvent {
 
   /// The SIP status code behind it, for an event about a call, or zero.
   final int? statusCode;
+
+  /// Why an account's password was not given to a challenge, a
+  /// `SipralChallengeRefusal` value, for `SipralEventKind.challengeDeclined`.
+  final int? challengeRefusal;
+
+  /// Where the challenged request went, `host:port`, for
+  /// `SipralEventKind.challengeDeclined`.
+  final String? challengeServer;
+
+  /// The realms it was challenged for, for
+  /// `SipralEventKind.challengeDeclined`.
+  final List<String>? challengeRealms;
 
   /// The account's `SipralRegistrationState` value, for
   /// `SipralEventKind.registrationChanged`.

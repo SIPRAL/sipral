@@ -577,6 +577,15 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "protocol": int(resolve.protocol),
         }
 
+    if kind == lib.SIPRAL_EVENT_KIND_CHALLENGE_DECLINED:
+        challenge = payload.challenge
+        realms = _text(challenge.realms, challenge.realms_len)
+        return {
+            "refusal": int(challenge.refusal),
+            "server": _text(challenge.server, challenge.server_len),
+            "realms": realms.split("\n") if realms else [],
+        }
+
     if kind in (
         lib.SIPRAL_EVENT_KIND_LOOKUP_WANTED,
         lib.SIPRAL_EVENT_KIND_LOCATED,

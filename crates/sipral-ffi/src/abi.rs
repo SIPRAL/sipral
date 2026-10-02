@@ -740,6 +740,8 @@ pub const SURFACE: Surface = Surface {
         crate::locate::SipralDnsRecordType::ABI,
         crate::locate::SipralDnsAnswer::ABI,
         crate::locate::SipralLocateFailure::ABI,
+        crate::event::SipralChallengeRefusal::ABI,
+        crate::stack::SipralHeldAudio::ABI,
     ],
     records: &[
         crate::version::SipralAbiVersion::ABI,
@@ -784,6 +786,7 @@ pub const SURFACE: Surface = Surface {
         crate::transport::SipralTransportFailedEvent::ABI,
         crate::local_conference::SipralLocalConferenceEvent::ABI,
         crate::locate::SipralLocateEvent::ABI,
+        crate::event::SipralChallengeEvent::ABI,
         crate::event::SipralEventPayload::ABI,
         crate::event::SipralEvent::ABI,
         crate::lifecycle::SipralSuspending::ABI,
@@ -1248,6 +1251,7 @@ mod tests {
             "SipralTransportFailedEvent",
             "SipralLocalConferenceEvent",
             "SipralLocateEvent",
+            "SipralChallengeEvent",
             "SipralEventPayload",
         ];
         let array_elements = ["SipralHeader"];

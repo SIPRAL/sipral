@@ -1417,6 +1417,8 @@ pub(crate) mod tests {
             reserved: 0,
             stream_protocol: 0,
             reserved_35: 0,
+            realms: ptr::null(),
+            realms_len: 0,
         }
     }
 
@@ -3597,6 +3599,160 @@ pub(crate) mod tests {
         poll(handle, 1_010 + wait);
         assert_eq!(seen.ended.len(), 1);
         assert_eq!(seen.ended[0].1, 513);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The challenges an account's password did not answer, copied out while
+    /// the callback ran: the account, why, who asked and for which realms.
+    #[derive(Default)]
+    struct Declined {
+        seen: Vec<(SipralHandle, u32, String, String)>,
+    }
+
+    unsafe extern "C" fn keep_declined(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let declined = unsafe { &mut *user_data.cast::<Declined>() };
+        let event = unsafe { &*event };
+        if event.kind != SipralEventKind::ChallengeDeclined {
+            return;
+        }
+        let payload = unsafe { event.payload.challenge };
+        let text = |pointer: *const c_char, len: usize| {
+            String::from_utf8_lossy(unsafe {
+                std::slice::from_raw_parts(pointer.cast::<u8>(), len)
+            })
+            .into_owned()
+        };
+        declined.seen.push((
+            event.account,
+            payload.refusal,
+            text(payload.server, payload.server_len),
+            text(payload.realms, payload.realms_len),
+        ));
+    }
+
+    /// The INVITE of a call placed from `account`, refused 407 under
+    /// `realm` by the account's own server, and what went out after it in
+    /// the same call.
+    fn challenged_under(
+        handle: SipralHandle,
+        account: SipralHandle,
+        realm: &str,
+        now_ms: u64,
+    ) -> Vec<Vec<u8>> {
+        let (status, _) =
+            crate::call::tests::place(handle, account, &crate::call::tests::call_config(), now_ms);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (invite, to, _) = take_one(handle);
+        assert_eq!(to, REGISTRAR);
+        let to = String::from_utf8_lossy(&header(&invite, HeaderName::To)).into_owned();
+        let challenge = String::from_utf8_lossy(&reply(
+            &invite,
+            407,
+            "Proxy Authentication Required",
+            &format!("Proxy-Authenticate: Digest realm=\"{realm}\", nonce=\"{realm}-n\", qop=\"auth\"\r\n"),
+        ))
+        .replacen(&format!("To: {to}"), &format!("To: {to};tag=sbc"), 1);
+        assert_eq!(
+            feed(handle, REGISTRAR, challenge.as_bytes(), now_ms + 10),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, now_ms + 10);
+        let call_id = header(&invite, HeaderName::CallId);
+        drain(handle)
+            .into_iter()
+            .filter(|message| header(message, HeaderName::CallId) == call_id)
+            .collect()
+    }
+
+    /// `sipral_account_config_t::realms` names the realms an account's
+    /// password answers: an SBC at the registrar's address challenging a
+    /// call under one of them is answered, and one challenging under any
+    /// other is not, which `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` reports
+    /// with the account, the server and the realm.
+    #[test]
+    fn the_realms_an_account_names_are_answered_and_any_other_is_reported_declined() {
+        let mut declined = Declined::default();
+        let mut observed = Observed::default();
+        let mut settings = config(keep_declined, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut declined).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let realms = "registrar.example\nsbc.example";
+        let mut account_config = account_config();
+        account_config.realms = realms.as_ptr().cast::<c_char>();
+        account_config.realms_len = realms.len();
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&account_config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        // the first realm met would be the only one taken, with none named
+        let out = challenged_under(handle, account, "registrar.example", 500);
+        assert!(out.iter().any(|message| message.starts_with(b"INVITE ")
+            && !header(message, HeaderName::ProxyAuthorization).is_empty()));
+        let out = challenged_under(handle, account, "sbc.example", 1_000);
+        assert!(
+            out.iter().any(|message| message.starts_with(b"INVITE ")
+                && !header(message, HeaderName::ProxyAuthorization).is_empty()),
+            "the SBC's realm is the account's, and its challenge is answered"
+        );
+        assert!(declined.seen.is_empty(), "{:?}", declined.seen);
+
+        let out = challenged_under(handle, account, "callee.example", 2_000);
+        assert!(
+            !out.iter().any(|message| message.starts_with(b"INVITE ")),
+            "a realm the account does not name gets no answer"
+        );
+        assert_eq!(declined.seen.len(), 1, "{:?}", declined.seen);
+        let (whose, refusal, server, realms) = &declined.seen[0];
+        assert_eq!(*whose, account);
+        assert_eq!(
+            *refusal,
+            crate::event::SipralChallengeRefusal::NotTheAccountsRealm as u32
+        );
+        assert_eq!(server, REGISTRAR);
+        assert!(
+            realms.split('\n').any(|realm| realm == "callee.example"),
+            "{realms}"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A list of realms with none in it is a mistake, not the default, and
+    /// a control byte other than the line feed between two is refused.
+    #[test]
+    fn realms_that_name_no_realm_are_refused() {
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let realms = "\n\n";
+        let mut account_config = account_config();
+        account_config.realms = realms.as_ptr().cast::<c_char>();
+        account_config.realms_len = realms.len();
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&account_config), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("names no realm"),
+            "{}",
+            last_error_text()
+        );
+        let realms = "sbc.example\n\tregistrar.example";
+        account_config.realms = realms.as_ptr().cast::<c_char>();
+        account_config.realms_len = realms.len();
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&account_config), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("control byte"),
+            "{}",
+            last_error_text()
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 }

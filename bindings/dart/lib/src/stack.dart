@@ -54,7 +54,12 @@ final class SipralStack {
   /// `serverUri`; [SipralDns.platform] by default. [tlsServerName] is the
   /// name a TLS connection of an account's own is checked against (the
   /// server's host by default), for an account added with
-  /// `streamProtocol: SipralTransport.tls` and no `tlsPin`.
+  /// `streamProtocol: SipralTransport.tls` and no `tlsPin`. [heldAudio] is a
+  /// `SipralHeldAudio` value: what a party this end holds is sent while the
+  /// hold lasts -- silence by default, since the frames sent may be a
+  /// microphone's; `SipralHeldAudio.application` sends the frames the
+  /// application sends (hold music, an announcement, a voice agent's own
+  /// speech).
   static Future<SipralStack> open({
     String? bindHost,
     int bindPort = 0,
@@ -68,6 +73,7 @@ final class SipralStack {
     bool? diagnosticTrace,
     SipralResolver? resolver,
     String? tlsServerName,
+    int heldAudio = SipralHeldAudio.default$,
   }) async {
     final sipral = library ?? _library();
     final socket = await RawDatagramSocket.bind(
@@ -95,6 +101,7 @@ final class SipralStack {
         datagramWithoutStreamBytes: datagramWithoutStreamBytes,
         pseudonymSalt: pseudonymSalt,
         diagnosticTrace: diagnosticTrace,
+        heldAudio: heldAudio,
       );
     } catch (_) {
       stack._release();
@@ -184,6 +191,7 @@ final class SipralStack {
     required int datagramWithoutStreamBytes,
     required List<int>? pseudonymSalt,
     required bool? diagnosticTrace,
+    required int heldAudio,
   }) {
     _callback = ffi.NativeCallable<SipralEventCallback>.isolateLocal(_onEvent);
     using((arena) {
@@ -228,7 +236,8 @@ final class SipralStack {
         ..datagramWithoutStreamBytes = datagramWithoutStreamBytes
         ..pseudonymSalt = salt.isEmpty ? ffi.nullptr : saltBytes
         ..pseudonymSaltLen = salt.length
-        ..diagnosticTrace = _toggle(diagnosticTrace);
+        ..diagnosticTrace = _toggle(diagnosticTrace)
+        ..heldAudio = heldAudio;
       final out = arena<SipralHandle>();
       _clock.start();
       _check(_sipral, 'sipral_stack_create', _sipral.stackCreate(config, out));
@@ -277,6 +286,15 @@ final class SipralStack {
   /// that closes is opened again. Until it is open a call the account
   /// places throws with `SipralStatus.transportDown`. Anything else is an
   /// [ArgumentError].
+  ///
+  /// [realms] are the realms the password answers (RFC 3261 §22.1). Left
+  /// empty, the account answers the realm its server first challenges it
+  /// with and every realm its REGISTERs are challenged with, and no other;
+  /// an SBC or outbound proxy at the server's address that challenges calls
+  /// under a realm of its own needs both named. A challenge the password is
+  /// not for is not answered, and `SipralEventKind.challengeDeclined` says
+  /// who asked and why ([SipralStackEvent.challengeRefusal],
+  /// [SipralStackEvent.challengeServer], [SipralStackEvent.challengeRealms]).
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -290,6 +308,7 @@ final class SipralStack {
     int keepaliveMs = 0,
     String? tlsPin,
     int? streamProtocol,
+    List<String> realms = const [],
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
@@ -339,6 +358,10 @@ final class SipralStack {
       final user = _text(arena, authUser);
       final password = _text(arena, authPassword);
       final display = _text(arena, displayName);
+      final realmsText = _text(
+        arena,
+        realms.isEmpty ? null : realms.join('\n'),
+      );
       config.ref
         ..size = ffi.sizeOf<SipralAccountConfig>()
         ..aor = aorText.$1
@@ -361,7 +384,9 @@ final class SipralStack {
         ..keepaliveMs = keepaliveMs
         ..tlsPinSha256 = pinText.$1
         ..tlsPinSha256Len = pinText.$2
-        ..streamProtocol = streamProtocol ?? 0;
+        ..streamProtocol = streamProtocol ?? 0
+        ..realms = realmsText.$1
+        ..realmsLen = realmsText.$2;
       final out = arena<SipralHandle>();
       _check(
         _sipral,

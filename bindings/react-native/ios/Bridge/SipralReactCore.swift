@@ -48,6 +48,9 @@ public struct SipralOpenOptions {
     public var tlsPin: String?
     /// False opens the devices past the platform's echo cancellation.
     public var systemEchoCancellation: Bool?
+    /// What a party this end holds is sent: "silence" or "application";
+    /// nil for silence.
+    public var heldAudio: String?
 
     public init(bindHost: String? = nil) {
         self.bindHost = bindHost
@@ -71,6 +74,7 @@ public struct SipralOpenOptions {
         diagnosticTrace = (options["diagnosticTrace"] as? NSNumber)?.boolValue
         tlsPin = options["tlsPin"] as? String
         systemEchoCancellation = (options["systemEchoCancellation"] as? NSNumber)?.boolValue
+        heldAudio = options["heldAudio"] as? String
     }
 }
 
@@ -93,6 +97,8 @@ public struct SipralAccountOptions {
     /// The fingerprint, as bare hexadecimal, of the one certificate that
     /// connection trusts.
     public var tlsPin: String?
+    /// The realms the password answers, one per line.
+    public var realms: String?
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -114,6 +120,7 @@ public struct SipralAccountOptions {
         expiresSeconds = UInt64(max(0, (options["expiresSeconds"] as? NSNumber)?.doubleValue ?? 0))
         streamProtocol = options["streamProtocol"] as? String
         tlsPin = options["tlsPin"] as? String
+        realms = options["realms"] as? String
     }
 }
 
@@ -169,6 +176,13 @@ public final class SipralReactCore: @unchecked Sendable {
                 if let pin = options.tlsPin {
                     trust = try TLSTrust.pinned(pin)
                 }
+                let heldAudio: SipralHeldAudio
+                switch options.heldAudio {
+                case nil: heldAudio = .default
+                case "silence": heldAudio = .silence
+                case "application": heldAudio = .application
+                case let other?: throw SipralRefusal("invalidArgument", "heldAudio is silence or application, not \(other)")
+                }
                 let opened = try SipralStack(
                     audio: try audio(options.manualAudio),
                     bindHost: options.bindHost,
@@ -185,7 +199,8 @@ public final class SipralReactCore: @unchecked Sendable {
                     datagramWithoutStreamBytes: options.datagramWithoutStreamBytes,
                     pseudonymSalt: try options.pseudonymSalt.map(Self.bytes(hex:)),
                     diagnosticTrace: options.diagnosticTrace,
-                    systemEchoCancellation: options.systemEchoCancellation
+                    systemEchoCancellation: options.systemEchoCancellation,
+                    heldAudio: heldAudio
                 )
                 let events = opened.events()
                 reader = Task { [weak self] in
@@ -238,7 +253,8 @@ public final class SipralReactCore: @unchecked Sendable {
                 displayName: options.displayName,
                 authUser: options.authUser,
                 authPassword: options.authPassword,
-                expiresSeconds: options.expiresSeconds
+                expiresSeconds: options.expiresSeconds,
+                realms: options.realms.map { $0.split(separator: "\n").map(String.init) } ?? []
             )
             let id = String(account.handle)
             locked { accounts[id] = account }
@@ -568,6 +584,10 @@ public final class SipralReactCore: @unchecked Sendable {
             transfer.target.map { flat["target"] = $0 }
         } else if event.kind == .digitReceived || event.kind == .inBandDigit, let digit = event.mediaData?.digit {
             flat["digit"] = String(digit)
+        } else if let challenge = event.challengeData {
+            challenge.refusal.map { flat["challengeRefusal"] = String(describing: $0) }
+            challenge.server.map { flat["challengeServer"] = $0 }
+            flat["challengeRealms"] = challenge.realms.joined(separator: "\n")
         } else if let locate = event.locateData {
             locate.targets.map { flat["targets"] = $0 }
             if event.kind == .locateFailed, let failure = SipralLocateFailure(rawValue: locate.failureRaw) {

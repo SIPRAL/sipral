@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 import Foundation
-import Sipral
+import CSipral
+@testable import Sipral
 import XCTest
 @testable import SipralReactBridge
 
@@ -321,6 +322,52 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(settings["systemEchoCancellation"] as? Bool, false)
         XCTAssertEqual(settings["pseudonymSalted"] as? Bool, false)
         XCTAssertGreaterThan(settings["codecCount"] as? Int ?? 0, 0)
+    }
+
+    /// ABI 0.36: the realms an account names and what a held party is sent
+    /// reach the library through the core, a value of neither the core
+    /// knows is refused before it, and a declined challenge is flattened
+    /// with its refusal, server and realms.
+    func testTheRealmsAndTheHeldAudioReachTheLibrary() throws {
+        let refused = SipralReactCore(emit: { _ in }, audio: { _ in .application })
+        refusal("invalidArgument") {
+            _ = try refused.open(SipralOpenOptions(["bindHost": "127.0.0.1", "heldAudio": "music"]))
+        }
+        let core = SipralReactCore(emit: { _ in }, audio: { _ in .application })
+        defer { core.close() }
+        _ = try core.open(SipralOpenOptions(["bindHost": "127.0.0.1", "heldAudio": "application"]))
+        _ = try core.addAccount(SipralAccountOptions([
+            "aor": "sip:alice@sipral.invalid", "registrarAddress": "127.0.0.1:5060",
+            "authUser": "alice", "authPassword": "open sesame", "realms": "registrar.example\nsbc, inc.",
+        ]))
+        refusal("invalidArgument") {
+            _ = try core.addAccount(SipralAccountOptions([
+                "aor": "sip:bob@sipral.invalid", "registrarAddress": "127.0.0.1:5060",
+                "realms": "registrar.example\nsbc\texample",
+            ]))
+        }
+
+        let server = "203.0.113.9:5060"
+        let realms = "sbc.example\ncallee, inc."
+        let flat = server.withCString { serverText in
+            realms.withCString { realmsText in
+                var raw = sipral_event_t()
+                raw.size = MemoryLayout<sipral_event_t>.size
+                raw.kind = SipralEventKind.challengeDeclined.rawValue
+                raw.account = 7
+                raw.payload.challenge.refusal = SipralChallengeRefusal.notTheAccountsRealm.rawValue
+                raw.payload.challenge.server = serverText
+                raw.payload.challenge.server_len = server.utf8.count
+                raw.payload.challenge.realms = realmsText
+                raw.payload.challenge.realms_len = realms.utf8.count
+                return SipralReactCore.flatten(SipralEventDecoder.decode(raw))
+            }
+        }
+        XCTAssertEqual(flat["kind"] as? String, "challengeDeclined")
+        XCTAssertEqual(flat["account"] as? String, "7")
+        XCTAssertEqual(flat["challengeRefusal"] as? String, "notTheAccountsRealm")
+        XCTAssertEqual(flat["challengeServer"] as? String, server)
+        XCTAssertEqual(flat["challengeRealms"] as? String, realms)
     }
 
     /// A call's own gain and mute through the core, on a stack in device mode

@@ -91,6 +91,8 @@ __all__ = [
     "Activity",
     "PublicationState",
     "PublishFailure",
+    "ChallengeRefusal",
+    "HeldAudio",
 ]
 
 
@@ -423,3 +425,11 @@ PublicationState = _enum("PublicationState", "SIPRAL_PUBLICATION_STATE_")
 
 #: A `sipral_publish_failure_t`: why a publication failed.
 PublishFailure = _enum("PublishFailure", "SIPRAL_PUBLISH_FAILURE_")
+
+#: A `sipral_challenge_refusal_t`: why an account's password was not given to
+#: a challenge, ``fields["refusal"]`` on `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`.
+ChallengeRefusal = _enum("ChallengeRefusal", "SIPRAL_CHALLENGE_REFUSAL_")
+
+#: A `sipral_held_audio_t`: what a party this end holds is sent,
+#: ``Stack(held_audio=...)``.
+HeldAudio = _enum("HeldAudio", "SIPRAL_HELD_AUDIO_")

@@ -423,6 +423,12 @@ public final class SipralStack: @unchecked Sendable {
     /// credentials and keys taken out, for a diagnosis;
     /// `setDiagnosticTrace(_:)` turns it on and off later.
     ///
+    /// `heldAudio` is what a party this end holds is sent while the hold
+    /// lasts: `.default` and `.silence` are silence in either mode, since in
+    /// application mode too the frames sent may be a microphone's;
+    /// `.application` sends the frames the application sends -- hold music,
+    /// an announcement, a voice agent's own speech.
+    ///
     /// `resolver` answers `SipralEventKind.lookupWanted` for the accounts
     /// added with `serverUri`, on a thread of its own per lookup;
     /// `SipralDns.platform` -- the system's DNS service for SRV and NAPTR,
@@ -467,6 +473,7 @@ public final class SipralStack: @unchecked Sendable {
         pseudonymSalt: [UInt8]? = nil,
         diagnosticTrace: Bool? = nil,
         systemEchoCancellation: Bool? = nil,
+        heldAudio: SipralHeldAudio = .default,
         resolver: SipralResolver? = nil
     ) throws {
         self.streamFallback = streamFallback
@@ -608,6 +615,7 @@ public final class SipralStack: @unchecked Sendable {
                     config.datagram_without_stream_bytes = datagramWithoutStreamBytes
                     config.diagnostic_trace = SipralStack.toggle(diagnosticTrace)
                     config.system_echo_cancellation = SipralStack.toggle(systemEchoCancellation)
+                    config.held_audio = heldAudio.rawValue
                     let salt = pseudonymSalt ?? []
                     return try salt.withUnsafeBufferPointer { saltBytes in
                         if !saltBytes.isEmpty {
@@ -1341,6 +1349,15 @@ public final class SipralStack: @unchecked Sendable {
     /// the account places throws `.transportDown`. Only on a stack that
     /// signals over UDP; anything but `.tcp` or `.tls` throws
     /// `.invalidArgument`.
+    ///
+    /// `realms` are the realms the password answers (RFC 3261 §22.1). Left
+    /// empty, the account answers the realm its server first challenges it
+    /// with and every realm its REGISTERs are challenged with, and no
+    /// other; an SBC or outbound proxy at the server's address that
+    /// challenges calls under a realm of its own needs both named. A
+    /// challenge the password is not for is not answered, and
+    /// `SipralEventKind.challengeDeclined` says who asked and why
+    /// (`SipralEvent.challengeData`).
     public func addAccount(
         aor: String,
         registrarAddress: String? = nil,
@@ -1358,6 +1375,7 @@ public final class SipralStack: @unchecked Sendable {
         sessionTimer: SessionTimer = .default,
         privacy: Privacy = [],
         trustedPeers: [String] = [],
+        realms: [String] = [],
         security: AccountSecurity = AccountSecurity()
     ) throws -> Account {
         guard (registrarAddress == nil) != (serverUri == nil) else {
@@ -1397,6 +1415,7 @@ public final class SipralStack: @unchecked Sendable {
             sessionTimer: sessionTimer,
             privacy: privacy,
             trustedPeers: trustedPeers,
+            realms: realms,
             security: security
         )
         movingQueue.sync { accounts[account.handle] = account }

@@ -1307,6 +1307,21 @@ or the consent beep is written into the silence as it would be into speech.
 A `sendonly` this end answered to the far end's `recvonly` is not a hold and
 carries the microphone.
 
+Silence is for frames that come from a microphone. An application whose
+frames are what the held party is to hear — hold music, an announcement, a
+voice agent saying it will be back — says so with `MediaConfig::held_audio`:
+`HeldAudio::Silence`, the facade's default, since it cannot tell a
+microphone from music, or `HeldAudio::Captured`, which sends what
+`MediaSession::capture` is handed through the hold as it would outside one;
+`MediaSession::set_held_audio` chooses for one call. The C ABI does the same
+(`sipral_stack_config_t::held_audio`, ABI 0.36): `SIPRAL_HELD_AUDIO_DEFAULT`
+and `SIPRAL_HELD_AUDIO_SILENCE` are silence in either mode — in application
+mode too, since the frames handed `sipral_media_capture` there are often a
+microphone's, through the library's own platform audio pumps or the
+application's — and `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the
+application hands over. The recording keeps silence for this side through a
+hold either way, as it always has.
+
 Among the re-offers handed up are the ones that change the security of a call
 in progress: a transport profile that moved, an `a=crypto` line that appeared
 or disappeared. An account under a *required* policy refuses them with 488

@@ -21,7 +21,7 @@ public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter
 /// <c>Contact</c>.</summary>
 internal sealed record AccountLocation(
     string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
-    SipralTransport StreamProtocol = 0);
+    SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle, and the entry points that take
@@ -168,6 +168,7 @@ public sealed class Account
                 ContactParametersOf(stack, location.StreamProtocol)));
         var serverUriBytes = location.ServerUri is null ? null : Encoding.UTF8.GetBytes(location.ServerUri);
         var pinBytes = location.TlsPin is null ? null : Encoding.UTF8.GetBytes(location.TlsPin);
+        var realmsBytes = location.Realms is null ? null : Encoding.UTF8.GetBytes(string.Join("\n", location.Realms));
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
@@ -188,6 +189,7 @@ public sealed class Account
         using (var stirOrigidPin = Pin(stirOrigidBytes))
         using (var serverUriPin = Pin(serverUriBytes))
         using (var pinPin = Pin(pinBytes))
+        using (var realmsPin = Pin(realmsBytes))
         {
             var config = SipralAccountConfig.Sized();
             config.Aor = aorPin.Pointer;
@@ -206,6 +208,11 @@ public sealed class Account
             config.StreamProtocol = (uint)location.StreamProtocol;
             config.TlsPinSha256 = pinPin.Pointer;
             config.TlsPinSha256Len = (nuint)(pinBytes?.Length ?? 0);
+            if (realmsBytes is { Length: > 0 })
+            {
+                config.Realms = realmsPin.Pointer;
+                config.RealmsLen = (nuint)realmsBytes.Length;
+            }
             config.Contact = contactPin.Pointer;
             config.ContactLen = (nuint)contactBytes.Length;
             if (displayNameBytes is not null)

@@ -1719,6 +1719,24 @@ enum class SipralEventKind(val value: Int) {
      * stays in use meanwhile. `account` is the account.
      */
     LOCATE_FAILED(57),
+    /**
+     * A request of an account's was challenged by somebody its
+     * password is not for, and the challenge was not answered (ABI
+     * 0.36): RFC 3261 §22.1 gives each protection domain its own
+     * password, and every answer is material for an offline search of
+     * it by whoever chose the nonce.
+     *
+     * `payload.challenge` says why — `refusal` — and who asked:
+     * `server`, where the challenged request went, and `realms`, what
+     * it was challenged for. Raised before the refusal settles the way
+     * any unanswered challenge does — a call ending with the 401 or
+     * 407, a registration failing with `BAD_CREDENTIALS`, a request
+     * inside a call refused — so the application knows why first. A
+     * server that answers under a realm the account was never told of
+     * is what `sipral_account_config_t::realms` is for. `account` is
+     * the account.
+     */
+    CHALLENGE_DECLINED(58),
     ;
 
     companion object {
@@ -3894,6 +3912,63 @@ enum class SipralLocateFailure(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralLocateFailure? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Why an account's password did not answer a challenge. Names for
+ * `sipral_challenge_event_t::refusal`.
+ */
+enum class SipralChallengeRefusal(val value: Int) {
+    /**
+     * Never written by this build.
+     */
+    UNKNOWN(0),
+    /**
+     * The challenged request went somewhere other than the account's
+     * own server — its registrar, or the outbound proxy of an account
+     * that does not register — so whoever asked is the far end of a
+     * call, or a peer reached directly.
+     */
+    NOT_THE_ACCOUNTS_SERVER(1),
+    /**
+     * The account's server asked for a realm that is not the
+     * account's: not one of `sipral_account_config_t::realms`, or, with
+     * none named, neither the one its server first challenged with nor
+     * one its REGISTERs were challenged with. A proxy passing on a far
+     * end's own challenge looks like this, and so does an SBC that
+     * challenges calls under a realm of its own.
+     */
+    NOT_THE_ACCOUNTS_REALM(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralChallengeRefusal? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a party this end holds is sent:
+ * `sipral_stack_config_t::held_audio`.
+ */
+enum class SipralHeldAudio(val value: Int) {
+    /**
+     * Silence, in either mode.
+     */
+    DEFAULT(0),
+    /**
+     * Silence: the party on hold hears nothing of the room it was put
+     * on hold from.
+     */
+    SILENCE(1),
+    /**
+     * The frames the application hands over, as they are.
+     */
+    APPLICATION(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralHeldAudio? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -6163,6 +6238,22 @@ class SipralStackConfig(
      * Zero.
      */
     val reserved35: Long = 0,
+    /**
+     * A SipralHeldAudio: what a party this end holds is sent while
+     * the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
+     * `sendonly`, so something goes on being sent. Zero is silence in
+     * either mode: in application mode the frames handed
+     * `sipral_media_capture` may be a microphone's as well, and the
+     * room a party was put on hold from is not sent unless asked for.
+     * `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
+     * hands over as they are, for a voice agent or an application
+     * playing its own hold music or announcement to the held party.
+     */
+    val heldAudio: Long = 0,
+    /**
+     * Zero.
+     */
+    val reserved36: Long = 0,
 )
 
 /**
@@ -6499,6 +6590,25 @@ class SipralAccountConfig(
      * Zero.
      */
     val reserved35: Long = 0,
+    /**
+     * The realms the password answers, each on a line of its own,
+     * separated by line feeds (a realm may hold a comma, and never a
+     * line break), or null for the default (ABI 0.36).
+     *
+     * The password answers the account's own server and nobody else
+     * (RFC 3261 §22.1). With none named the account takes the realms
+     * its server first challenges it with, and every realm its
+     * registrar challenges a REGISTER with, and answers those and no
+     * others: a proxy passing on a far end's own 401 under a realm of
+     * its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+     * says so. A server whose calls are challenged under a realm its
+     * REGISTERs never meet — an SBC or an outbound proxy at the
+     * registrar's address with a realm of its own — needs both named
+     * here; named, these and no others are answered, REGISTERs
+     * included. An empty line is skipped; a realm is compared exactly,
+     * case included, as RFC 3261 §22.1 compares it.
+     */
+    val realms: String? = null,
 )
 
 /**
@@ -8253,6 +8363,28 @@ data class SipralLocateEvent(
 )
 
 /**
+ * What a SipralEventKind.CHALLENGE_DECLINED carries: who asked for
+ * the account's password, and why it was not given (ABI 0.36).
+ */
+data class SipralChallengeEvent(
+    /**
+     * A SipralChallengeRefusal.
+     */
+    val refusal: Long,
+    /**
+     * Where the challenged request went, and the refusal came from, as
+     * `host:port`. Not NUL-terminated.
+     */
+    val server: String?,
+    /**
+     * The realms it was challenged for, each on a line of its own,
+     * separated by line feeds: a realm may hold a comma, and never a
+     * line break. UTF-8, not NUL-terminated.
+     */
+    val realms: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -8362,6 +8494,10 @@ class SipralEventPayload(
      * and SipralEventKind.LOCATE_FAILED.
      */
     val locate: SipralLocateEvent,
+    /**
+     * For SipralEventKind.CHALLENGE_DECLINED.
+     */
+    val challenge: SipralChallengeEvent,
 )
 
 class SipralEvent(
@@ -8713,6 +8849,21 @@ class SipralEvent(
      * and SipralEventKind.LOCATE_FAILED.
      */
     private val payloadLocateNumbers: LongArray? = null,
+    /**
+     * Where the challenged request went, and the refusal came from, as
+     * `host:port`. Not NUL-terminated.
+     */
+    private val payloadChallengeServer: String? = null,
+    /**
+     * The realms it was challenged for, each on a line of its own,
+     * separated by line feeds: a realm may hold a comma, and never a
+     * line break. UTF-8, not NUL-terminated.
+     */
+    private val payloadChallengeRealms: String? = null,
+    /**
+     * For SipralEventKind.CHALLENGE_DECLINED.
+     */
+    private val payloadChallengeNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -8741,6 +8892,7 @@ class SipralEvent(
             SipralTransportFailedEvent((payloadTransportFailedNumbers?.get(0) ?: 0L), (payloadTransportFailedNumbers?.get(1) ?: 0L), (payloadTransportFailedNumbers?.get(2) ?: 0L), (payloadTransportFailedNumbers?.get(3) ?: 0L), payloadTransportFailedDetail),
             SipralLocalConferenceEvent((payloadLocalConferenceNumbers?.get(0) ?: 0L), (payloadLocalConferenceNumbers?.get(1) ?: 0L), (payloadLocalConferenceNumbers?.get(2) ?: 0L), (payloadLocalConferenceNumbers?.get(3) ?: 0L), (payloadLocalConferenceNumbers?.get(4) ?: 0L), (payloadLocalConferenceNumbers?.get(5) ?: 0L), (payloadLocalConferenceNumbers?.get(6) ?: 0L)),
             SipralLocateEvent((payloadLocateNumbers?.get(0) ?: 0L), (payloadLocateNumbers?.get(1) ?: 0L), payloadLocateName, payloadLocateTargets, (payloadLocateNumbers?.get(2) ?: 0L)),
+            SipralChallengeEvent((payloadChallengeNumbers?.get(0) ?: 0L), payloadChallengeServer, payloadChallengeRealms),
         )
 }
 
@@ -8812,10 +8964,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -9366,7 +9518,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 35)
+        agree(0, 36)
     }
 
     /**
@@ -9390,7 +9542,7 @@ internal object SipralNative {
     external fun sipral_abi_struct_size(name: ByteArray, size: LongArray): Int
     external fun sipral_abi_versioned_count(count: LongArray): Int
     external fun sipral_capabilities(capabilities: LongArray): Int
-    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, configSystemEchoCancellation: Long, configReserved35: Long, stack: LongArray): Int
+    external fun sipral_stack_create(configEventCallback: Long, configTransport: Long, configBindAddress: ByteArray?, configUserAgent: ByteArray?, configEntropy: ByteArray?, configTimerT1Ms: Long, configTimerT2Ms: Long, configTimerT4Ms: Long, configCodecs: ByteArray?, configFrameMs: Long, configOfferDtmf: Long, configOfferRtcpMux: Long, configSilenceSuppression: Long, configMediaStallWatchdog: Long, configMediaStallMs: Long, configMediaClockUnixSeconds: Long, configMediaSeed: ByteArray?, configSrtp: Long, configIce: Long, configNat: Long, configStunServer: ByteArray?, configG729AnnexB: Long, configTurnServer: ByteArray?, configTurnUsername: ByteArray?, configTurnPassword: ByteArray?, configReferrals: Long, configRegistrarKeepalive: Long, configRegistrarKeepaliveMs: Long, configTurnTransport: Long, configAudio: Long, configAudioActivation: Long, configAudioTransmitCallback: Long, configAudioProbeMs: Long, configAudioDeviceRateHz: Long, configMaxDialogs: Long, configMaxServerTransactions: Long, configDiagnosticDecisions: Long, configDiagnosticRecords: Long, configDtmfDetection: Long, configStunFallbacks: ByteArray?, configRtpPortMin: Long, configRtpPortMax: Long, configSrtpSuites: ByteArray?, configPathMtu: Long, configDatagramWithoutStreamBytes: Long, configPseudonymSalt: ByteArray?, configDiagnosticTrace: Long, configReserved: Long, configSystemEchoCancellation: Long, configReserved35: Long, configHeldAudio: Long, configReserved36: Long, stack: LongArray): Int
     external fun sipral_stack_settings(stack: Long, settings: LongArray): Int
     external fun sipral_stack_destroy(stack: Long): Int
     external fun sipral_stack_poll(stack: Long, nowMs: Long, result: LongArray): Int
@@ -9409,7 +9561,7 @@ internal object SipralNative {
     external fun sipral_account_refresh_binding(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_announcement_forget(stack: Long, announcement: Long): Int
     external fun sipral_account_push_echo(stack: Long, account: Long, echo: LongArray): Int
-    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, configStreamProtocol: Long, configReserved35: Long, account: LongArray): Int
+    external fun sipral_account_add(stack: Long, configAor: ByteArray?, configRegistrar: ByteArray?, configContact: ByteArray?, configRegistrarAddress: ByteArray?, configDisplayName: ByteArray?, configAuthUser: ByteArray?, configAuthPassword: ByteArray?, configInstanceId: ByteArray?, configExpiresSeconds: Long, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configTransport: Long, configPushProvider: ByteArray?, configPushPrid: ByteArray?, configPushParam: ByteArray?, configPushWakesItself: Long, configQualityReportUri: ByteArray?, configSessionTimer: Long, configSessionIntervalSeconds: Long, configPrivacy: Long, configTrustedPeers: ByteArray?, configSrtp: Long, configSrtpSuites: ByteArray?, configStirVerification: Long, configStirKey: ByteArray?, configStirCertificateUrl: ByteArray?, configStirOrig: ByteArray?, configStirOrigid: ByteArray?, configStirAttestation: Long, configRecordingInClear: Long, configKeepaliveMs: Long, configServerUri: ByteArray?, configTlsPinSha256: ByteArray?, configServerNaptr: Long, configReserved: Long, configStreamProtocol: Long, configReserved35: Long, configRealms: ByteArray?, account: LongArray): Int
     external fun sipral_account_remove(stack: Long, account: Long): Int
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
@@ -9594,7 +9746,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 35
+    const val ABI_VERSION_MINOR: Long = 36
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -10050,11 +10202,11 @@ object Sipral {
         "sipral_abi_version_t" to intArrayOf(24, 20, 20),
         "sipral_capabilities_t" to intArrayOf(24, 16, 16),
         "sipral_counters_t" to intArrayOf(232, 228, 232),
-        "sipral_stack_config_t" to intArrayOf(424, 288, 296),
+        "sipral_stack_config_t" to intArrayOf(432, 296, 304),
         "sipral_poll_result_t" to intArrayOf(48, 28, 32),
         "sipral_stack_settings_t" to intArrayOf(136, 128, 136),
         "sipral_header_t" to intArrayOf(32, 16, 16),
-        "sipral_account_config_t" to intArrayOf(448, 248, 256),
+        "sipral_account_config_t" to intArrayOf(464, 256, 264),
         "sipral_call_config_t" to intArrayOf(152, 84, 84),
         "sipral_codec_info_t" to intArrayOf(32, 28, 28),
         "sipral_codec_candidate_t" to intArrayOf(24, 20, 20),
@@ -10089,6 +10241,7 @@ object Sipral {
         "sipral_transport_failed_event_t" to intArrayOf(32, 24, 24),
         "sipral_local_conference_event_t" to intArrayOf(40, 40, 40),
         "sipral_locate_event_t" to intArrayOf(48, 32, 32),
+        "sipral_challenge_event_t" to intArrayOf(40, 20, 20),
         "sipral_event_payload_t" to intArrayOf(328, 208, 216),
         "sipral_event_t" to intArrayOf(384, 248, 264),
         "sipral_suspending_t" to intArrayOf(32, 16, 16),
@@ -10288,7 +10441,7 @@ object Sipral {
         val configAudioTransmitCallback = SipralAudioTransmitListeners.register(config.audioTransmitListener)
         var status = -1
         try {
-            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, config.systemEchoCancellation, config.reserved35, stackSlot)
+            status = SipralNative.sipral_stack_create(configEventCallback, config.transport, configBindAddress, configUserAgent, config.entropy, config.timerT1Ms, config.timerT2Ms, config.timerT4Ms, configCodecs, config.frameMs, config.offerDtmf, config.offerRtcpMux, config.silenceSuppression, config.mediaStallWatchdog, config.mediaStallMs, config.mediaClockUnixSeconds, config.mediaSeed, config.srtp, config.ice, config.nat, configStunServer, config.g729AnnexB, configTurnServer, configTurnUsername, configTurnPassword, config.referrals, config.registrarKeepalive, config.registrarKeepaliveMs, config.turnTransport, config.audio, config.audioActivation, configAudioTransmitCallback, config.audioProbeMs, config.audioDeviceRateHz, config.maxDialogs, config.maxServerTransactions, config.diagnosticDecisions, config.diagnosticRecords, config.dtmfDetection, configStunFallbacks, config.rtpPortMin, config.rtpPortMax, configSrtpSuites, config.pathMtu, config.datagramWithoutStreamBytes, config.pseudonymSalt, config.diagnosticTrace, config.reserved, config.systemEchoCancellation, config.reserved35, config.heldAudio, config.reserved36, stackSlot)
         } finally {
             SipralEventListeners.made(configEventCallback, status, stackSlot[0])
             SipralAudioTransmitListeners.made(configAudioTransmitCallback, status, stackSlot[0])
@@ -10823,8 +10976,9 @@ object Sipral {
         val configStirOrigid = config.stirOrigid?.toByteArray(Charsets.UTF_8)
         val configServerUri = config.serverUri?.toByteArray(Charsets.UTF_8)
         val configTlsPinSha256 = config.tlsPinSha256?.toByteArray(Charsets.UTF_8)
+        val configRealms = config.realms?.toByteArray(Charsets.UTF_8)
         val accountSlot = LongArray(1)
-        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, config.streamProtocol, config.reserved35, accountSlot))
+        check(SipralNative.sipral_account_add(stack, configAor, configRegistrar, configContact, configRegistrarAddress, configDisplayName, configAuthUser, configAuthPassword, configInstanceId, config.expiresSeconds, configHeadersBytes, configHeadersLengths, config.transport, configPushProvider, configPushPrid, configPushParam, config.pushWakesItself, configQualityReportUri, config.sessionTimer, config.sessionIntervalSeconds, config.privacy, configTrustedPeers, config.srtp, configSrtpSuites, config.stirVerification, config.stirKey, configStirCertificateUrl, configStirOrig, configStirOrigid, config.stirAttestation, config.recordingInClear, config.keepaliveMs, configServerUri, configTlsPinSha256, config.serverNaptr, config.reserved, config.streamProtocol, config.reserved35, configRealms, accountSlot))
         return accountSlot[0]
     }
 

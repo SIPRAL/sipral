@@ -53,6 +53,20 @@ class EveryArmIsRead(unittest.TestCase):
                 unread.append(f"{name} ({arm})")
         self.assertEqual(unread, [], "kinds whose payload this layer never reads")
 
+    def test_a_declined_challenge_carries_who_asked_and_for_what(self) -> None:
+        raw = _raw(lib.SIPRAL_EVENT_KIND_CHALLENGE_DECLINED)
+        server = ffi.new("char[]", b"203.0.113.9:5060")
+        realms = ffi.new("char[]", b"sbc.example\ncallee, inc.")
+        raw.payload.challenge.refusal = lib.SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_REALM
+        raw.payload.challenge.server = server
+        raw.payload.challenge.server_len = len(b"203.0.113.9:5060")
+        raw.payload.challenge.realms = realms
+        raw.payload.challenge.realms_len = len(b"sbc.example\ncallee, inc.")
+        fields = events.decode(raw).fields
+        self.assertEqual(fields["refusal"], lib.SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_REALM)
+        self.assertEqual(fields["server"], "203.0.113.9:5060")
+        self.assertEqual(fields["realms"], ["sbc.example", "callee, inc."])
+
     def test_a_subscription_notice_carries_its_state(self) -> None:
         raw = _raw(lib.SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED)
         raw.payload.subscription.subscription = 7

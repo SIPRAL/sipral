@@ -2,7 +2,12 @@
 // Copyright (c) 2026 Tiberiu Balasea
 
 import Sipral, {SipralCall, SipralClient, SipralError} from '../index';
-import type {CallEndedEvent, IncomingCallEvent, RegistrationChangedEvent} from '../index';
+import type {
+  CallEndedEvent,
+  ChallengeDeclinedEvent,
+  IncomingCallEvent,
+  RegistrationChangedEvent,
+} from '../index';
 import {FakeNative} from './support/fakeNative';
 import {asked} from './support/reactNative';
 
@@ -154,6 +159,18 @@ describe('opening', () => {
     expect(native.calls).toEqual([]);
   });
 
+  it('passes what a held party is sent through, and refuses anything else before crossing', async () => {
+    const native = new FakeNative();
+    const client = await Sipral.open({bindHost: '192.0.2.10', heldAudio: 'application'}, native);
+    open.push(client);
+    expect(native.calls[0].args[0]).toMatchObject({heldAudio: 'application'});
+    await client.close();
+    open = [];
+    const other = new FakeNative();
+    expect((await refusal(Sipral.open({heldAudio: 'music' as 'silence'}, other))).code).toBe('invalidArgument');
+    expect(other.calls).toEqual([]);
+  });
+
   it('looks the native module up as Sipral', () => {
     expect(asked).toEqual(['Sipral']);
   });
@@ -242,6 +259,44 @@ describe('accounts', () => {
     const tlsClient = await Sipral.open({signalling: 'tls', signallingServer: '198.51.100.20:5061'}, new FakeNative());
     open.push(tlsClient);
     expect((await refusal(tlsClient.addAccount({...base, streamProtocol: 'tcp'}))).code).toBe('invalidArgument');
+  });
+
+  it('crosses the realms a password answers one per line, and refuses an empty one before crossing', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({
+      aor: 'sip:alice@example.com',
+      registrarAddress: '203.0.113.5:5060',
+      realms: ['registrar.example', 'sbc, inc.'],
+    });
+    expect(native.calls[1].args[0]).toMatchObject({realms: 'registrar.example\nsbc, inc.'});
+    await client.addAccount({aor: 'sip:bob@example.com', registrarAddress: '203.0.113.5:5060', realms: []});
+    expect((native.calls[2].args[0] as {realms?: string}).realms).toBeUndefined();
+    const before = native.calls.length;
+    const base = {aor: 'sip:carol@example.com', registrarAddress: '203.0.113.5:5060'};
+    expect((await refusal(client.addAccount({...base, realms: ['']}))).code).toBe('invalidArgument');
+    expect((await refusal(client.addAccount({...base, realms: ['a\nb']}))).code).toBe('invalidArgument');
+    expect(native.calls).toHaveLength(before);
+  });
+
+  it('reports a declined challenge on the account and on the client, its realms as a list', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({aor: 'sip:alice@example.com', registrarAddress: '203.0.113.5:5060'});
+    const onAccount: ChallengeDeclinedEvent[] = [];
+    const onClient: ChallengeDeclinedEvent[] = [];
+    account.on('challengeDeclined', (event) => onAccount.push(event));
+    client.on('challengeDeclined', (event) => onClient.push(event));
+    native.emit({
+      kind: 'challengeDeclined',
+      account: account.id,
+      challengeRefusal: 'notTheAccountsRealm',
+      challengeServer: '203.0.113.5:5060',
+      challengeRealms: 'sbc.example\ncallee, inc.',
+    });
+    native.emit({kind: 'challengeDeclined', account: '99', challengeRefusal: 'notTheAccountsServer'});
+    expect(onAccount).toEqual([
+      {account, refusal: 'notTheAccountsRealm', server: '203.0.113.5:5060', realms: ['sbc.example', 'callee, inc.']},
+    ]);
+    expect(onClient).toEqual(onAccount);
   });
 
   it('refuses an account with no address before crossing', async () => {

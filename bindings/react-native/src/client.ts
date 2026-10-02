@@ -21,6 +21,7 @@ import type {
   CallAudio,
   CallDirection,
   CallState,
+  ChallengeRefusal,
   EndReason,
   LocateFailure,
   OpenOptions,
@@ -53,6 +54,16 @@ export interface LocateFailedEvent {
   failure: LocateFailure;
   /** When the name is looked up again. */
   retryInMs: number;
+}
+
+export interface ChallengeDeclinedEvent {
+  account: SipralAccount;
+  /** Why the password was not given. */
+  refusal: ChallengeRefusal;
+  /** Where the challenged request went, host:port. */
+  server: string;
+  /** The realms it was challenged for. */
+  realms: string[];
 }
 
 export interface IncomingCallEvent {
@@ -116,6 +127,7 @@ export interface ClientEvents {
   digitReceived: DigitEvent;
   located: LocatedEvent;
   locateFailed: LocateFailedEvent;
+  challengeDeclined: ChallengeDeclinedEvent;
   /** Every event, typed or not, as the native half handed it over. */
   event: NativeEvent;
 }
@@ -137,6 +149,7 @@ export interface AccountEvents {
   registrationChanged: RegistrationChangedEvent;
   located: LocatedEvent;
   locateFailed: LocateFailedEvent;
+  challengeDeclined: ChallengeDeclinedEvent;
 }
 
 const DTMF = /^[0-9A-Da-d*#]+$/;
@@ -251,6 +264,11 @@ export class SipralAccount {
   /** @internal */
   locateFailed(event: LocateFailedEvent): void {
     this.emitter.emit('locateFailed', event);
+  }
+
+  /** @internal */
+  challengeDeclined(event: ChallengeDeclinedEvent): void {
+    this.emitter.emit('challengeDeclined', event);
   }
 
   private usable(): void {
@@ -556,6 +574,9 @@ export class SipralClient {
     if (options.pseudonymSalt !== undefined && !/^([0-9a-fA-F]{2}){16,}$/.test(options.pseudonymSalt)) {
       throw new SipralError('invalidArgument', 'pseudonymSalt is at least 16 bytes, as hexadecimal');
     }
+    if (options.heldAudio !== undefined && options.heldAudio !== 'silence' && options.heldAudio !== 'application') {
+      throw new SipralError('invalidArgument', 'heldAudio is "silence" or "application"');
+    }
     const client = new SipralClient(native);
     client.signalling = signalling;
     SipralClient.opened = client;
@@ -578,6 +599,7 @@ export class SipralClient {
         diagnosticTrace: options.diagnosticTrace,
         tlsPin,
         systemEchoCancellation: options.systemEchoCancellation,
+        heldAudio: options.heldAudio,
       });
     } catch (failure) {
       client.release();
@@ -624,8 +646,16 @@ export class SipralClient {
           throw new SipralError('invalidArgument', 'tlsPin is the certificate the account\'s own TLS connection trusts: it needs streamProtocol "tls"');
         }
         tlsPin = options.tlsPin === undefined ? undefined : pinDigest(options.tlsPin);
+        if (options.realms !== undefined && options.realms.some((realm) => realm === '' || realm.includes('\n'))) {
+          throw new SipralError('invalidArgument', 'a realm is a line of text, not empty');
+        }
       },
-      (native) => native.addAccount({...options, tlsPin}),
+      (native) =>
+        native.addAccount({
+          ...options,
+          tlsPin,
+          realms: options.realms === undefined || options.realms.length === 0 ? undefined : options.realms.join('\n'),
+        }),
     );
     const account = new SipralAccount(this, id, options.aor);
     this.accounts.set(id, account);
@@ -775,6 +805,21 @@ export class SipralClient {
         account.locateFailed(payload);
         this.emitter.emit('locateFailed', payload);
       }
+      return;
+    }
+    if (event.kind === 'challengeDeclined') {
+      const account = this.accounts.get(event.account);
+      if (account === undefined) {
+        return;
+      }
+      const payload = {
+        account,
+        refusal: (event.challengeRefusal as ChallengeRefusal | undefined) ?? 'unknown',
+        server: event.challengeServer ?? '',
+        realms: (event.challengeRealms ?? '').split('\n').filter((one) => one !== ''),
+      };
+      account.challengeDeclined(payload);
+      this.emitter.emit('challengeDeclined', payload);
       return;
     }
     if (event.call === '') {

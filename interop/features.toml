@@ -330,6 +330,18 @@ unit_tested = true
 flows = ["a challenge for another realm, declined"]
 
 [[feature]]
+name = "The realms a password answers, named for a server under two, and a decline said"
+implemented = true
+unit_tested = true
+flows = ["a server under two realms, both named", "a server under two realms, one unnamed, declined"]
+
+[[feature]]
+name = "What a party this end holds is sent: silence, or the application's audio"
+implemented = true
+unit_tested = true
+flows = ["hold and resume", "held, the application's audio sent on"]
+
+[[feature]]
 name = "Local conference of N calls, each on its own codec"
 implemented = true
 unit_tested = true

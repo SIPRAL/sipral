@@ -98,6 +98,8 @@ public sealed class SipralEventArgs : EventArgs
     /// <see cref="SipralEventKind.Located"/> and
     /// <see cref="SipralEventKind.LocateFailed"/>.</summary>
     public SipralLocateEventInfo? Locate { get; private init; }
+    /// <summary>Set for <see cref="SipralEventKind.ChallengeDeclined"/>.</summary>
+    public SipralChallengeEventInfo? Challenge { get; private init; }
 
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
@@ -340,7 +342,16 @@ public sealed class SipralEventArgs : EventArgs
         SipralAnnounceEventInfo? announce = null;
         SipralMessageEventInfo? messageInfo = null;
         SipralLocateEventInfo? locate = null;
-        if (kind is SipralEventKind.LookupWanted or SipralEventKind.Located or SipralEventKind.LocateFailed)
+        SipralChallengeEventInfo? challenge = null;
+        if (kind == SipralEventKind.ChallengeDeclined)
+        {
+            var c = evt.Payload.Challenge;
+            var realms = ReadUtf8(c.Realms, c.RealmsLen);
+            challenge = new SipralChallengeEventInfo(
+                (SipralChallengeRefusal)c.Refusal, ReadUtf8(c.Server, c.ServerLen),
+                string.IsNullOrEmpty(realms) ? Array.Empty<string>() : realms.Split('\n'));
+        }
+        else if (kind is SipralEventKind.LookupWanted or SipralEventKind.Located or SipralEventKind.LocateFailed)
         {
             var l = evt.Payload.Locate;
             locate = new SipralLocateEventInfo(
@@ -391,6 +402,7 @@ public sealed class SipralEventArgs : EventArgs
             Announce = announce,
             MessageInfo = messageInfo,
             Locate = locate,
+            Challenge = challenge,
         };
     }
 

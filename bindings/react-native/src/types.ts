@@ -69,6 +69,9 @@ export type RegistrationFailure =
 /** `sipral_locate_failure_t`: why a server named by a URI was not located. */
 export type LocateFailure = 'none' | 'notFound' | 'unanswered' | 'unsupported';
 
+/** `sipral_challenge_refusal_t`: why an account's password was not given to a challenge. */
+export type ChallengeRefusal = 'unknown' | 'notTheAccountsServer' | 'notTheAccountsRealm';
+
 export interface OpenOptions {
   /**
    * The phone's own address on the network the server is reached over: the
@@ -134,6 +137,13 @@ export interface OpenOptions {
    * that cancels it on each call itself. On unless said otherwise.
    */
   systemEchoCancellation?: boolean;
+  /**
+   * What a party this end holds is sent while the hold lasts. Left out,
+   * silence, in either mode. "application" sends what the client sends --
+   * for a client in application mode playing hold music or an announcement
+   * itself.
+   */
+  heldAudio?: 'silence' | 'application';
 }
 
 /** Which way one call's audio goes: what the microphone sends it, or what it plays. */
@@ -201,6 +211,15 @@ export interface AccountOptions {
    * `streamProtocol` "tls".
    */
   tlsPin?: string;
+  /**
+   * The realms the password answers (RFC 3261 §22.1). Left out, the account
+   * answers the realm its server first challenges it with and every realm
+   * its REGISTERs are challenged with, and no other; an SBC or outbound
+   * proxy at the server's address that challenges calls under a realm of its
+   * own needs both named. A challenge the password is not for is not
+   * answered, and `challengeDeclined` says who asked and why.
+   */
+  realms?: string[];
 }
 
 export interface PlaceCallOptions {

@@ -256,6 +256,7 @@ class Stack:
         diagnostic_trace: bool | None = None,
         resolver: Resolver | None = None,
         system_echo_cancellation: bool | None = None,
+        held_audio: int = 0,
     ) -> None:
         """See the class docstring for the socket and thread this owns.
 
@@ -457,6 +458,13 @@ class Stack:
         noise suppression, for a headset, which has no echo to cancel, or an
         application that cancels it on each call itself; Linux has none to
         turn off. :meth:`sipral.audio.Audio.info` says what the platform did.
+
+        ``held_audio`` is a :class:`sipral.enums.HeldAudio`: what a party
+        this end holds is sent while the hold lasts. ``DEFAULT`` and
+        ``SILENCE`` are silence in either mode, since in application mode too
+        the frames sent may be a microphone's; ``APPLICATION`` sends the
+        frames the application sends -- hold music, an announcement, a voice
+        agent's own speech.
 
         ``resolver`` answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
         accounts added with ``server_uri``, on a thread of its own, one per
@@ -726,6 +734,7 @@ class Stack:
             config.pseudonym_salt_len = len(pseudonym_salt)
         config.diagnostic_trace = _toggle(diagnostic_trace)
         config.system_echo_cancellation = _toggle(system_echo_cancellation)
+        config.held_audio = int(held_audio)
         #: The RTP port range media sockets are bound in, or ``None``.
         self.rtp_ports = (rtp_port_min, rtp_port_max) if rtp_port_min or rtp_port_max else None
         #: Every callback `sipral_stack_log` was given, kept alive here for
@@ -887,8 +896,19 @@ class Stack:
         stir_origid: str | None = None,
         stir_attestation: int = 0,
         recording_in_clear: bool = False,
+        realms: Sequence[str] | None = None,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
+
+        ``realms`` are the realms the password answers (RFC 3261 Section
+        22.1). Left out, the account answers the realm its server first
+        challenges it with and every realm its REGISTERs are challenged
+        with, and no other; an SBC or outbound proxy at the server's address
+        that challenges calls under a realm of its own needs both named. A
+        challenge the password is not for is not answered, and
+        `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` says who asked and why:
+        ``fields["refusal"]`` (a :class:`sipral.enums.ChallengeRefusal`),
+        ``fields["server"]`` and ``fields["realms"]``.
 
         ``srtp`` is a `SIPRAL_SRTP_*` every call of this account is held to,
         over the stack's own -- a call may ask for more and never for less
@@ -998,6 +1018,7 @@ class Stack:
             stir_origid=stir_origid,
             stir_attestation=stir_attestation,
             recording_in_clear=recording_in_clear,
+            realms=realms,
         )
         with self._lock:
             self._accounts.append(account)

@@ -25,6 +25,7 @@ import org.sipral.SipralCallEndReason
 import org.sipral.SipralCallState
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralHeldAudio
 import org.sipral.SipralException
 import org.sipral.SipralLocateFailure
 import org.sipral.SipralRegistrationFailure
@@ -37,6 +38,7 @@ import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
+import org.sipral.idiomatic.declinedChallengeOf
 import org.sipral.idiomatic.locateOf
 import org.sipral.idiomatic.transferOf
 
@@ -67,6 +69,9 @@ data class SipralOpenOptions(
     val tlsPin: String? = null,
     /** False opens the devices past the platform's echo cancellation. */
     val systemEchoCancellation: Boolean? = null,
+    /** What a party this end holds is sent: "silence" or "application";
+     * null for silence. */
+    val heldAudio: String? = null,
 )
 
 /** What `addAccount` takes, the fields of NativeAccountOptions. */
@@ -88,6 +93,8 @@ data class SipralAccountOptions(
     /** The fingerprint, as bare hexadecimal, of the one certificate that
      * connection trusts. */
     val tlsPin: String? = null,
+    /** The realms the password answers, one per line. */
+    val realms: String? = null,
 )
 
 /**
@@ -127,6 +134,12 @@ class SipralReactCore(
             SipralSrtp.entries.firstOrNull { camel(it.name) == named }
                 ?: throw SipralRefusal("invalidArgument", "srtp is no SRTP policy: $named")
         }
+        val heldAudio = when (options.heldAudio) {
+            null -> SipralHeldAudio.DEFAULT
+            "silence" -> SipralHeldAudio.SILENCE
+            "application" -> SipralHeldAudio.APPLICATION
+            else -> throw SipralRefusal("invalidArgument", "heldAudio is silence or application, not ${options.heldAudio}")
+        }
         val opened = SipralClient.open(
             bindHost = options.bindHost?.takeIf { it.isNotEmpty() },
             bindPort = options.bindPort,
@@ -144,6 +157,7 @@ class SipralReactCore(
             pseudonymSalt = options.pseudonymSalt?.let(::bytes),
             diagnosticTrace = options.diagnosticTrace,
             systemEchoCancellation = options.systemEchoCancellation,
+            heldAudio = heldAudio,
         )
         val collecting = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         collecting.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -189,6 +203,7 @@ class SipralReactCore(
             expiresSeconds = options.expiresSeconds,
             tlsPin = options.tlsPin,
             streamProtocol = stream,
+            realms = options.realms?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
         )
         val id = account.handle.toString()
         accounts[id] = account
@@ -459,6 +474,12 @@ class SipralReactCore(
                     text(call.toUri)?.let { flat["toUri"] = it }
                 }
                 event.kind in digitKinds -> digitOf(event)?.let { flat["digit"] = it.toString() }
+                declinedChallengeOf(event) != null -> {
+                    val challenge = declinedChallengeOf(event)!!
+                    challenge.refusal?.let { flat["challengeRefusal"] = camel(it.name) }
+                    challenge.server?.let { flat["challengeServer"] = it }
+                    flat["challengeRealms"] = challenge.realms.joinToString("\n")
+                }
                 locateOf(event) != null -> {
                     val locate = locateOf(event)!!
                     locate.targets?.let { flat["targets"] = it }

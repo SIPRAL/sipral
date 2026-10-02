@@ -90,6 +90,59 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(heardBack?.count, bobMedia.frameSamples)
     }
 
+    /// The loudest sample of what `bob` hears of `alice` sending a tone on a
+    /// call `alice` holds, on stacks whose `heldAudio` is `heldAudio`.
+    private func loudestHeardOnHold(_ heldAudio: SipralHeldAudio) async throws -> Int {
+        let alice = try SipralStack(audio: .application, heldAudio: heldAudio)
+        let bob = try SipralStack(audio: .application, heldAudio: heldAudio)
+        defer { alice.close(); bob.close() }
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+
+        let holdEvents = aliceCall.events()
+        try aliceCall.hold()
+        let held = await firstOne(of: holdEvents) { $0.callData?.heldHere == true }
+        XCTAssertNotNil(held, "the hold never came into force")
+
+        let aliceMedia = try XCTUnwrap(aliceCall.media)
+        let bobMedia = try XCTUnwrap(bobCall.media)
+        let heard = Recorder(bobMedia.frames(bufferingNewest: 256))
+        aliceMedia.sendAudio([Int16](repeating: 8_000, count: aliceMedia.frameSamples * 40))
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        return heard.elements.map { frame in frame.map { abs(Int($0)) }.max() ?? 0 }.max() ?? 0
+    }
+
+    /// A party this end holds hears silence by default, in application mode
+    /// too, where the frames sent may be a microphone's; it hears what the
+    /// application sends — hold music, an announcement, a voice agent — on
+    /// a stack told `heldAudio: .application`.
+    func testAHeldPartyHearsSilenceUnlessTheStackSaysTheApplication() async throws {
+        let byDefault = try await loudestHeardOnHold(.default)
+        XCTAssertLessThan(byDefault, 100, "the held party heard the application on a stack told nothing")
+        let application = try await loudestHeardOnHold(.application)
+        XCTAssertGreaterThan(application, 1_000, "the held party did not hear what the application sent")
+    }
+
+    /// The realms a password answers reach the stack one per line: a realm
+    /// with a comma of its own is one realm, and one with a control byte is
+    /// refused there.
+    func testTheRealmsAPasswordAnswersReachTheStackOnePerLine() throws {
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        _ = try stack.addAccount(
+            aor: "sip:alice@sipral.invalid", registrarAddress: "127.0.0.1:5060",
+            authUser: "alice", authPassword: "open sesame", realms: ["registrar.example", "sbc, inc."]
+        )
+        XCTAssertThrowsError(
+            try stack.addAccount(
+                aor: "sip:bob@sipral.invalid", registrarAddress: "127.0.0.1:5060",
+                realms: ["registrar.example", "sbc\texample"]
+            )
+        ) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .invalidArgument)
+        }
+    }
+
     func testHoldResumeDtmfAndStatistics() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)

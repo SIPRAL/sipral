@@ -27,11 +27,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralHeldAudio
 import org.sipral.SipralTransport
 import org.sipral.idiomatic.SipralAccount
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.SipralDeclinedChallenge
 import org.sipral.idiomatic.awaitNext
 
 /** What [SipralJava.awaitNext] hands back: what the action returned, and
@@ -76,13 +78,27 @@ object SipralJava {
     fun open(bindHost: String, bindPort: Int, userAgent: String?, audio: SipralAudioMode): SipralClient =
         SipralClient.open(bindHost = bindHost, bindPort = bindPort, userAgent = userAgent, audio = audio)
 
+    /** [SipralClient.open] in application mode, a party this end holds
+     * sent [heldAudio]: silence by default, or what the application sends
+     * -- hold music, an announcement, a voice agent's own speech. */
+    @JvmStatic
+    fun open(bindHost: String, bindPort: Int, userAgent: String?, heldAudio: SipralHeldAudio): SipralClient =
+        SipralClient.open(
+            bindHost = bindHost, bindPort = bindPort, userAgent = userAgent, audio = SipralAudioMode.Application,
+            heldAudio = heldAudio,
+        )
+
     /**
      * [SipralClient.addAccount]: [registrarAddress] is where requests go,
      * `host:port`; with [registrar] the account can register there, as
      * [authUser] with [authPassword] when challenged. [streamProtocol]
      * (`SipralTransport.TCP` or `TLS`) puts the account on a connection of
      * its own to that server, beside accounts on the client's UDP socket to
-     * others; a TLS one is held to [tlsPin] when given.
+     * others; a TLS one is held to [tlsPin] when given. [realms] are the
+     * realms the password answers, for a server whose calls are challenged
+     * under a realm its REGISTERs never meet; a challenge under any other is
+     * not answered, and `CHALLENGE_DECLINED` ([declinedChallengeOf]) says
+     * so.
      */
     @JvmStatic
     @JvmOverloads
@@ -95,6 +111,7 @@ object SipralJava {
         authPassword: String? = null,
         streamProtocol: SipralTransport? = null,
         tlsPin: String? = null,
+        realms: List<String> = emptyList(),
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -103,7 +120,14 @@ object SipralJava {
         authPassword = authPassword,
         streamProtocol = streamProtocol,
         tlsPin = tlsPin,
+        realms = realms,
     )
+
+    /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for
+     * any other event ([org.sipral.idiomatic.declinedChallengeOf]). */
+    @JvmStatic
+    fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? =
+        org.sipral.idiomatic.declinedChallengeOf(event)
 
     /** [SipralClient.placeCall] to [target], its media socket bound on
      * [mediaHost]. */

@@ -15,7 +15,9 @@
 //! Date header field, given with [`Pending::dated`], has to be fresh and
 //! close to `iat` (RFC 8224 §6.2, Step 4). And a verifier that keeps a
 //! [`ReplayCache`] and finishes with [`Pending::verify_once`] refuses a
-//! PASSporT it has already verified inside its window (§12.1).
+//! PASSporT it has already verified inside its window (§12.1);
+//! [`Pending::verify_arrival`] does the same while letting one request
+//! forked to several lines of one verifier through on each of them.
 
 use std::collections::VecDeque;
 
@@ -277,6 +279,41 @@ impl Pending {
         now: u64,
         seen: &mut ReplayCache,
     ) -> Verdict {
+        self.verify_against(chain, anchors, now, seen, None)
+    }
+
+    /// As [`Pending::verify_once`], for a PASSporT that came in the request
+    /// `arrival` names, on the line it names.
+    ///
+    /// A proxy that forks one INVITE to several contacts sends each branch
+    /// the same `Identity`, and two of those contacts can be two lines of
+    /// one verifier — two accounts of one stack, the members of a ring
+    /// group. Each branch is the same request, not a replay of it, so a
+    /// PASSporT already recorded is taken again when every time it was
+    /// recorded was for the same request ([`Arrival::request`]) on another
+    /// line. The same PASSporT in another request (another `Call-ID`), or
+    /// the same request again on a line that already took it, is still a
+    /// replay (RFC 8224 §12.1).
+    #[must_use]
+    pub fn verify_arrival(
+        &self,
+        chain: &[u8],
+        anchors: &TrustAnchors,
+        now: u64,
+        seen: &mut ReplayCache,
+        arrival: &Arrival,
+    ) -> Verdict {
+        self.verify_against(chain, anchors, now, seen, Some(arrival))
+    }
+
+    fn verify_against(
+        &self,
+        chain: &[u8],
+        anchors: &TrustAnchors,
+        now: u64,
+        seen: &mut ReplayCache,
+        arrival: Option<&Arrival>,
+    ) -> Verdict {
         match self.check(chain, anchors, now) {
             Ok(verified) => {
                 let entry = Seen {
@@ -284,6 +321,7 @@ impl Pending {
                     dest: self.claims.dest.clone(),
                     iat: self.claims.iat,
                     signature: self.signature.to_bytes().to_vec(),
+                    arrival: arrival.cloned(),
                 };
                 if seen.admit(entry, now, self.config.freshness) {
                     Verdict::Valid(verified)
@@ -366,13 +404,61 @@ pub struct ReplayCache {
 }
 
 /// What identifies one PASSporT to [`ReplayCache`]: `orig`, `dest`, `iat`
-/// and the signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// and the signature; and where it was taken, when the verifier said.
+#[derive(Debug, Clone)]
 struct Seen {
     orig: Tn,
     dest: Dest,
     iat: u64,
     signature: Vec<u8>,
+    arrival: Option<Arrival>,
+}
+
+impl Seen {
+    /// Whether the two are the same PASSporT, wherever each was taken.
+    fn same_passport(&self, other: &Self) -> bool {
+        self.iat == other.iat
+            && self.signature == other.signature
+            && self.orig == other.orig
+            && self.dest == other.dest
+    }
+}
+
+/// The request a PASSporT came in and the line it reached, for
+/// [`Pending::verify_arrival`].
+///
+/// `request` is whatever names one request across the branches a proxy
+/// forks it into and nothing else: its `Call-ID`, `From` tag and `CSeq`,
+/// which a fork keeps and a new request does not (RFC 3261 §8.2.2.2). `line`
+/// is which of the verifier's own lines it reached — an account — in any
+/// numbering the caller keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrival {
+    request: Box<str>,
+    line: u64,
+}
+
+impl Arrival {
+    /// The request named by `request`, reaching `line`.
+    #[must_use]
+    pub fn new(request: &str, line: u64) -> Self {
+        Arrival {
+            request: Box::from(request),
+            line,
+        }
+    }
+
+    /// What names the request.
+    #[must_use]
+    pub fn request(&self) -> &str {
+        &self.request
+    }
+
+    /// Which line it reached.
+    #[must_use]
+    pub const fn line(&self) -> u64 {
+        self.line
+    }
 }
 
 impl ReplayCache {
@@ -402,11 +488,30 @@ impl ReplayCache {
 
     /// Record `entry` and say so, or say it was already there. What has left
     /// the window around `now` is dropped first.
+    ///
+    /// Already there means recorded before, unless every time it was
+    /// recorded was for the same request as `entry` on another line: a
+    /// branch of one forked request, which is taken on each line once.
     fn admit(&mut self, entry: Seen, now: u64, window: u64) -> bool {
         self.seen
             .retain(|seen| seen.iat.saturating_add(window) >= now);
-        if self.seen.contains(&entry) {
-            return false;
+        let mut earlier = self
+            .seen
+            .iter()
+            .filter(|seen| seen.same_passport(&entry))
+            .peekable();
+        if earlier.peek().is_some() {
+            let Some(arrival) = entry.arrival.as_ref() else {
+                return false;
+            };
+            let another_branch = earlier.all(|seen| {
+                seen.arrival.as_ref().is_some_and(|taken| {
+                    taken.request == arrival.request && taken.line != arrival.line
+                })
+            });
+            if !another_branch {
+                return false;
+            }
         }
         if self.seen.len() >= self.capacity {
             self.seen.pop_front();

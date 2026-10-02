@@ -59,7 +59,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         if (jni_event_callback_class == NULL) {
             return JNI_ERR;
         }
-        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J[B[B[J)V");
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J[B[B[J[B[B[J)V");
         if (jni_event_callback_deliver == NULL) {
             return JNI_ERR;
         }
@@ -241,6 +241,9 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     jbyteArray payloadLocateName = NULL;
     jbyteArray payloadLocateTargets = NULL;
     jlongArray payloadLocateNumbers = NULL;
+    jbyteArray payloadChallengeServer = NULL;
+    jbyteArray payloadChallengeRealms = NULL;
+    jlongArray payloadChallengeNumbers = NULL;
 
     if (jni_vm == NULL || event == NULL) {
         return;
@@ -1023,8 +1026,34 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
             (*env)->SetLongArrayRegion(env, payloadLocateNumbers, 0, 3, slots);
         }
     }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_CHALLENGE_DECLINED) && JNI_REACHES(event, sipral_event_t, payload.challenge.server_len) && event->payload.challenge.server != NULL) {
+        payloadChallengeServer = (*env)->NewByteArray(env, (jsize)event->payload.challenge.server_len);
+        if (payloadChallengeServer == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadChallengeServer, 0, (jsize)event->payload.challenge.server_len, (const jbyte *)event->payload.challenge.server);
+        }
+    }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_CHALLENGE_DECLINED) && JNI_REACHES(event, sipral_event_t, payload.challenge.realms_len) && event->payload.challenge.realms != NULL) {
+        payloadChallengeRealms = (*env)->NewByteArray(env, (jsize)event->payload.challenge.realms_len);
+        if (payloadChallengeRealms == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadChallengeRealms, 0, (jsize)event->payload.challenge.realms_len, (const jbyte *)event->payload.challenge.realms);
+        }
+    }
     if (built) {
-        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName, payloadLocateTargets, payloadLocateNumbers);
+        jlong slots[1] = { 0 };
+        slots[0] = JNI_REACHES(event, sipral_event_t, payload.challenge.refusal) ? (jlong)event->payload.challenge.refusal : 0;
+        payloadChallengeNumbers = (*env)->NewLongArray(env, 1);
+        if (payloadChallengeNumbers == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetLongArrayRegion(env, payloadChallengeNumbers, 0, 1, slots);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName, payloadLocateTargets, payloadLocateNumbers, payloadChallengeServer, payloadChallengeRealms, payloadChallengeNumbers);
     }
     /* deliver hands what a listener throws to the thread's own handler, so
      * what is pending here is the JVM's -- an array it could not make --
@@ -1236,6 +1265,15 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
     if (payloadLocateNumbers != NULL) {
         (*env)->DeleteLocalRef(env, payloadLocateNumbers);
+    }
+    if (payloadChallengeServer != NULL) {
+        (*env)->DeleteLocalRef(env, payloadChallengeServer);
+    }
+    if (payloadChallengeRealms != NULL) {
+        (*env)->DeleteLocalRef(env, payloadChallengeRealms);
+    }
+    if (payloadChallengeNumbers != NULL) {
+        (*env)->DeleteLocalRef(env, payloadChallengeNumbers);
     }
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
@@ -1747,7 +1785,7 @@ Java_org_sipral_SipralNative_sipral_1capabilities(JNIEnv *env, jobject self, jlo
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configMaxDialogs, jlong configMaxServerTransactions, jlong configDiagnosticDecisions, jlong configDiagnosticRecords, jlong configDtmfDetection, jbyteArray configStunFallbacks, jlong configRtpPortMin, jlong configRtpPortMax, jbyteArray configSrtpSuites, jlong configPathMtu, jlong configDatagramWithoutStreamBytes, jbyteArray configPseudonymSalt, jlong configDiagnosticTrace, jlong configReserved, jlong configSystemEchoCancellation, jlong configReserved35, jlongArray stack)
+Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jlong configEventCallback, jlong configTransport, jbyteArray configBindAddress, jbyteArray configUserAgent, jbyteArray configEntropy, jlong configTimerT1Ms, jlong configTimerT2Ms, jlong configTimerT4Ms, jbyteArray configCodecs, jlong configFrameMs, jlong configOfferDtmf, jlong configOfferRtcpMux, jlong configSilenceSuppression, jlong configMediaStallWatchdog, jlong configMediaStallMs, jlong configMediaClockUnixSeconds, jbyteArray configMediaSeed, jlong configSrtp, jlong configIce, jlong configNat, jbyteArray configStunServer, jlong configG729AnnexB, jbyteArray configTurnServer, jbyteArray configTurnUsername, jbyteArray configTurnPassword, jlong configReferrals, jlong configRegistrarKeepalive, jlong configRegistrarKeepaliveMs, jlong configTurnTransport, jlong configAudio, jlong configAudioActivation, jlong configAudioTransmitCallback, jlong configAudioProbeMs, jlong configAudioDeviceRateHz, jlong configMaxDialogs, jlong configMaxServerTransactions, jlong configDiagnosticDecisions, jlong configDiagnosticRecords, jlong configDtmfDetection, jbyteArray configStunFallbacks, jlong configRtpPortMin, jlong configRtpPortMax, jbyteArray configSrtpSuites, jlong configPathMtu, jlong configDatagramWithoutStreamBytes, jbyteArray configPseudonymSalt, jlong configDiagnosticTrace, jlong configReserved, jlong configSystemEchoCancellation, jlong configReserved35, jlong configHeldAudio, jlong configReserved36, jlongArray stack)
 {
     (void)env;
     (void)self;
@@ -1842,6 +1880,8 @@ Java_org_sipral_SipralNative_sipral_1stack_1create(JNIEnv *env, jobject self, jl
     config_value.reserved = (uint32_t)configReserved;
     config_value.system_echo_cancellation = (sipral_toggle_t)configSystemEchoCancellation;
     config_value.reserved_35 = (uint32_t)configReserved35;
+    config_value.held_audio = (sipral_held_audio_t)configHeldAudio;
+    config_value.reserved_36 = (uint32_t)configReserved36;
     sipral_handle_t stack_value = 0;
     sipral_status_t status = sipral_stack_create(&config_value, &stack_value);
     if (configBindAddress) {
@@ -2256,7 +2296,7 @@ Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlong configKeepaliveMs, jbyteArray configServerUri, jbyteArray configTlsPinSha256, jlong configServerNaptr, jlong configReserved, jlong configStreamProtocol, jlong configReserved35, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlong configKeepaliveMs, jbyteArray configServerUri, jbyteArray configTlsPinSha256, jlong configServerNaptr, jlong configReserved, jlong configStreamProtocol, jlong configReserved35, jbyteArray configRealms, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -2358,6 +2398,10 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     config_value.reserved = (uint32_t)configReserved;
     config_value.stream_protocol = (sipral_transport_t)configStreamProtocol;
     config_value.reserved_35 = (uint32_t)configReserved35;
+    jbyte *configRealms_data = configRealms ? (*env)->GetByteArrayElements(env, configRealms, NULL) : NULL;
+    jsize configRealms_size = configRealms ? (*env)->GetArrayLength(env, configRealms) : 0;
+    config_value.realms = (const char *)configRealms_data;
+    config_value.realms_len = (size_t)configRealms_size;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -2433,6 +2477,9 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     }
     if (configTlsPinSha256) {
         (*env)->ReleaseByteArrayElements(env, configTlsPinSha256, configTlsPinSha256_data, JNI_ABORT);
+    }
+    if (configRealms) {
+        (*env)->ReleaseByteArrayElements(env, configRealms, configRealms_data, JNI_ABORT);
     }
     if (ready) {
         {

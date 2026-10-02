@@ -5,6 +5,7 @@ package org.sipral.idiomatic
 
 import org.sipral.Sipral
 import org.sipral.SipralAccountConfig
+import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
@@ -96,6 +97,7 @@ class SipralAccount internal constructor(
         val tlsPin: String?,
         val advertised: String?,
         val streamProtocol: SipralTransport? = null,
+        val realms: List<String> = emptyList(),
     )
     /** Where this account says it can be reached, as its `Contact` carries
      * it now: after [SipralClient.networkChanged], the new address. */
@@ -158,6 +160,7 @@ class SipralAccount internal constructor(
                 tlsPinSha256 = location.tlsPin,
                 serverNaptr = if (location.serverNaptr) SipralToggle.ON.value.toLong() else 0,
                 streamProtocol = (location.streamProtocol?.value ?: 0).toLong(),
+                realms = location.realms.takeIf { it.isNotEmpty() }?.joinToString("\n"),
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(
@@ -384,4 +387,32 @@ sealed class SipralAnnounced {
 
     /** The INVITE beat the push, and this is its call handle. */
     data class Arrived(val call: Long) : SipralAnnounced()
+}
+
+/**
+ * A challenge an account's password was not given to
+ * (`SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`): why ([refusal], null for a
+ * reason this build has no name for), where the challenged request went
+ * ([server], `host:port`), and every realm it was challenged for.
+ */
+class SipralDeclinedChallenge(
+    val refusal: SipralChallengeRefusal?,
+    val server: String?,
+    val realms: List<String>,
+)
+
+/**
+ * The `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` payload, its realms one per
+ * line in C read as a list, or null for an event of any other kind.
+ */
+fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? {
+    if (event.kind != SipralEventKind.CHALLENGE_DECLINED.value.toLong()) {
+        return null
+    }
+    val told = event.payload.challenge
+    return SipralDeclinedChallenge(
+        SipralChallengeRefusal.of(told.refusal.toInt()),
+        told.server,
+        told.realms?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
+    )
 }

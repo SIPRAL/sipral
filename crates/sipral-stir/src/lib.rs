@@ -134,7 +134,9 @@ pub use verdict::{
     ChainProblem, Failure, InfoProblem, Malformed, SipResponse, Staleness, Verdict, Verified,
     Verstat,
 };
-pub use verify::{Config, DEFAULT_FRESHNESS, DEFAULT_INFO_SCHEMES, Pending, ReplayCache, Verifier};
+pub use verify::{
+    Arrival, Config, DEFAULT_FRESHNESS, DEFAULT_INFO_SCHEMES, Pending, ReplayCache, Verifier,
+};
 
 /// The longest Identity header field value read or written, in octets.
 pub const MAX_IDENTITY_LEN: usize = 8 * 1024;

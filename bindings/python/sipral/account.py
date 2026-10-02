@@ -157,6 +157,7 @@ class Account:
         stir_origid: str | None = None,
         stir_attestation: int = 0,
         recording_in_clear: bool = False,
+        realms: Sequence[str] | None = None,
     ) -> "Account":
         aor_bytes = aor.encode("utf-8")
         registrar_address_bytes = (registrar_address or "").encode("utf-8")
@@ -260,6 +261,11 @@ class Account:
             config.stir_origid_len = len(origid_bytes)
         config.stir_attestation = int(stir_attestation)
         config.recording_in_clear = 1 if recording_in_clear else 0
+        realms_bytes = "\n".join(realms or ()).encode("utf-8")
+        realms_buf = ffi.new("char[]", realms_bytes) if realms_bytes else None
+        if realms_buf is not None:
+            config.realms = realms_buf
+            config.realms_len = len(realms_bytes)
 
         out_account = ffi.new("sipral_handle_t *")
         _call(

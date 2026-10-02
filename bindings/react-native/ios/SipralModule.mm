@@ -90,6 +90,7 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   if (options.systemEchoCancellation().has_value()) {
     put(given, @"systemEchoCancellation", @(options.systemEchoCancellation().value()));
   }
+  put(given, @"heldAudio", options.heldAudio());
   [_bridge open:given resolve:resolve reject:reject];
 }
 
@@ -122,6 +123,7 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   }
   put(given, @"streamProtocol", options.streamProtocol());
   put(given, @"tlsPin", options.tlsPin());
+  put(given, @"realms", options.realms());
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 

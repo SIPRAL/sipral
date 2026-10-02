@@ -32,7 +32,9 @@ use crate::error::MediaError;
 use crate::event::{DigitSource, Event, MediaEvent};
 use crate::keying::SrtpPolicy;
 use crate::record::tests::Buffer;
-use crate::session::{Arrival, MediaConfig, MediaSession, Playback, Start, StreamIdentity};
+use crate::session::{
+    Arrival, HeldAudio, MediaConfig, MediaSession, Playback, Start, StreamIdentity,
+};
 use crate::{
     Account, AccountId, CallHandle, CallMedia, EndpointConfig, Input, Link, MediaEngine, Network,
     OutgoingCall, OutgoingExtras, Recovery, TransportId, TransportProtocol, UaEvent, Uri,
@@ -3901,6 +3903,64 @@ fn a_party_this_end_holds_hears_silence_and_the_resume_restores_the_microphone()
     assert!(
         resumed.iter().skip(SETTLING).all(|level| *level > 1_000),
         "the resume did not put the microphone back on the call: {resumed:?}"
+    );
+}
+
+/// An application whose frames are what the held party is to hear — hold
+/// music, an announcement, a voice agent — says so with
+/// [`HeldAudio::Captured`], and the party this end holds hears them. One
+/// call told otherwise ([`MediaSession::set_held_audio`]) sends silence
+/// again, from the next frame.
+#[test]
+fn a_party_this_end_holds_hears_what_the_application_sends_when_it_says_so() {
+    const FRAMES: usize = 20;
+    const SETTLING: usize = 8;
+    let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
+    let mut pair = Pair::new(catalog.clone());
+    pair.caller.engine = MediaEngine::new(
+        catalog,
+        MediaConfig {
+            held_audio: HeldAudio::Captured,
+            ..MediaConfig::default()
+        },
+        WallClock::from_unix(pair.now, 1_700_000_000, 0),
+        [0x0b ^ 0xa5; 32],
+    );
+    let call = pair.connect();
+    let remote = pair.callee.call().expect("the callee knows the call");
+    let mut samples = vec![0_i16; 160];
+    let mut phase = 0_u32;
+    let mut frames = |pair: &mut Pair| {
+        let mut played = Vec::new();
+        for _ in 0..FRAMES {
+            tone(&mut samples, 8_000, &mut phase);
+            let (_, _, heard) = pair.one_way(call, remote, &samples);
+            played.push(loudness(&heard));
+        }
+        played
+    };
+
+    pair.caller.agent.hold(call, pair.now).expect("the hold");
+    pair.caller.drain(pair.now, false);
+    pair.callee.drain(pair.now, false);
+    pair.settle();
+    let mut session = pair.caller.engine.session(call).expect("the session");
+    assert!(session.is_holding());
+    assert_eq!(session.held_audio(), HeldAudio::Captured);
+    drop(session);
+    let held = frames(&mut pair);
+    assert!(
+        held.iter().skip(SETTLING).all(|level| *level > 1_000),
+        "the party on hold did not hear what the application sent: {held:?}"
+    );
+
+    session = pair.caller.engine.session(call).expect("the session");
+    session.set_held_audio(HeldAudio::Silence);
+    drop(session);
+    let silenced = frames(&mut pair);
+    assert!(
+        silenced.iter().skip(SETTLING).all(|level| *level < 100),
+        "the call told to send silence on hold did not: {silenced:?}"
     );
 }
 

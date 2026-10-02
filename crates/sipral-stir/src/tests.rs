@@ -597,6 +597,77 @@ fn the_replay_cache_forgets_what_has_left_the_window_and_stays_bounded() {
     assert_eq!(seen.len(), 1, "what left the window went");
 }
 
+/// One INVITE forked to two lines of one verifier carries the same
+/// PASSporT on each branch: the second line takes it, while the same
+/// PASSporT in another request, or the same request on a line that already
+/// took it, is still a replay (RFC 8224 §12.1).
+#[test]
+fn a_forked_request_is_taken_once_on_each_line_and_a_replay_on_none() {
+    let pki = Pki::new();
+    let mut seen = ReplayCache::default();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let verdict = |seen: &mut ReplayCache, arrival: &Arrival| {
+        Verifier::default()
+            .start(&identity, None)
+            .unwrap()
+            .verify_arrival(&pki.chain(), &anchors(&pki), NOW, seen, arrival)
+    };
+    let fork = "a84b4c76e66710\n1928301774\n314159";
+    assert!(matches!(
+        verdict(&mut seen, &Arrival::new(fork, 1)),
+        Verdict::Valid(_)
+    ));
+    assert!(matches!(
+        verdict(&mut seen, &Arrival::new(fork, 2)),
+        Verdict::Valid(_)
+    ));
+    let replayed = Verdict::Invalid(Failure::Stale {
+        iat: NOW,
+        now: NOW,
+        what: Staleness::Replayed,
+    });
+    // the same request again on a line that took it
+    assert_eq!(verdict(&mut seen, &Arrival::new(fork, 2)), replayed);
+    // the same PASSporT in a request of its own, on a third line
+    assert_eq!(
+        verdict(&mut seen, &Arrival::new("elsewhere\n1928301774\n314159", 3)),
+        replayed
+    );
+    // and with no arrival at all
+    let again = Verifier::default().start(&identity, None).unwrap();
+    assert_eq!(
+        again.verify_once(&pki.chain(), &anchors(&pki), NOW, &mut seen),
+        replayed
+    );
+    assert_eq!(seen.len(), 2, "each line that took it, once");
+    assert_eq!(Arrival::new(fork, 2).line(), 2);
+    assert_eq!(Arrival::new(fork, 2).request(), fork);
+}
+
+/// A PASSporT first verified with no arrival is a replay on any line.
+#[test]
+fn a_passport_taken_with_no_arrival_is_a_replay_on_every_line() {
+    let pki = Pki::new();
+    let mut seen = ReplayCache::default();
+    let identity = signer().identity(&claims(NOW)).unwrap();
+    let first = Verifier::default().start(&identity, None).unwrap();
+    assert!(matches!(
+        first.verify_once(&pki.chain(), &anchors(&pki), NOW, &mut seen),
+        Verdict::Valid(_)
+    ));
+    let branch = Verifier::default().start(&identity, None).unwrap();
+    assert!(matches!(
+        branch.verify_arrival(
+            &pki.chain(),
+            &anchors(&pki),
+            NOW,
+            &mut seen,
+            &Arrival::new("a84b4c76e66710", 7)
+        ),
+        Verdict::Invalid(Failure::Stale { .. })
+    ));
+}
+
 #[test]
 fn info_is_fetched_over_https_unless_the_policy_names_another_scheme() {
     let pki = Pki::new();

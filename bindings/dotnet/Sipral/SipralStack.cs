@@ -397,6 +397,14 @@ public sealed partial class SipralStack : IDisposable
     /// <see cref="SipralAudioSnapshot.SystemEchoCancellation"/> says what the
     /// platform did.
     ///
+    /// <paramref name="heldAudio"/> is what a party this end holds is sent
+    /// while the hold lasts: <see cref="SipralHeldAudio.Default"/> and
+    /// <see cref="SipralHeldAudio.Silence"/> are silence in either mode,
+    /// since in application mode too the frames sent may be a microphone's;
+    /// <see cref="SipralHeldAudio.Application"/> sends the frames the
+    /// application sends — hold music, an announcement, a voice agent's own
+    /// speech.
+    ///
     /// <paramref name="resolver"/> answers
     /// <see cref="SipralEventKind.LookupWanted"/> for the accounts added with
     /// <c>serverUri</c>, on a thread of its own per lookup;
@@ -447,7 +455,8 @@ public sealed partial class SipralStack : IDisposable
         byte[]? pseudonymSalt = null,
         bool? diagnosticTrace = null,
         SipralResolver? resolver = null,
-        bool? systemEchoCancellation = null)
+        bool? systemEchoCancellation = null,
+        SipralHeldAudio heldAudio = SipralHeldAudio.Default)
     {
         RtpPorts = rtpPortMin == 0 && rtpPortMax == 0 ? null : (rtpPortMin, rtpPortMax);
         _chosenPort = bindPort;
@@ -586,6 +595,7 @@ public sealed partial class SipralStack : IDisposable
             config.PseudonymSaltLen = (nuint)(pseudonymSalt?.Length ?? 0);
             config.DiagnosticTrace = ToggleOf(diagnosticTrace);
             config.SystemEchoCancellation = ToggleOf(systemEchoCancellation);
+            config.HeldAudio = (uint)heldAudio;
 
             status = NativeMethods.sipral_stack_create(config, out stackHandle);
         }
@@ -950,7 +960,16 @@ public sealed partial class SipralStack : IDisposable
     /// <c>tlsTrust</c> otherwise, under <c>tlsServerName</c> or the server's
     /// host. One that closes is opened again. Until it is open a call the
     /// account places throws with <see cref="SipralStatus.TransportDown"/>.
-    /// Only on a stack that signals over UDP.</summary>
+    /// Only on a stack that signals over UDP.
+    ///
+    /// <paramref name="realms"/> are the realms the password answers (RFC
+    /// 3261 §22.1). Left out, the account answers the realm its server first
+    /// challenges it with and every realm its REGISTERs are challenged with,
+    /// and no other; an SBC or outbound proxy at the server's address that
+    /// challenges calls under a realm of its own needs both named. A
+    /// challenge the password is not for is not answered, and
+    /// <see cref="SipralEventKind.ChallengeDeclined"/> says who asked and why
+    /// (<see cref="SipralEventArgs.Challenge"/>).</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -969,7 +988,8 @@ public sealed partial class SipralStack : IDisposable
         bool serverNaptr = false,
         ulong keepaliveMs = 0,
         string? tlsPin = null,
-        SipralTransport streamProtocol = 0)
+        SipralTransport streamProtocol = 0,
+        IEnumerable<string>? realms = null)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
@@ -985,7 +1005,7 @@ public sealed partial class SipralStack : IDisposable
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
-            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol));
+            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms));
         lock (_accounts)
         {
             _accounts.Add(account);

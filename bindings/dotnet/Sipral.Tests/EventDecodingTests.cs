@@ -71,6 +71,38 @@ public class EventDecodingTests
         Assert.Empty(unread);
     }
 
+    /// <summary>A challenge an account's password was not given to says why,
+    /// who asked, and every realm it was asked for, one per line in
+    /// C.</summary>
+    [Fact]
+    public void ADeclinedChallengeCarriesWhoAskedAndForWhat()
+    {
+        var server = Encoding.UTF8.GetBytes("203.0.113.9:5060");
+        var realms = Encoding.UTF8.GetBytes("sbc.example\ncallee, inc.");
+        var serverPtr = Marshal.AllocHGlobal(server.Length);
+        var realmsPtr = Marshal.AllocHGlobal(realms.Length);
+        try
+        {
+            Marshal.Copy(server, 0, serverPtr, server.Length);
+            Marshal.Copy(realms, 0, realmsPtr, realms.Length);
+            var evt = Raw(SipralEventKind.ChallengeDeclined);
+            evt.Payload.Challenge.Refusal = (uint)SipralChallengeRefusal.NotTheAccountsRealm;
+            evt.Payload.Challenge.Server = serverPtr;
+            evt.Payload.Challenge.ServerLen = (nuint)server.Length;
+            evt.Payload.Challenge.Realms = realmsPtr;
+            evt.Payload.Challenge.RealmsLen = (nuint)realms.Length;
+            var decoded = Decode(evt).Challenge!;
+            Assert.Equal(SipralChallengeRefusal.NotTheAccountsRealm, decoded.Refusal);
+            Assert.Equal("203.0.113.9:5060", decoded.Server);
+            Assert.Equal(new[] { "sbc.example", "callee, inc." }, decoded.Realms);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(serverPtr);
+            Marshal.FreeHGlobal(realmsPtr);
+        }
+    }
+
     [Fact]
     public void ASubscriptionNoticeCarriesItsState()
     {

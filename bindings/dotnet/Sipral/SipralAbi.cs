@@ -1647,6 +1647,24 @@ public enum SipralEventKind : uint
     /// stays in use meanwhile. `account` is the account.
     /// </summary>
     LocateFailed = 57,
+    /// <summary>
+    /// A request of an account's was challenged by somebody its
+    /// password is not for, and the challenge was not answered (ABI
+    /// 0.36): RFC 3261 §22.1 gives each protection domain its own
+    /// password, and every answer is material for an offline search of
+    /// it by whoever chose the nonce.
+    ///
+    /// `payload.challenge` says why — `refusal` — and who asked:
+    /// `server`, where the challenged request went, and `realms`, what
+    /// it was challenged for. Raised before the refusal settles the way
+    /// any unanswered challenge does — a call ending with the 401 or
+    /// 407, a registration failing with `BAD_CREDENTIALS`, a request
+    /// inside a call refused — so the application knows why first. A
+    /// server that answers under a realm the account was never told of
+    /// is what `sipral_account_config_t::realms` is for. `account` is
+    /// the account.
+    /// </summary>
+    ChallengeDeclined = 58,
 }
 
 /// <summary>
@@ -3577,6 +3595,55 @@ public enum SipralLocateFailure : uint
 }
 
 /// <summary>
+/// Why an account's password did not answer a challenge. Names for
+/// `sipral_challenge_event_t::refusal`.
+/// </summary>
+public enum SipralChallengeRefusal : uint
+{
+    /// <summary>
+    /// Never written by this build.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// The challenged request went somewhere other than the account's
+    /// own server — its registrar, or the outbound proxy of an account
+    /// that does not register — so whoever asked is the far end of a
+    /// call, or a peer reached directly.
+    /// </summary>
+    NotTheAccountsServer = 1,
+    /// <summary>
+    /// The account's server asked for a realm that is not the
+    /// account's: not one of `sipral_account_config_t::realms`, or, with
+    /// none named, neither the one its server first challenged with nor
+    /// one its REGISTERs were challenged with. A proxy passing on a far
+    /// end's own challenge looks like this, and so does an SBC that
+    /// challenges calls under a realm of its own.
+    /// </summary>
+    NotTheAccountsRealm = 2,
+}
+
+/// <summary>
+/// What a party this end holds is sent:
+/// `sipral_stack_config_t::held_audio`.
+/// </summary>
+public enum SipralHeldAudio : uint
+{
+    /// <summary>
+    /// Silence, in either mode.
+    /// </summary>
+    Default = 0,
+    /// <summary>
+    /// Silence: the party on hold hears nothing of the room it was put
+    /// on hold from.
+    /// </summary>
+    Silence = 1,
+    /// <summary>
+    /// The frames the application hands over, as they are.
+    /// </summary>
+    Application = 2,
+}
+
+/// <summary>
 /// The one callback a stack has.
 ///
 /// It is called from inside `sipral_stack_poll`, on the thread that called
@@ -4519,6 +4586,22 @@ public struct SipralStackConfig
     /// Zero.
     /// </summary>
     public uint Reserved35;
+    /// <summary>
+    /// A SipralHeldAudio: what a party this end holds is sent while
+    /// the hold lasts (ABI 0.36). RFC 3264 §8.4 leaves the held stream
+    /// `sendonly`, so something goes on being sent. Zero is silence in
+    /// either mode: in application mode the frames handed
+    /// `sipral_media_capture` may be a microphone's as well, and the
+    /// room a party was put on hold from is not sent unless asked for.
+    /// `SIPRAL_HELD_AUDIO_APPLICATION` sends the frames the application
+    /// hands over as they are, for a voice agent or an application
+    /// playing its own hold music or announcement to the held party.
+    /// </summary>
+    public uint HeldAudio;
+    /// <summary>
+    /// Zero.
+    /// </summary>
+    public uint Reserved36;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -5196,6 +5279,29 @@ public struct SipralAccountConfig
     /// Zero.
     /// </summary>
     public uint Reserved35;
+    /// <summary>
+    /// The realms the password answers, each on a line of its own,
+    /// separated by line feeds (a realm may hold a comma, and never a
+    /// line break), or null for the default (ABI 0.36).
+    ///
+    /// The password answers the account's own server and nobody else
+    /// (RFC 3261 §22.1). With none named the account takes the realms
+    /// its server first challenges it with, and every realm its
+    /// registrar challenges a REGISTER with, and answers those and no
+    /// others: a proxy passing on a far end's own 401 under a realm of
+    /// its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+    /// says so. A server whose calls are challenged under a realm its
+    /// REGISTERs never meet — an SBC or an outbound proxy at the
+    /// registrar's address with a realm of its own — needs both named
+    /// here; named, these and no others are answered, REGISTERs
+    /// included. An empty line is skipped; a realm is compared exactly,
+    /// case included, as RFC 3261 §22.1 compares it.
+    /// </summary>
+    public IntPtr Realms;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint RealmsLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -7633,6 +7739,38 @@ public struct SipralLocateEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.ChallengeDeclined carries: who asked for
+/// the account's password, and why it was not given (ABI 0.36).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralChallengeEvent
+{
+    /// <summary>
+    /// A SipralChallengeRefusal.
+    /// </summary>
+    public uint Refusal;
+    /// <summary>
+    /// Where the challenged request went, and the refusal came from, as
+    /// `host:port`. Not NUL-terminated.
+    /// </summary>
+    public IntPtr Server;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerLen;
+    /// <summary>
+    /// The realms it was challenged for, each on a line of its own,
+    /// separated by line feeds: a realm may hold a comma, and never a
+    /// line break. UTF-8, not NUL-terminated.
+    /// </summary>
+    public IntPtr Realms;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint RealmsLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -7772,6 +7910,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralLocateEvent Locate;
+    /// <summary>
+    /// For SipralEventKind.ChallengeDeclined.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralChallengeEvent Challenge;
 }
 
 /// <summary>
@@ -9870,7 +10013,7 @@ public static partial class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 35;
+    public const uint AbiVersionMinor = 36;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10324,11 +10467,11 @@ public static partial class Sipral
         ("sipral_abi_version_t", Marshal.SizeOf<SipralAbiVersion>(), 24, 20, 20),
         ("sipral_capabilities_t", Marshal.SizeOf<SipralCapabilities>(), 24, 16, 16),
         ("sipral_counters_t", Marshal.SizeOf<SipralCounters>(), 232, 228, 232),
-        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 424, 288, 296),
+        ("sipral_stack_config_t", Marshal.SizeOf<SipralStackConfig>(), 432, 296, 304),
         ("sipral_poll_result_t", Marshal.SizeOf<SipralPollResult>(), 48, 28, 32),
         ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 448, 248, 256),
+        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 464, 256, 264),
         ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 152, 84, 84),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),
@@ -10363,6 +10506,7 @@ public static partial class Sipral
         ("sipral_transport_failed_event_t", Marshal.SizeOf<SipralTransportFailedEvent>(), 32, 24, 24),
         ("sipral_local_conference_event_t", Marshal.SizeOf<SipralLocalConferenceEvent>(), 40, 40, 40),
         ("sipral_locate_event_t", Marshal.SizeOf<SipralLocateEvent>(), 48, 32, 32),
+        ("sipral_challenge_event_t", Marshal.SizeOf<SipralChallengeEvent>(), 40, 20, 20),
         ("sipral_event_payload_t", Marshal.SizeOf<SipralEventPayload>(), 328, 208, 216),
         ("sipral_event_t", Marshal.SizeOf<SipralEvent>(), 384, 248, 264),
         ("sipral_suspending_t", Marshal.SizeOf<SipralSuspending>(), 32, 16, 16),

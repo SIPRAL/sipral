@@ -1358,11 +1358,14 @@ impl UserAgent {
     ///
     /// Every path that answers a challenge comes through here, so that the
     /// rule holds for all of them: the challenged request went to the
-    /// account's own server — its address, on whatever port — and every
-    /// realm it was challenged for is the
-    /// account's — the ones [`Account::realms`](crate::Account::realms)
-    /// names, or with none named, the ones the server first challenged with,
-    /// taken here the first time and kept. A challenge that fails either is
+    /// account's own server — its address, on whatever port, an IPv4
+    /// address and its IPv4-mapped IPv6 form being one — and every realm it
+    /// was challenged for is the account's: the ones
+    /// [`Account::realms`](crate::Account::realms) names, or with none
+    /// named, the ones the server first challenged with, taken here the
+    /// first time and kept, together with every realm the account's own
+    /// REGISTER is challenged for, whenever it is. A challenge that fails
+    /// either is
     /// declined at the endpoint, so that nothing is answered ahead of the
     /// next one either, and reported as [`UaEvent::ChallengeDeclined`]; the
     /// caller then treats it as a challenge with nothing to answer it, which
@@ -1381,16 +1384,32 @@ impl UserAgent {
         let Some(origin) = self.endpoint.challenge_origin(transaction) else {
             return Some(credentials);
         };
+        // the account's own REGISTER, challenged by its registrar: whatever
+        // realm that names is the account's, since nobody passes a REGISTER
+        // on to a far end of their choosing
+        let registering = match transaction {
+            AnyTransactionId::NonInviteClient(id) => self
+                .registrations
+                .get(&account)
+                .is_some_and(|reg| reg.transaction == Some(id)),
+            _ => false,
+        };
         // the host, not the port: a PBX that takes TCP on another port than
-        // UDP is the same server over the stream §18.1.1 moved a request to
-        let why = if origin.destination.ip() == config.remote.ip() {
-            let known = if config.realms.is_empty() {
-                &config.pinned_realms
+        // UDP is the same server over the stream §18.1.1 moved a request to.
+        // Canonical, so that a server named by its IPv4 address is the same
+        // server when a dual-stack socket reports it IPv4-mapped
+        let why = if origin.destination.ip().to_canonical() == config.remote.ip().to_canonical() {
+            let foreign = if !config.realms.is_empty() {
+                origin
+                    .realms
+                    .iter()
+                    .any(|realm| !config.realms.contains(realm))
+            } else if registering {
+                false
             } else {
-                &config.realms
+                let known = &config.pinned_realms;
+                !known.is_empty() && origin.realms.iter().any(|realm| !known.contains(realm))
             };
-            let foreign =
-                !known.is_empty() && origin.realms.iter().any(|realm| !known.contains(realm));
             foreign.then_some(crate::event::ChallengeRefusal::NotTheAccountsRealm)
         } else {
             Some(crate::event::ChallengeRefusal::NotTheAccountsServer)
@@ -1398,9 +1417,13 @@ impl UserAgent {
         let Some(why) = why else {
             if let Some(config) = self.accounts.get_mut(&account)
                 && config.realms.is_empty()
-                && config.pinned_realms.is_empty()
+                && (registering || config.pinned_realms.is_empty())
             {
-                config.pinned_realms.clone_from(&origin.realms);
+                for realm in &origin.realms {
+                    if !config.pinned_realms.contains(realm) {
+                        config.pinned_realms.push(Arc::clone(realm));
+                    }
+                }
             }
             return Some(credentials);
         };

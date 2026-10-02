@@ -228,7 +228,8 @@ pub struct Account {
     /// [`Account::realms`].
     pub(crate) realms: Vec<Arc<str>>,
     /// With none configured, the realms the account's server first
-    /// challenged with, taken then and kept.
+    /// challenged with, taken then and kept — and, for an account that
+    /// registers, the realms its registrar challenges its REGISTERs with.
     pub(crate) pinned_realms: Vec<Arc<str>>,
     pub(crate) expires: Duration,
     /// The session interval to ask for on a call (RFC 4028). `None` asks for
@@ -504,9 +505,16 @@ impl Account {
     /// Named none — the default — the account takes the realms its own
     /// server first challenges it with, and from then on answers those and
     /// no others: a proxy passing on a far end's own 401, under a realm of
-    /// its choosing, gets nothing. An outbound proxy and a registrar that
-    /// challenge under different realms need both named here, since only
-    /// the first one met would be taken.
+    /// its choosing, gets nothing. For an account that registers, what its
+    /// registrar challenges a REGISTER with is always the account's — nobody
+    /// passes a REGISTER on to a far end of their choosing — so those realms
+    /// are added to the ones taken, on every registration and every refresh,
+    /// and a registrar that moved to another realm is followed. An SBC or
+    /// outbound proxy at the server's address
+    /// that challenges calls under a realm the REGISTERs never meet needs
+    /// both named here, since nothing else says that realm is the
+    /// account's. Named, these and no others are answered, REGISTERs
+    /// included.
     #[must_use]
     pub fn realms(mut self, realms: &[&str]) -> Self {
         self.realms = realms.iter().map(|realm| Arc::from(*realm)).collect();

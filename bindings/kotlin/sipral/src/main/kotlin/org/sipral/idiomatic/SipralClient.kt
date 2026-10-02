@@ -47,6 +47,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralEventListener
 import org.sipral.SipralException
 import org.sipral.SipralHeader
+import org.sipral.SipralHeldAudio
 import org.sipral.SipralIce
 import org.sipral.SipralLink
 import org.sipral.SipralLogLevel
@@ -410,6 +411,13 @@ class SipralClient private constructor(
          * cancel, or an application that cancels it on each call itself;
          * [SipralAudioDevices.info] says what the platform did.
          *
+         * [heldAudio] is what a party this end holds is sent while the hold
+         * lasts: [SipralHeldAudio.DEFAULT] and [SipralHeldAudio.SILENCE] are
+         * silence in either mode, since in application mode too the frames
+         * sent may be a microphone's; [SipralHeldAudio.APPLICATION] sends the
+         * frames the application sends -- hold music, an announcement, a
+         * voice agent's own speech.
+         *
          * [resolver] answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
          * accounts added with a `serverUri`, on a thread of its own per
          * lookup; [SipralDns.platform] when null.
@@ -453,6 +461,7 @@ class SipralClient private constructor(
             diagnosticTrace: Boolean? = null,
             resolver: SipralResolver? = null,
             systemEchoCancellation: Boolean? = null,
+            heldAudio: SipralHeldAudio = SipralHeldAudio.DEFAULT,
         ): SipralClient {
             require(signalling == SipralTransport.UDP || signalling == SipralTransport.TCP || signalling == SipralTransport.TLS) {
                 "signalling is UDP, TCP or TLS"
@@ -508,7 +517,10 @@ class SipralClient private constructor(
                     registrarKeepalive, registrarKeepaliveMs, audioProbeMs, audioDeviceRateHz, srtp,
                     maxDialogs, maxServerTransactions, diagnosticDecisions, diagnosticRecords,
                     stunFallbacks, dtmfDetection, signalling, inviteLimit,
-                    Tail(srtpSuites, pathMtu, datagramWithoutStreamBytes, pseudonymSalt, diagnosticTrace, systemEchoCancellation),
+                    Tail(
+                        srtpSuites, pathMtu, datagramWithoutStreamBytes, pseudonymSalt, diagnosticTrace,
+                        systemEchoCancellation, heldAudio,
+                    ),
                 )
             } catch (refusal: Exception) {
                 socket?.close()
@@ -603,6 +615,7 @@ class SipralClient private constructor(
             pseudonymSalt = tail.pseudonymSalt?.takeIf { it.isNotEmpty() },
             diagnosticTrace = toggle(tail.diagnosticTrace),
             systemEchoCancellation = toggle(tail.systemEchoCancellation),
+            heldAudio = tail.heldAudio.value.toLong(),
         )
         handle = Sipral.stackCreate(config)
         if (inviteLimit != null) {
@@ -617,7 +630,7 @@ class SipralClient private constructor(
         }
     }
 
-    /** The ABI 0.34 and 0.35 members of the stack's configuration, as
+    /** The ABI 0.34 to 0.36 members of the stack's configuration, as
      * [open] took them. */
     private class Tail(
         val srtpSuites: List<String>,
@@ -626,6 +639,7 @@ class SipralClient private constructor(
         val pseudonymSalt: ByteArray?,
         val diagnosticTrace: Boolean?,
         val systemEchoCancellation: Boolean?,
+        val heldAudio: SipralHeldAudio,
     )
 
     /** Elapsed milliseconds since this stack was created -- what every
@@ -1046,6 +1060,7 @@ class SipralClient private constructor(
         keepaliveMs: Long = 0,
         tlsPin: String? = null,
         streamProtocol: SipralTransport? = null,
+        realms: List<String> = emptyList(),
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
@@ -1062,7 +1077,9 @@ class SipralClient private constructor(
             this,
             aor,
             registrarAddress = registrarAddress,
-            location = SipralAccount.Location(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol),
+            location = SipralAccount.Location(
+                serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
+            ),
             registrar = registrar,
             contact = contact,
             displayName = displayName,

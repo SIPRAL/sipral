@@ -29,9 +29,11 @@ export 'src/sipral_abi.dart'
     show
         Sipral,
         SipralCallState,
+        SipralChallengeRefusal,
         SipralDnsAnswer,
         SipralDnsRecordType,
         SipralEventKind,
+        SipralHeldAudio,
         SipralLoadError,
         SipralLocateFailure,
         SipralRegistrationFailure,

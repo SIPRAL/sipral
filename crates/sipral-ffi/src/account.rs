@@ -347,7 +347,65 @@ record! {
         pub stream_protocol: Number<SipralTransport>,
         /// Zero.
         pub reserved_35: u32,
+        /// The realms the password answers, each on a line of its own,
+        /// separated by line feeds (a realm may hold a comma, and never a
+        /// line break), or null for the default (ABI 0.36).
+        ///
+        /// The password answers the account's own server and nobody else
+        /// (RFC 3261 §22.1). With none named the account takes the realms
+        /// its server first challenges it with, and every realm its
+        /// registrar challenges a REGISTER with, and answers those and no
+        /// others: a proxy passing on a far end's own 401 under a realm of
+        /// its choosing gets nothing, and `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`
+        /// says so. A server whose calls are challenged under a realm its
+        /// REGISTERs never meet — an SBC or an outbound proxy at the
+        /// registrar's address with a realm of its own — needs both named
+        /// here; named, these and no others are answered, REGISTERs
+        /// included. An empty line is skipped; a realm is compared exactly,
+        /// case included, as RFC 3261 §22.1 compares it.
+        pub realms: *const c_char,
+        /// How many bytes of it.
+        pub realms_len: usize,
     }
+}
+
+/// The realms `config` names, one to a line: `None` for none, which is the
+/// default. A line break is the one byte a realm never holds, so it is the
+/// one byte allowed between them; any other control byte, or a list with no
+/// realm in it, is refused.
+///
+/// # Safety
+///
+/// `config.realms` must be readable for `config.realms_len` bytes.
+unsafe fn realms_of(config: &SipralAccountConfig) -> Result<Option<Vec<&str>>, Fail> {
+    let raw =
+        unsafe { crate::text::bytes(config.realms.cast::<u8>(), config.realms_len, "realms") }?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return Err(fail(SipralStatus::InvalidArgument, "realms is not UTF-8"));
+    };
+    let mut named = Vec::new();
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.bytes().any(crate::text::is_field_ending) {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                "realms carries a control byte other than the line feed between two realms",
+            ));
+        }
+        if !line.is_empty() {
+            named.push(line);
+        }
+    }
+    if named.is_empty() {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "realms names no realm: null, for the default, is how to name none",
+        ));
+    }
+    Ok(Some(named))
 }
 
 // Safety: the trait's contract. Plain data with no invariant between the
@@ -707,6 +765,9 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
         account = account.on_stream(protocol);
     }
     account = unsafe { with_reach(account, config, server) }?;
+    if let Some(named) = unsafe { realms_of(config) }? {
+        account = account.realms(&named);
+    }
     if let Some(display) = display {
         account = account.display_name(display);
     }
@@ -997,6 +1058,8 @@ pub(crate) mod tests {
             reserved: 0,
             stream_protocol: 0,
             reserved_35: 0,
+            realms: std::ptr::null(),
+            realms_len: 0,
         }
     }
 

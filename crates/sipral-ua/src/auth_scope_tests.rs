@@ -370,3 +370,130 @@ fn the_accounts_server_on_another_port_is_still_answered() {
     assert!(!header(&retry, HeaderName::Authorization).is_empty());
     assert!(declined(&events(&mut agent)).is_none());
 }
+
+/// The INVITE of a call placed from `id` through its server, challenged by
+/// a 407 under `realm`: whether the password answered it.
+fn invite_answered_under(agent: &mut UserAgent, id: AccountId, realm: &str, now: Instant) -> bool {
+    agent.call(id, &outgoing(), now).expect("the INVITE goes");
+    let invite = sent(agent);
+    deliver(agent, &challenge(&invite, 407, &proxy_auth(realm)), now);
+    let answered = transmits(agent).iter().any(|bytes| {
+        bytes.starts_with(b"INVITE ") && !header(bytes, HeaderName::ProxyAuthorization).is_empty()
+    });
+    events(agent);
+    answered
+}
+
+/// A registrar that moved to another realm is followed: its challenge to a
+/// refresh, or to a fresh registration, is the account's own and answered,
+/// and the realm is the account's for calls from then on. A realm no
+/// REGISTER was ever challenged for is still not answered.
+#[test]
+fn the_realm_is_learned_again_from_the_registrars_own_challenge() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = with_password(&mut agent, &[]);
+    registered_under(&mut agent, id, "example.com", t0);
+    assert!(invite_answered_under(&mut agent, id, "example.com", t0));
+
+    // the refresh, challenged under the registrar's new realm
+    agent.register(id, t0).expect("the refresh goes");
+    let refresh = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &challenge(&refresh, 401, &www("moved.example", "registrar-2")),
+        t0,
+    );
+    let retry = sent(&mut agent);
+    assert!(
+        !header(&retry, HeaderName::Authorization).is_empty(),
+        "the registrar's own challenge is answered whatever realm it names"
+    );
+    assert!(declined(&events(&mut agent)).is_none());
+    deliver(
+        &mut agent,
+        &reply(
+            &retry,
+            200,
+            "OK",
+            "Contact: <sip:alice@192.0.2.1>;expires=3600\r\n",
+        ),
+        t0,
+    );
+    events(&mut agent);
+    assert!(invite_answered_under(&mut agent, id, "moved.example", t0));
+
+    // given up and registered afresh, under a third realm
+    agent.unregister(id, t0).expect("the un-REGISTER goes");
+    let gone = sent(&mut agent);
+    deliver(&mut agent, &reply(&gone, 200, "OK", ""), t0);
+    events(&mut agent);
+    registered_under(&mut agent, id, "third.example", t0);
+    assert!(invite_answered_under(&mut agent, id, "third.example", t0));
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &challenge(&invite, 407, &proxy_auth("callee.example")),
+        t0,
+    );
+    assert_eq!(invites(&transmits(&mut agent)), 0);
+    let (_, realms, why) = declined(&events(&mut agent)).expect("declined");
+    assert!(realms.contains(&Arc::from("callee.example")), "{realms:?}");
+    assert_eq!(why, ChallengeRefusal::NotTheAccountsRealm);
+}
+
+/// An SBC at the registrar's address that challenges calls under a realm of
+/// its own, beside the registrar's: both named on the account, both are
+/// answered, and a third is not.
+#[test]
+fn two_realms_named_on_the_account_are_both_answered() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = with_password(&mut agent, &["registrar.example", "sbc.example"]);
+    registered_under(&mut agent, id, "registrar.example", t0);
+    assert!(invite_answered_under(&mut agent, id, "sbc.example", t0));
+    assert!(invite_answered_under(
+        &mut agent,
+        id,
+        "registrar.example",
+        t0
+    ));
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &challenge(&invite, 407, &proxy_auth("callee.example")),
+        t0,
+    );
+    assert_eq!(invites(&transmits(&mut agent)), 0);
+    let (_, _, why) = declined(&events(&mut agent)).expect("declined");
+    assert_eq!(why, ChallengeRefusal::NotTheAccountsRealm);
+}
+
+/// The account's server written as an IPv4-mapped IPv6 address, as a
+/// dual-stack socket reports it, is the account's server.
+#[test]
+fn the_accounts_server_ipv4_mapped_is_still_answered() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = with_password(&mut agent, &[]);
+    registered_under(&mut agent, id, "example.com", t0);
+
+    let mapped: SocketAddr = "[::ffff:192.0.2.9]:5060".parse().expect("an address");
+    agent
+        .call(id, &outgoing().to_address(UDP, mapped), t0)
+        .expect("the INVITE goes");
+    let invite = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &challenge(&invite, 401, &www("example.com", "server")),
+        t0,
+    );
+    let retry = transmits(&mut agent)
+        .into_iter()
+        .find(|bytes| bytes.starts_with(b"INVITE "))
+        .expect("the retry");
+    assert!(!header(&retry, HeaderName::Authorization).is_empty());
+    assert!(declined(&events(&mut agent)).is_none());
+}

@@ -23,6 +23,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.sipral.Sipral
 import org.sipral.SipralAudioActivation
+import org.sipral.SipralChallengeRefusal
+import org.sipral.SipralEvent
+import org.sipral.SipralEventKind
 import org.sipral.idiomatic.SipralAudioMode
 
 private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application) {
@@ -334,6 +337,55 @@ private fun aCallsOwnAudioIsSetAndReadBack(): String {
 
 /** An action after the worker was shut down is rejected as closed rather
  * than thrown at its caller; the close itself runs after what was queued. */
+/** The realms an account names and what a held party is sent reach the
+ * library through the core, a value of neither the core knows refused before
+ * it, and a declined challenge flattened with its refusal, server and realms. */
+private fun theRealmsAndTheHeldAudioReachTheLibrary(): String {
+    val refused = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
+    refusal("invalidArgument") {
+        refused.open(SipralOpenOptions(bindHost = "127.0.0.1", heldAudio = "music"))
+    }
+    val core = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
+    try {
+        core.open(SipralOpenOptions(bindHost = "127.0.0.1", heldAudio = "application"))
+        core.addAccount(
+            SipralAccountOptions(
+                aor = "sip:alice@sipral.invalid", registrarAddress = "127.0.0.1:5060",
+                authUser = "alice", authPassword = "open sesame", realms = "registrar.example\nsbc, inc.",
+            ),
+        )
+        refusal("invalidArgument") {
+            core.addAccount(
+                SipralAccountOptions(
+                    aor = "sip:bob@sipral.invalid", registrarAddress = "127.0.0.1:5060",
+                    realms = "registrar.example\nsbc\texample",
+                ),
+            )
+        }
+    } finally {
+        core.close()
+    }
+    val flat = SipralReactCore.flatten(
+        SipralEvent(
+            size = 0,
+            stack = 0,
+            kind = SipralEventKind.CHALLENGE_DECLINED.value.toLong(),
+            account = 7,
+            call = 0,
+            message = null,
+            payloadChallengeServer = "203.0.113.9:5060",
+            payloadChallengeRealms = "sbc.example\ncallee, inc.",
+            payloadChallengeNumbers = longArrayOf(SipralChallengeRefusal.NOT_THE_ACCOUNTS_REALM.value.toLong()),
+        ),
+    )
+    assertEquals("challengeDeclined", flat["kind"])
+    assertEquals("7", flat["account"])
+    assertEquals("notTheAccountsRealm", flat["challengeRefusal"])
+    assertEquals("203.0.113.9:5060", flat["challengeServer"])
+    assertEquals("sbc.example\ncallee, inc.", flat["challengeRealms"])
+    return "the realms and the held audio reached the library, and a declined challenge was flattened"
+}
+
 private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
     val worker = SipralWorker("sipral-react-native-check")
     val outcomes = Collections.synchronizedList(ArrayList<String>())
@@ -354,7 +406,7 @@ fun main() {
     val said = try {
         everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
-            "; " + aCallsOwnAudioIsSetAndReadBack()
+            "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

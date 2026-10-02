@@ -779,6 +779,8 @@ mod tests {
             reserved: 0,
             stream_protocol: 0,
             reserved_35: 0,
+            realms: std::ptr::null(),
+            realms_len: 0,
         }
     }
 

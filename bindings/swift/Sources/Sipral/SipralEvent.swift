@@ -75,6 +75,19 @@ public struct SipralEvent: Sendable {
     /// `payload.message`, for `SipralEventKind.messageReceived`,
     /// `.messageSent` and `.messagesWaiting` only.
     public internal(set) var messageData: MessageEventData? = nil
+    /// `payload.challenge`, for `SipralEventKind.challengeDeclined` only.
+    public internal(set) var challengeData: ChallengeEventData? = nil
+}
+
+/// What `SipralEventKind.challengeDeclined` carries
+/// (`sipral_challenge_event_t`): a challenge an account's password was not
+/// given to, why, who asked and for which realms.
+public struct ChallengeEventData: Sendable {
+    public let refusal: SipralChallengeRefusal?
+    /// Where the challenged request went, `host:port`.
+    public let server: String?
+    /// The realms it was challenged for.
+    public let realms: [String]
 }
 
 /// What `SipralEventKind.subscriptionChanged` and `.notified` carry
@@ -822,6 +835,15 @@ enum SipralEventDecoder {
                 name: textC(told.name, told.name_len),
                 targets: textC(told.targets, told.targets_len),
                 retryInMs: told.retry_in_ms
+            )
+        }
+        if kindRaw == SipralEventKind.challengeDeclined.rawValue {
+            let told = raw.payload.challenge
+            let realms = textC(told.realms, told.realms_len) ?? ""
+            event.challengeData = ChallengeEventData(
+                refusal: SipralChallengeRefusal(rawValue: told.refusal),
+                server: textC(told.server, told.server_len),
+                realms: realms.split(separator: "\n").map(String.init)
             )
         }
         if kindRaw == SipralEventKind.messageReceived.rawValue

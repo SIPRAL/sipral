@@ -724,6 +724,22 @@ event_kinds! {
         /// failed as well, and backs off; an address an earlier answer named
         /// stays in use meanwhile. `account` is the account.
         57 = LocateFailed, c"locate failed";
+        /// A request of an account's was challenged by somebody its
+        /// password is not for, and the challenge was not answered (ABI
+        /// 0.36): RFC 3261 §22.1 gives each protection domain its own
+        /// password, and every answer is material for an offline search of
+        /// it by whoever chose the nonce.
+        ///
+        /// `payload.challenge` says why — `refusal` — and who asked:
+        /// `server`, where the challenged request went, and `realms`, what
+        /// it was challenged for. Raised before the refusal settles the way
+        /// any unanswered challenge does — a call ending with the 401 or
+        /// 407, a registration failing with `BAD_CREDENTIALS`, a request
+        /// inside a call refused — so the application knows why first. A
+        /// server that answers under a realm the account was never told of
+        /// is what `sipral_account_config_t::realms` is for. `account` is
+        /// the account.
+        58 = ChallengeDeclined, c"challenge declined";
     }
 }
 
@@ -802,6 +818,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::LookupWanted, "locate"),
     (SipralEventKind::Located, "locate"),
     (SipralEventKind::LocateFailed, "locate"),
+    (SipralEventKind::ChallengeDeclined, "challenge"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1668,6 +1685,49 @@ record! {
     }
 }
 
+codes! {
+    /// Why an account's password did not answer a challenge. Names for
+    /// `sipral_challenge_event_t::refusal`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralChallengeRefusal: u32 {
+        /// Never written by this build.
+        Unknown = 0,
+        /// The challenged request went somewhere other than the account's
+        /// own server — its registrar, or the outbound proxy of an account
+        /// that does not register — so whoever asked is the far end of a
+        /// call, or a peer reached directly.
+        NotTheAccountsServer = 1,
+        /// The account's server asked for a realm that is not the
+        /// account's: not one of `sipral_account_config_t::realms`, or, with
+        /// none named, neither the one its server first challenged with nor
+        /// one its REGISTERs were challenged with. A proxy passing on a far
+        /// end's own challenge looks like this, and so does an SBC that
+        /// challenges calls under a realm of its own.
+        NotTheAccountsRealm = 2,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::ChallengeDeclined`] carries: who asked for
+    /// the account's password, and why it was not given (ABI 0.36).
+    #[derive(Clone, Copy)]
+    pub struct SipralChallengeEvent {
+        /// A [`SipralChallengeRefusal`].
+        pub refusal: Number<SipralChallengeRefusal>,
+        /// Where the challenged request went, and the refusal came from, as
+        /// `host:port`. Not NUL-terminated.
+        pub server: *const c_char,
+        /// How many bytes of it.
+        pub server_len: usize,
+        /// The realms it was challenged for, each on a line of its own,
+        /// separated by line feeds: a realm may hold a comma, and never a
+        /// line break. UTF-8, not NUL-terminated.
+        pub realms: *const c_char,
+        /// How many bytes of it.
+        pub realms_len: usize,
+    }
+}
+
 record! {
     /// The arm of an event that its kind names.
     ///
@@ -1734,6 +1794,8 @@ record! {
         /// For [`SipralEventKind::LookupWanted`], [`SipralEventKind::Located`]
         /// and [`SipralEventKind::LocateFailed`].
         pub locate: SipralLocateEvent,
+        /// For [`SipralEventKind::ChallengeDeclined`].
+        pub challenge: SipralChallengeEvent,
     }
 }
 
@@ -2073,7 +2135,52 @@ pub(crate) fn translate(
     if let Some(out) = about_a_location(known, event, transport) {
         return Some(out);
     }
+    if let Some(out) = about_a_challenge(known, event, transport) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
+}
+
+/// A challenge an account's password did not answer. Who asked and the
+/// realms are `text`, the text [`text_to_point_at`] built for this event —
+/// the address, a line feed, and the realms one to a line — since neither
+/// has bytes of its own in the shape C reads.
+fn about_a_challenge(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+    text: Option<&str>,
+) -> Option<SipralEvent> {
+    let UaEvent::ChallengeDeclined { account, why, .. } = *event else {
+        return None;
+    };
+    let (server, realms) = text
+        .and_then(|text| text.split_once('\n'))
+        .unwrap_or_default();
+    let payload = SipralChallengeEvent {
+        refusal: match why {
+            sipral_ua::ChallengeRefusal::NotTheAccountsServer => {
+                SipralChallengeRefusal::NotTheAccountsServer as u32
+            }
+            sipral_ua::ChallengeRefusal::NotTheAccountsRealm => {
+                SipralChallengeRefusal::NotTheAccountsRealm as u32
+            }
+            _ => SipralChallengeRefusal::Unknown as u32,
+        },
+        server: server.as_ptr().cast::<c_char>(),
+        server_len: server.len(),
+        realms: realms.as_ptr().cast::<c_char>(),
+        realms_len: realms.len(),
+    };
+    let mut out = SipralEvent::of(
+        known.stack,
+        SipralEventKind::ChallengeDeclined,
+        payload!(challenge: payload),
+    );
+    out.account = known
+        .accounts
+        .name_of(account)
+        .unwrap_or(SIPRAL_HANDLE_NONE);
+    Some(out)
 }
 
 /// An account's server being located by RFC 3263: a lookup wanted, the
@@ -2677,6 +2784,18 @@ pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(","),
         ),
+        UaEvent::ChallengeDeclined {
+            from, ref realms, ..
+        } => {
+            let mut text = format!("{from}\n");
+            for (index, realm) in realms.iter().enumerate() {
+                if index > 0 {
+                    text.push('\n');
+                }
+                text.push_str(realm);
+            }
+            Some(text)
+        }
         _ => None,
     }
 }
@@ -3872,7 +3991,8 @@ mod tests {
         assert_eq!(SipralEventKind::LookupWanted as u32, 55);
         assert_eq!(SipralEventKind::Located as u32, 56);
         assert_eq!(SipralEventKind::LocateFailed as u32, 57);
-        assert_eq!(SipralEventKind::ALL.len(), 55, "and there are no others");
+        assert_eq!(SipralEventKind::ChallengeDeclined as u32, 58);
+        assert_eq!(SipralEventKind::ALL.len(), 56, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -3979,7 +4099,12 @@ mod tests {
         assert_eq!(name(55).as_deref(), Some("lookup wanted"), "55 is live");
         assert_eq!(name(56).as_deref(), Some("located"), "56 is live");
         assert_eq!(name(57).as_deref(), Some("locate failed"), "57 is live");
-        assert_eq!(name(58), None, "past the last kind");
+        assert_eq!(
+            name(58).as_deref(),
+            Some("challenge declined"),
+            "58 is live"
+        );
+        assert_eq!(name(59), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

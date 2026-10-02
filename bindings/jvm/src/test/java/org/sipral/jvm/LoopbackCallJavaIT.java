@@ -27,6 +27,8 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.sipral.SipralCallState;
 import org.sipral.SipralEventKind;
+import org.sipral.SipralException;
+import org.sipral.SipralStatus;
 import org.sipral.SipralTransport;
 import org.sipral.idiomatic.SipralAccount;
 import org.sipral.idiomatic.SipralCall;
@@ -130,6 +132,21 @@ class LoopbackCallJavaIT {
             assertTrue(message.startsWith("REGISTER "), message);
             assertTrue(message.contains("Via: SIP/2.0/TCP "), message);
             assertTrue(message.contains(";transport=tcp"), message);
+        }
+    }
+
+    /** The realms an account names reach the library one per line from
+     * Java: a realm with a comma of its own is one realm, and one with a
+     * control byte is refused there. */
+    @Test
+    void theRealmsAnAccountNamesReachTheLibrary() throws Exception {
+        try (SipralClient client = SipralJava.open("127.0.0.1")) {
+            SipralJava.addAccount(client, "sip:alice@example.invalid", "127.0.0.1:5060", null, "alice", "open sesame",
+                null, null, List.of("registrar.example", "sbc, inc."));
+            SipralException refused = assertThrows(SipralException.class, () -> SipralJava.addAccount(
+                client, "sip:bob@example.invalid", "127.0.0.1:5060", null, null, null, null, null,
+                List.of("registrar.example", "sbc\texample")));
+            assertSame(SipralStatus.INVALID_ARGUMENT, refused.getStatus());
         }
     }
 

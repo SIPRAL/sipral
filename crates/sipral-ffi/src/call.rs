@@ -2306,6 +2306,8 @@ a=recvonly\r\n";
             reserved: 0,
             stream_protocol: 0,
             reserved_35: 0,
+            realms: std::ptr::null(),
+            realms_len: 0,
         }
     }
 
@@ -3511,6 +3513,75 @@ Contact: <sip:bob@203.0.113.5:5060>\r\n\
             observed.kinds()
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// The payload of one frame of a loud tone captured on a call this end
+    /// holds, on a stack whose `held_audio` is `held_audio`.
+    fn held_payload(held_audio: u32) -> Vec<u8> {
+        let mut observed = Observed::default();
+        let (handle, call) = media_call_tuned(&mut observed, |config| {
+            config.held_audio = held_audio;
+        });
+        let _ = sent(handle);
+        assert_eq!(
+            unsafe { sipral_call_hold(handle, call, 2_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let reinvite = one(handle);
+        deliver(handle, &accepted(&reinvite, HELD_ANSWER, false), 2_100);
+        poll(handle, 2_100);
+        assert_eq!(held_state(handle, call), (1, 0), "the hold is in force");
+        let media = crate::media::tests::media_of(handle, call);
+        let mut buffers = crate::media::tests::Buffers::new();
+        let mut packet = buffers.packet();
+        let samples = [3_000_i16; 160];
+        let status = unsafe {
+            crate::media::sipral_media_capture(
+                media,
+                2_120,
+                samples.as_ptr(),
+                samples.len(),
+                &raw mut packet,
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let (payload, _) = buffers.taken(&packet);
+        crate::media::tests::release(media);
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        payload.get(12..).unwrap_or_default().to_vec()
+    }
+
+    /// What a party this end holds is sent in application mode: silence by
+    /// default, since the frames handed over may be a microphone's, and
+    /// when `held_audio` asks for it; the frames the application hands
+    /// over — hold music, an announcement, a voice agent's speech — when it
+    /// asks for those by name. Mu-law silence is 0xFF in every byte.
+    #[test]
+    fn a_held_party_hears_silence_in_application_mode_unless_the_application_is_named() {
+        let silent =
+            |payload: &[u8]| !payload.is_empty() && payload.iter().all(|byte| *byte == 0xFF);
+        let default = held_payload(crate::stack::SipralHeldAudio::Default as u32);
+        assert!(silent(&default), "{default:?}");
+        let silence = held_payload(crate::stack::SipralHeldAudio::Silence as u32);
+        assert!(silent(&silence), "{silence:?}");
+        let application = held_payload(crate::stack::SipralHeldAudio::Application as u32);
+        assert!(
+            !application.is_empty() && !silent(&application),
+            "{application:?}"
+        );
+
+        let mut observed = Observed::default();
+        let mut settings = config(record, &mut observed);
+        settings.held_audio = 3;
+        let (status, _) = create(&settings);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("held_audio"),
+            "{}",
+            last_error_text()
+        );
     }
 
     /// `HELD_ANSWER` carries `a=recvonly`, which per RFC 4566 means the party

@@ -11,7 +11,7 @@
 # appended member at a time. A dash means the library fills that
 # struct in itself and no caller ever declares one.
 sipral_abi_version_t reserved 24 24 20 20 20 20
-sipral_account_config_t recording_in_clear 392 448 208 248 216 256
+sipral_account_config_t recording_in_clear 392 464 208 256 216 264
 sipral_audio_device_t present 32 32 28 28 28 28
 sipral_audio_info_t reserved 48 48 44 44 48 48
 sipral_audio_transmit_t - - 56 - 36 - 40
@@ -40,7 +40,7 @@ sipral_push_echo_t refresh_lead_ms 24 24 20 20 24 24
 sipral_record_config_t far_end_len 80 80 40 40 40 40
 sipral_recording_options_t reserved 32 32 28 28 28 28
 sipral_screen_request_t - - 48 - 28 - 32
-sipral_stack_config_t rtp_port_max 368 424 248 288 256 296
+sipral_stack_config_t rtp_port_max 368 432 248 296 256 304
 sipral_stack_settings_t rtp_port_max 112 136 104 128 112 136
 sipral_stir_config_t reserved 56 56 44 44 48 48
 sipral_stream_encryption_t awaiting_keys 32 32 28 28 28 28

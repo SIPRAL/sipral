@@ -462,3 +462,12 @@ public sealed record SipralPresenceEventInfo(
     uint StatusCode,
     ulong ExpiresMs,
     ulong RefreshInMs);
+
+/// <summary>What <see cref="SipralEventKind.ChallengeDeclined"/> carries: a
+/// challenge an account's password was not given to, why, where the
+/// challenged request went (<c>host:port</c>), and every realm it was
+/// challenged for.</summary>
+public sealed record SipralChallengeEventInfo(
+    SipralChallengeRefusal Refusal,
+    string? Server,
+    IReadOnlyList<string> Realms);

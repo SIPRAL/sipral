@@ -52,8 +52,8 @@ use std::time::{Duration, Instant};
 use sipral_core::endpoint::OutgoingResponse;
 use sipral_core::msg::{HeaderName, OwnedMessage, RawMessage, StatusCode, Uri, UriRef, UriScheme};
 use sipral_stir::{
-    Attest, Claims, Config, Dest, Failure, InfoProblem, OrigId, Pending, ReplayCache, Shaken,
-    Signer, Tn, TrustAnchors, Verdict, Verified, Verifier,
+    Arrival, Attest, Claims, Config, Dest, Failure, InfoProblem, OrigId, Pending, ReplayCache,
+    Shaken, Signer, Tn, TrustAnchors, Verdict, Verified, Verifier,
 };
 
 use crate::call::{IDENTITY, SignedHeaders};
@@ -316,6 +316,31 @@ impl Numbers {
     }
 }
 
+/// The request a held INVITE is and the line it reached, as the replay
+/// check reads them: its `Call-ID`, `From` tag and `CSeq` number — what
+/// every branch of one forked INVITE shares and a new request does not (RFC
+/// 3261 §8.2.2.2) — and its account, or a line of its own for an INVITE
+/// addressed to none.
+fn arrival_of(held: &Held) -> Arrival {
+    let raw = held.request.as_raw();
+    let call_id = raw.call_id().unwrap_or_default();
+    let tag = raw
+        .from()
+        .ok()
+        .and_then(|from| from.tag())
+        .unwrap_or_default();
+    let sequence = raw.cseq().map_or(0, |cseq| cseq.seq);
+    let request = format!(
+        "{}\n{}\n{sequence}",
+        String::from_utf8_lossy(call_id),
+        String::from_utf8_lossy(&tag)
+    );
+    let line = held
+        .account
+        .map_or(u64::MAX, |account| u64::from(account.0));
+    Arrival::new(&request, line)
+}
+
 /// Where an incoming INVITE goes next.
 enum Gate {
     /// To the application now, with this verdict or none.
@@ -372,18 +397,21 @@ impl UserAgent {
         let waiting = self.stir.waiting.remove(&call).ok_or(UaError::NoSuchCall)?;
         let unix = self.unix_at(now).unwrap_or(0);
         // RFC 8224 §12.1: a PASSporT already found valid inside its window
-        // is a replay, and is refused as stale
+        // is a replay, and is refused as stale -- unless it was found valid
+        // in this same request on another of this agent's lines, which is a
+        // proxy's fork of one INVITE and not a replay of it
         let seen = &mut self.stir.seen;
+        let arrival = arrival_of(&waiting.held);
         let verdict = match (chain, self.stir.config.as_ref()) {
             (Some(chain), Some(config)) => {
                 waiting
                     .pending
-                    .verify_once(chain, &config.anchors, unix, seen)
+                    .verify_arrival(chain, &config.anchors, unix, seen, &arrival)
             }
             (Some(chain), None) => {
                 waiting
                     .pending
-                    .verify_once(chain, &TrustAnchors::new(), unix, seen)
+                    .verify_arrival(chain, &TrustAnchors::new(), unix, seen, &arrival)
             }
             (None, _) => waiting.pending.unavailable(),
         };
