@@ -71,9 +71,9 @@ This licence grants no rights in the name Sipral or in its marks. See
 
 ## 7. Contributions
 
-Contribution is not a condition of this licence. Code is not accepted from
-outside before 1.0; after that it is accepted under a contributor licence
-agreement, which is not written yet. `CONTRIBUTING.md` says the same.
+Contribution is not a condition of this licence. Code from outside the project
+is accepted only under a contributor licence agreement, as `CONTRIBUTING.md`
+sets out.
 
 ## 8. No runtime enforcement
 

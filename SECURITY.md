@@ -22,7 +22,7 @@ channel, to the maintainer directly. GitHub's **private vulnerability
 reporting** — the Security tab on the repository, then "Report a
 vulnerability" — is switched on the day this repository turns public, and
 becomes the channel from that day on: private between you and the
-maintainer, no email address needed from either side, and the one this
+maintainer, and the one this
 policy's own time commitments below are measured against from then on.
 
 ## What happens after a report

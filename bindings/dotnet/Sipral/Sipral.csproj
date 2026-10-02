@@ -8,7 +8,7 @@
     <Version>1.0.0</Version>
     <Authors>Tiberiu Balasea</Authors>
     <Copyright>Copyright (c) 2026 Tiberiu Balasea</Copyright>
-    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding over the C ABI, with the native library for Windows, macOS and Linux inside the package.</Description>
+    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding over the C ABI, with the native library for Windows, macOS and Linux inside the package. Licensed under AGPL-3.0-only, or under the Sipral commercial licence for closed-source products: https://sipral.org/terms/</Description>
     <!-- the AGPL arm alone: nuget.org takes only licence identifiers the OSI
          or the FSF approved, so the commercial arm's LicenseRef- cannot be
          written here; LICENSING.md, linked from the README, states both -->

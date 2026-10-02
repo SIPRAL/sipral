@@ -109,15 +109,13 @@ section 7 of the AGPL-3.0 that come with every file.
 
 ## Getting a commercial licence
 
-Through the contact form at <https://sipral.org>. It is private, and it is the route
-we prefer: you should not have to announce in public that your product is closed
-source in order to ask a question about licensing it.
+Through the contact form at <https://sipral.org/contact/>. It is private, and it is
+the route we prefer: you should not have to announce in public that your product
+is closed source in order to ask a question about licensing it. The full terms are
+at <https://sipral.org/terms/>.
 
 If you would rather ask in the open, there is a
 [commercial licence enquiry](../../issues/new?template=commercial-licence.yml)
 issue template. That thread is public, so use it only if you do not mind.
 
-There is deliberately no email address anywhere in this repository. Published
-addresses get harvested, and the resulting spam buries the enquiries that
-matter. Security reports have their own private route, in
-[`SECURITY.md`](SECURITY.md).
+Security reports have their own private route, in [`SECURITY.md`](SECURITY.md).

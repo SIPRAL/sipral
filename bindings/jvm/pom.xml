@@ -37,7 +37,7 @@ own tests, and the loopback tests then fail at the first native call.
         </license>
         <license>
             <name>LicenseRef-Sipral-Commercial</name>
-            <url>https://github.com/SIPRAL/sipral/blob/main/LICENSE-COMMERCIAL.md</url>
+            <url>https://sipral.org/terms/</url>
             <distribution>repo</distribution>
         </license>
     </licenses>
