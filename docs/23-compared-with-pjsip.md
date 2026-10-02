@@ -254,6 +254,13 @@ one candidate, its first fragment; the figures above were read again from
 the kept capture once `wire.py` reassembled fragments, which its tests now
 cover.)
 
+This run predates the compact form: the endpoint now writes a request that
+is over the datagram limit compact first (RFC 3261 §7.3.3,
+`docs/03-core-signalling.md`), then without its `Allow`, and asks for a
+stream only if it is still over. Against the live PBX in
+`docs/11-testing.md`, that took a challenged INVITE from 1389 bytes to 1239,
+sent over UDP with no stream asked for.
+
 ## What is not compared
 
 - More than four simultaneous calls in pjsua, which its packaged build does

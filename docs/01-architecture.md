@@ -78,22 +78,23 @@ which files are generated and which are written by hand, and
 ```
 
 Dependencies point down only, and most of these crates have none. `sipral-core`
-depends on nothing outside the standard library; `sipral-media`, `sipral-rtp`,
+depends on nothing outside the standard library; `sipral-media`,
 `sipral-dtls`, `sipral-stir` and `sipral-headless` name no Sipral crate at
-all, `sipral-diag` names only `sipral-core`, and the four
+all, `sipral-rtp` and `sipral-diag` name only `sipral-core` (`sipral-rtp` for
+the SDP model its RFC 4585 attributes are read and written through), and the four
 `sipral-io-*` name exactly one, `sipral-io-common`, which names none. The device crates
 stand outside the picture because nothing in it depends on them: an
 application links at most one of `sipral-io-coreaudio`, `sipral-io-wasapi`,
 `sipral-io-aaudio` or `sipral-io-pipewire`, and never more than one.
 `sipral-audio` is the one crate above them: the engine `sipral-ffi` runs in
-device mode, which names `sipral`, `sipral-media` and the device crate of the
+device mode, which names `sipral`, `sipral-media`, `sipral-io-common` and the device crate of the
 platform it is built for, and which nothing below `sipral-ffi` names.
 
 `sipral-headless` stands outside the picture the same way, and names no
 Sipral crate itself — it stays the leaf the picture above draws it as, sans-I/O
 and free of every other layer's state. The dashed edge is the one exception to
 "nothing in the picture depends on them": `sipral`'s own optional `headless`
-feature (off by default, unlike `dtls`, `ice` and `stun`, which are on) depends
+feature (off by default, unlike `dtls`, `ice`, `stun` and `stir`, which are on) depends
 on it,
 to carry PCM between this protocol's queues and a live `MediaSession` — the
 [facade's own section](#the-facade) below and
@@ -196,7 +197,7 @@ DTLS 1.2, for the SRTP keys of a DTLS-SRTP handshake (RFC 5764): the client
 and server handshake, sans-I/O like the core, over the record layer, the
 handshake framing and messages, the key derivation and the exporter, and the
 self-signed certificate a peer checks against `a=fingerprint`. Like
-`sipral-rtp` it names no Sipral crate.
+`sipral-media` it names no Sipral crate.
 
 The facade depends on it, and on `sipral-nat` beside it, behind the `dtls`
 feature: the handshake runs on the call's own media socket, and telling its

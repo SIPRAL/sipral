@@ -58,8 +58,9 @@ its own (§5.1), which is why the plan carries both.
 Neither mentions a socket, a device, a thread or a codec implementation, which
 is what lets one `sipral-ua` drive a softphone and an agent that puts PCM on a
 socket. Both live in `sipral-core::sdp`, next to the offer/answer machinery that
-produces them. The media crates do not read them: `sipral-media` and
-`sipral-rtp` name no Sipral crate in their manifests at all, and the `sipral`
+produces them. The media crates do not read them: `sipral-media` names no
+Sipral crate in its manifest, `sipral-rtp` only `sipral-core` for the RFC
+4585 and RFC 5506 attributes, and the `sipral`
 facade is what turns a plan into the arguments they take. That is what keeps
 the seam a shared vocabulary rather than a call.
 

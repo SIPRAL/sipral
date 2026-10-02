@@ -766,7 +766,8 @@ each lookup, which every idiomatic layer answers with the platform's
 resolver. A dialog whose next hop turns out to be a name is
 `SIPRAL_EVENT_KIND_RESOLVE_NEEDED`, answered with `sipral_stack_resolved`
 or, legitimately, not at all. TLS is the application's, with the platform's
-own library — the Swift, Kotlin, .NET and Python layers run it — and so is
+own library — the Swift, Kotlin, .NET and Python layers run it, and the Dart
+layer on an account's own connection — and so is
 the certificate check: `22-tls.md` is the recipe, per platform, with what
 RFC 5922 asks beyond an ordinary HTTPS check and how to pin a PBX's own
 certificate.

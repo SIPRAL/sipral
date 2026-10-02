@@ -471,7 +471,7 @@ live stack rather than reached from one.
 | **A6** — stream statistics | `sipral_call_media` mints a handle once media starts; `sipral_media_info` and `sipral_media_statistics` read it live, and `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` delivers the completed record once the call has ended. |
 | **A9** — DTMF over INFO | `sipral_call_send_dtmf`'s `via` argument picks RTP or INFO per send; `SIPRAL_EVENT_KIND_DTMF_SENT` reports the far end's answer, a 415 included, and `SIPRAL_EVENT_KIND_DIGIT_RECEIVED`'s `source` says which of the two a keypress arrived by. |
 | **A10** — product identity, the settable half | `sipral_stack_config_t::user_agent`. The signalling-trace half is superseded by D1, and D1 is Rust-only — see below. |
-| **B1** — never emit a request that cannot arrive | RFC 3261 §18.1.1 runs on every call this stack signals, with nothing to turn it on, and every byte `sipral_stack_poll_transmit` hands over is already the size the application is about to put on the wire, without a capture. `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` carries the choice itself: a request too large for a datagram does not go out, the event names where it was going and over which protocol, and `sipral_stack_transport_bind` lets the application answer it. |
+| **B1** — never emit a request that cannot arrive | RFC 3261 §18.1.1 runs on every call this stack signals, with nothing to turn it on, and every byte `sipral_stack_poll_transmit` hands over is already the size the application is about to put on the wire, without a capture. `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` carries the choice itself: a request too large for a datagram even in the compact form does not go out, unless the deployment set the limit aside (`datagram_without_stream_bytes`), the event names where it was going and over which protocol, and `sipral_stack_transport_bind` lets the application answer it. |
 | **B2** — a silently ignored setting is worse than an unsupported one | `SIPRAL_STATUS_NOT_SUPPORTED`, a status distinct from `SIPRAL_STATUS_INVALID_ARGUMENT`, exists for exactly this and nothing else. |
 | **B3** — a failure during suspend or resume is an event, not an abort | True of every way in: a background timer through `sipral_stack_poll`, a dead transport through `sipral_stack_transport_failed`, and now suspend, resume and lost name resolution through the D4 entry points below. None of them aborts; each raises an event and leaves the stack answerable. |
 | **B4** — the threading contract is a guarantee, not a convention | Documented and tested in `docs/08-ffi.md`; a call that lands on the wrong thread gets `SIPRAL_STATUS_BUSY`, not a fault. |
@@ -512,7 +512,9 @@ The Rust surface for each of these already exists somewhere below
   ringer chosen per stack. Per call — one call on the headset while another
   rings the room — is the one piece of A2 still open: the engine's roles are
   per engine, and a call has no device of its own yet. A3 is built with A2:
-  gain, mute and the meter per direction, kept across a device change.
+  gain, mute and the meter per direction, kept across a device change, and
+  for each call on its own (`sipral_audio_call_set_gain`, `_set_muted`,
+  `_level`).
   Linux has no backend for the engine yet (`sipral-io-pipewire` links a
   library the packaged wheel must not require), so on Linux A2 and A3 stay
   the application's. Android has one from API level 28, over AAudio, with

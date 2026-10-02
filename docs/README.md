@@ -23,11 +23,11 @@ tree object survived both unchanged, so the code history is untouched.
 | [01-architecture.md](01-architecture.md) | layering, the sans-I/O boundary, what lives in which crate |
 | [02-clean-room.md](02-clean-room.md) | provenance rules, what may not be read, what to do when unsure |
 | [03-core-signalling.md](03-core-signalling.md) | parser, transactions, dialogs, SDP, authentication |
-| [04-ua.md](04-ua.md) | registration, calls, hold, transfer, subscriptions |
+| [04-ua.md](04-ua.md) | registration, calls, hold, transfer, subscriptions, locating a server by RFC 3263, an account on a transport of its own |
 | [05-media.md](05-media.md) | RTP, jitter buffer, loss concealment, DTMF, SRTP, codecs |
 | [06-nat.md](06-nat.md) | STUN, TURN, ICE in the lite and full roles, and what carriers actually need |
 | [07-headless.md](07-headless.md) | the PCM socket endpoint for AI voice agents |
-| [08-ffi.md](08-ffi.md) | C ABI rules, versioning and the freeze, and the Swift, .NET, Kotlin, Python, Dart and React Native bindings |
+| [08-ffi.md](08-ffi.md) | C ABI rules, versioning and the freeze, and the Swift, .NET, Kotlin (Android and a server JVM), Python, Dart and React Native bindings |
 | [09-rfc-index.md](09-rfc-index.md) | every specification implemented, and by which crate |
 | [10-roadmap.md](10-roadmap.md) | phases and their exit criteria |
 | [11-testing.md](11-testing.md) | test corpus, fixtures, the interoperability matrix |
