@@ -2615,6 +2615,7 @@ area_hygiene() {
     step_security_policy
     step_rfc4475_corpus
     step_one_version
+    step "every copy of the version (scripts/version.sh --check)"; scripts/version.sh --check || FAIL=1
     step_no_addresses
     step_language
     step_provenance
