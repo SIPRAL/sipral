@@ -5,7 +5,7 @@
          null pointer, so the nullable annotations have to mean something -->
     <Nullable>enable</Nullable>
     <PackageId>Sipral</PackageId>
-    <Version>0.0.1</Version>
+    <Version>1.0.0</Version>
     <Authors>Tiberiu Balasea</Authors>
     <Copyright>Copyright (c) 2026 Tiberiu Balasea</Copyright>
     <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding over the C ABI, with the native library for Windows, macOS and Linux inside the package.</Description>

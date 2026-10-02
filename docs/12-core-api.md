@@ -1485,10 +1485,10 @@ is told which one survived. Placing a call mints the first before any dialog
 exists — there has to be something to cancel with — and the first early dialog
 adopts it; each one after that is a sibling.
 
-## The Rust surface under ABI 0.34 and 0.35
+## The Rust surface under ABI 0.34, 0.35 and 0.36
 
 What a Rust application reaches without the C ABI, crate by crate, for what
-the last two minors added; each C entry point named is the projection of it.
+those three minors added; each C entry point named is the projection of it.
 
 **`sipral_core::endpoint::locate`** (RFC 3263). `Locator::new(&uri, protocol,
 family, naptr, seed)` starts locating a URI's server for one transport and
@@ -1556,6 +1556,22 @@ peer elsewhere (`sipral_advertised_address`).
   `sipral::MemberFilter`, and `LocalConference::filter` puts it in the
   call's path in a conference, so the controls act there too.
 
+**What ABI 0.36 added, in Rust:**
+
+- `sipral_ua::Account::realms(&[&str])` names the realms an account's
+  password answers (`sipral_account_config_t::realms`), and
+  `UaEvent::ChallengeDeclined { account, from, realms, why }` says when it
+  answered none, `why` a `ChallengeRefusal` (`NotTheAccountsServer`,
+  `NotTheAccountsRealm`); `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` is its
+  projection.
+- `sipral::HeldAudio` (`Silence`, the default, or `Captured`) in
+  `MediaConfig::held_audio` says what a party this end holds is sent
+  (`sipral_stack_config_t::held_audio`, `docs/05-media.md`).
+- `sipral_stir::Arrival::new(request, line)` and
+  `Pending::verify_arrival` key STIR's replay check by the request a
+  PASSporT came in and the line it reached, rather than by the PASSporT
+  alone (`docs/04-ua.md`).
+
 ## Projection onto C
 
 - Handles: the C ABI is built over `sipral-ua`, so no transaction or dialog
@@ -1568,8 +1584,10 @@ peer elsewhere (`sipral_advertised_address`).
 - Every entry point runs under `catch_unwind` and maps a caught panic to
   `SIPRAL_STATUS_PANIC`.
 - The ABI is built over `sipral-ua`, not over `sipral-core`. The core's
-  surface is public because sibling crates need it, but the compatibility
-  promise at 1.0 is made for `sipral-ua` and the C ABI.
+  surface is public because sibling crates need it, and so is `sipral-ua`'s,
+  but neither is published: the compatibility promise of the 1.0 release is
+  made for the C ABI and the language packages over it (`08-ffi.md`, "The
+  freeze"), and the Rust crates' API may change in any release.
 
 ## What was taken, and what was rejected
 

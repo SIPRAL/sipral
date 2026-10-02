@@ -17,13 +17,19 @@ interesting.
 ## Where 1.0 falls
 
 1.0 is a promise about the C ABI rather than the end of a phase: the surface
-frozen at minor 33 holds for the whole of major 1 (`08-ffi.md`, "The
-freeze"), later minors only appending to it. It does not wait for what only
-a third party can supply — a paid carrier account (phase 1), real phones and
-the two stores (phase 4), a public registry the packages are pulled from
-(phase 5) — nor for what each phase below still names as left: the
-adversarial review of DTLS-SRTP (phase 2), a device chosen per call (phase
-3), and video (phase 6), which comes after 1.0 by decision.
+frozen at ABI minor 33 holds for every 1.x release of the library (`08-ffi.md`,
+"The freeze"), later ABI minors only appending to it. The 1.0.0 release is at
+ABI 0.36; the library's version and the ABI's are two numbers, each moved by
+its own rule (`08-ffi.md`, "Versioning"). What 1.0 publishes is the C library
+and the language packages over it; the Rust crates are not part of it, and
+their API promises nothing (`11-testing.md`, "Releasing").
+
+It does not wait for what only a third party can supply — a paid carrier
+account (phase 1), real phones and the two stores (phase 4), a public
+registry the packages are pulled from (phase 5) — nor for what each phase
+below still names as left: the adversarial review of DTLS-SRTP (phase 2), a
+device chosen per call (phase 3), and video (phase 6), which comes after 1.0
+by decision.
 
 ## Phase 0 — design
 
@@ -404,7 +410,7 @@ property through before it reaches C.
   with a Java face over the Kotlin one;
 - the artefacts each platform consumes, built locally: an `.xcframework`, an
   AAR with the shared object for each Android ABI, a NuGet with native runtimes
-  (`win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` --
+  (`win-x64`, `win-arm64`, `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` --
   `linux-arm64` cross-compiled, no arm64 hardware needed), wheels including a
   `manylinux_2_28_aarch64` one built the same cross-compiled way — with
   publishing left to a person, and each of them built without
@@ -594,12 +600,13 @@ feasibility.
 - Before that flip: private captures confirmed out of the tree, `gitleaks` clean
   over the whole history, and the licence set, SPDX headers and `cargo deny`
   in place, which they are from commit zero.
-- No crate is published to a registry before the ABI in `08-ffi.md` is frozen.
-  A published crate name is a promise about compatibility. The exception is
-  a name reservation: `Sipral` 0.0.1 on NuGet, a stub assembly that implements
-  nothing. The `sipral` name on crates.io is to be reserved the same way, by a
-  pre-release version of the one crate with `publish = true`; that upload has
-  not happened.
+- No package is published to a registry before the ABI in `08-ffi.md` is
+  frozen. A published name is a promise about compatibility. The exceptions
+  are name reservations: `Sipral` 0.0.1 on NuGet, a stub assembly that
+  implements nothing, and `sipral` 0.0.1 on crates.io, the one crate with
+  `publish = true`. The 1.0 release publishes the language packages, not the
+  crate: the reservation stays what it is, and `scripts/package/crate.sh`
+  says so rather than packaging it.
 - The ABI is not frozen before every entry the desktop client needs exists in
   C (the phase 3 list), before a C driver has run the lab's flows through
   `sipral.h`, and before every printed binding compiles in the gate. Flipping

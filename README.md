@@ -27,7 +27,7 @@ phone line inside a voice agent without a media server in between.**
 - **More than a call.** Opus, G.722, G.711, L16 and G.729 Annexes A and B (bit-exact against the ITU conformance streams); an adaptive jitter buffer with concealment and drift correction; DTMF three ways; N-way local conferences with each call on its own codec; SIPREC; presence, MESSAGE, message waiting and busy lamp field; real-time text; RTCP-XR with MOS.
 - **Diagnosable in the field.** A per-call record of every decision with its reason code as JSON, pcapng export with GDPR redaction, health counters, and a diagnostic trace with credentials and keys stripped.
 - **Proven against what is deployed.** A container lab runs registration, calls, hold, transfers, DTMF, SRTP, DTLS-SRTP, NAT, ICE and TURN against Asterisk 22, FreeSWITCH 1.10, Kamailio 6.1, OpenSIPS 4.0 and baresip — through the Rust API, again from a C program through `sipral.h`, and with the Python, Swift, Kotlin and .NET layers answering, over clean and impaired links — and a short set of them has run against a live FreePBX 16 at every ABI minor since 0.32.
-- **Measured, not claimed.** Ten thousand concurrent calls with audio held in one process at about 72 KB each; under 3 µs per audio frame with two hundred calls on four threads; a 5 MB shared library with Opus, SRTP, DTLS, ICE, STIR and the device engine in it ([`docs/19-numbers.md`](docs/19-numbers.md), [`docs/23-compared-with-pjsip.md`](docs/23-compared-with-pjsip.md)).
+- **Measured, not claimed.** Ten thousand concurrent calls with audio held in one process at about 72 KB each; under 1 µs per audio frame with two hundred calls on four threads when the far end sends digits as RTP events, about 8 µs when the library listens for them in the audio; a 5 MB shared library with Opus, SRTP, DTLS, ICE, STIR and the device engine in it ([`docs/19-numbers.md`](docs/19-numbers.md), [`docs/23-compared-with-pjsip.md`](docs/23-compared-with-pjsip.md)).
 
 ## A call, in Python
 
@@ -81,15 +81,26 @@ signalling over UDP with an account's own TCP or TLS connection beside it.
 
 ## Status
 
-**1.0.** The C ABI surface frozen at minor 0.33 — names, numbers, struct
-layouts and ownership rules
-([`docs/08-ffi.md`, "The freeze"](docs/08-ffi.md#the-freeze-abi-033)) — is
-what 1.0 promises for the whole of major 1: a later minor only appends, a
-binding built against an earlier minor of the same major keeps loading
-against a later library, and the gate holds every pinned struct length and
-every member's offset to the commit before it. Security fixes reach the
-current minor release and the one before it ([`SECURITY.md`](SECURITY.md)).
-The artefacts in the table above are built locally by `scripts/package/`.
+**1.0.0, at C ABI 0.36.** These are two numbers on purpose: 1.0.0 is the
+release every package ships under, and 0.36 is the version of the C
+interface, which `sipral_abi_check` compares when a binding loads
+([`docs/08-ffi.md`, "Versioning"](docs/08-ffi.md#versioning)).
+
+What 1.0 promises, for every 1.x release: the C ABI surface frozen at minor
+0.33 — names, numbers, struct layouts and ownership rules
+([`docs/08-ffi.md`, "The freeze"](docs/08-ffi.md#the-freeze-abi-033)) —
+stands, and a later minor only appends to it; the gate holds every pinned
+struct length and every member's offset to the commit before it. Every
+binding asks the native library it loads whether it speaks the ABI the
+binding was printed against, and while the ABI's major is 0 that check takes
+an exact minor: a package goes with the native library of its own release.
+The Rust crates are not part of the release and their API promises nothing;
+the `sipral` name on crates.io stays the 0.0.1 reservation it is. Security
+fixes reach the current minor release and the one before it
+([`SECURITY.md`](SECURITY.md)). The artefacts in the table above are built
+by `scripts/package/`, and
+[`docs/11-testing.md`, "Releasing"](docs/11-testing.md#releasing) is the
+order they are published in.
 
 ## Roadmap
 
@@ -139,5 +150,5 @@ trademark, see [`TRADEMARK.md`](TRADEMARK.md).
 ## Contributing
 
 Issues, interoperability reports and anonymised captures are welcome. Code
-contributions open after 1.0 under a contributor licence agreement, for the
-reason in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+contributions are taken under a contributor licence agreement, once it is
+published in [`CONTRIBUTING.md`](CONTRIBUTING.md), for the reason given there.

@@ -11,10 +11,10 @@ members = ["crates/*", "interop/harness", "tools/abi-gen", "tools/diag-export", 
 exclude = ["fuzz", "crates/sipral-aec-webrtc"]
 
 [workspace.dependencies]
-sipral-core = { path = "crates/sipral-core", version = "0.0.1" }
+sipral-core = { path = "crates/sipral-core", version = "1.0.0" }
 
 [workspace.package]
-version = "0.0.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"

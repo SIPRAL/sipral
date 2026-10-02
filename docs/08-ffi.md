@@ -2846,6 +2846,21 @@ reported by a function, `sipral_abi_check`, and a mismatch is a hard failure
 with a legible message naming both versions, rather than a crash at whichever
 call happens to hit the difference first.
 
+**Two numbers, not one.** The *library version* — 1.0.0 at the first
+release — is `version` in the root `Cargo.toml`'s `[workspace.package]`,
+which every crate and every language package ships under and
+`scripts/version.sh` writes everywhere a copy is kept (`11-testing.md`,
+"Releasing"). The *ABI version* — 0.36 at that same release — is
+`SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH`, printed into the header
+and every binding, and it is the only one a binding compares at load.
+Neither moves the other: a release that fixes a bug and grows no declaration
+raises the library version and leaves the ABI's where it was, and a release
+that grows the surface raises both, each by its own rule. A library version
+says which release a package came from; the ABI version says which header it
+speaks. The promise 1.0 makes is stated against the second: for every 1.x
+release, the surface frozen at ABI 0.33 ("The freeze", below) stands and a
+later minor only appends to it.
+
 Which number moves is a rule about the printed surface and not about the Rust
 behind it. `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH` in
 `crates/sipral-ffi/src/version.rs` are where they are written down, and this
@@ -2854,9 +2869,12 @@ is what they mean:
 - **major**, when a declaration that was published changes meaning, changes
   shape or goes away. Nothing built against one major works against another.
   While it is 0, `sipral_abi_check` takes an exact match: the surface frozen
-  at minor 33 ("The freeze", below) is what 1.0 promises, and no 0.x minor
-  promises anything about another. From 1.0 a binding built against an
-  earlier minor of the same major keeps working.
+  at minor 33 ("The freeze", below) is what the 1.0 release promises, but the
+  check does not take a binding printed at one 0.x minor against a library
+  at another, so a package goes with the native library of its own release.
+  From ABI 1.0 a binding built against an earlier minor of the same major
+  keeps working: the check takes any minor up to the library's own. The
+  library's 1.0.0 release is at ABI 0.36, not ABI 1.0.
 - **minor**, for anything the header gains: a function, a struct member, an
   enumerator, a published constant, a type alias — everything the generator
   prints, and not only the function and the struct member the rule used to
@@ -3001,9 +3019,10 @@ anything is read.
 
 ## The freeze (ABI 0.33)
 
-Minor 33 froze the surface: what it prints is what 1.0 promises, and every
-minor after it — 34 is the first, below — only adds to it, under these rules.
-From 1.0 on, for the life of major 1:
+Minor 33 froze the surface: what it prints is what the 1.0 release promises,
+and every minor after it — 34 is the first, below — only adds to it, under
+these rules. From the library's 1.0.0 release on, for every 1.x release (the
+library's version, not the ABI's — "Two numbers, not one", above):
 
 - **Names stand.** Every entry point, struct, member, parameter, enumeration,
   enumerator, constant and callback keeps the name it has at 0.33, and every

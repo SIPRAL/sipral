@@ -5,15 +5,15 @@ Copyright (c) 2026 Tiberiu Balasea
 
 # Contributing
 
-## Code contributions are closed until 1.0
+## Code contributions wait for a contributor licence agreement
 
 Sipral is dual-licensed, and the commercial arm only exists because one party
 holds every copyright in the tree. A single merged patch without a signed
 agreement takes that away and cannot be undone without rewriting the code.
-Before 1.0 the cost of getting that wrong is higher than the value of the
-patches, so the answer is a flat no rather than a case-by-case one.
+Before 1.0 the cost of getting that wrong was higher than the value of the
+patches, so the answer was a flat no rather than a case-by-case one.
 
-After 1.0, code is accepted under a contributor licence agreement. That
+From 1.0, code is accepted under a contributor licence agreement. That
 agreement is not written yet; it will be published in this file before the first
 patch is taken, and a signature is confirmed before a merge.
 

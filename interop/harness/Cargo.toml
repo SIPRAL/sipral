@@ -24,7 +24,7 @@ publish = false
 # it is pure Rust. `ice` beside it, for the same reason and for the flows that
 # require ICE (src/ice_lite.rs, src/ice_nat.rs), and `stun` for the second of
 # those, which asks coturn where each end's media socket appears.
-sipral = { path = "../../crates/sipral", version = "0.0.1", default-features = false, features = [
+sipral = { path = "../../crates/sipral", version = "1.0.0", default-features = false, features = [
     "dtls",
     "ice",
     "stun",
@@ -46,7 +46,7 @@ sipral-core.workspace = true
 # flow. default-features = false for the same reason as `sipral` above: this
 # crate never encodes Opus, and pulling it in would ask Windows for a C++
 # toolchain over nothing this flow uses.
-sipral-media = { path = "../../crates/sipral-media", version = "0.0.1", default-features = false }
+sipral-media = { path = "../../crates/sipral-media", version = "1.0.0", default-features = false }
 # The run's own entropy (`run_seed` in src/main.rs), the same crate and the
 # same version `crates/sipral/Cargo.toml` already pulls in for the identical
 # reason — already in this workspace's dependency graph, so naming it here
@@ -56,7 +56,7 @@ getrandom = "0.2.17"
 # that mutes one call of two (src/own_controls.rs) needs the engine's pump,
 # its per-call controls and its meters, and the containers it runs in have
 # no sound card. `fake` is the engine's own test backend, built for this.
-sipral-audio = { path = "../../crates/sipral-audio", version = "0.0.1", features = ["fake"] }
+sipral-audio = { path = "../../crates/sipral-audio", version = "1.0.0", features = ["fake"] }
 
 # Two flows whose audio is a real device's, one per desktop this stack
 # targets: a call whose microphone and earpiece are PipeWire nodes
@@ -73,7 +73,7 @@ sipral-audio = { path = "../../crates/sipral-audio", version = "0.0.1", features
 # The recording flow's recorder opens the SRTP copies an encrypted call's
 # recording session sends (src/protocols.rs), with the transform the stack
 # itself runs; tests only.
-sipral-rtp = { path = "../../crates/sipral-rtp", version = "0.0.1" }
+sipral-rtp = { path = "../../crates/sipral-rtp", version = "1.0.0" }
 
 [features]
 opus = ["sipral/opus"]
@@ -81,10 +81,10 @@ pipewire = ["dep:sipral-io-pipewire"]
 wasapi = ["dep:sipral-io-wasapi"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sipral-io-pipewire = { path = "../../crates/sipral-io-pipewire", version = "0.0.1", optional = true }
+sipral-io-pipewire = { path = "../../crates/sipral-io-pipewire", version = "1.0.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sipral-io-wasapi = { path = "../../crates/sipral-io-wasapi", version = "0.0.1", optional = true }
+sipral-io-wasapi = { path = "../../crates/sipral-io-wasapi", version = "1.0.0", optional = true }
 
 [lints]
 workspace = true

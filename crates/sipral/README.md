@@ -6,6 +6,6 @@ A SIP + RTP client stack written in Rust, with Swift, .NET, Kotlin and Python bi
 
 It opens no socket and no audio device, and it reads no clock. The application owns all three, which is what lets the same stack run under Tokio, Swift structured concurrency, a .NET task or a bare event loop.
 
-Pre-release: the C ABI is not frozen and neither is this API. Dual-licensed AGPL-3.0 / commercial.
+This Rust API is not part of the Sipral 1.0 release and makes no compatibility promise: what 1.0 promises is the C ABI and the language packages over it. The `sipral` name on crates.io is a reservation at 0.0.1; the 1.0 release does not publish this crate. Dual-licensed AGPL-3.0 / commercial.
 
 https://sipral.org

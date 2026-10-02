@@ -13,7 +13,7 @@
 [package]
 name = "sipral-aec-webrtc"
 description = "A Processor over webrtc-audio-processing, attachable from an application, not linked by the facade."
-version = "0.0.1"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
@@ -25,7 +25,7 @@ categories = ["network-programming", "multimedia::audio"]
 publish = false
 
 [dependencies]
-sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+sipral-media = { path = "../sipral-media", version = "1.0.0", default-features = false }
 webrtc-audio-processing = { version = "2.1.0", default-features = false, features = ["bundled"] }
 
 # An empty table of its own, not just the root Cargo.toml's `exclude`: this

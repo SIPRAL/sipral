@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "sipral"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "sipral-core",
  "sipral-headless",
@@ -608,11 +608,11 @@ dependencies = [
 
 [[package]]
 name = "sipral-core"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "sipral-dtls"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "hmac",
@@ -640,25 +640,25 @@ dependencies = [
 
 [[package]]
 name = "sipral-headless"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "sipral-media"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "opus",
 ]
 
 [[package]]
 name = "sipral-nat"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "sipral-core",
 ]
 
 [[package]]
 name = "sipral-rtp"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-stir"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "p256",
  "x509-cert",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "sipral-ua"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "sipral-core",
 ]

@@ -965,6 +965,48 @@ load average above a hundred on eight cores, so the per-frame and set-up
 times above were not measured again: a wall-clock figure read on it would
 say more about the machine than about the library.
 
+## 2 October 2026 — `1.0.0`, the release, at ABI 0.36
+
+Apple M-series, macOS, `rustc 1.95.0`, release profile, `./scripts/bench.sh`
+as it stands, on the release tree (the code the `v1.0.0` tag carries). The
+load average was 4.7 when the run started and 10.5 when it ended, on eight
+cores shared with other work.
+
+| What | Number | How |
+|---|---|---|
+| Shared library, `libsipral_ffi.dylib` | 5.20 MB | 5 201 264 bytes as built, the crate's default features; stripping again changes nothing |
+| Audio, per frame of 20 ms, 200 calls on 4 threads | 7.6 µs of wall time | the load test as `bench.sh` runs it: a minute of G.711 per call, in-band digit detection running on every frame (below) |
+| The same, one call | 7.1 µs | the same per frame as with two hundred: no call waited on another (0 busy) |
+| Opening a stack | 0.1–1.0 ms | the first stack in a process pays for its own lazy initialisation |
+| Bringing one call up | 144–414 µs | the load test's own, placing the INVITE, reading the answer, opening the session |
+| Memory per call, the load test | 94.6 KB | peak resident memory with 200 calls against one, over 199 |
+| Signalling, a call set up | 146–243 µs caller, 369–442 µs callee | a hundred and then a thousand calls, each challenged, answered with a reliable 180 and PRACK, held, resumed and hung up |
+| Signalling, per transaction | 41.6–56.5 µs caller, 107.9–112.7 µs callee | the same two runs |
+| Signalling, messages a second | 62 000–84 000 caller, 31 000–32 000 callee | the same two runs |
+| A live call's memory, counted by the test's allocator | 16.3–18.6 KB signalling and 48.4–48.5 KB media per end | settled, once the transactions that set it up are gone |
+| A frame of codec, one call | PCMU 0.51 µs, PCMA 0.31 µs, G.722 18.5 µs, Opus 94.9 µs, G.729 99.6 µs | encode and decode together, the codec layer alone |
+
+**The per-frame figure is not the 23 September one, and the difference is
+one feature.** The load test answers its calls with G.711 and no
+`telephone-event`, and since 29 September a call that negotiated no
+telephone event listens for keypad digits in the far end's audio itself
+(`sipral_stack_config_t::dtmf_detection`, `docs/05-media.md`): a windowed
+Goertzel filter bank over a sliding window, on every frame. A profile of the
+load test (`sample`, a build with line tables) puts about nine in ten of the
+samples taken in the library's own code in that analyser
+(`sipral_media::inband::analysis`). The same test with `telephone-event`
+added to its answer — a local change for the measurement, not committed — so
+that detection stays off, read 0.54–0.60 µs a frame with two hundred calls
+and 0.30–0.34 µs with one at a load average of 5 (1.4–1.8 µs and 0.32–0.34
+µs at 22 to 26), at or under the 23 September figures; the unchanged test,
+run again at that load average of 5, read 7.7 µs. So a call whose far end
+sends digits as RTP events costs what it did, and a call that has to be
+listened to costs about 7 µs a frame more: about a third of a millisecond of
+one core a second, per call.
+
+Not measured again: five and ten thousand calls held (`bench.sh scale`,
+29 September), which wants the machine to itself.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

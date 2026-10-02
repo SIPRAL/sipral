@@ -15,8 +15,8 @@ name = "diag-export"
 path = "src/main.rs"
 
 [dependencies]
-sipral-core = { path = "../../crates/sipral-core", version = "0.0.1" }
-sipral-diag = { path = "../../crates/sipral-diag", version = "0.0.1" }
+sipral-core = { path = "../../crates/sipral-core", version = "1.0.0" }
+sipral-diag = { path = "../../crates/sipral-diag", version = "1.0.0" }
 
 [lints]
 workspace = true

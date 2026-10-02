@@ -26,20 +26,20 @@ ice = ["sipral/ice"]
 
 [dependencies]
 # a call's session, which is what the pump captures into and plays out of
-sipral = { path = "../sipral", version = "0.0.1", default-features = false }
+sipral = { path = "../sipral", version = "1.0.0", default-features = false }
 # the resampler between a device's rate and a call's, and the mixer's arithmetic
-sipral-media = { path = "../sipral-media", version = "0.0.1", default-features = false }
+sipral-media = { path = "../sipral-media", version = "1.0.0", default-features = false }
 # gain, mute and the meter, which every backend applies to its own frames
-sipral-io-common = { path = "../sipral-io-common", version = "0.0.1" }
+sipral-io-common = { path = "../sipral-io-common", version = "1.0.0" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "0.0.1" }
+sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "1.0.0" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sipral-io-wasapi = { path = "../sipral-io-wasapi", version = "0.0.1" }
+sipral-io-wasapi = { path = "../sipral-io-wasapi", version = "1.0.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]
-sipral-io-aaudio = { path = "../sipral-io-aaudio", version = "0.0.1" }
+sipral-io-aaudio = { path = "../sipral-io-aaudio", version = "1.0.0" }
 
 [lints]
 workspace = true

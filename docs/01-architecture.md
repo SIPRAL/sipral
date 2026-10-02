@@ -285,9 +285,9 @@ picture are allowed to meet. An application that just wants a softphone stack
 depends on this one crate and gets `sipral-ua` plus a media pipeline
 re-exported under one name.
 
-It is still the only crate with `publish = true` and the only one that ships
-before 1.0. The crates.io name is not held yet: the upload has not
-happened.
+It is the only crate with `publish = true`, and that is for the name: `sipral`
+0.0.1 on crates.io is a reservation. The 1.0 release publishes the C library
+and the language packages, not the crates (`11-testing.md`, "Releasing").
 What it now also carries is the join:
 
 - **`CodecCatalog` and `Codec`** — what this build actually contains, in the

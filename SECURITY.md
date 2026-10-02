@@ -98,6 +98,7 @@ whoever reads a scan without reading the configuration.
 
 ## Supported versions
 
-There are no releases yet, so the supported version is the current `main`. Once
-releases start: before 1.0, only the latest; after 1.0, the current minor and
-the one before it.
+From 1.0.0 on, security fixes reach the current minor release and the one
+before it: at 1.0.0, that is 1.0.x alone. The supported artefacts are the C
+library and the language packages a release publishes; the Rust crates are
+not part of a release (`docs/11-testing.md`, "Releasing").
