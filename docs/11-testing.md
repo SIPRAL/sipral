@@ -921,6 +921,29 @@ where the other carried it in nearly all; each of its half seconds still
 had the tone in it. Against the container lab's Asterisk both read the tone
 in every reading.
 
+On 2 October 2026 the tree that writes an oversize request compact, keeps
+the account's password to its own server's realm and opens the audio
+devices off the stack's lock (still ABI 0.35) ran against the same PBX, the
+same way and with its configuration untouched: the library and the Rust
+harness built on the second lab machine from this tree, run in one
+container on the PBX host's network, from four of the extensions the
+earlier runs used — the one that requires SDES and three with no SRTP.
+Nothing was left registered afterwards.
+
+| Flow | Driven by | Result |
+|---|---|---|
+| register, the password answering only the realm the PBX first challenged with | Rust harness | pass: five challenges in the run, every one for the realm `asterisk` and each answered — the REGISTERs and the INVITEs of the two calls below — and the binding given back |
+| a call held and resumed with every request written compact (RFC 3261 §7.3.3), to the echo test | Rust harness | pass: 12 of 12 requests compact, the challenged INVITE and the ACK of its 401 among them; held, resumed, 105 packets sent and 102 back |
+| SRTP best effort with four codecs (Opus, PCMU, PCMA, G.722) from the extension that requires SDES, TCP not allowed, registered first, digits sent as named events, to the echo test | Python layer's datagram caller | pass: the first INVITE went in full at 1100 bytes; the answer to the challenge, 1389 bytes in full (the 1100 and a 289-byte `Authorization`), went over UDP compact and without its `Allow` at 1239 bytes, and no stream was asked for; the PBX took `AES_CM_128_HMAC_SHA1_80`, the second of the two lines offered; PCMU; the `1` started the echo and the `2` came back from it; held, resumed and hung up, 753 packets sent and 749 received |
+| an SDES call through the PBX from the extension that requires SDES to one with no SRTP, a Python stack at each end: held and resumed by the far extension, then by this end, three seconds after each | Python layer | pass: on the SDES leg the PBX took the second line, `AES_CM_128_HMAC_SHA1_80`, and answered this end's own hold and resume on it; 150 frames went each way in each three seconds, talking, held by the far end, resumed by it, held here and resumed here; the BYE was on the wire 40 ms after the hangup was asked |
+| a call hung up while its devices open (fakes taking a second for each half of one duplex unit), to the echo test | Rust harness | pass: attach 0 ms, detach 20 ms, the BYE on the wire 20 ms after the hangup was asked and the call ended 25 ms after it; the open finished two seconds later and its unit was let go of |
+
+Read the fourth row with the PBX's configuration in mind: `moh_passthrough`
+is off on every extension, so a hold from the far extension stays at the
+PBX, which plays its own music to the SDES leg and sends that end nothing
+to answer. A far end that re-offers an SDES call itself, on the line it took
+second, is the container lab's `farhold` flow against FreeSWITCH.
+
 Known peer behaviours worth writing down rather than rediscovering:
 
 - FreeSWITCH ships with 100rel disabled. PRACK is implemented for carriers, not
