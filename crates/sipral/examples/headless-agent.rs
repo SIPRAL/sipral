@@ -58,8 +58,11 @@
 //! holds three each. With `--max-calls` and no `--invite-burst`, the guard
 //! against scanners follows the ceiling too: twice `N` INVITEs from one
 //! address at once — a full ceiling, ended, and a second full one straight
-//! after it — and `N` more a second after that, so the agent's own guard
-//! never turns a call away that the ceiling would have let in.
+//! after it — and `N` more a second after that, so a rush up to the ceiling,
+//! and a second one as soon as the first has ended, meets the ceiling and
+//! not the guard. Calls shorter than a second, offered faster than `N` a
+//! second for longer than that, still meet the guard: past its burst it
+//! lets `N` a second in, whatever room the ceiling has.
 //! `--invite-burst` given as well is taken as it is, and the guard then
 //! refuses with 480 whatever it would refuse at that rate. Each call holds
 //! a UDP socket for its audio, two when the far end keeps RTCP apart, so
@@ -77,7 +80,10 @@
 //! did. `quit` hangs every call up, gives the registration up and exits
 //! once both are done or five seconds have passed. The end of standard
 //! input is not a command: under a service manager with standard input
-//! closed, the agent goes on answering.
+//! closed, the agent goes on answering. Started in the background of an
+//! interactive shell (`&`), it is given `< /dev/null`: a background job
+//! that reads the terminal is stopped (`SIGTTIN`) until it is brought to
+//! the foreground.
 //!
 //! A request the stack will not put in a UDP datagram (RFC 3261
 //! §18.1.1: over 1300 bytes with no known path MTU) is said on one line,
