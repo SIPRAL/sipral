@@ -2850,7 +2850,7 @@ call happens to hit the difference first.
 release — is `version` in the root `Cargo.toml`'s `[workspace.package]`,
 which every crate and every language package ships under and
 `scripts/version.sh` writes everywhere a copy is kept (`11-testing.md`,
-"Releasing"). The *ABI version* — 0.36 at that same release — is
+"Releasing"). The *ABI version* — 1.0 at that same release — is
 `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH`, printed into the header
 and every binding, and it is the only one a binding compares at load.
 Neither moves the other: a release that fixes a bug and grows no declaration
@@ -2858,8 +2858,10 @@ raises the library version and leaves the ABI's where it was, and a release
 that grows the surface raises both, each by its own rule. A library version
 says which release a package came from; the ABI version says which header it
 speaks. The promise 1.0 makes is stated against the second: for every 1.x
-release, the surface frozen at ABI 0.33 ("The freeze", below) stands and a
-later minor only appends to it.
+release, ABI 1.0 — the surface frozen at 0.33, as 0.36 left it ("The
+freeze" and "ABI 1.0", below) — stands, a later ABI minor only appends to
+it, and a binding built against any 1.x minor keeps loading against every
+later 1.x library.
 
 Which number moves is a rule about the printed surface and not about the Rust
 behind it. `SIPRAL_ABI_VERSION_MAJOR`, `_MINOR` and `_PATCH` in
@@ -2868,13 +2870,14 @@ is what they mean:
 
 - **major**, when a declaration that was published changes meaning, changes
   shape or goes away. Nothing built against one major works against another.
-  While it is 0, `sipral_abi_check` takes an exact match: the surface frozen
-  at minor 33 ("The freeze", below) is what the 1.0 release promises, but the
-  check does not take a binding printed at one 0.x minor against a library
-  at another, so a package goes with the native library of its own release.
-  From ABI 1.0 a binding built against an earlier minor of the same major
-  keeps working: the check takes any minor up to the library's own. The
-  library's 1.0.0 release is at ABI 0.36, not ABI 1.0.
+  Within a major, a binding built against an earlier minor keeps working:
+  `sipral_abi_check` takes any minor up to the library's own, so a binding
+  printed at 1.k loads against a library at 1.m for every m ≥ k, and one
+  printed at a later minor than the library's is refused, since it may call
+  or fill in what that library does not have. While the major was 0 the
+  check took an exact minor and promised nothing between two of them; the
+  library's 1.0.0 release is at ABI 1.0, and the major refuses every binding
+  printed at 0.x, 0.36's included.
 - **minor**, for anything the header gains: a function, a struct member, an
   enumerator, a published constant, a type alias — everything the generator
   prints, and not only the function and the struct member the rule used to
@@ -3443,3 +3446,37 @@ list (Swift `SipralEvent.challengeData`, .NET `SipralEventArgs.Challenge`,
 Python `fields["realms"]`, Dart `SipralStackEvent.challengeRealms`, Kotlin
 and the JVM jar `declinedChallengeOf`, React Native the `challengeDeclined`
 event on the client and the account).
+
+## ABI 1.0
+
+ABI 1.0 is 0.36's surface under a new number, and the version the 1.0.0
+release ships at. Nothing was added, removed or reshaped: every name,
+number, member, offset and pin is where 0.36 had it, and
+`bindings/c/abi-sizes.txt` did not change. What moved is the three version
+constants and the rule `sipral_abi_check` applies to them.
+
+**What 1.x promises.** A binding built against ABI 1.k loads against a
+library at 1.m for every m ≥ k, and works there as it did against 1.k: what
+"The freeze" lists stands, and a later minor only appends a function, a
+member after a struct's last one, an enumerator, a constant or an event
+kind. A binding built against a later minor than the library it finds is
+refused at load, with both versions named, rather than at the first call
+that reaches for what that library lacks. The pins stay where minor 33 put
+them, so a struct a caller declares at any length a 1.x header gave it is
+taken, and the members it did not send read as zero.
+
+**Every 0.x binding is refused**, 0.36's included, although its surface is
+this one: 0.x promised nothing between two minors, and a package that went
+out against one is matched with its own release's library rather than taken
+on trust. A C caller that never asks `sipral_abi_check` and declares its
+structs at their 0.33 to 0.36 lengths is still served by the pins.
+
+**What would be a 2.0**: a published declaration that changes meaning,
+changes shape or goes away — a member removed, moved or retyped, an
+enumerator or status renumbered, a pin moved, a convention of the header's
+conventions block or of the callback table changed, an entry point that
+stops accepting what it accepted. Each of these is a new major, with every
+binding regenerated and every pin and offset free to move once; the gate
+holds pins and offsets to the last commit and lets them move only with the
+major. A fix that changes no declaration is a patch, and is not asked about
+at load.

@@ -61,6 +61,67 @@ void main() {
     });
   });
 
+  group('the check Sipral.open makes keeps the 1.x rule', () {
+    (int, int) library() {
+      final version = calloc<SipralAbiVersion>();
+      try {
+        version.ref.size = ffi.sizeOf<SipralAbiVersion>();
+        expect(sipral.abiVersion(version), SipralStatus.ok);
+        return (version.ref.major, version.ref.minor);
+      } finally {
+        calloc.free(version);
+      }
+    }
+
+    String lastError() => using((arena) {
+      final buffer = arena<ffi.Char>(512);
+      expect(
+        sipral.lastErrorMessage(buffer, 512, ffi.nullptr),
+        SipralStatus.ok,
+      );
+      return buffer.cast<Utf8>().toDartString();
+    });
+
+    void refused(int major, int minor) {
+      expect(
+        sipral.abiCheck(major, minor),
+        SipralStatus.unsupportedVersion,
+        reason: '$major.$minor was served',
+      );
+      expect(lastError(), contains('$major.$minor'));
+    }
+
+    test('the minor this binding was printed against is served', () {
+      expect(
+        sipral.abiCheck(Sipral.abiVersionMajor, Sipral.abiVersionMinor),
+        SipralStatus.ok,
+      );
+    });
+
+    // a library newer than its binding: every earlier minor of this major
+    // is a binding the library in hand is newer than
+    test('a binding built against an earlier minor is served', () {
+      final (major, libraryMinor) = library();
+      for (var minor = 0; minor <= libraryMinor; minor++) {
+        expect(
+          sipral.abiCheck(major, minor),
+          SipralStatus.ok,
+          reason: '$major.$minor',
+        );
+      }
+    });
+
+    test('a binding built against a later minor is refused', () {
+      final (major, minor) = library();
+      refused(major, minor + 1);
+    });
+
+    test('another major is refused', () {
+      refused(Sipral.abiVersionMajor + 1, 0);
+      refused(0, 36);
+    });
+  });
+
   test('a status is named by the library', () {
     final name = sipral.statusName(SipralStatus.invalidArgument);
     expect(name.cast<Utf8>().toDartString(), isNotEmpty);

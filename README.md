@@ -81,19 +81,22 @@ signalling over UDP with an account's own TCP or TLS connection beside it.
 
 ## Status
 
-**1.0.0, at C ABI 0.36.** These are two numbers on purpose: 1.0.0 is the
-release every package ships under, and 0.36 is the version of the C
+**1.0.0, at C ABI 1.0.** These are two numbers on purpose: 1.0.0 is the
+release every package ships under, and 1.0 is the version of the C
 interface, which `sipral_abi_check` compares when a binding loads
 ([`docs/08-ffi.md`, "Versioning"](docs/08-ffi.md#versioning)).
 
 What 1.0 promises, for every 1.x release: the C ABI surface frozen at minor
-0.33 — names, numbers, struct layouts and ownership rules
-([`docs/08-ffi.md`, "The freeze"](docs/08-ffi.md#the-freeze-abi-033)) —
-stands, and a later minor only appends to it; the gate holds every pinned
-struct length and every member's offset to the commit before it. Every
-binding asks the native library it loads whether it speaks the ABI the
-binding was printed against, and while the ABI's major is 0 that check takes
-an exact minor: a package goes with the native library of its own release.
+0.33 and carried into ABI 1.0 unchanged — names, numbers, struct layouts and
+ownership rules
+([`docs/08-ffi.md`, "The freeze"](docs/08-ffi.md#the-freeze-abi-033), and
+["ABI 1.0"](docs/08-ffi.md#abi-10)) — stands, and a later minor only
+appends to it; the gate holds every pinned struct length and every member's
+offset to the commit before it. Every binding asks the native library it
+loads whether it speaks the ABI the binding was printed against, and that
+check keeps older applications working: a binding built against ABI 1.k
+loads against any library at 1.m with m ≥ k, and one built against a later
+minor than the library's is refused at load with both versions named.
 The Rust crates are not part of the release and their API promises nothing;
 the `sipral` name on crates.io stays the 0.0.1 reservation it is. Security
 fixes reach the current minor release and the one before it

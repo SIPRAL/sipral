@@ -402,11 +402,36 @@ private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
     return "a settle after the module was invalidated was rejected as closed"
 }
 
+/** The check the Kotlin layer under this module makes at load keeps the 1.x
+ * rule, and a refusal of it reaches JavaScript as `unsupportedVersion`
+ * naming the caller's version: within this major every minor up to the
+ * library's own is served -- a binding the library is newer than -- and a
+ * later minor, another major or any 0.x is refused. */
+private fun theAbiCheckKeepsTheOneXRule(): String {
+    val library = Sipral.abiVersion()
+    assertEquals(Sipral.ABI_VERSION_MAJOR, library.major)
+    assertTrue(library.minor >= Sipral.ABI_VERSION_MINOR, "library minor ${library.minor}")
+    for (minor in 0L..library.minor) {
+        SipralReactCore.guarded { Sipral.abiCheck(library.major, minor) }
+    }
+    for ((major, minor) in listOf(library.major to library.minor + 1, library.major + 1 to 0L, 0L to 36L)) {
+        val refused = assertFailsWith<SipralRefusal>("$major.$minor was served") {
+            SipralReactCore.guarded { Sipral.abiCheck(major, minor) }
+        }
+        val sentence = refused.message.orEmpty()
+        assertEquals("unsupportedVersion", refused.code, sentence)
+        assertTrue(sentence.contains("$major.$minor"), sentence)
+    }
+    return "the ABI check served ${library.major}.0 to ${library.major}.${library.minor} and refused a later minor, " +
+        "another major and 0.36"
+}
+
 fun main() {
     val said = try {
         everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
-            "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary()
+            "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
+            theAbiCheckKeepsTheOneXRule()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

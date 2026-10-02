@@ -2790,6 +2790,43 @@ static void a_call_restarts_its_ice(void)
     sipral_stack_destroy(fixture.stack);
 }
 
+/* The 1.x rule, asked of the library this header came with: a caller built
+ * against any minor of this major up to the library's own is served -- the
+ * library being newer than its caller is the ordinary case once a later minor
+ * ships -- and one built against a later minor, another major or any 0.x is
+ * refused, with a last error naming the caller's version. */
+static void the_abi_check_keeps_the_1x_rule(void)
+{
+    sipral_abi_version_t version = { 0 };
+    uint32_t minor;
+    char said[32] = { 0 };
+    char error[512] = { 0 };
+
+    version.size = sizeof version;
+    expect("the library will not say its ABI version",
+           sipral_abi_version(&version) == SIPRAL_STATUS_OK);
+    expect("the library is at another major than its header",
+           version.major == SIPRAL_ABI_VERSION_MAJOR);
+    expect("the library is at an earlier minor than its header",
+           version.minor >= SIPRAL_ABI_VERSION_MINOR);
+    for (minor = 0; minor <= version.minor; minor++) {
+        expect("a caller at an earlier or equal minor of this major was refused",
+               sipral_abi_check(version.major, minor) == SIPRAL_STATUS_OK);
+    }
+    expect("a caller at a later minor than the library was served",
+           sipral_abi_check(version.major, version.minor + 1) ==
+               SIPRAL_STATUS_UNSUPPORTED_VERSION);
+    snprintf(said, sizeof said, "%u.%u", (unsigned)version.major,
+             (unsigned)(version.minor + 1));
+    expect("the refusal does not name the caller's version",
+           sipral_last_error_message(error, sizeof error, NULL) == SIPRAL_STATUS_OK
+               && strstr(error, said) != NULL);
+    expect("a caller at the next major was served",
+           sipral_abi_check(version.major + 1, 0) == SIPRAL_STATUS_UNSUPPORTED_VERSION);
+    expect("a caller at ABI 0.36 was served",
+           sipral_abi_check(0, 36) == SIPRAL_STATUS_UNSUPPORTED_VERSION);
+}
+
 static void sizes_agree(void)
 {
 #define ASK(type)                                                             \
@@ -2873,6 +2910,7 @@ int main(void)
         printf("  smoke.c: this library does not speak the header's ABI\n");
         return 1;
     }
+    the_abi_check_keeps_the_1x_rule();
     sizes_agree();
     oldest_lengths_still_work();
     headers_cross_a_call();

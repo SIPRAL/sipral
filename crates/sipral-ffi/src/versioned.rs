@@ -84,7 +84,11 @@ pub(crate) unsafe trait Versioned: Copy {
 /// number is derived from it.
 ///
 /// The frozen ABI starts at minor 33: every pin names the member each struct
-/// ended with there. Changing one is wrong in every case but a struct whose
+/// ended with there. ABI 1.0 is that surface as minor 36 left it, carried
+/// into major 1 unchanged, and the pins with it: a caller compiled against
+/// 1.0 declares at least these lengths, so they turn none of them away, and
+/// the members appended from 0.34 to 0.36 come back zero for the rare caller
+/// that declares a shorter one. Changing one is wrong in every case but a struct whose
 /// first frozen version did not end where it says. `bindings/c/abi-sizes.txt`
 /// prints the member and the length it comes to on each layout, and the gate
 /// diffs it, so the change shows up twice.

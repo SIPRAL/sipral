@@ -22,8 +22,9 @@ use crate::versioned::{Versioned, write_versioned};
 
 constants! {
     /// The ABI's major version. Nothing published against one major works
-    /// against another.
-    pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 0;
+    /// against another; within one, a binding built against a minor works
+    /// against a library at that minor or any later one.
+    pub const SIPRAL_ABI_VERSION_MAJOR: u32 = 1;
 
     /// The ABI's minor version, raised by anything the header gains —
     /// everything the generator prints, and not only a function or a struct
@@ -31,7 +32,7 @@ constants! {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 36;
+    pub const SIPRAL_ABI_VERSION_MINOR: u32 = 0;
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     pub const SIPRAL_ABI_VERSION_PATCH: u32 = 0;
@@ -93,12 +94,28 @@ entry! {
     }
 }
 
+/// Whether a library at `library` (major, minor) serves a caller built
+/// against `caller`: the same major, and a minor no later than the library's.
+///
+/// Apart from `sipral_abi_check` so that the rule can be held to libraries
+/// other than this one — a later minor than this build has is the case a
+/// binding meets in the field and this build cannot show by itself.
+const fn serves(library: (u32, u32), caller: (u32, u32)) -> bool {
+    caller.0 == library.0 && caller.1 <= library.1
+}
+
 entry! {
     /// Whether this library can serve a binding generated against
     /// `major`.`minor`. Called once, at load, before anything else: by the
     /// binding itself where its language gives it somewhere to call from, and
     /// by the application where it does not. The Versioning section of
     /// `docs/08-ffi.md` says which binding is which.
+    ///
+    /// It can when `major` is this library's major and `minor` is no later
+    /// than this library's minor: a later minor only appends to an earlier
+    /// one, so a binding built against 1.0 loads against a library at 1.4,
+    /// and one built against 1.4 is turned away by a library at 1.0, which
+    /// lacks what 1.4 added.
     ///
     /// `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
     /// naming both versions, which is what the binding should put in the
@@ -109,16 +126,10 @@ entry! {
     ///
     /// Reads no memory the caller owns, and is safe to call from any thread.
     fn sipral_abi_check(major: u32, minor: u32) {
-        // while the major version is zero the ABI is not frozen and no minor
-        // promises anything about another; from 1.0 on, a binding built
-        // against an earlier minor of the same major keeps working
-        let compatible = major == SIPRAL_ABI_VERSION_MAJOR
-            && if SIPRAL_ABI_VERSION_MAJOR == 0 {
-                minor == SIPRAL_ABI_VERSION_MINOR
-            } else {
-                minor <= SIPRAL_ABI_VERSION_MINOR
-            };
-        if compatible {
+        if serves(
+            (SIPRAL_ABI_VERSION_MAJOR, SIPRAL_ABI_VERSION_MINOR),
+            (major, minor),
+        ) {
             return Ok(());
         }
         Err(fail(
@@ -204,7 +215,7 @@ entry! {
 mod tests {
     use super::{
         SIPRAL_ABI_VERSION_MAJOR, SIPRAL_ABI_VERSION_MINOR, SIPRAL_ABI_VERSION_PATCH,
-        SipralAbiVersion, sipral_abi_check, sipral_abi_struct_size, sipral_abi_version,
+        SipralAbiVersion, serves, sipral_abi_check, sipral_abi_struct_size, sipral_abi_version,
         sipral_abi_versioned_count,
     };
     use crate::abi::SURFACE;
@@ -316,17 +327,60 @@ mod tests {
     }
 
     #[test]
-    fn an_unfrozen_abi_promises_nothing_between_its_minors() {
-        assert_eq!(
+    fn every_minor_of_this_major_up_to_the_librarys_own_is_served() {
+        assert_ne!(
             SIPRAL_ABI_VERSION_MAJOR, 0,
-            "once the ABI freezes this rule changes and so does this test"
+            "the 1.x rule is for a frozen major"
         );
+        for minor in 0..=SIPRAL_ABI_VERSION_MINOR {
+            assert_eq!(
+                unsafe { sipral_abi_check(SIPRAL_ABI_VERSION_MAJOR, minor) },
+                SipralStatus::Ok,
+                "a binding built against {SIPRAL_ABI_VERSION_MAJOR}.{minor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binding_built_against_a_later_minor_is_refused_and_says_which_two_disagree() {
+        let later = SIPRAL_ABI_VERSION_MINOR + 1;
         assert_eq!(
-            unsafe { sipral_abi_check(0, SIPRAL_ABI_VERSION_MINOR + 1) },
+            unsafe { sipral_abi_check(SIPRAL_ABI_VERSION_MAJOR, later) },
             SipralStatus::UnsupportedVersion
         );
+        let message = last_error_text();
+        assert!(
+            message.contains(&format!("{SIPRAL_ABI_VERSION_MAJOR}.{later}")),
+            "the message does not name the caller: {message}"
+        );
+    }
+
+    /// The 1.x promise held against libraries this build is not: a library
+    /// at a later minor serves a binding at an earlier one, and the reverse
+    /// is refused.
+    #[test]
+    fn a_library_at_a_later_minor_serves_a_binding_at_an_earlier_one() {
+        assert!(serves((1, 0), (1, 0)), "equal minors");
+        assert!(serves((1, 4), (1, 0)), "a newer library, an older binding");
+        assert!(serves((1, 4), (1, 3)), "a newer library, an older binding");
+        assert!(!serves((1, 0), (1, 1)), "an older library, a newer binding");
+        assert!(!serves((1, 3), (1, 4)), "an older library, a newer binding");
+        assert!(!serves((1, 4), (2, 0)), "another major, above");
+        assert!(!serves((2, 0), (1, 9)), "another major, below");
+    }
+
+    /// Every 0.x binding is refused, the 0.36 one with this very surface
+    /// included: 0.x promised nothing between its minors, and a binding
+    /// printed then was never told that 1.0 would keep its shapes.
+    #[test]
+    fn a_binding_built_against_major_zero_is_refused() {
         assert_eq!(
-            unsafe { sipral_abi_check(0, SIPRAL_ABI_VERSION_MINOR.wrapping_sub(1)) },
+            unsafe { sipral_abi_check(0, 36) },
+            SipralStatus::UnsupportedVersion
+        );
+        assert!(last_error_text().contains("0.36"), "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_abi_check(0, SIPRAL_ABI_VERSION_MINOR) },
             SipralStatus::UnsupportedVersion
         );
     }

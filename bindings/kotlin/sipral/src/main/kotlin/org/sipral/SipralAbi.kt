@@ -9518,7 +9518,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(0, 36)
+        agree(1, 0)
     }
 
     /**
@@ -9734,9 +9734,10 @@ object Sipral {
 
     /**
      * The ABI's major version. Nothing published against one major works
-     * against another.
+     * against another; within one, a binding built against a minor works
+     * against a library at that minor or any later one.
      */
-    const val ABI_VERSION_MAJOR: Long = 0
+    const val ABI_VERSION_MAJOR: Long = 1
 
     /**
      * The ABI's minor version, raised by anything the header gains —
@@ -9746,7 +9747,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 36
+    const val ABI_VERSION_MINOR: Long = 0
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -10329,6 +10330,12 @@ object Sipral {
      * binding itself where its language gives it somewhere to call from, and
      * by the application where it does not. The Versioning section of
      * `docs/08-ffi.md` says which binding is which.
+     *
+     * It can when `major` is this library's major and `minor` is no later
+     * than this library's minor: a later minor only appends to an earlier
+     * one, so a binding built against 1.0 loads against a library at 1.4,
+     * and one built against 1.4 is turned away by a library at 1.0, which
+     * lacks what 1.4 added.
      *
      * `SIPRAL_STATUS_UNSUPPORTED_VERSION` when it cannot, with a last error
      * naming both versions, which is what the binding should put in the

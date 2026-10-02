@@ -19,7 +19,9 @@ interesting.
 1.0 is a promise about the C ABI rather than the end of a phase: the surface
 frozen at ABI minor 33 holds for every 1.x release of the library (`08-ffi.md`,
 "The freeze"), later ABI minors only appending to it. The 1.0.0 release is at
-ABI 0.36; the library's version and the ABI's are two numbers, each moved by
+ABI 1.0, which is 0.36's surface under the first frozen major (`08-ffi.md`,
+"ABI 1.0"): a binding built against ABI 1.k loads against every later 1.x
+library. The library's version and the ABI's are two numbers, each moved by
 its own rule (`08-ffi.md`, "Versioning"). What 1.0 publishes is the C library
 and the language packages over it; the Rust crates are not part of it, and
 their API promises nothing (`11-testing.md`, "Releasing").

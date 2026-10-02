@@ -108,6 +108,6 @@ class SipralNativesTest {
         assertSame(platform, SipralNatives.loaded())
         SipralNatives.load()
         assertSame(platform, SipralNatives.loaded())
-        assertEquals(0L, org.sipral.Sipral.abiVersion().major)
+        assertEquals(org.sipral.Sipral.ABI_VERSION_MAJOR, org.sipral.Sipral.abiVersion().major)
     }
 }
