@@ -396,6 +396,10 @@ pub(crate) fn run(
                     media.receive_into(&mut session, now);
                 }
             }
+            // the devices open on a thread of the engine's own and are put
+            // under the calls by a service once they have answered, as the
+            // stack's poll does
+            engine.engine.service();
             engine.speak(now);
             let elapsed = now.saturating_duration_since(engine.started);
             if !engine.unmuted && elapsed >= MUTED {

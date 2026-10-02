@@ -4324,7 +4324,8 @@ static int slurp(const char *path, uint8_t *out, size_t room, size_t *len)
 }
 
 /* Fetch the certificate a verification asked for, the way an application
- * does it: over HTTP, from the URL the PASSporT named. Only a URL made of
+ * does it: over HTTPS, from the URL the PASSporT named, trusting what curl is
+ * told to (interop/stir/run.sh sets CURL_CA_BUNDLE). Only a URL made of
  * what a lab URL is made of is fetched, since it goes on a command line. */
 static int fetch(const char *url, uint8_t *out, size_t room, size_t *len)
 {
@@ -4619,7 +4620,7 @@ static int stir_call(const char *label, const char *key_path, const char *url,
  * -- a signed call verified and carried, an unsigned one refused 428 by a
  * strict account, and one signed by a certificate nobody trusts refused 437
  * -- the certificates made for the run by scripts/lab.sh's `security` step
- * (interop/stir/run.sh) and served over HTTP beside this process. */
+ * (interop/stir/run.sh) and served over HTTPS beside this process. */
 static int run_stir(void)
 {
     const char *key = getenv("SIPRAL_STIR_KEY");
