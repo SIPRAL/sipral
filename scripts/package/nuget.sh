@@ -13,11 +13,11 @@
 #   scripts/package/nuget.sh collect --out DIR [--rid RID ...]
 #       builds whatever RIDs *this* host can build for real -- osx-arm64 and
 #       osx-x64 on macOS with cargo, linux-x64 on Linux with Docker's
-#       rust:1.95-trixie (the toolchain this workspace is pinned to) -- and
-#       writes DIR/<rid>/<native file>. A RID neither of those covers
-#       (win-x64, win-arm64) is not this subcommand's job: build it directly
-#       with cargo on a Windows host and place the .dll at
-#       DIR/<rid>/sipral_ffi.dll by hand, the same shape this writes.
+#       rust:1.95-trixie (the toolchain this workspace is pinned to),
+#       linux-arm64 in the aarch64 cross image wherever Docker is, win-x64
+#       and win-arm64 on Windows under Git Bash with Rust's MSVC toolchain --
+#       and writes DIR/<rid>/<native file>. The packing host then takes every
+#       RID's directory, from whichever machine built it, as its --staging.
 #
 #   scripts/package/nuget.sh pack --out DIR --staging DIR [--rid RID ...] \
 #       [--dry-run] [--publish]
@@ -202,6 +202,29 @@ if [ "$CMD" = "collect" ]; then
                 fi
                 ;;
             win-x64|win-arm64)
+                case "$HOST_OS" in
+                    MINGW*|MSYS*|CYGWIN*)
+                        # Git Bash on Windows, with Rust's MSVC toolchain and
+                        # the Visual Studio build tools for the target's
+                        # architecture
+                        if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+                            fail "$rid: $triple not installed (rustup target add $triple)"; continue
+                        fi
+                        rm -f "$OUT/$rid/$FEATURES_MARKER"
+                        win_target="${CARGO_TARGET_DIR:-$ROOT/target}"
+                        if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" \
+                            --target-dir "$win_target" >"$OUT/.build-$rid.log" 2>&1; then
+                            mkdir -p "$OUT/$rid"
+                            cp "$win_target/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
+                            printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
+                            pass "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+                        else
+                            fail "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple:"
+                            tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
+                        fi
+                        continue
+                        ;;
+                esac
                 note "$rid: not built by this subcommand; on a Windows host run"
                 note "         cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple,"
                 note "         place the result at $OUT/$rid/$(native_name_of "$rid")"
@@ -221,13 +244,25 @@ STAGING="$(cd "$STAGING" && pwd)"
 
 command -v dotnet >/dev/null 2>&1 || { fail "dotnet not found"; printf '\nnuget.sh pack: failed\n'; exit 1; }
 
+step "one version"
+"$ROOT/scripts/version.sh" --check || { printf '\nnuget.sh pack: failed\n'; exit 1; }
+
 STAGE="$OUT/_stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/proj"
 cp -R "$ROOT/bindings/dotnet/Sipral/." "$STAGE/proj/"
 
-step "runtimes, from $STAGING, for $PACKAGE_ID, $VARIANT_LABEL"
+# The licence texts at the package's root, beside the README: the AGPL, the
+# commercial arm, and the third-party licences and notices of what the
+# natives link -- what the JVM jar carries under META-INF/.
+LICENCE_FILES=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-LICENSES.txt THIRD-PARTY-NOTICES.md)
 ITEMS=""
+for f in "${LICENCE_FILES[@]}"; do
+    cp "$ROOT/$f" "$STAGE/proj/$f"
+    ITEMS="$ITEMS    <None Include=\"$f\" Pack=\"true\" PackagePath=\"/\" />\n"
+done
+
+step "runtimes, from $STAGING, for $PACKAGE_ID, $VARIANT_LABEL"
 populated=0
 for rid in "${RIDS[@]}"; do
     native="$(native_name_of "$rid")"
@@ -290,6 +325,13 @@ if [ -n "$NUPKG" ]; then
             fi
         fi
     done
+    for f in README.md "${LICENCE_FILES[@]}"; do
+        printf '%s\n' "$listing" | grep -q " $f\$" && pass "carries $f" || fail "$NUPKG is missing $f"
+    done
+    nuspec=$(unzip -p "$NUPKG" "$PACKAGE_ID.nuspec" 2>/dev/null)
+    for element in '<license type="expression">' '<projectUrl>' '<repository type="git"' '<readme>' '<icon>' '<copyright>' '<tags>'; do
+        printf '%s\n' "$nuspec" | grep -qF "$element" && pass "the nuspec carries $element" || fail "the nuspec has no $element"
+    done
 else
     fail "no $PACKAGE_ID.<version>.nupkg landed in $OUT"
 fi
@@ -320,9 +362,9 @@ fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
-    printf '  not run: nothing ships to NuGet before the ABI freezes (docs/08-ffi.md).\n'
-    printf '  What the owner runs once it has: dotnet nuget push %s\n' "${NUPKG:-$OUT/$PACKAGE_ID.<version>.nupkg}"
-    printf '  --source https://api.nuget.org/v3/index.json --api-key <key>\n'
+    printf '  not run: the owner publishes, with every RID staged (not a --dry-run pack):\n'
+    printf '    dotnet nuget push %s\n' "${NUPKG:-$OUT/$PACKAGE_ID.<version>.nupkg}"
+    printf '      --source https://api.nuget.org/v3/index.json --api-key <key>\n'
 fi
 
 printf '\n'

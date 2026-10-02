@@ -8,15 +8,23 @@ build-backend = "hatchling.build"
 [project]
 name = "sipral"
 version = "0.0.1"
-description = "Sipral - Session Initiation Protocol Rust Audio Layer. Python bindings, over the C ABI."
+description = "Sipral - Session Initiation Protocol Rust Audio Layer. The Python binding over the C ABI, with the native library inside the wheel."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "AGPL-3.0-only"
-authors = [{ name = "SIPRAL" }]
+# PEP 639 reads a LicenseRef-, so PyPI gets both arms, as npm does; the
+# licence texts go into the wheel's .dist-info/licenses from the repository
+# root (scripts/package/wheels.sh), since PEP 639 keeps license-files inside
+# this directory
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+authors = [{ name = "Tiberiu Balasea" }]
 keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
     "Intended Audience :: Telecommunications Industry",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Communications :: Telephony",
     "Topic :: Communications :: Internet Phone",
@@ -26,6 +34,7 @@ dependencies = ["cffi>=1.15"]
 [project.urls]
 Homepage = "https://sipral.org"
 Repository = "https://github.com/SIPRAL/sipral"
+Changelog = "https://github.com/SIPRAL/sipral/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sipral"]

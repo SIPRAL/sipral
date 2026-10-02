@@ -6,11 +6,16 @@
     <Nullable>enable</Nullable>
     <PackageId>Sipral</PackageId>
     <Version>0.0.1</Version>
-    <Authors>SIPRAL</Authors>
-    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. .NET bindings. Pre-release name reservation; the first usable release follows.</Description>
+    <Authors>Tiberiu Balasea</Authors>
+    <Copyright>Copyright (c) 2026 Tiberiu Balasea</Copyright>
+    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding over the C ABI, with the native library for Windows, macOS and Linux inside the package.</Description>
+    <!-- the AGPL arm alone: nuget.org takes only licence identifiers the OSI
+         or the FSF approved, so the commercial arm's LicenseRef- cannot be
+         written here; LICENSING.md, linked from the README, states both -->
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
     <PackageProjectUrl>https://sipral.org</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SIPRAL/sipral</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageTags>sip;voip;rtp;telephony;softphone</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>

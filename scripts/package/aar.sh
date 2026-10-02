@@ -43,6 +43,14 @@
 # assemble runs anywhere kotlinc does, including with no natives at all
 # under --dry-run.
 #
+# Beside the archive, assemble writes what a Maven repository publishes with
+# it: sipral(-opus)-<version>.pom, carrying the name, description, URL, both
+# licences, the developer, the SCM and the one dependency an AAR cannot
+# carry inside itself, and sipral(-opus)-<version>-sources.jar. The group id
+# is bindings/jvm/pom.xml's `sipral.groupId`, the same one the JVM jar
+# publishes under, or SIPRAL_GROUP_ID when that names another. classes.jar
+# carries the licence texts under META-INF/sipral/.
+#
 # Both take --with-opus, for the variant that carries libopus. Without it,
 # collect-natives builds without sipral-ffi's `opus` feature and every other
 # default kept (features.sh says why and how), and writes the list it built
@@ -188,9 +196,21 @@ fi
 # assemble
 [ -z "$NATIVES" ] && { printf 'assemble needs --natives DIR\n' >&2; exit 2; }
 
+step "one version"
+"$ROOT/scripts/version.sh" --check || { printf '\naar.sh: failed\n'; exit 1; }
+AAR_VERSION="$("$ROOT/scripts/version.sh")"
+
 STAGE="$OUT/_stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/aar"
+
+# What every artefact carrying the natives carries beside them, as
+# bindings/jvm/pom.xml puts them in the JVM jar. Under a directory of their
+# own rather than at META-INF/ itself: the Android Gradle Plugin leaves
+# META-INF/LICENSE out of an APK by default, and two libraries' files at one
+# path stop the application's build.
+LICENCE_FILES=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-LICENSES.txt THIRD-PARTY-NOTICES.md)
+LICENCE_DIR="META-INF/sipral"
 
 step "classes, from bindings/kotlin"
 # org.sipral.idiomatic is compiled against kotlinx-coroutines-core-jvm, from
@@ -221,8 +241,10 @@ else
         KOTLIN_TARGET="2.2"
         if kotlinc -language-version "$KOTLIN_TARGET" -api-version "$KOTLIN_TARGET" -cp "$COROUTINES_JAR" \
             "${kt_sources[@]}" -d "$STAGE/classes" >"$STAGE/kotlinc.log" 2>&1; then
+            mkdir -p "$STAGE/classes/$LICENCE_DIR"
+            for f in "${LICENCE_FILES[@]}"; do cp "$ROOT/$f" "$STAGE/classes/$LICENCE_DIR/$f"; done
             ( cd "$STAGE/classes" && jar cf "$STAGE/aar/classes.jar" . )
-            pass "kotlinc for Kotlin $KOTLIN_TARGET, then jar cf classes.jar"
+            pass "kotlinc for Kotlin $KOTLIN_TARGET, then jar cf classes.jar, the licence texts under $LICENCE_DIR/"
             metadata=$(javap -v -cp "$STAGE/classes" org.sipral.Sipral 2>/dev/null \
                 | sed -n 's/^ *mv=\[\([0-9]*\),\([0-9]*\),.*/\1.\2/p' | head -1)
             [ "$metadata" = "$KOTLIN_TARGET" ] \
@@ -334,6 +356,10 @@ if [ -f "$AAR" ]; then
         printf '%s\n' "$classes" | grep -q " $class\$" \
             && pass "classes.jar carries $class" || fail "classes.jar is missing $class"
     done
+    for f in "${LICENCE_FILES[@]}"; do
+        printf '%s\n' "$classes" | grep -q " $LICENCE_DIR/$f\$" \
+            && pass "classes.jar carries $LICENCE_DIR/$f" || fail "classes.jar is missing $LICENCE_DIR/$f"
+    done
     for abi in "${ABIS[@]}"; do
         for lib in "${NATIVE_LIBS[@]}"; do
             [ -f "$NATIVES/jni/$abi/$lib" ] || continue
@@ -344,13 +370,82 @@ if [ -f "$AAR" ]; then
     done
 fi
 
+if [ -f "$AAR" ]; then
+    step "for a Maven repository"
+    ARTIFACT_ID="sipral$VARIANT_SUFFIX"
+    GROUP_ID="${SIPRAL_GROUP_ID:-$(sed -n 's|.*<sipral.groupId>\(.*\)</sipral.groupId>.*|\1|p' "$ROOT/bindings/jvm/pom.xml")}"
+    POM="$OUT/$ARTIFACT_ID-$AAR_VERSION.pom"
+    COROUTINES_VERSION=$(sed -n 's|.*<coroutines.version>\(.*\)</coroutines.version>.*|\1|p' "$ROOT/bindings/jvm/pom.xml")
+    cat >"$POM" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>$GROUP_ID</groupId>
+  <artifactId>$ARTIFACT_ID</artifactId>
+  <version>$AAR_VERSION</version>
+  <packaging>aar</packaging>
+  <name>Sipral for Android</name>
+  <description>Sipral - Session Initiation Protocol Rust Audio Layer. The Kotlin binding for Android, with the native libraries for arm64-v8a, armeabi-v7a and x86_64 inside the archive; $VARIANT_LABEL.</description>
+  <url>https://sipral.org</url>
+  <licenses>
+    <license>
+      <name>AGPL-3.0-only</name>
+      <url>https://www.gnu.org/licenses/agpl-3.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+    <license>
+      <name>LicenseRef-Sipral-Commercial</name>
+      <url>https://github.com/SIPRAL/sipral/blob/main/LICENSE-COMMERCIAL.md</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>Tiberiu Balasea</name>
+    </developer>
+  </developers>
+  <scm>
+    <url>https://github.com/SIPRAL/sipral</url>
+    <connection>scm:git:https://github.com/SIPRAL/sipral.git</connection>
+  </scm>
+  <dependencies>
+    <dependency>
+      <groupId>org.jetbrains.kotlinx</groupId>
+      <artifactId>kotlinx-coroutines-core</artifactId>
+      <version>$COROUTINES_VERSION</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+    if [ -z "$GROUP_ID" ] || [ -z "$COROUTINES_VERSION" ]; then
+        fail "bindings/jvm/pom.xml names no sipral.groupId or coroutines.version to write the POM from"
+    elif ! command -v xmllint >/dev/null 2>&1; then
+        # android.sh's image has no libxml2; the template above is the one
+        # every --dry-run of this script on the Mac lints
+        note "$(basename "$POM"): $GROUP_ID:$ARTIFACT_ID:$AAR_VERSION, not linted (no xmllint on this host)"
+    elif xmllint --noout "$POM" 2>"$STAGE/pom-lint.log"; then
+        pass "$(basename "$POM"): $GROUP_ID:$ARTIFACT_ID:$AAR_VERSION"
+    else
+        fail "$(basename "$POM") is not well-formed:"; sed 's/^/        /' "$STAGE/pom-lint.log"
+    fi
+    SOURCES="$OUT/$ARTIFACT_ID-$AAR_VERSION-sources.jar"
+    rm -f "$SOURCES"
+    if ( cd "$ROOT/bindings/kotlin/sipral/src/main/kotlin" && jar cf "$SOURCES" . ); then
+        pass "$(basename "$SOURCES")"
+    else
+        fail "jar cf $(basename "$SOURCES")"
+    fi
+fi
+
 # The SBOM sits beside sipral(.opus).aar, from sipral-ffi's own dependency
 # graph across every ABI this one archive carries (docs/10-roadmap.md).
 # --notices only for the variant whose feature list is
 # THIRD-PARTY-LICENSES.txt's own (no flags at all, opus included).
 if [ -f "$AAR" ]; then
     step "SBOM"
-    AAR_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
     SBOM_ARGS=(--crate sipral-ffi --features "$FFI_FEATURES" --target all \
         --artifact-name "sipral$VARIANT_SUFFIX" --artifact-version "$AAR_VERSION" \
         --artifact "$AAR" --out "$AAR.cdx.json")
@@ -362,12 +457,13 @@ if [ -f "$AAR" ]; then
     fi
 fi
 
-if [ "$PUBLISH" -eq 1 ]; then
+if [ "$PUBLISH" -eq 1 ] && [ -f "$AAR" ]; then
     step "publish"
-    printf '  not run: nothing ships to Maven before the ABI freezes (docs/08-ffi.md).\n'
-    printf '  What the owner runs once it has a Maven host: publish %s\n' "$AAR"
-    printf '  through that host'"'"'s usual upload (a Maven repository publish, or\n'
-    printf '  `gradle publish` once a Gradle project wraps it).\n'
+    printf '  not run: the owner publishes. To a Maven repository, signed, as\n'
+    printf '  %s:%s:%s:\n' "$GROUP_ID" "$ARTIFACT_ID" "$AAR_VERSION"
+    printf '    %s (as %s-%s.aar)\n' "$AAR" "$ARTIFACT_ID" "$AAR_VERSION"
+    printf '    %s\n' "$POM" "$SOURCES"
+    printf '  docs/11-testing.md, "Releasing", says what Maven Central asks beyond these.\n'
 fi
 
 printf '\n'

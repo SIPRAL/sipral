@@ -9,7 +9,7 @@
 # linux-x64 and linux-arm64 inside the jar, under org/sipral/jvm/native/.
 #
 #   scripts/package/jvm.sh --out DIR [--with-opus] [--no-qemu]
-#       needs Docker, Maven and a JDK carrying include/jni.h. linux-x64 is
+#       needs Docker, Maven, xmllint and a JDK carrying include/jni.h. linux-x64 is
 #       built inside quay.io/pypa/manylinux_2_28_x86_64, so that it links
 #       nothing newer than glibc 2.28, with Rust installed there (and cached
 #       under DIR/cache) at rust-toolchain.toml's own channel; linux-arm64 is
@@ -32,6 +32,16 @@
 #       tests run over it, and the jar's layout is checked as far as that
 #       pair goes. Maven resolves its plugins and the jar's dependencies from
 #       the local repository, and from Maven Central the first time.
+#       On a host that is not Linux -- a Mac -- there is no pair to build or
+#       load, and --dry-run proves what that host can: sipral-ffi
+#       type-checked for both Linux targets, and the JNI shims compiled (not
+#       linked) for both against glibc's own headers with `zig cc`. Linking,
+#       the glibc floor, `mvn verify` and the run under qemu are a Linux
+#       host's, and the run says so.
+#
+# Every run, --dry-run or not, first holds bindings/jvm/pom.xml to what
+# Maven Central shows and requires: a name, a description, a URL, both
+# licences, a developer, the SCM, and no address anywhere in it.
 #
 # --with-opus builds the variant carrying libopus, as sipral-jvm-opus;
 # features.sh says why the default leaves it out. The group id is
@@ -116,17 +126,90 @@ glibc_minor() {
     printf '%s\n' "${highest#GLIBC_2.}"
 }
 
+step "one version"
+"$ROOT/scripts/version.sh" --check || { FAIL=1; finish; }
+
+step "the POM, bindings/jvm/pom.xml"
+POM_SOURCE="$ROOT/bindings/jvm/pom.xml"
+if ! command -v xmllint >/dev/null 2>&1; then
+    fail "xmllint not found (libxml2)"
+elif xmllint --noout "$POM_SOURCE" 2>"$OUT/pom-lint.log"; then
+    pass "well-formed (xmllint)"
+    # The project's own elements, read with the namespace set aside.
+    pom_count() { xmllint --xpath "count($1)" "$POM_SOURCE" 2>/dev/null; }
+    for element in name description url; do
+        [ "$(pom_count "/*[local-name()='project']/*[local-name()='$element'][normalize-space()]")" = "1" ] \
+            && pass "<$element>" || fail "no <$element> in the POM"
+    done
+    licences=$(pom_count "/*[local-name()='project']/*[local-name()='licenses']/*[local-name()='license']")
+    [ "$licences" = "2" ] && pass "both licences" || fail "$licences licence(s) in the POM, and Sipral has two arms"
+    [ "$(pom_count "//*[local-name()='developers']/*[local-name()='developer']/*[local-name()='name']")" -ge 1 ] \
+        && pass "<developers>" || fail "no developer named in the POM"
+    [ "$(pom_count "//*[local-name()='scm']/*[local-name()='url' or local-name()='connection']")" = "2" ] \
+        && pass "<scm>, its URL and connection" || fail "the POM's <scm> needs a URL and a connection"
+    if grep -qE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "$POM_SOURCE"; then
+        fail "an address in the POM"
+    else
+        pass "no address in the POM"
+    fi
+    group_id=$(xmllint --xpath "string(//*[local-name()='properties']/*[local-name()='sipral.groupId'])" "$POM_SOURCE" 2>/dev/null)
+    note "group id: ${SIPRAL_GROUP_ID:-$group_id}$([ -z "${SIPRAL_GROUP_ID:-}" ] && printf ', the placeholder until the owner sets sipral.groupId (or SIPRAL_GROUP_ID)')"
+else
+    fail "bindings/jvm/pom.xml is not well-formed:"; sed 's/^/        /' "$OUT/pom-lint.log"
+fi
+[ "$FAIL" -ne 0 ] && finish
+
+JDK="${JAVA_HOME:-}"
+if [ -z "$JDK" ] || [ ! -f "$JDK/include/jni.h" ]; then
+    javac_path=$(command -v javac 2>/dev/null)
+    [ -n "$javac_path" ] && JDK="$(cd "$(dirname "$(readlink -f "$javac_path")")/.." && pwd)"
+fi
+
+if [ "$DRY_RUN" -eq 1 ] && [ "$(uname -s)" != "Linux" ]; then
+    step "$(uname -s) has no pair to build: what this host can prove, $VARIANT_LABEL"
+    [ -n "$JDK" ] && [ -f "$JDK/include/jni.h" ] || { fail "no JDK carrying include/jni.h (set JAVA_HOME)"; finish; }
+    command -v zig >/dev/null 2>&1 || { fail "zig not found (brew install zig): nothing else here reads C the way glibc does"; finish; }
+    # The opus variant vendors a C build that needs a Linux C toolchain, so
+    # the type check runs with the default package's features either way.
+    package_features 0
+    # This host's own jni_md.h, beside jni.h: what it decides (how
+    # JNIEXPORT is spelt, which C type a jlong is) is not what can go wrong
+    # here; what the shims ask of glibc is.
+    md_dir=$(dirname "$(find "$JDK/include" -mindepth 2 -name jni_md.h | head -1)")
+    for entry in "${PLATFORMS[@]}"; do
+        platform="${entry%%:*}"
+        triple="${entry##*:}"
+        if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+            fail "$platform: $triple is not installed: rustup target add $triple"
+        elif cargo check -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" >"$OUT/check-$platform.log" 2>&1; then
+            pass "$platform: cargo check -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+        else
+            fail "$platform: cargo check --target $triple:"; tail -30 "$OUT/check-$platform.log" | sed 's/^/        /'
+        fi
+        compiled=1
+        for source in "${JNI_SOURCES[@]}"; do
+            if ! zig cc -target "${triple%%-*}-linux-gnu.2.$GLIBC_MINOR_MAX" -std=c11 -fPIC -O2 -Wall -Wextra -Werror \
+                -I"$JDK/include" -I"$md_dir" -I"$ROOT/bindings/c/include" -c -o "$OUT/jni.o" \
+                "$ROOT/bindings/kotlin/sipral/src/main/jni/$source" >"$OUT/zig-$platform.log" 2>&1; then
+                fail "$platform: $source does not compile against glibc 2.$GLIBC_MINOR_MAX:"
+                sed 's/^/        /' "$OUT/zig-$platform.log"
+                compiled=0
+            fi
+        done
+        [ "$compiled" -eq 1 ] && pass "$platform: ${JNI_SOURCES[*]} compile against glibc 2.$GLIBC_MINOR_MAX (zig cc, not linked)"
+    done
+    rm -f "$OUT/jni.o"
+    note "not run here, a Linux host's with Docker, Maven and a JDK: both pairs linked against"
+    note "glibc 2.$GLIBC_MINOR_MAX, mvn verify over the jar, and the arm64 run under qemu (jvm.sh --out DIR)"
+    finish
+fi
+
 step "tools"
 TOOLS=(mvn cargo)
 if [ "$DRY_RUN" -eq 1 ]; then TOOLS+=(cc); else TOOLS+=(docker); fi
 for tool in "${TOOLS[@]}"; do
     command -v "$tool" >/dev/null 2>&1 && pass "$tool" || fail "$tool not found"
 done
-JDK="${JAVA_HOME:-}"
-if [ -z "$JDK" ] || [ ! -f "$JDK/include/jni.h" ]; then
-    javac_path=$(command -v javac 2>/dev/null)
-    [ -n "$javac_path" ] && JDK="$(cd "$(dirname "$(readlink -f "$javac_path")")/.." && pwd)"
-fi
 if [ -n "$JDK" ] && [ -f "$JDK/include/jni.h" ] && [ -f "$JDK/include/linux/jni_md.h" ]; then
     pass "a JDK with Linux JNI headers, $JDK"
 else

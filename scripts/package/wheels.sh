@@ -7,7 +7,9 @@
 # docs/08-ffi.md's Python section lists as not here yet.
 #
 #   scripts/package/wheels.sh --out DIR [--dry-run] [--publish]
-#       this host's own platform: builds sipral-ffi with cargo, for real
+#       this host's own platform: builds sipral-ffi with cargo, for real --
+#       macOS (arm64 or x86_64), Linux x86_64 outside manylinux, or Windows
+#       under Git Bash with the MSVC Rust toolchain (win_amd64, win_arm64)
 #   scripts/package/wheels.sh --out DIR --manylinux [--dry-run] [--publish]
 #       linux-x64, manylinux_2_28: needs Docker, re-execs this script inside
 #       quay.io/pypa/manylinux_2_28_x86_64
@@ -18,6 +20,14 @@
 #       unprivileged, no binfmt)
 #   ... --with-opus
 #       any of the above, as the variant that carries libopus
+#
+# --manylinux and --linux-arm64 under --dry-run on a host without Docker
+# prove what that host can: sipral-ffi type-checked for the wheel's target
+# with the package's features. Building it, its glibc floor and the run
+# under qemu are a Docker host's, and the run says so.
+#
+# Every wheel carries the licence texts from the repository root in its
+# .dist-info/licenses (PEP 639), named by License-File in its METADATA.
 #
 # Without --with-opus the native is built without sipral-ffi's `opus`
 # feature and every other default kept (features.sh says why and how). With
@@ -78,7 +88,33 @@ OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
 
+step "one version"
+scripts/version.sh --check || { printf '\nwheels.sh: failed\n'; exit 1; }
+
+# `dry_run_without_docker TRIPLE LABEL WHAT`: --manylinux or --linux-arm64
+# under --dry-run with no Docker here. The variant with libopus vendors a C
+# build that needs the container's cross compiler, so the type check runs
+# with the default package's features either way.
+dry_run_without_docker() {
+    step "$2, --dry-run on a host without Docker"
+    package_features 0
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$1"; then
+        fail "$1 is not installed: rustup target add $1"
+    elif cargo check -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$1" >"$OUT/check-$1.log" 2>&1; then
+        pass "cargo check -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $1"
+    else
+        fail "cargo check -p sipral-ffi --target $1:"; tail -30 "$OUT/check-$1.log" | sed 's/^/        /'
+    fi
+    printf '  note  not run here, a Docker host'"'"'s: %s\n' "$3"
+    printf '\n'
+    [ "$FAIL" -eq 0 ] && { printf 'wheels.sh: done (dry-run, no Docker), %s\n' "$2"; exit 0; }
+    printf 'wheels.sh: failed\n'; exit 1
+}
+
 if [ "$MANYLINUX" -eq 1 ]; then
+    command -v docker >/dev/null 2>&1 || [ "$DRY_RUN" -eq 0 ] \
+        || dry_run_without_docker x86_64-unknown-linux-gnu manylinux_2_28_x86_64 \
+            "the build in quay.io/pypa/manylinux_2_28_x86_64 and the wheel made there"
     step "manylinux_2_28_x86_64, via Docker"
     command -v docker >/dev/null 2>&1 || { fail "docker not found"; printf '\nwheels.sh: failed\n'; exit 1; }
     args=(--out /out --inside-manylinux)
@@ -103,6 +139,9 @@ if [ "$MANYLINUX" -eq 1 ]; then
 fi
 
 if [ "$LINUX_ARM64" -eq 1 ]; then
+    command -v docker >/dev/null 2>&1 || [ "$DRY_RUN" -eq 0 ] \
+        || dry_run_without_docker aarch64-unknown-linux-gnu manylinux_2_28_aarch64 \
+            "the cross build in the aarch64 cross image, its glibc 2.28 check, and the wheel imported and tested under qemu (qemu-verify.sh)"
     step "manylinux_2_28_aarch64, cross-compiled (no arm64 hardware), via Docker"
     command -v docker >/dev/null 2>&1 || { fail "docker not found (linux-arm64 cross-compiles in a container)"; printf '\nwheels.sh: failed\n'; exit 1; }
     . "$ROOT/scripts/package/aarch64-cross.sh"
@@ -142,8 +181,8 @@ if [ "$LINUX_ARM64" -eq 1 ]; then
     fi
     if [ "$PUBLISH" -eq 1 ]; then
         step "publish"
-        printf '  not run: nothing ships to PyPI before the ABI freezes (docs/08-ffi.md).\n'
-        printf '  What the owner runs once it has: twine upload %s\n' "${FINAL:-$OUT/*.whl}"
+        printf '  not run: the owner publishes, every wheel of the release together:\n'
+        printf '    twine upload %s\n' "${FINAL:-$OUT/*.whl}"
     fi
     printf '\n'
     [ "$FAIL" -eq 0 ] && { printf 'wheels.sh: done, %s, linux-arm64\n' "${FINAL:-$OUT}"; exit 0; }
@@ -191,6 +230,19 @@ elif [ "$UNAME_S" = "Linux" ]; then
     NATIVE="libsipral_ffi.so"
     PY=python3
     pass "Linux $UNAME_M, outside manylinux: tag $TAG (portable only to a like-built host; use --manylinux for a distributable tag)"
+elif case "$UNAME_S" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
+    # Git Bash on Windows, with Rust's MSVC toolchain: the wheel's tag is
+    # the architecture's alone, since a DLL names no minimum Windows release
+    # the way a Mach-O names a macOS one.
+    case "$UNAME_M" in
+        x86_64) RUST_TRIPLE="x86_64-pc-windows-msvc"; TAG="win_amd64" ;;
+        aarch64|arm64) RUST_TRIPLE="aarch64-pc-windows-msvc"; TAG="win_arm64" ;;
+        *) fail "unrecognised Windows arch: $UNAME_M"; printf '\nwheels.sh: failed\n'; exit 1 ;;
+    esac
+    NATIVE="sipral_ffi.dll"
+    PY=python
+    command -v python3 >/dev/null 2>&1 && PY=python3
+    pass "Windows $UNAME_M ($UNAME_S): tag $TAG"
 else
     fail "unsupported host: $UNAME_S"; printf '\nwheels.sh: failed\n'; exit 1
 fi
@@ -239,6 +291,8 @@ step "a build-only virtualenv for hatchling and wheel"
     fail "$PY -m venv:"; tail -20 "$STAGE/venv.log" | sed 's/^/        /'; printf '\nwheels.sh: failed\n'; exit 1
 }
 VENV_PY="$STAGE/venv/bin/python"
+# a venv on Windows keeps its interpreter under Scripts/
+[ -x "$VENV_PY" ] || VENV_PY="$STAGE/venv/Scripts/python.exe"
 if "$VENV_PY" -m pip install --quiet hatchling 'wheel>=0.36' >"$STAGE/pip.log" 2>&1; then
     pass "pip install hatchling wheel, into the build venv"
 else
@@ -287,11 +341,35 @@ else
 fi
 [ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
 
+# The licence texts, which PEP 639 keeps inside the project directory and
+# so cannot be named from bindings/python/pyproject.toml: the AGPL, the
+# commercial arm, and the third-party licences and notices of what the
+# native links. Each is named by a License-File line beside
+# License-Expression in METADATA, and `wheel pack` below writes RECORD over
+# them.
+LICENCE_FILES=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-LICENSES.txt THIRD-PARTY-NOTICES.md)
+DIST_INFO=$(dirname "$WHEEL_METADATA")
+mkdir -p "$DIST_INFO/licenses"
+for f in "${LICENCE_FILES[@]}"; do cp "$ROOT/$f" "$DIST_INFO/licenses/$f"; done
+if grep -q '^License-Expression: ' "$DIST_INFO/METADATA" \
+    && awk -v files="${LICENCE_FILES[*]}" '
+        { print }
+        /^License-Expression: / && !done {
+            n = split(files, f, " ")
+            for (i = 1; i <= n; i++) print "License-File: " f[i]
+            done = 1
+        }' "$DIST_INFO/METADATA" >"$DIST_INFO/METADATA.new" \
+    && mv "$DIST_INFO/METADATA.new" "$DIST_INFO/METADATA"; then
+    pass "${LICENCE_FILES[*]} in .dist-info/licenses, named in METADATA"
+else
+    fail "no License-Expression in METADATA to name the licence files beside"
+fi
+[ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
+
 # The variant with libopus is its own distribution, sipral-opus: `wheel pack`
 # names the file after the .dist-info directory, and pip reads the name out
 # of METADATA, so both change and nothing else does. The package inside is
 # still `sipral`, imported the same way.
-DIST_INFO=$(dirname "$WHEEL_METADATA")
 DIST_NAME="sipral"
 DIST_VERSION=$(basename "$DIST_INFO" .dist-info)
 DIST_VERSION="${DIST_VERSION#sipral-}"
@@ -358,6 +436,11 @@ print(next((l[6:] for l in z.read(m[0]).decode().splitlines() if l.startswith("N
     else
         fail "$(basename "$FINAL") is missing sipral/stack.py"
     fi
+    for f in "${LICENCE_FILES[@]}"; do
+        printf '%s\n' "$listing" | grep -q "\.dist-info/licenses/$f" \
+            && pass "$(basename "$FINAL") carries .dist-info/licenses/$f" \
+            || fail "$(basename "$FINAL") is missing .dist-info/licenses/$f"
+    done
 else
     fail "no tagged wheel in $OUT"
 fi
@@ -396,8 +479,10 @@ elif [ "$DRY_RUN" -eq 0 ] && [ -n "$FINAL" ]; then
     step "importing it for real"
     INSTALL_VENV="$STAGE/install-venv"
     "$PY" -m venv "$INSTALL_VENV" >/dev/null 2>&1
-    if "$INSTALL_VENV/bin/pip" install --quiet "$FINAL" >"$STAGE/install.log" 2>&1 \
-        && "$INSTALL_VENV/bin/python" -c 'import sipral; print(sipral.__name__)' >"$STAGE/import.log" 2>&1; then
+    INSTALL_BIN="$INSTALL_VENV/bin"
+    [ -d "$INSTALL_BIN" ] || INSTALL_BIN="$INSTALL_VENV/Scripts"
+    if "$INSTALL_BIN/python" -m pip install --quiet "$FINAL" >"$STAGE/install.log" 2>&1 \
+        && "$INSTALL_BIN/python" -c 'import sipral; print(sipral.__name__)' >"$STAGE/import.log" 2>&1; then
         pass "installed into a clean venv and imported: $(cat "$STAGE/import.log")"
     else
         fail "install-and-import, into a clean venv:"
@@ -407,8 +492,8 @@ fi
 
 if [ "$PUBLISH" -eq 1 ]; then
     step "publish"
-    printf '  not run: nothing ships to PyPI before the ABI freezes (docs/08-ffi.md).\n'
-    printf '  What the owner runs once it has: twine upload %s\n' "${FINAL:-$OUT/*.whl}"
+    printf '  not run: the owner publishes, every wheel of the release together:\n'
+    printf '    twine upload %s\n' "${FINAL:-$OUT/*.whl}"
 fi
 
 printf '\n'
