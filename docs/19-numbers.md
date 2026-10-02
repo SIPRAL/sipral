@@ -950,6 +950,21 @@ Read together:
   again 1 495 times and the slowest call took 7.4 s to come up, every one of
   them up in the end.
 
+## 2 October 2026 — `0.0.1`, the library at ABI 0.35
+
+Apple M-series, macOS, `rustc 1.95.0`, `cargo build --release -p sipral-ffi`
+with the crate's default features (`opus`, `dtls`, `ice`, `stun`, `stir`),
+measured the way `scripts/bench.sh` measures it.
+
+| | Value | Note |
+|---|---|---|
+| Shared library, `libsipral_ffi.dylib` | 5.18 MB | 5 184 736 bytes as built; the release profile already strips it. 2.99 MB on 24 September |
+
+Only the size was taken that day. The machine was running other builds at a
+load average above a hundred on eight cores, so the per-frame and set-up
+times above were not measured again: a wall-clock figure read on it would
+say more about the machine than about the library.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
