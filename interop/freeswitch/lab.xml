@@ -86,7 +86,13 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
   <!-- A far end that holds, resumes and refreshes a call keyed by SDES on
        its own, for the harness's farhold flow. Only AES_CM_128_HMAC_SHA1_80
        is taken, so an offer that lists AEAD_AES_256_GCM first is answered on
-       its second line. Two seconds after the answer FreeSWITCH holds the call
+       its second line. That holds only on the lab_late profile
+       (lab_late_profile.xml), which Kamailio sends 9010 to: there the offer
+       is read once the call is answered, after the suite is set below. On
+       the lab profile the offer is read as the INVITE arrives, the first
+       line FreeSWITCH can run is taken before this extension says anything,
+       and the suite set here then refuses the call it already chose. Two
+       seconds after the answer FreeSWITCH holds the call
        (a re-INVITE with a=sendonly), three seconds later resumes it, and
        three seconds after that re-offers it as it stands; each re-INVITE
        carries its own a=crypto lines, which this end answers with the key of
@@ -98,9 +104,11 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
     <condition field="destination_number" expression="^9010$">
       <action application="set" data="rtp_secure_media=mandatory:AES_CM_128_HMAC_SHA1_80"/>
       <action application="answer"/>
-      <action application="sched_api" data="+2 none uuid_hold ${uuid}"/>
-      <action application="sched_api" data="+5 none uuid_hold off ${uuid}"/>
-      <action application="sched_api" data="+8 none uuid_media_reneg ${uuid}"/>
+      <!-- sched_api is an API command, not a dialplan application: it is
+           run by expanding it, which schedules the command and returns -->
+      <action application="set" data="far_hold=${sched_api(+2 none uuid_hold ${uuid})}"/>
+      <action application="set" data="far_resume=${sched_api(+5 none uuid_hold off ${uuid})}"/>
+      <action application="set" data="far_refresh=${sched_api(+8 none uuid_media_reneg ${uuid})}"/>
       <action application="echo"/>
     </condition>
   </extension>

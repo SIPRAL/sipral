@@ -1,0 +1,35 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Tiberiu Balasea
+
+The lab profile again (lab_profile.xml says why the lab has one of its own),
+on another port and with one difference: an offer is read only once the
+dialplan answers (inbound-late-negotiation), not as the INVITE arrives. That
+is what lets lab.xml's 9010 name the one SDES suite it takes before the
+offer is read, so that it answers on the line carrying that suite rather
+than on the first line it can run. Every other call stays on the lab
+profile, which reads the offer early, as it always has; Kamailio sends 9010
+alone here.
+-->
+<profile name="lab_late">
+  <settings>
+    <param name="sip-port" value="5092"/>
+    <param name="context" value="public"/>
+    <param name="dialplan" value="XML"/>
+    <param name="rfc2833-pt" value="101"/>
+    <param name="sip-ip" value="$${local_ip_v4}"/>
+    <param name="rtp-ip" value="$${local_ip_v4}"/>
+    <param name="apply-nat-acl" value="none"/>
+    <param name="aggressive-nat-detection" value="false"/>
+    <param name="auth-calls" value="false"/>
+    <param name="accept-blind-reg" value="false"/>
+    <param name="accept-blind-auth" value="false"/>
+    <param name="inbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="outbound-codec-prefs" value="PCMU,PCMA"/>
+    <param name="inbound-codec-negotiation" value="generous"/>
+    <param name="inbound-late-negotiation" value="true"/>
+    <param name="disable-transcoding" value="true"/>
+    <param name="manage-presence" value="false"/>
+    <param name="tls" value="false"/>
+  </settings>
+</profile>

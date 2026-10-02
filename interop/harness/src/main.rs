@@ -455,16 +455,15 @@ fn main() -> ExitCode {
 
 /// The flows about what this end writes and answers rather than what a
 /// server offers: the compact form on every server, and FreeSWITCH behind
-/// each proxy with it; FreeSWITCH's own re-offers
-/// (`interop/freeswitch/lab.xml`'s 9010) behind either proxy, since
-/// Asterisk never re-offers a call by itself; and
-/// `interop/kamailio/kamailio.cfg`'s challenge for another realm.
+/// each proxy with it; then, through Kamailio, FreeSWITCH's own re-offers
+/// (`interop/freeswitch/lab.xml`'s 9010, which only Kamailio routes to the
+/// profile that reads the offer late), since Asterisk never re-offers a
+/// call by itself, and `interop/kamailio/kamailio.cfg`'s challenge for
+/// another realm.
 fn signalling_flows(server: &str) -> Vec<Flow> {
     let mut flows = vec![Flow::Compact];
-    if server == "kamailio" || server == "opensips" {
-        flows.push(Flow::FarHold);
-    }
     if server == "kamailio" {
+        flows.push(Flow::FarHold);
         flows.push(Flow::ForeignRealm);
     }
     flows

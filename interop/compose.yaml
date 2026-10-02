@@ -65,6 +65,7 @@ services:
       - ./freeswitch/lab_user.xml:/etc/freeswitch/directory/default/lab_user.xml:ro
       - ./freeswitch/lab.xml:/etc/freeswitch/dialplan/public/zz_sipral_lab.xml:ro
       - ./freeswitch/lab_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab.xml:ro
+      - ./freeswitch/lab_late_profile.xml:/etc/freeswitch/sip_profiles/zz_sipral_lab_late.xml:ro
       - ./freeswitch/lab_event_socket.conf.xml:/etc/freeswitch/autoload_configs/event_socket.conf.xml:ro
     networks: [lab]
 
