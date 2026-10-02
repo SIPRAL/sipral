@@ -3047,7 +3047,8 @@ library's version, not the ABI's — "Two numbers, not one", above):
   held while it does, what it may call, and how long its `user_data` must
   live.
 
-A header from before 0.33 is refused at load by the exact-minor rule, and a
+A header from before 0.33 is refused at load, as every 0.x header is now
+that the ABI is at major 1 ("ABI 1.0", below), and a
 struct as long as a pre-0.33 header declared it is refused by its pin: the
 oldest version of every struct the frozen ABI serves is minor 33's. The
 sections above that tell how a member was appended "with the pin unmoved"
