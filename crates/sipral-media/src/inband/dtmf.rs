@@ -68,7 +68,7 @@
 //! [`KeyPress`] puts that and a telephone event side by side:
 //! [`KeyPress::is_same_press`] says whether two reports are one key.
 
-use super::analysis::{Analyzer, Claim, Hop, HopTracker, end_edge, start_edge};
+use super::analysis::{Analyzer, Claim, Hop, HopTracker, Window, end_edge, start_edge};
 use super::{SampleRate, count_f64, dbm0_to_power, position_f64, round_position};
 
 /// The four low-group frequencies of Q.23, in hertz: the rows of the keypad.
@@ -543,8 +543,11 @@ impl DtmfDetector {
     /// Listen to `samples`, the next ones of the stream, and report every
     /// digit start and end they complete.
     pub fn process(&mut self, samples: &[i16], mut on_event: impl FnMut(DtmfEvent)) {
-        for &sample in samples {
-            if self.analyzer.push(sample) {
+        let mut rest = samples;
+        while !rest.is_empty() {
+            let (taken, hop_done) = self.analyzer.feed(rest);
+            rest = rest.get(taken..).unwrap_or_default();
+            if hop_done {
                 let heard = self.classify();
                 let claim = heard.and_then(|h| self.is_steady(&h).then_some(h.claim));
                 self.last = heard;
@@ -587,15 +590,22 @@ impl DtmfDetector {
     }
 
     /// What the window just analysed holds, if it holds a digit.
-    fn classify(&self) -> Option<Heard> {
-        let bank = &self.analyzer;
+    ///
+    /// A window whose hops alone carry too little energy for one is passed
+    /// over before a filter runs: most of what a call hears is pauses and
+    /// quiet, and this is where the cost of listening to them goes.
+    fn classify(&mut self) -> Option<Heard> {
         let limits = &self.limits;
+        if self.analyzer.quieter_than(2.0 * limits.min_power) {
+            return None;
+        }
+        let bank = self.analyzer.window();
         let total = bank.total_power();
         if total < 2.0 * limits.min_power {
             return None;
         }
-        let (row, low) = strongest(bank, 0)?;
-        let (column, high) = strongest(bank, 4)?;
+        let (row, low) = strongest(&bank, 0)?;
+        let (column, high) = strongest(&bank, 4)?;
         let low_nominal = LOW_GROUP.get(row).copied()?;
         let high_nominal = HIGH_GROUP.get(column).copied()?;
 
@@ -764,11 +774,11 @@ impl DtmfDetector {
     }
 }
 
-/// The strongest of the four filters from `first` on, by magnitude.
-fn strongest(bank: &Analyzer, first: usize) -> Option<(usize, super::analysis::Reading)> {
-    (0..4)
-        .filter_map(|i| bank.reading(first + i).map(|r| (i, r)))
-        .max_by(|a, b| a.1.magnitude.total_cmp(&b.1.magnitude))
+/// The strongest of the four filters from `first` on, by magnitude, and
+/// what the window says about it.
+fn strongest(bank: &Window<'_>, first: usize) -> Option<(usize, super::analysis::Reading)> {
+    let strongest = bank.strongest(first, first + 4)?;
+    bank.reading(strongest).map(|r| (strongest - first, r))
 }
 
 #[cfg(test)]

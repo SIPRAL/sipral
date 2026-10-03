@@ -126,9 +126,21 @@ challenged once by Asterisk (two REGISTERs, two INVITEs each):
 | First INVITE, no ICE, size on the wire | 869 bytes | 1373 bytes |
 
 These are single samples on a loaded machine and the difference between the
-two is a few milliseconds either way; the agent reads its socket in a loop
-that sleeps 5 ms when there is nothing to read, which is where most of its
-extra answering time goes. The INVITE sizes are not noise: pjsua offers every
+two is a few milliseconds either way; the agent measured here read its socket
+in a loop that slept 5 ms when there was nothing to read, which is where most
+of its extra answering time went. It has since stopped sleeping and waits on
+the socket instead (unreleased, for 1.1). The same flow run again for Sipral
+alone on 3 October, with that agent against the same Asterisk 22.10.1:
+registration 3.5 ms, the outgoing call 5.5 ms, and the incoming call answered
+in 0.7 ms. Registered and idle it used no measurable processor time (0.00 %,
+where the table below has 0.65 %), and 0.90, 1.70, 3.05 and 26.30 % of a core
+at 1, 4, 10 and 100 calls (below: 1.40, 2.30, 4.35 and 28.65 %). Its memory
+in that run, 5.8 MB resident and 3.9 MB private idle, is above the
+29 September agent's below; the 1.0.0 agent and this one measure the same on
+the host (4.4 to 4.6 MB idle), so that growth is older than the change to the
+loop. The bad links and the moved address came out within what two draws of
+the same profiles differ by. `docs/19-numbers.md` has the set-up time on
+loopback, before and after. The INVITE sizes are not noise: pjsua offers every
 codec its build has (Speex three ways, iLBC, GSM, G.722, Opus, G.711) and
 Sipral its default catalogue (Opus, G.722, G.711, telephone-event).
 

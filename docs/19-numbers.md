@@ -1062,6 +1062,98 @@ run, which brought 784 of the thousand calls up, and for nearly 19 in the
 second, which brought all thousand up and then lost their audio. No figure
 from it is given.
 
+## 3 October 2026 — unreleased, for `1.1.0`: the in-band digit detector
+
+Apple M2, macOS, `rustc 1.95.0`, release profile, the load average about 5
+on eight cores shared with other work. The 1.0.0 tree (the `v1.0.0` tag) and
+this one were built side by side and run in turn, three times each; each
+figure is the median of the three.
+
+| What | 1.0.0 | Now | How |
+|---|---|---|---|
+| Audio, per frame of 20 ms, 200 calls on 4 threads | 7.2 µs | 0.72 µs | the load test as `bench.sh` runs it, in-band digit detection on every frame; its packets carry digital silence |
+| The same, one call | 6.4 µs | 0.50 µs | |
+| The same, 200 calls, the packets carrying loud noise | 8.6 µs | 3.6 µs | the load test with random µ-law bytes for its payload, a local change for the measurement, not committed |
+| The same, one call | 7.9 µs | 3.3 µs | |
+| The detector alone, a frame at 8 kHz: silence | 6.03 µs | 0.17 µs | `DtmfDetector::process` on ten seconds of each signal in 20 ms frames, best of five, from a test written for the measurement and not committed |
+| The same, speech at −20 dBm0 | 6.74 µs | 1.35 µs | the crate's own generated speech, pauses included |
+| The same, white noise at −10 dBm0 | 7.21 µs | 2.71 µs | no pause anywhere: the filters run on every window |
+| Memory per call, the load test | 95.7 KB | 94.5 KB | peak resident memory with 200 calls against one, over 199 |
+
+**Quiet costs almost nothing now, and talk about a fifth of what it did.**
+The detector slides a 20 ms window along the audio 5 ms at a time and ran
+its eight filters, and a square root and a phase for each, on every window.
+It now asks first whether the hops a window covers carry, unweighted, the
+energy a digit at its lowest accepted level would put there: the window
+weighs no sample by more than one, so that energy bounds what the window
+measures, and a window under the bound cannot hold a digit. Pauses, a far
+end that is listening, comfort noise and silence are most of a call, and
+they now cost the 0.17 µs a frame of keeping the samples. A window over the
+bound runs the filters beside its own power in one pass, and gives a square
+root and a phase only to the strongest filter of each group: that is the
+noise row, every window of it.
+
+**Nothing it hears changed.** Every reading is computed by the same
+arithmetic in the same order, so it is the same to the bit; the in-band
+tests pass unchanged, and three thousand generated cases — digits up to 4 %
+off frequency, twisted by up to 10 dB, 15 to 90 ms long, under white noise
+from −75 to −18 dBm0, speech, music and sweeps, sliced into pieces of random
+length with resets among them — gave the same events from 1.0.0 and from
+this code, every edge included.
+
+So the 2 October paragraph's "about 7 µs a frame more" for a call that has to
+be listened to is, on the same load test, the difference between 0.72 µs and
+the 0.54–0.60 µs it read with detection off: under two tenths of a
+microsecond while the far end is quiet. While it talks, the load test was
+not run with speech in its packets; the detector-alone rows put the cost at
+about 1.4 µs a frame for speech with its pauses, and 2.7 µs for loud noise
+with none.
+
+## 3 October 2026 — unreleased, for `1.1.0`: the headless agent waiting on its socket
+
+`crates/sipral/examples/headless-agent.rs` as of 1.0.0, whose loop slept
+5 ms whenever a turn read nothing, against this tree's, which waits on its
+SIP socket until a datagram arrives or the next thing it has to do falls due.
+The Linux x86-64 lab machine of 2 October, both built there with
+`rustc 1.95.0` on the host, release profile; another run's lab containers
+were up beside them, at a load average under 2 on its 32 vCPUs. The calls
+come from the 1.0.0 harness's `scale` flow, the same binary for both, on the
+same machine; it times each call from its INVITE to the 2xx, in a loop of
+its own that sleeps 1 ms when it has read nothing, which is most of the
+1.3 ms below.
+
+| | 1.0.0, sleeping | Now, waiting |
+|---|---|---|
+| Set-up, INVITE to 2xx at the caller, fifty calls at 5 a second: p50, p90, max | 9.1, 10.5, 12.4 ms; again 9.0, 11.2, 12.3 ms | 1.3, 1.5, 2.5 ms; again 1.3, 1.4, 1.6 ms |
+| Processor time over a minute with no call, standard input closed | 0.36 s, about 200 wake-ups a second | under 0.01 s, two wake-ups in the minute |
+| The same, standard input open | 0.44 s | 0.08 s, about 20 wake-ups a second |
+| A thousand calls as on 2 October: set-up p50, p90, max | 17.3, 103.0, 178.5 ms, 467 calls a second | 8.2, 39.5, 117.2 ms, 482 calls a second |
+| The agent's processor time while it holds them | 0.90 of one core | 0.99 of one core |
+| Its resident memory, before the first call and with the thousand held | 5.3 MB, 95.0 MB | 5.7 MB, 95.9 MB |
+| Frames the caller played with its buffer run dry | 6 349 of 1 499 297 (0.42 %) | 4 566 of 1 499 000 (0.30 %) |
+| Packets a second at the caller, out and in (due: 50 000) | 49 975, 50 023 | 49 966, 50 113 |
+| SIP sent again, either way; transactions timed out | none; none | none; none |
+
+Read together:
+
+- **An answer went out two sleeps late.** An INVITE that arrived while the
+  loop slept waited out the sleep, and the 200, queued while the next turn
+  handled the INVITE's events, was written only at the start of the turn
+  after, past a second sleep. A turn now writes what it decided before it
+  ends, and the wait ends when a datagram arrives.
+- **Idle is idle.** With nothing to do, the wait lasts until the stack's next
+  timer; with standard input open it also ends every 50 ms to read a
+  command, since the thread reading standard input cannot wake a wait on a
+  socket.
+- **Only the SIP socket is waited on.** Each call's own socket is read on
+  every turn, at least every 5 ms while there are calls, and never waited
+  on, so a thousand sockets with audio in them cost no extra wake-up. At a
+  thousand calls a turn takes longer than those 5 ms, and the loop runs its
+  turns back to back where the old one rested 5 ms after each, with frames
+  already due: that is the tenth of a core more, and it bought the earlier
+  answers and a quarter fewer frames played dry. One thread is still the
+  agent's limit, as on 2 October.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

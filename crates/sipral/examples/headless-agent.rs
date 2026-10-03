@@ -72,7 +72,9 @@
 //!
 //! **What it is told.** A line on standard input is a command: `netchange`
 //! says the network changed. The agent reads the route to the registrar
-//! again at once rather than at its next half-second look, and tells the
+//! again as soon as it reads the line — within a twentieth of a second,
+//! the longest its loop waits without looking at standard input — rather
+//! than at its next half-second look, and tells the
 //! stack (`UserAgent::network_changed`) even when the address is where it
 //! was — the platform knows of a change the address does not show, such as
 //! a new path behind the same one, so the stack registers again — and moves
@@ -154,6 +156,17 @@ const INVITE_REFILL: Duration = Duration::from_secs(2);
 /// REGISTER nobody answers would otherwise hold it for the 32 seconds of
 /// RFC 3261's timer F.
 const QUIT_GRACE: Duration = Duration::from_secs(5);
+
+/// While a call has a socket for its audio, the loop turns at least this
+/// often to read it: what a packet's arrival is timed at is the turn that
+/// read it, and the jitter and delay every call's last line reports are
+/// measured from those times.
+const MEDIA_LOOK: Duration = Duration::from_millis(5);
+
+/// While standard input is open, the longest a command waits to be read
+/// when nothing else turns the loop: the thread reading it cannot wake a
+/// loop waiting on a socket, so the loop looks.
+const COMMAND_LOOK: Duration = Duration::from_millis(50);
 
 /// Server transactions per call that `--max-calls` makes room for: the
 /// INVITE's own, kept 32 seconds after it is answered (RFC 6026's timer L),
@@ -605,6 +618,33 @@ impl Agent {
         })
     }
 
+    /// When the loop has to turn again if no SIP datagram arrives first —
+    /// [`run`] waits on the SIP socket until then: the earliest of the
+    /// stack's own timers, the next look at the route, the end of `quit`'s
+    /// grace, the next look at the calls' audio while there are any, and
+    /// the next look at standard input while it is open (`listening`).
+    /// `None` is nothing to do until a datagram arrives.
+    ///
+    /// Only the SIP socket is waited on. Every call's socket is read on
+    /// every turn, and the turns come at least every [`MEDIA_LOOK`] while a
+    /// call has one, so a call's audio sitting unread in its socket never
+    /// wakes the loop by itself: with a thousand calls, a wait that woke
+    /// for any readable socket would wake at once, every time, for audio
+    /// that is read on the next turn anyway.
+    fn next_turn(&self, now: Instant, listening: bool) -> Option<Instant> {
+        [
+            (!self.endpoint.media.is_empty()).then(|| now + MEDIA_LOOK),
+            listening.then(|| now + COMMAND_LOOK),
+            self.route.as_ref().map(|route| route.next_check),
+            self.leaving,
+            self.endpoint.agent.poll_timeout(),
+            self.endpoint.engine.poll_timeout(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
     /// Place `--call`, once.
     fn place(&mut self, now: Instant) {
         let Some(target) = self.call.take() else {
@@ -684,85 +724,18 @@ impl Agent {
     }
 }
 
-/// Answer whatever just arrived, and let every call's session move one frame:
-/// what it said comes back out, and what it says now is kept for the next
-/// turn.
+/// Read what arrived and answer it, and let every call's session move one
+/// frame: what it said comes back out, and what it says now is kept for the
+/// next turn. `true` when a SIP datagram arrived.
+///
+/// What the turn decided goes out before it ends: an answer queued while
+/// the events are handled is written by the drain that finds no more of
+/// them, not left for the next turn, which may be a wait away.
 fn tick(agent: &mut Agent, now: Instant) -> bool {
     agent.follow(now);
-    for event in agent.endpoint.pump(now) {
-        match event {
-            Event::Signalling(UaEvent::Registered { .. }) => {
-                println!("registered");
-                agent.place(now);
-            }
-            Event::Signalling(UaEvent::RegistrationFailed { reason, status, .. }) => {
-                println!("registration failed: {reason} ({status:?})");
-                agent.unregistering = false;
-            }
-            Event::Signalling(UaEvent::Unregistered { .. }) => {
-                println!("unregistered");
-                agent.unregistering = false;
-            }
-            Event::Signalling(UaEvent::IncomingCall { call, .. }) if agent.leaving.is_some() => {
-                let _ = agent
-                    .endpoint
-                    .agent
-                    .reject(call, StatusCode::SERVICE_UNAVAILABLE, now);
-            }
-            Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
-                match agent.endpoint.open_media(call, now) {
-                    Ok(local) => match agent.endpoint.engine.answer(
-                        &mut agent.endpoint.agent,
-                        call,
-                        local,
-                        now,
-                    ) {
-                        Ok(()) => println!("answered {call:?}"),
-                        Err(error) => eprintln!("cannot answer {call:?}: {error}"),
-                    },
-                    // most often the open-file limit: a socket a call, two
-                    // when the far end keeps RTCP apart
-                    Err(error) => {
-                        eprintln!("cannot open a media socket for {call:?}, refused 503: {error}");
-                        let _ =
-                            agent
-                                .endpoint
-                                .agent
-                                .reject(call, StatusCode::SERVICE_UNAVAILABLE, now);
-                    }
-                }
-            }
-            Event::Signalling(UaEvent::Unclaimed(CoreEvent::TransportWanted {
-                protocol,
-                destination,
-                request_bytes,
-                limit_bytes,
-            })) => println!(
-                "transport wanted: {protocol:?} to {destination} for a request of \
-                 {request_bytes} bytes, over the {limit_bytes} a datagram may carry"
-            ),
-            Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
-                println!("connected {call:?}");
-            }
-            Event::Signalling(UaEvent::CallAddressWanted { call }) => {
-                agent.endpoint.readdress(call, now);
-            }
-            Event::Media {
-                call,
-                event: MediaEvent::Ended(stats),
-            } => println!("ended {call:?} {}", Ending::of(&stats).line()),
-            Event::Signalling(UaEvent::CallEnded { call, .. }) => {
-                agent.echoes.remove(&call);
-                // Without this, every call this agent has ever answered
-                // keeps its bound RTP socket alive in `endpoint.media` for
-                // the rest of the process's life — harmless for the examples
-                // that place one call and exit, real for the one that keeps
-                // answering (`Endpoint::close_media`'s own doc).
-                agent.endpoint.close_media(call);
-            }
-            _ => {}
-        }
-    }
+    let arrived = agent.endpoint.read_sip(now);
+    agent.endpoint.timers(now);
+    settle(agent, now);
     let echoes = &mut agent.echoes;
     agent.endpoint.run_media(now, |call, media, session, now| {
         // one closure plays what was captured last turn, the other captures
@@ -786,8 +759,100 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
         );
         echoes.insert(call, said_this_turn);
     });
-    agent.endpoint.timers(now);
-    agent.endpoint.read_sip(now)
+    settle(agent, now);
+    arrived
+}
+
+/// Drain every event the stack has and answer each, until a drain finds
+/// none: answering one can raise another (a call refused ends), and the
+/// drain that comes back empty has written whatever the answers queued.
+fn settle(agent: &mut Agent, now: Instant) {
+    loop {
+        let events = agent.endpoint.pump(now);
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            handle(agent, &event, now);
+        }
+    }
+}
+
+/// Answer one event.
+fn handle(agent: &mut Agent, event: &Event, now: Instant) {
+    match event {
+        Event::Signalling(UaEvent::Registered { .. }) => {
+            println!("registered");
+            agent.place(now);
+        }
+        Event::Signalling(UaEvent::RegistrationFailed { reason, status, .. }) => {
+            println!("registration failed: {reason} ({status:?})");
+            agent.unregistering = false;
+        }
+        Event::Signalling(UaEvent::Unregistered { .. }) => {
+            println!("unregistered");
+            agent.unregistering = false;
+        }
+        Event::Signalling(UaEvent::IncomingCall { call, .. }) if agent.leaving.is_some() => {
+            let _ = agent
+                .endpoint
+                .agent
+                .reject(*call, StatusCode::SERVICE_UNAVAILABLE, now);
+        }
+        Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
+            match agent.endpoint.open_media(*call, now) {
+                Ok(local) => {
+                    match agent
+                        .endpoint
+                        .engine
+                        .answer(&mut agent.endpoint.agent, *call, local, now)
+                    {
+                        Ok(()) => println!("answered {call:?}"),
+                        Err(error) => eprintln!("cannot answer {call:?}: {error}"),
+                    }
+                }
+                // most often the open-file limit: a socket a call, two
+                // when the far end keeps RTCP apart
+                Err(error) => {
+                    eprintln!("cannot open a media socket for {call:?}, refused 503: {error}");
+                    let _ =
+                        agent
+                            .endpoint
+                            .agent
+                            .reject(*call, StatusCode::SERVICE_UNAVAILABLE, now);
+                }
+            }
+        }
+        Event::Signalling(UaEvent::Unclaimed(CoreEvent::TransportWanted {
+            protocol,
+            destination,
+            request_bytes,
+            limit_bytes,
+        })) => println!(
+            "transport wanted: {protocol:?} to {destination} for a request of \
+                 {request_bytes} bytes, over the {limit_bytes} a datagram may carry"
+        ),
+        Event::Signalling(UaEvent::CallConfirmed { call, .. }) => {
+            println!("connected {call:?}");
+        }
+        Event::Signalling(UaEvent::CallAddressWanted { call }) => {
+            agent.endpoint.readdress(*call, now);
+        }
+        Event::Media {
+            call,
+            event: MediaEvent::Ended(stats),
+        } => println!("ended {call:?} {}", Ending::of(stats).line()),
+        Event::Signalling(UaEvent::CallEnded { call, .. }) => {
+            agent.echoes.remove(call);
+            // Without this, every call this agent has ever answered
+            // keeps its bound RTP socket alive in `endpoint.media` for
+            // the rest of the process's life — harmless for the examples
+            // that place one call and exit, real for the one that keeps
+            // answering (`Endpoint::close_media`'s own doc).
+            agent.endpoint.close_media(*call);
+        }
+        _ => {}
+    }
 }
 
 fn main() -> ExitCode {
@@ -891,19 +956,26 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         unregistering: false,
     };
     let told = commands(std::io::BufReader::new(std::io::stdin()));
+    let mut listening = true;
     loop {
         let now = Instant::now();
-        while let Ok(command) = told.try_recv() {
-            agent.obey(command, now);
+        loop {
+            match told.try_recv() {
+                Ok(command) => agent.obey(command, now),
+                Err(mpsc::TryRecvError::Empty) => break,
+                // standard input has ended, and with it any need to look
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    listening = false;
+                    break;
+                }
+            }
         }
-        let busy = tick(&mut agent, now);
+        tick(&mut agent, now);
         if agent.finished(now) {
             println!("bye");
             return Ok(());
         }
-        if !busy {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        agent.endpoint.wait_sip(agent.next_turn(now, listening));
     }
 }
 
