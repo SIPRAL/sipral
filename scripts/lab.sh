@@ -887,10 +887,10 @@ python_agent() {
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "'packets_received': [1-9]" \
+        | grep '^ended ' | found -E "'packets_received': [1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "'packets_sent': [1-9]" \
+        | grep '^ended ' | found -E "'packets_sent': [1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -975,10 +975,10 @@ kotlin_agent() {
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "packets_received=[1-9]" \
+        | grep '^ended ' | found -E "packets_received=[1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "packets_sent=[1-9]" \
+        | grep '^ended ' | found -E "packets_sent=[1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1039,9 +1039,9 @@ swift_agent() {
         || { printf '  it never answered\n'; return 1; }
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1112,10 +1112,10 @@ csharp_agent() {
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq 'packets_received=[1-9]' \
+        | grep '^ended ' | found -E 'packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq 'packets_sent=[1-9]' \
+        | grep '^ended ' | found -E 'packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1206,9 +1206,9 @@ headless_socket_agent() {
         || { printf '  it never answered\n'; return 1; }
     printf '%s\n' "$app_log" | found '^dtmf #' \
         || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1668,7 +1668,7 @@ ice_lite_flow() {
     [ "$status" -eq 0 ] || return 1
     printf '%s\n' "$app_log" | found '^path chosen ' \
         || { printf '  the lite end never took a nominated pair\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  the lite end sent no audio on the pair\n'; return 1; }
 }
 
@@ -1724,9 +1724,9 @@ ice_lite_asterisk() {
         || { printf '  Asterisk never nominated a pair on the lite end\n'; return 1; }
     printf '%s\n' "$app_log" | found '^dtmf #' \
         || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
     # a fifth of a second of Asterisk's audio, which a packet or two sent
     # before its checks finished cannot reach
@@ -1781,7 +1781,7 @@ c_listener_address() {
 # what it said.
 c_listener_log() {
     local tries=0
-    until docker logs "$C_LISTENER_NAME" 2>&1 | grep -Eq '^(ended |nothing arrived|referral lapsed)'; do
+    until docker logs "$C_LISTENER_NAME" 2>&1 | found -E '^(ended |nothing arrived|referral lapsed)'; do
         tries=$((tries + 1))
         [ "$tries" -ge "$1" ] && break
         sleep 1
@@ -1867,7 +1867,7 @@ ice_lite_c_flow() {
     [ "$status" -eq 0 ] || return 1
     printf '%s\n' "$log" | found '^path chosen' \
         || { printf '  the lite end never took a nominated pair\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended packets_sent=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended packets_sent=[1-9]' \
         || { printf '  the lite end sent no audio on the pair\n'; return 1; }
 }
 
@@ -3405,7 +3405,7 @@ datagram_call() {
 
 # Whether the caller's own lines say `$1`.
 datagram_said() {
-    printf '%s\n' "$DATAGRAM_LOG" | grep -Eq "$1"
+    printf '%s\n' "$DATAGRAM_LOG" | found -E "$1"
 }
 
 # SIP over TCP and TLS through the four idiomatic layers (docs/22-tls.md,
@@ -3541,9 +3541,9 @@ tls_agent_call() {
         || { printf '  it never answered\n'; return 1; }
     printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
-    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_received'?[:=] ?[1-9]" \
+    printf '%s\n' "$log" | grep '^ended ' | found -E "packets_received'?[:=] ?[1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_sent'?[:=] ?[1-9]" \
+    printf '%s\n' "$log" | grep '^ended ' | found -E "packets_sent'?[:=] ?[1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -3663,7 +3663,7 @@ tls_two_lines_flow() {
             SIPRAL_UDP_SERVER=\"\$udp:5060\" SIPRAL_TLS_SERVER=\"\$tls:5061\" \
                 exec python3 -u /lines/caller.py" 2>&1)
     printf '%s\n' "$log" | sed 's/^/    /'
-    said() { printf '%s\n' "$log" | grep -Eq "$1"; }
+    said() { printf '%s\n' "$log" | found -E "$1"; }
     if said '^both registered$' && said '^both up$' \
         && said '^udp media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
         && said '^tls media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
@@ -3745,7 +3745,7 @@ datagram_flow() {
     if datagram_said '^wanted 2 [0-9.]+:5060 1[3-9][0-9][0-9] 1300$' \
         && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
+        && printf '%s\n' "$DATAGRAM_SEEN" | found -E '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
         pass "a challenged INVITE past 1300 bytes, taken over TCP: Asterisk on UDP and TCP, the answer to its challenge went on a connection the Python layer opened, and the call was held 45 seconds in, resumed and hung up"
     else
         fail "a challenged INVITE past 1300 bytes, taken over TCP"
@@ -3784,7 +3784,7 @@ datagram_flow() {
         -e SIPRAL_UDP_ANYWAY_BYTES=1600
     if datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from UDP:' \
+        && printf '%s\n' "$DATAGRAM_SEEN" | found -E '\(1[3-9][0-9][0-9] bytes\) from UDP:' \
         && ! printf '%s\n' "$DATAGRAM_SEEN" | found 'from TCP:'; then
         pass "a challenged INVITE past 1300 bytes, sent over UDP anyway: one suite and a long From to UDP alone, UDP past the limit allowed up to 1600 bytes, the INVITE went as one datagram and the call was held, resumed and hung up"
     else
