@@ -256,6 +256,32 @@ impl Endpoint {
         arrived
     }
 
+    /// Wait until a SIP datagram is waiting to be read or `until` has come,
+    /// whichever is first; with `until` `None`, until a datagram. Nothing
+    /// is read: [`Endpoint::read_sip`] reads it.
+    ///
+    /// The socket stays non-blocking everywhere else; for the wait it blocks,
+    /// with a timeout, on a look at the next datagram that leaves it queued.
+    /// A failure to switch either way is a wait that does not happen — the
+    /// caller turns at once — never one that does not end.
+    pub(crate) fn wait_sip(&self, until: Option<Instant>) {
+        let timeout = match until {
+            Some(until) => match until.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => Some(left),
+                _ => return,
+            },
+            None => None,
+        };
+        if self.sip.set_read_timeout(timeout).is_err() || self.sip.set_nonblocking(false).is_err() {
+            return;
+        }
+        // one byte is enough to know a datagram is there; the rest of it is
+        // left where it is, since this only looks
+        let mut look = [0_u8; 1];
+        let _ = self.sip.peek_from(&mut look);
+        let _ = self.sip.set_nonblocking(true);
+    }
+
     /// Add an account.
     pub(crate) fn add_account(&mut self, account: sipral::Account) -> AccountId {
         self.agent.add_account(account)

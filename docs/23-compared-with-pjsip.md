@@ -126,9 +126,11 @@ challenged once by Asterisk (two REGISTERs, two INVITEs each):
 | First INVITE, no ICE, size on the wire | 869 bytes | 1373 bytes |
 
 These are single samples on a loaded machine and the difference between the
-two is a few milliseconds either way; the agent reads its socket in a loop
-that sleeps 5 ms when there is nothing to read, which is where most of its
-extra answering time goes. The INVITE sizes are not noise: pjsua offers every
+two is a few milliseconds either way; the agent measured here read its socket
+in a loop that slept 5 ms when there was nothing to read, which is where most
+of its extra answering time went. It has since stopped sleeping and waits on
+the socket instead (unreleased, for 1.1); `docs/19-numbers.md` has its set-up
+time before and after, measured on loopback rather than in this lab. The INVITE sizes are not noise: pjsua offers every
 codec its build has (Speex three ways, iLBC, GSM, G.722, Opus, G.711) and
 Sipral its default catalogue (Opus, G.722, G.711, telephone-event).
 
