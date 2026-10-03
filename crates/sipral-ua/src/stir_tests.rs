@@ -662,33 +662,21 @@ fn forked(invite: &[u8], contact: &str, tag: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-/// One INVITE a ring group hunts through two lines of one agent — two
-/// accounts — carries the same `Identity` on both branches, and both verify:
-/// the second is the same request, not a replay of it. The first line
-/// refuses, its transaction ends (RFC 3261 §8.2.2.2 answers a branch that
-/// arrives while it is still going 482), and the proxy tries the second
-/// line inside the PASSporT's freshness window. The same PASSporT in a
-/// request of its own is still refused (RFC 8224 §12.1).
+/// One INVITE a ring group forks to two lines of one agent — two accounts —
+/// carries the same `Identity` on both branches, and both verify: the second
+/// is the same request, not a replay of it. The second branch arrives while
+/// the first line is still ringing, which is what a parallel fork does; each
+/// line is a UAS of its own, so RFC 3261 §8.2.2.2 does not take it for the
+/// first branch's merged copy. The same PASSporT in a request of its own is
+/// still refused (RFC 8224 §12.1).
 #[test]
 fn a_call_forked_to_two_lines_of_one_agent_verifies_on_both() {
     let t0 = Instant::now();
     let credentials = credentials(&[CALLER]);
     let invite = signed_invite(&credentials, t0);
 
+    // both lines registered with one server, each under a contact of its own
     let (mut called, first_line) = called(&credentials, true, StirVerification::Strict, t0);
-    // the first line's server is elsewhere, so that the branch arriving from
-    // the registrar on the second line's contact is the second line's
-    called.remove_account(first_line);
-    let first_line = called.add_account(
-        Account::new(
-            uri(&format!("sip:{CALLED}@example.com")),
-            uri("sip:example.com"),
-            uri("sip:called@192.0.2.1"),
-            UDP,
-            "198.51.100.7:5060".parse().expect("an address"),
-        )
-        .stir_verification(StirVerification::Strict),
-    );
     let second_line = called.add_account(
         Account::new(
             uri("sip:ring-group@example.com"),
@@ -700,7 +688,12 @@ fn a_call_forked_to_two_lines_of_one_agent_verifies_on_both() {
         .stir_verification(StirVerification::Strict),
     );
 
-    let first = verified(&mut called, &credentials, &invite, t0);
+    let first = verified(
+        &mut called,
+        &credentials,
+        &forked(&invite, "sip:called@192.0.2.1", "line1"),
+        t0,
+    );
     assert_eq!(first.outcome, VerificationOutcome::Valid, "{first:?}");
     let one = called
         .calls()
@@ -708,21 +701,14 @@ fn a_call_forked_to_two_lines_of_one_agent_verifies_on_both() {
         .next()
         .expect("the first line's call");
     assert_eq!(called.call_account(one), Some(first_line));
-    called
-        .reject(one, crate::StatusCode::BUSY_HERE, t0)
-        .expect("refused");
-    // Timer H: the refusal's transaction ends, unacknowledged, and with it
-    // the request's claim on §8.2.2.2
-    let t1 = t0 + Duration::from_secs(33);
-    called.handle_timeout(t1);
+    called.ring(one, None, t0).expect("the first line rings");
     transmits(&mut called);
-    events(&mut called);
 
     let second = verified(
         &mut called,
         &credentials,
-        &forked(&invite, "sip:second@192.0.2.1", "hunt"),
-        t1,
+        &forked(&invite, "sip:second@192.0.2.1", "parallel"),
+        t0,
     );
     assert_eq!(second.outcome, VerificationOutcome::Valid, "{second:?}");
     assert!(!second.refused);
@@ -732,11 +718,11 @@ fn a_call_forked_to_two_lines_of_one_agent_verifies_on_both() {
         .find(|call| *call != one)
         .expect("the second line's call");
     assert_eq!(called.call_account(other), Some(second_line));
-    called.ring(other, None, t1).expect("the second line rings");
+    called.ring(other, None, t0).expect("the second line rings");
     transmits(&mut called);
 
     // the same PASSporT in a request of its own is a replay
-    let replay = verified(&mut called, &credentials, &replayed(&invite, "again"), t1);
+    let replay = verified(&mut called, &credentials, &replayed(&invite, "again"), t0);
     assert_eq!(replay.failure, Some(VerificationFailure::Stale));
     assert!(replay.refused);
     assert_eq!(refusal(&mut called), "SIP/2.0 403 Stale Date");

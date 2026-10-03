@@ -1027,12 +1027,14 @@ impl Endpoint {
             .and_then(|key| self.dialogs.find(&key));
 
         // §8.2.2.2: a request with no To tag whose From tag, Call-ID and CSeq
-        // already belong to an ongoing server transaction, under a branch
-        // that does not itself match it, has reached this end by a second
-        // path — almost always a fork. It is answered 482 on a transaction of
-        // its own, and the call the first copy is opening is not touched by
-        // it. A To tag, even one naming no dialog here, makes it §12.2.2's
-        // case instead
+        // already belong to an ongoing server transaction on the same line
+        // (an equivalent Request-URI), under a branch that does not itself
+        // match it, has reached this end by a second path — almost always a
+        // fork. It is answered 482 on a transaction of its own, and the call
+        // the first copy is opening is not touched by it. A copy sent to
+        // another line of this stack is that line's call, and rings there. A
+        // To tag, even one naming no dialog here, makes it §12.2.2's case
+        // instead
         if existing.is_none() && self.transactions.merged_with(request) {
             self.refuse_merged_invite(request, flow, now);
             return;

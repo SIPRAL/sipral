@@ -850,6 +850,182 @@ fn a_merged_invite_is_answered_482_and_opens_no_second_call() {
     assert_eq!(endpoint.in_flight().1, 1, "one early dialog, not two");
 }
 
+// -- one request forked to two lines of one stack ------------------------------
+
+/// `incoming`'s request, sent to `line` rather than to Alice's contact: what a
+/// proxy forwards when it forks to a contact another account of this stack
+/// registered (RFC 3261 §16.6 rewrites the Request-URI to each target, and
+/// leaves `From`, `To`, `Call-ID` and `CSeq` as they were).
+fn to_line(method: &str, branch: &str, line: &str) -> Vec<u8> {
+    String::from_utf8_lossy(&incoming(method, branch, ""))
+        .replacen("sip:alice@192.0.2.1 SIP/2.0", &format!("{line} SIP/2.0"), 1)
+        .into_bytes()
+}
+
+/// Deliver [`to_line`]'s request.
+fn arrive(endpoint: &mut Endpoint, method: &str, branch: &str, line: &str, now: Instant) {
+    deliver(endpoint, &to_line(method, branch, line), now);
+}
+
+/// The statuses of every response in `out`.
+fn answered_with(out: &[super::Transmit]) -> Vec<StatusCode> {
+    out.iter().filter_map(|t| status_of(&t.payload)).collect()
+}
+
+/// How many new calls `events` hands up.
+fn calls_in(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, Event::IncomingInvite { .. }))
+        .count()
+}
+
+#[test]
+fn a_fork_to_two_lines_of_one_stack_rings_on_both() {
+    // the second line's contact is another UAS's; §8.2.2.2 asks a UAS whether
+    // the request is already being processed there, and on this line it is not
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "INVITE", "line1", "sip:alice@192.0.2.1", t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 1);
+    transmits(&mut endpoint);
+
+    arrive(&mut endpoint, "INVITE", "line2", "sip:second@192.0.2.1", t0);
+    assert_eq!(
+        calls_in(&events(&mut endpoint)),
+        1,
+        "the branch for the second line is a call of its own"
+    );
+    let out = transmits(&mut endpoint);
+    assert!(
+        !answered_with(&out).contains(&StatusCode::LOOP_DETECTED),
+        "{:?}",
+        answered_with(&out)
+    );
+    assert_eq!(endpoint.in_flight().0, 2, "two INVITE server transactions");
+}
+
+#[test]
+fn a_copy_that_reaches_the_same_line_spelled_another_way_is_still_merged() {
+    // §19.1.4: a parameter only one side carries, other than the five it
+    // names, does not make two URIs different resources, so `;ob` on the
+    // second path's Request-URI names the same line
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "INVITE", "path1", "sip:alice@192.0.2.1", t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 1);
+    transmits(&mut endpoint);
+
+    arrive(
+        &mut endpoint,
+        "INVITE",
+        "path2",
+        "sip:alice@192.0.2.1;ob",
+        t0,
+    );
+    assert_eq!(calls_in(&events(&mut endpoint)), 0, "a second call opened");
+    assert!(answered_with(&transmits(&mut endpoint)).contains(&StatusCode::LOOP_DETECTED));
+}
+
+#[test]
+fn each_line_of_a_fork_still_refuses_its_own_second_copy() {
+    // the index holds both lines under one key; a copy reaching the second
+    // line again is that line's merged request, and the first is untouched
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "INVITE", "a1", "sip:alice@192.0.2.1", t0);
+    arrive(&mut endpoint, "INVITE", "b1", "sip:second@192.0.2.1", t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 2);
+    transmits(&mut endpoint);
+
+    arrive(&mut endpoint, "INVITE", "b2", "sip:second@192.0.2.1", t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 0);
+    assert_eq!(
+        answered_with(&transmits(&mut endpoint)),
+        vec![StatusCode::TRYING, StatusCode::LOOP_DETECTED],
+        "the repeat's own transaction says 100, then 482"
+    );
+}
+
+#[test]
+fn a_retransmission_on_either_line_is_absorbed_by_its_own_transaction() {
+    // §17.2.3 comes first: a copy whose branch matches a transaction is that
+    // transaction's retransmission, answered from it with the 100 it already
+    // sent, never a merged request and never a second call
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    let first = to_line("INVITE", "r1", "sip:alice@192.0.2.1");
+    let second = to_line("INVITE", "r2", "sip:second@192.0.2.1");
+    deliver(&mut endpoint, &first, t0);
+    deliver(&mut endpoint, &second, t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 2);
+    transmits(&mut endpoint);
+
+    for again in [&first, &second] {
+        deliver(&mut endpoint, again, t0);
+        assert_eq!(calls_in(&events(&mut endpoint)), 0);
+        assert_eq!(
+            answered_with(&transmits(&mut endpoint)),
+            vec![StatusCode::TRYING],
+            "a retransmission is answered with what its transaction sent"
+        );
+    }
+    assert_eq!(endpoint.in_flight().0, 2, "no transaction was added");
+}
+
+#[test]
+fn two_calls_that_differ_only_in_their_from_tag_are_both_let_in() {
+    // the From tag is a third of §8.2.2.2's key: two callers that happened
+    // on one Call-ID and CSeq are two requests, not one arriving twice
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "INVITE", "own1", "sip:alice@192.0.2.1", t0);
+    let other = String::from_utf8_lossy(&to_line("INVITE", "own2", "sip:alice@192.0.2.1"))
+        .replace(";tag=bobtag", ";tag=carol")
+        .into_bytes();
+    deliver(&mut endpoint, &other, t0);
+    assert_eq!(calls_in(&events(&mut endpoint)), 2);
+    assert!(!answered_with(&transmits(&mut endpoint)).contains(&StatusCode::LOOP_DETECTED));
+}
+
+#[test]
+fn a_message_forked_to_two_lines_reaches_both() {
+    // §8.2.2.2 for every method, scoped the same way
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "MESSAGE", "m1", "sip:alice@192.0.2.1", t0);
+    arrive(&mut endpoint, "MESSAGE", "m2", "sip:second@192.0.2.1", t0);
+    let handed_up = events(&mut endpoint)
+        .iter()
+        .filter(|event| matches!(event, Event::IncomingOutOfDialog { .. }))
+        .count();
+    assert_eq!(handed_up, 2);
+    assert!(!answered_with(&transmits(&mut endpoint)).contains(&StatusCode::LOOP_DETECTED));
+}
+
+#[test]
+fn a_copy_refused_on_one_line_leaves_the_other_lines_claim_standing() {
+    // three transactions under one key, on two lines: the 482 the second
+    // line's repeat earns takes a place of its own in the index and moves
+    // nothing, so the first line still refuses another path to it
+    let t0 = Instant::now();
+    let mut endpoint = endpoint(t0);
+    arrive(&mut endpoint, "MESSAGE", "k1", "sip:alice@192.0.2.1", t0);
+    arrive(&mut endpoint, "MESSAGE", "k2", "sip:second@192.0.2.1", t0);
+    arrive(&mut endpoint, "MESSAGE", "k3", "sip:second@192.0.2.1", t0);
+    events(&mut endpoint);
+    assert_eq!(
+        answered_with(&transmits(&mut endpoint)),
+        vec![StatusCode::LOOP_DETECTED]
+    );
+    arrive(&mut endpoint, "MESSAGE", "k4", "sip:alice@192.0.2.1", t0);
+    assert!(events(&mut endpoint).is_empty(), "handed up a second time");
+    assert_eq!(
+        answered_with(&transmits(&mut endpoint)),
+        vec![StatusCode::LOOP_DETECTED]
+    );
+}
+
 // -- a call counts against the ceiling from the moment it is let in -----------
 
 /// An INVITE from a caller of its own: its own branch, `Call-ID` and tag.

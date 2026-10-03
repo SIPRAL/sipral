@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **One INVITE forked to two lines of one stack rings on both.** RFC 3261 §8.2.2.2's merged-request check now compares the Request-URI too: a request with no `To` tag that repeats another's `From` tag, `Call-ID` and `CSeq` is answered 482 only when it reaches the same line (the same Request-URI, or one equivalent by §19.1.4), and a copy a proxy forwards to another contact the stack registered is that line's call. A parallel fork or ring group to two accounts of one stack used to ring one line and refuse the other 482, and a ring group hunting to the next line within five seconds over UDP met the same 482. A branch whose `To` names one line's address of record and whose Request-URI names another line's contact is now the second line's call, where the oldest of the two accounts took it. A STIR-signed call forked this way verifies on both lines. No C ABI change.
+
 ## [1.0.0] - 2026-10-02
 
 The first release, at C ABI 1.0. What it promises, for every 1.x release:

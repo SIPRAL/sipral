@@ -4393,6 +4393,81 @@ fn a_call_that_comes_in_is_matched_to_the_line_it_was_addressed_to() {
 }
 
 #[test]
+fn one_invite_forked_to_two_lines_of_the_agent_rings_once_on_each() {
+    // a ring group: the proxy forks one INVITE to the contact each line
+    // registered (RFC 3261 §16.6), and both branches keep the `To` the caller
+    // wrote — here the first line's address of record. Each line is its own
+    // UAS, so neither branch is the other's merged copy (§8.2.2.2), and the
+    // Request-URI, not the `To`, says which line a branch is for
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let password = |user: &str| Credentials::new(user, "open sesame");
+    let first = agent.add_account(
+        account()
+            .credentials(password("alice"))
+            .realms(&["example.com"]),
+    );
+    let second = agent.add_account(
+        Account::new(
+            uri("sip:support@example.com"),
+            uri("sip:example.com"),
+            uri("sip:support@192.0.2.1"),
+            UDP,
+            registrar(),
+        )
+        .credentials(password("support"))
+        .realms(&["support.example.com"]),
+    );
+    let to_first = incoming_invite("ring", Some(OFFER));
+    let to_second = String::from_utf8_lossy(&to_first)
+        .replacen(
+            "INVITE sip:alice@192.0.2.1 ",
+            "INVITE sip:support@192.0.2.1 ",
+            1,
+        )
+        .replacen("branch=z9hG4bKring;", "branch=z9hG4bKring2;", 1)
+        .into_bytes();
+
+    deliver(&mut agent, &to_first, t0);
+    deliver(&mut agent, &to_second, t0);
+    let out = transmits(&mut agent);
+    assert!(
+        !out.iter().any(|bytes| bytes.starts_with(b"SIP/2.0 482")),
+        "a branch for the second line was refused as merged"
+    );
+    let rung: Vec<(CallHandle, Option<AccountId>)> = events(&mut agent)
+        .into_iter()
+        .filter_map(|event| match event {
+            UaEvent::IncomingCall { call, account, .. } => Some((call, account)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rung.len(), 2, "one call per line: {rung:?}");
+    assert_eq!(rung[0].1, Some(first));
+    assert_eq!(rung[1].1, Some(second), "the Request-URI names the line");
+
+    for (call, _) in &rung {
+        agent.ring(*call, None, t0).expect("each line rings");
+    }
+    let ringing = transmits(&mut agent);
+    assert_eq!(ringing.len(), 2);
+    assert_ne!(
+        text(&ringing[0], HeaderName::To),
+        text(&ringing[1], HeaderName::To),
+        "two early dialogs, one tag each"
+    );
+
+    // the second line answers, from its own binding
+    agent
+        .answer(rung[1].0, Some(Arc::from(ANSWER)), t0)
+        .expect("200 goes");
+    let ok = sent(&mut agent);
+    assert!(ok.starts_with(b"SIP/2.0 200 OK\r\n"));
+    assert_eq!(header(&ok, HeaderName::Contact), b"<sip:support@192.0.2.1>");
+    assert_eq!(agent.call_state(rung[0].0), Some(CallState::Ringing));
+}
+
+#[test]
 fn ringing_then_answering_puts_the_call_up_when_the_ack_arrives() {
     let t0 = Instant::now();
     let mut agent = agent(t0);

@@ -1290,16 +1290,20 @@ impl UserAgent {
     /// The account an incoming INVITE was addressed to, when it can be told.
     ///
     /// The Request-URI is where the registrar sent it, so it is this end's
-    /// contact; the `To` is the address of record. Either identifies a line.
-    /// Among the lines either names, the one whose requests use the transport
-    /// the request arrived on wins, and then the one whose server it came
-    /// from: two accounts with the same user, on two servers or on UDP and
-    /// TLS in one stack, are each found by their own flow. With neither
-    /// matching, a line on the arrival flow whose contact has the
-    /// Request-URI's user is the one — a server that rewrote the host still
-    /// names the user it registered. None matching is not a reason to refuse
-    /// the call — a misrouted INVITE that vanishes silently is worse than one
-    /// the application can see.
+    /// contact; the `To` is the address of record. Either identifies a line,
+    /// and the contact is the stronger of the two: a proxy forking to several
+    /// lines rewrites the Request-URI to each line's contact and leaves the
+    /// `To` as the caller wrote it (RFC 3261 §16.6), so a branch whose `To`
+    /// is one line's address of record and whose Request-URI is another's
+    /// contact is the second line's. Among the lines named alike, the one
+    /// whose requests use the transport the request arrived on wins, and then
+    /// the one whose server it came from: two accounts with the same user, on
+    /// two servers or on UDP and TLS in one stack, are each found by their
+    /// own flow. With neither matching, a line on the arrival flow whose
+    /// contact has the Request-URI's user is the one — a server that rewrote
+    /// the host still names the user it registered. None matching is not a
+    /// reason to refuse the call — a misrouted INVITE that vanishes silently
+    /// is worse than one the application can see.
     ///
     /// General enough for any incoming request, not only an INVITE, because
     /// `reliable::on_require_event` needs the same answer for a request that
@@ -1317,8 +1321,14 @@ impl UserAgent {
         // TLS, are told apart by these where the URIs name both alike
         let flow = self.guard.arrived_on();
         let source = self.guard.source();
+        let named = |config: &Account| {
+            target
+                .as_ref()
+                .is_some_and(|uri| config.contact.equivalent(uri))
+        };
         let closeness = |config: &Account| {
             (
+                named(config),
                 flow.is_some_and(|transport| transport == config.transport),
                 source.is_some_and(|peer| peer == config.remote),
             )
@@ -1335,9 +1345,7 @@ impl UserAgent {
                 .map(|(id, _)| *id)
         };
         let addressed = best(&mut self.accounts.iter().filter(|(_, config)| {
-            target
-                .as_ref()
-                .is_some_and(|uri| config.contact.equivalent(uri))
+            named(config)
                 || record
                     .as_ref()
                     .is_some_and(|uri| config.aor.equivalent(uri))
