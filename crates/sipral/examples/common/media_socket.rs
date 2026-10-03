@@ -47,8 +47,8 @@ pub(crate) const PACE: Duration = Duration::from_millis(20);
 /// rest have their next port held.
 const PAIR_ATTEMPTS: usize = 64;
 
-/// One call's RTP socket, and its RTCP one when the call keeps RTCP on a
-/// port of its own.
+/// One call's RTP socket, and the port after it, held from the bind and
+/// kept for RTCP when the call keeps RTCP on a port of its own.
 pub(crate) struct MediaSocket {
     socket: UdpSocket,
     /// The port after the RTP one, bound once the call's plan says RTCP

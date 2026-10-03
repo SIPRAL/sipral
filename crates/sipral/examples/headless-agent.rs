@@ -65,9 +65,10 @@
 //! lets `N` a second in, whatever room the ceiling has.
 //! `--invite-burst` given as well is taken as it is, and the guard then
 //! refuses with 480 whatever it would refuse at that rate. Each call holds
-//! a UDP socket for its audio, two when the far end keeps RTCP apart, so
-//! the process's open-file limit (`ulimit -n`) has to allow twice `N` and a
-//! few more; a call the agent cannot open a socket for is refused 503 and
+//! two UDP sockets for its audio, its RTP port and the one after it for
+//! RTCP, and lets the second go only once the far end keeps the two on one
+//! port, so the process's open-file limit (`ulimit -n`) has to allow twice
+//! `N` and a few more; a call the agent cannot open a socket for is refused 503 and
 //! said on standard error.
 //!
 //! **What it is told.** A line on standard input is a command: `netchange`
@@ -811,8 +812,8 @@ fn handle(agent: &mut Agent, event: &Event, now: Instant) {
                         Err(error) => eprintln!("cannot answer {call:?}: {error}"),
                     }
                 }
-                // most often the open-file limit: a socket a call, two
-                // when the far end keeps RTCP apart
+                // most often the open-file limit: two sockets a call until
+                // the far end keeps RTP and RTCP on one port
                 Err(error) => {
                     eprintln!("cannot open a media socket for {call:?}, refused 503: {error}");
                     let _ =
