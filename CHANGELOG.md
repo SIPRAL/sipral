@@ -18,6 +18,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
   at once does, and goes as `Expires: 0` when the wait ends; it used to keep
   the old state and could be sent, or retried, as a REGISTER asking for the
   binding back.
+- The examples' media socket holds the RTCP port next to its RTP port from
+  the moment it binds, choosing the two as a pair, where it bound RTCP only
+  once the call's plan named it and lost that port to another call in about
+  one call in twenty-five at a thousand at once.
 
 ## [1.0.0] - 2026-10-02
 
