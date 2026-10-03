@@ -48,12 +48,12 @@ policy's own time commitments below are measured against from then on.
 6. **Credit.** The reporter is named in the advisory, unless they ask to
    stay anonymous or to be named differently.
 
-**Time commitments** — the maintainer's own promise, not a guarantee of
-outcome, and the standard this small a vendor can actually hold:
+**Time commitments** — the maintainer's promise to every reporter, not a
+guarantee of outcome:
 
 | From | To | Within |
 |---|---|---|
-| Report received | Acknowledgement | 3 business days |
+| Report received | Acknowledgement | 7 business days |
 | Acknowledgement | Triage (reproduced, scoped, severity assigned) | 10 business days |
 | Triage | A fix, for **critical** or **high** severity | 30 days |
 | Triage | A fix, for **medium** or **low** severity | No fixed deadline; tracked to closure, not silently dropped |
