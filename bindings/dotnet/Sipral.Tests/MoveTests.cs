@@ -106,7 +106,10 @@ public sealed class MoveTests
         {
             return;
         }
-        using var alice = new SipralStack(audio: SipralAudio.Application);
+        // bound at one address, which a move binds again at the next: a stack
+        // on every interface keeps advertising the route toward its server,
+        // loopback here, below
+        using var alice = new SipralStack("127.0.0.1", audio: SipralAudio.Application);
         using var bob = new SipralStack(audio: SipralAudio.Application);
         var (call, answered) = await ConnectAsync(alice, bob);
         try
@@ -220,6 +223,31 @@ public sealed class MoveTests
         stack.MoveTo(elsewhere);
         Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
         Assert.True(stack.KeptSignallingPort);
+    }
+
+    /// <summary>A stack bound on every interface keeps picking its own
+    /// address across a move: its socket stays where it was, on its port, and
+    /// what it advertises is the route toward each account's server again
+    /// rather than the address the move named, taken as fixed from then
+    /// on.</summary>
+    [Fact]
+    public void AStackOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove()
+    {
+        var elsewhere = OtherAddress();
+        using var stack = new SipralStack(audio: SipralAudio.Application);
+        var port = stack.BindAddress[(stack.BindAddress.LastIndexOf(':') + 1)..];
+        var away = stack.AddAccount("sip:alice@192.0.2.1", registrarAddress: "192.0.2.1:5060");
+        Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+
+        stack.MoveTo(elsewhere);
+        var here = stack.AddAccount("sip:bob@127.0.0.1", registrarAddress: "127.0.0.1:5060");
+        Assert.Equal($"127.0.0.1:{port}", here.Advertised);
+
+        stack.MoveTo("127.0.0.1");
+        Assert.Equal($"{elsewhere}:{port}", stack.BindAddress);
+        Assert.True(stack.KeptSignallingPort);
+        Assert.Equal($"{elsewhere}:{port}", away.Advertised);
+        Assert.Equal($"127.0.0.1:{port}", here.Advertised);
     }
 
     [Fact]

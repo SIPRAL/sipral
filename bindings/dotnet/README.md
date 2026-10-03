@@ -224,7 +224,11 @@ suite, and whether the exchange authenticated the far end), and
 `stack.MoveTo(host)` is what an application calls when the platform says the
 address changed: the signalling socket is bound again there, the change
 reported, and every account added without a `contact` pointed at the new
-address (`Account.Rebind` does one by hand). On `SipralRecovery.Rebuild`
+address (`Account.Rebind` does one by hand). A stack created with no
+`bindHost` keeps its socket on every interface, and its port, and goes on
+choosing its own address: it advertises the route toward its first account's
+server again, and each account the route toward its own, rather than taking
+`host` as fixed. On `SipralRecovery.Rebuild`
 each call whose media was described at the old address gets
 `SipralEventKind.CallAddressWanted`, and `call.Readdress(host)` offers it
 again from a socket there — a re-INVITE moving only `c=` and the `m=` port.

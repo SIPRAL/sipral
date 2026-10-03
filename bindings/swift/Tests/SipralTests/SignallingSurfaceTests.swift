@@ -352,6 +352,35 @@ final class SignallingSurfaceTests: XCTestCase {
         XCTAssertTrue(stack.keptSignallingPort)
     }
 
+    /// A stack bound on every interface keeps picking its own address
+    /// across a move: its socket stays where it was, on its port, and what it
+    /// advertises is the route toward each account's server again rather
+    /// than the address the platform named, taken as fixed from then on.
+    func testAStackOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove() throws {
+        let elsewhere = try otherAddress()
+        let stack = try SipralStack(audio: .application)
+        defer { stack.close() }
+        let port = UDPSocket.parse(stack.bindAddress).port
+        let away = try stack.addAccount(aor: "sip:alice@192.0.2.1", registrarAddress: "192.0.2.1:5060")
+        XCTAssertEqual(stack.bindAddress, "\(elsewhere):\(port)")
+
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: elsewhere, interface: "moved"))
+        let here = try stack.addAccount(aor: "sip:bob@127.0.0.1", registrarAddress: "127.0.0.1:5060")
+        XCTAssertTrue(
+            here.contact.contains("127.0.0.1:\(port)"),
+            "an account added after the move is reached at the route toward its server: \(here.contact)"
+        )
+
+        try stack.networkChanged(to: SipralStack.Network(link: .wired, address: "127.0.0.1", interface: "back"))
+        XCTAssertEqual(
+            stack.bindAddress, "\(elsewhere):\(port)",
+            "the route toward the first account's server, not the address the platform named"
+        )
+        XCTAssertTrue(stack.keptSignallingPort)
+        XCTAssertTrue(away.contact.contains("\(elsewhere):\(port)"), away.contact)
+        XCTAssertTrue(here.contact.contains("127.0.0.1:\(port)"), here.contact)
+    }
+
     func testACallUnderNoChangeIsNotAskedToMove() async throws {
         let stack = try SipralStack(audio: .application)
         defer { stack.close() }

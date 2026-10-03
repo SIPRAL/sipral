@@ -391,8 +391,10 @@ public static class SipralDns
 public sealed partial class SipralStack
 {
     /// <summary>Whether this stack picks the address peers reach it at — it
-    /// was given no <c>bindHost</c> — and whether it has picked it yet: the
-    /// route toward the first server an account names.</summary>
+    /// was given no <c>bindHost</c>, and keeps picking across every
+    /// <see cref="MoveTo"/> — and whether it has picked it yet: the route
+    /// toward the first server an account names, since it was created or
+    /// since the network last moved it.</summary>
     private bool _routes;
     private bool _routeChosen;
     private readonly object _routeLock = new();
@@ -467,15 +469,59 @@ public sealed partial class SipralStack
         }
         if (first && address != BindAddress)
         {
-            var local = NativeText.ToSBytes(address);
-            SipralErrors.Call(
-                () => NativeMethods.sipral_stack_transport_bind(
-                    Handle, global::Sipral.Sipral.TransportMain, (uint)SipralTransport.Udp, local, (nuint)local.Length,
-                    null!, 0, NowMs, out _),
-                "sipral_stack_transport_bind");
-            BindAddress = address;
+            AdvertiseMain(address);
         }
         return address;
+    }
+
+    /// <summary>The UDP transport the stack writes in its <c>Via</c> named
+    /// <paramref name="address"/> from now on, on a stack that picks its own
+    /// address.</summary>
+    private void AdvertiseMain(string address)
+    {
+        var local = NativeText.ToSBytes(address);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_transport_bind(
+                Handle, global::Sipral.Sipral.TransportMain, (uint)SipralTransport.Udp, local, (nuint)local.Length,
+                null!, 0, NowMs, out _),
+            "sipral_stack_transport_bind");
+        BindAddress = address;
+    }
+
+    /// <summary>What a stack bound on every interface advertises after a
+    /// move, chosen again as it was at creation: the route toward its first
+    /// account's server, or with no server to route toward,
+    /// <paramref name="host"/> — the new network's own address — on the same
+    /// port. The socket on every interface already receives there, on the
+    /// port it had, and stays; an address this machine lacks throws, as
+    /// binding the socket there would.</summary>
+    private void AdvertiseAgain(string host)
+    {
+        var address = IPAddress.Parse(host);
+        using (var probe = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp))
+        {
+            probe.Bind(new IPEndPoint(address, 0));
+        }
+        KeptSignallingPort = true;
+        lock (_routeLock)
+        {
+            _routeChosen = false;
+        }
+        string? server;
+        lock (_accounts)
+        {
+            server = _accounts.Select(one => one.RegistrarAddress).FirstOrDefault(IsAddress);
+        }
+        if (server is not null)
+        {
+            AdvertiseToward(server);
+            return;
+        }
+        var local = $"{host}:{ParseAddress(BindAddress).Port}";
+        if (local != BindAddress)
+        {
+            AdvertiseMain(local);
+        }
     }
 
     /// <summary>Whether an account added now, with no <c>Contact</c> of its

@@ -11,6 +11,13 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- **A de-registration that has to wait goes as one.** Asked for while the account waited for its registrar's lookup or for its own connection, it reads `UNREGISTERED` at once, as one sent at once does, and goes as `Expires: 0` when the wait ends; it used to keep the old state and could be sent, or retried, as a REGISTER asking for the binding back.
+- **A stack on every interface keeps choosing its own address after a move.** A stack created with no bind address keeps choosing its own address after a network change, in the Swift, Kotlin, .NET and Python layers: its socket stays on every interface and its port, and it advertises the route toward its first account's server again, and each account the route toward its own. It used to take the new address as fixed from then on, so a server reached over a VPN, or a second account's server reached another way, was told an address it could not reach.
+- **The examples take their RTP and RTCP ports as a pair.** The examples' media socket holds the RTCP port next to its RTP port from the moment it binds, where it bound RTCP only once the call's plan named it and lost that port to another call in about one call in twenty-five at a thousand at once.
+- **The scripts read a listing to its end.** The gate, the lab and the packaging scripts read a whole listing before deciding a line is not in it: `grep -q` stopping at the first match made the writer die of SIGPIPE under `pipefail`, which read a match as none under load — the parallel gate's AAR dry run missing classes it had, a lab call's log missing the packets it counted — and could pass the check that libopus is out of a graph that has it.
+
 ## [1.0.0] - 2026-10-02
 
 The first release, at C ABI 1.0. What it promises, for every 1.x release:

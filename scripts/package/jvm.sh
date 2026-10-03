@@ -52,6 +52,13 @@
 # files under DIR/maven, DIR/natives and DIR/cache.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 
@@ -179,7 +186,7 @@ if [ "$DRY_RUN" -eq 1 ] && [ "$(uname -s)" != "Linux" ]; then
     for entry in "${PLATFORMS[@]}"; do
         platform="${entry%%:*}"
         triple="${entry##*:}"
-        if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+        if ! rustup target list --installed 2>/dev/null | found -x "$triple"; then
             fail "$platform: $triple is not installed: rustup target add $triple"
         elif cargo check -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" >"$OUT/check-$platform.log" 2>&1; then
             pass "$platform: cargo check -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
@@ -419,11 +426,11 @@ listing=$(unzip -l "$JAR" 2>/dev/null)
 for class in org/sipral/SipralNative.class org/sipral/idiomatic/SipralClient.class \
     org/sipral/jvm/SipralNatives.class org/sipral/jvm/SipralJava.class \
     META-INF/LICENSE META-INF/THIRD-PARTY-LICENSES.txt; do
-    printf '%s\n' "$listing" | grep -q " $class\$" && pass "carries $class" || fail "missing $class"
+    printf '%s\n' "$listing" | found " $class\$" && pass "carries $class" || fail "missing $class"
 done
 for platform in "${EXPECTED[@]}"; do
     for lib in "${LIBS[@]}"; do
-        printf '%s\n' "$listing" | grep -q " $RESOURCE_ROOT/$platform/$lib\$" \
+        printf '%s\n' "$listing" | found " $RESOURCE_ROOT/$platform/$lib\$" \
             && pass "carries $RESOURCE_ROOT/$platform/$lib" \
             || fail "missing $RESOURCE_ROOT/$platform/$lib"
     done

@@ -42,6 +42,11 @@ pub(crate) const MAX_SAMPLES: usize = 960;
 /// twenty-millisecond packetisation.
 pub(crate) const PACE: Duration = Duration::from_millis(20);
 
+/// How many ports the system is asked for before an RTP and RTCP pair is
+/// given up on: about half of what it hands out is odd, and a few of the
+/// rest have their next port held.
+const PAIR_ATTEMPTS: usize = 64;
+
 /// One call's RTP socket, and its RTCP one when the call keeps RTCP on a
 /// port of its own.
 pub(crate) struct MediaSocket {
@@ -50,6 +55,11 @@ pub(crate) struct MediaSocket {
     /// runs there (RFC 3550 §11): a peer that did not agree to multiplex
     /// the two (RFC 5761) sends its reports to it, and expects ours from it.
     rtcp: Option<UdpSocket>,
+    /// That port, held from the moment the RTP one was bound and until the
+    /// plan says whether RTCP runs there: bound only once the plan said so,
+    /// it had been taken meanwhile by another call's RTP in one call of
+    /// twenty-five at a thousand at once.
+    reserved: Option<UdpSocket>,
     /// Whether binding it was tried and failed, so it is not tried again
     /// every frame.
     rtcp_refused: bool,
@@ -63,13 +73,16 @@ pub(crate) struct MediaSocket {
 }
 
 impl MediaSocket {
-    /// Bind a socket for RTP, so the offer or the answer can name its port.
+    /// Bind a socket for RTP, so the offer or the answer can name its port,
+    /// and hold the one after it for RTCP.
     pub(crate) fn bind(now: Instant) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        let (socket, reserved) = bind_pair(|| UdpSocket::bind("0.0.0.0:0"))?;
         socket.set_nonblocking(true)?;
+        reserved.set_nonblocking(true)?;
         Ok(Self {
             socket,
             rtcp: None,
+            reserved: Some(reserved),
             rtcp_refused: false,
             running: false,
             started: now,
@@ -108,7 +121,9 @@ impl MediaSocket {
         let _ = socket.send_to(payload, destination);
     }
 
-    /// Bind the RTCP port the call's plan names, the first time it names one.
+    /// Take the RTCP port the call's plan names, the first time it names one:
+    /// the one held beside the RTP port when that is it, else bound now. A
+    /// plan that multiplexes the two, or has no RTCP, lets the held one go.
     /// A port somebody else holds is said on standard error; the call then
     /// runs with its reports going out from the RTP port and none coming in.
     fn follow_rtcp_plan(&mut self, session: &MediaSession) {
@@ -116,8 +131,18 @@ impl MediaSocket {
             return;
         }
         let RtcpPlan::SeparatePort { local, .. } = session.plan().rtcp else {
+            self.reserved = None;
             return;
         };
+        let held = self.reserved.take().filter(|socket| {
+            socket
+                .local_addr()
+                .is_ok_and(|at| at.port() == local.port())
+        });
+        if let Some(socket) = held {
+            self.rtcp = Some(socket);
+            return;
+        }
         match UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), local.port()))
             .and_then(|socket| socket.set_nonblocking(true).map(|()| socket))
         {
@@ -206,5 +231,78 @@ impl MediaSocket {
             sink(room);
             self.next_play += PACE;
         }
+    }
+}
+
+/// An RTP socket on an even port, from `pick`, and an RTCP one on the port
+/// after it (RFC 3550 §11), taken as a pair: a port `pick` hands out odd, or
+/// whose next port somebody else holds, is let go of and another asked for.
+fn bind_pair(
+    mut pick: impl FnMut() -> std::io::Result<UdpSocket>,
+) -> std::io::Result<(UdpSocket, UdpSocket)> {
+    let mut held = None;
+    for _ in 0..PAIR_ATTEMPTS {
+        let media = pick()?;
+        let port = media.local_addr()?.port();
+        let Some(next) = port.checked_add(1).filter(|_| port.is_multiple_of(2)) else {
+            continue;
+        };
+        match UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), next)) {
+            Ok(control) => return Ok((media, control)),
+            Err(error) => held = Some(error),
+        }
+    }
+    Err(held.unwrap_or_else(|| {
+        std::io::Error::new(ErrorKind::AddrInUse, "no even port with its next one free")
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+
+    use super::bind_pair;
+
+    fn any() -> std::io::Result<UdpSocket> {
+        UdpSocket::bind("0.0.0.0:0")
+    }
+
+    fn port(socket: &UdpSocket) -> u16 {
+        socket.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn rtp_is_bound_on_an_even_port_with_the_next_one_held() {
+        for _ in 0..32 {
+            let (media, control) = bind_pair(any).unwrap();
+            assert!(port(&media).is_multiple_of(2));
+            assert_eq!(port(&control), port(&media) + 1);
+            let taken = UdpSocket::bind(SocketAddr::new(
+                Ipv4Addr::UNSPECIFIED.into(),
+                port(&control),
+            ));
+            assert!(taken.is_err(), "the RTCP port is not held");
+        }
+    }
+
+    #[test]
+    fn a_port_whose_next_one_is_held_is_let_go_of() {
+        // an even port whose next one another socket already has
+        let (blocked, squatter) = loop {
+            let (media, control) = bind_pair(any).unwrap();
+            let even = port(&media);
+            drop(control);
+            if let Ok(squatter) =
+                UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), even + 1))
+            {
+                break (media, squatter);
+            }
+        };
+        let refused = port(&blocked);
+        let mut offered = Some(blocked);
+        let (media, control) = bind_pair(|| offered.take().map_or_else(any, Ok)).unwrap();
+        assert_ne!(port(&media), refused, "a pair whose RTCP port was held");
+        assert_eq!(port(&control), port(&media) + 1);
+        drop(squatter);
     }
 }

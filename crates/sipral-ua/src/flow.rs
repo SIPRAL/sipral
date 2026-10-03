@@ -123,6 +123,7 @@ impl UserAgent {
         match self.account_flow(account, now) {
             Flow::Ready => Ok(false),
             Flow::Asked { until } => {
+                self.hold_register(account, unregistering);
                 if let Some(reg) = self.registrations.get_mut(&account)
                     && reg.transaction.is_none()
                 {
@@ -149,10 +150,11 @@ impl UserAgent {
             }
             let held = self.registrations.get(&account).is_some_and(|reg| {
                 reg.transaction.is_none()
-                    && matches!(
-                        reg.state,
-                        RegistrationState::Registering | RegistrationState::Retrying
-                    )
+                    && (reg.unregistering
+                        || matches!(
+                            reg.state,
+                            RegistrationState::Registering | RegistrationState::Retrying
+                        ))
             });
             if held {
                 let unregistering = self
@@ -270,7 +272,7 @@ mod tests {
     use crate::account::{Account, AccountId};
     use crate::agent::UserAgent;
     use crate::call::OutgoingCall;
-    use crate::event::UaEvent;
+    use crate::event::{RegistrationState, UaEvent};
     use crate::{EndpointConfig, Uri};
 
     const UDP: TransportId = TransportId(1);
@@ -622,6 +624,126 @@ mod tests {
                 .any(|one| one.bytes.starts_with(b"REGISTER ") && one.transport == TLS),
             "registered again over the new connection"
         );
+    }
+
+    /// The REGISTERs `sent` carried over the TLS connection, as the value
+    /// of each one's `Expires`.
+    fn expires_over_tls(sent: &[Sent]) -> Vec<Vec<u8>> {
+        sent.iter()
+            .filter(|one| one.transport == TLS && one.bytes.starts_with(b"REGISTER "))
+            .map(|one| header(&one.bytes, HeaderName::Expires))
+            .collect()
+    }
+
+    /// A registered line whose connection is gone, and whose REGISTER waits
+    /// for another.
+    fn waiting_line(now: Instant) -> (UserAgent, AccountId) {
+        let (mut agent, _, on_tls) = registered_lines(now);
+        agent
+            .receive(
+                Input::TransportFailed {
+                    transport: TLS,
+                    error: TransportErrorKind::ConnectionReset,
+                },
+                now,
+            )
+            .unwrap();
+        let (sent, _) = drain(&mut agent);
+        assert!(sent.is_empty(), "the REGISTER waits for the connection");
+        (agent, on_tls)
+    }
+
+    #[test]
+    fn a_de_registration_waiting_for_its_connection_goes_as_one() {
+        let t0 = Instant::now();
+        let (mut agent, on_tls) = waiting_line(t0);
+        agent.unregister(on_tls, t0).unwrap();
+        assert_eq!(
+            agent.registration_state(on_tls),
+            Some(RegistrationState::Unregistered),
+            "a de-registration that waits reads as one sent at once does"
+        );
+        let (sent, _) = drain(&mut agent);
+        assert!(sent.is_empty(), "nothing goes before the connection");
+
+        bind_stream(&mut agent, TransportProtocol::Tls, t0);
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(
+            expires_over_tls(&sent),
+            [b"0".to_vec()],
+            "the connection carries the de-registration, not the binding back"
+        );
+        let leaving = sent
+            .iter()
+            .find(|one| one.transport == TLS)
+            .expect("the de-registration");
+        let contact = header(&leaving.bytes, HeaderName::Contact);
+        let events = over_tls(
+            &mut agent,
+            &ok_for(&leaving.bytes, &String::from_utf8_lossy(&contact)),
+            t0,
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, UaEvent::Unregistered { account } if *account == on_tls)
+            ),
+            "the 200 is read as the binding given up"
+        );
+        assert_eq!(
+            agent.registration_state(on_tls),
+            Some(RegistrationState::Unregistered)
+        );
+    }
+
+    #[test]
+    fn a_de_registration_whose_connection_never_comes_never_asks_for_the_binding_back() {
+        let t0 = Instant::now();
+        let (mut agent, on_tls) = waiting_line(t0);
+        agent.unregister(on_tls, t0).unwrap();
+        let _ = drain(&mut agent);
+        let mut now = t0;
+        let mut asked_again = false;
+        while let Some(due) = agent.poll_timeout() {
+            if due > t0 + Duration::from_secs(120) {
+                break;
+            }
+            now = due.max(now);
+            agent.handle_timeout(now);
+            let (sent, events) = drain(&mut agent);
+            assert!(expires_over_tls(&sent).is_empty());
+            asked_again |= !wanted(&events).is_empty();
+            assert_eq!(
+                agent.registration_state(on_tls),
+                Some(RegistrationState::Unregistered),
+                "the retries are a de-registration's"
+            );
+        }
+        assert!(asked_again, "the retry asks for the connection again");
+
+        // a connection that comes in the end carries the de-registration,
+        // at once or when the back-off it is in runs out
+        bind_stream(&mut agent, TransportProtocol::Tls, now);
+        let (mut sent, _) = drain(&mut agent);
+        while expires_over_tls(&sent).is_empty() {
+            let due = agent.poll_timeout().expect("a retry is scheduled");
+            assert!(due < now + Duration::from_hours(1), "nothing went");
+            now = due.max(now);
+            agent.handle_timeout(now);
+            sent = drain(&mut agent).0;
+        }
+        assert_eq!(expires_over_tls(&sent), [b"0".to_vec()]);
+    }
+
+    #[test]
+    fn a_registration_asked_for_while_a_de_registration_waits_takes_its_place() {
+        let t0 = Instant::now();
+        let (mut agent, on_tls) = waiting_line(t0);
+        agent.unregister(on_tls, t0).unwrap();
+        agent.register(on_tls, t0).unwrap();
+        let _ = drain(&mut agent);
+        bind_stream(&mut agent, TransportProtocol::Tls, t0);
+        let (sent, _) = drain(&mut agent);
+        assert_eq!(expires_over_tls(&sent), [b"3600".to_vec()]);
     }
 
     #[test]

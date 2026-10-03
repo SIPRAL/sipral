@@ -196,7 +196,11 @@ carries it on media started, changed and secured.
 `stack.move_to(host)` is what an application calls when the platform says
 the address changed: the signalling socket is bound again there, the change
 reported, and every account added without a `contact` pointed at the new
-address (`Account.rebind` does one by hand). On `Recovery.REBUILD` each call
+address (`Account.rebind` does one by hand). A stack created with no
+`bind_host` keeps its socket on every interface, and its port, and goes on
+choosing its own address: it advertises the route toward its first account's
+server again, and each account the route toward its own, rather than taking
+`host` as fixed. On `Recovery.REBUILD` each call
 whose media was described at the old address gets
 `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, and `call.readdress(host)` offers it
 again from a socket there — a re-INVITE moving only `c=` and the `m=` port —

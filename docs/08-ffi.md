@@ -443,9 +443,15 @@ request.
 `sipral_account_unregister` returns**, before the REGISTER that gives the
 binding up has been written, and stays so while the registrar has not
 answered: the state says what the account was asked to be, and this ABI has
-no state for a binding being given up. The registrar's 200 is the
-`SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` that follows, reading
-`UNREGISTERED`; a failure is one reading `RETRYING` or `FAILED`. An
+no state for a binding being given up. That holds as well for a
+de-registration that has to wait first — for the lookup of a registrar named
+by a URI, or for an account's own connection — and whatever goes when the
+wait ends is the `Expires: 0`, never a REGISTER asking for the binding back.
+The registrar's 200 is the `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` that
+follows, reading `UNREGISTERED` with `failure` zero; a de-registration that
+did not get through is one reading `UNREGISTERED` still, with its `failure`
+and a `retry_in_ms`, since it is retried as a de-registration, and a refusal
+nothing can fix reads `FAILED`. An
 application that waits for the binding to be gone before it exits waits for
 that event — or for the stack's transmit drain to have sent the request,
 when the answer does not matter — not for the state, which has already

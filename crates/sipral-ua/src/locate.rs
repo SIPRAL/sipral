@@ -231,7 +231,9 @@ impl UserAgent {
             return false;
         }
         location.waiting = Some(unregistering);
-        if location.lookup.is_none() {
+        let idle = location.lookup.is_none();
+        self.hold_register(account, unregistering);
+        if idle {
             self.start_lookup(account, now);
         }
         // either it waits, or a lookup that settled at once — a numeric host
@@ -604,7 +606,7 @@ mod tests {
     use crate::account::{Account, AccountId};
     use crate::agent::UserAgent;
     use crate::call::OutgoingCall;
-    use crate::event::{RegistrationFailure, UaEvent};
+    use crate::event::{RegistrationFailure, RegistrationState, UaEvent};
     use crate::{EndpointConfig, Input, TransportId, TransportProtocol, UaError, Uri};
     use sipral_core::endpoint::{Answer, LocateError, Query, Record, RecordType, Srv};
     use sipral_core::msg::{HeaderName, ParseMode, ParseScratch, parse};
@@ -853,6 +855,43 @@ mod tests {
         assert_eq!(
             agent.located_targets(id),
             [addr("192.0.2.40:5080"), addr("198.51.100.41:5080")]
+        );
+    }
+
+    #[test]
+    fn a_de_registration_waiting_for_a_lookup_never_asks_for_the_binding_back() {
+        let t0 = Instant::now();
+        let mut agent = agent(t0);
+        let id = agent.add_account(located("sip:pbx.example.com"));
+        agent.register(id, t0).unwrap();
+        let nothing = Dns::default();
+        let _ = settle(&mut agent, id, &nothing, t0);
+
+        // asked to leave while no address is known: the lookup it waits for
+        // fails too, and the retry after that finds the registrar
+        agent.unregister(id, t0).unwrap();
+        assert_eq!(
+            agent.registration_state(id),
+            Some(RegistrationState::Unregistered),
+            "a de-registration that waits reads as one sent at once does"
+        );
+        let seen = settle(&mut agent, id, &nothing, t0);
+        assert!(seen.registers().is_empty());
+        assert_eq!(
+            agent.registration_state(id),
+            Some(RegistrationState::Unregistered)
+        );
+        let seen = run(&mut agent, id, &pbx(300), t0, t0 + Duration::from_secs(600));
+        let expires: Vec<Vec<u8>> = seen
+            .sent
+            .iter()
+            .filter(|(_, bytes)| bytes.starts_with(b"REGISTER "))
+            .map(|(_, bytes)| header(bytes, HeaderName::Expires))
+            .collect();
+        assert!(!expires.is_empty(), "the de-registration went once located");
+        assert!(
+            expires.iter().all(|value| value == b"0"),
+            "a retry asked for the binding back: {expires:?}"
         );
     }
 

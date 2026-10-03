@@ -270,6 +270,13 @@
 # capture with it.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
@@ -463,7 +470,7 @@ if [ "$WANT" = wasapi ]; then
         # still on 5060 behind it is the phone that never rings
         tries=0
         until ( cd interop && docker compose exec -T asterisk \
-                asterisk -rx 'pjsip show transports' 2>/dev/null ) | grep -q '0\.0\.0\.0:5062'; do
+                asterisk -rx 'pjsip show transports' 2>/dev/null ) | found '0\.0\.0\.0:5062'; do
             tries=$((tries + 1))
             [ "$tries" -ge 30 ] && { fail "Asterisk's own SIP socket is not on 5062"; exit 1; }
             sleep 1
@@ -710,7 +717,7 @@ wait_for freeswitch "MSG Thread 0 Started" || exit 1
 # probe of what a server said about itself.
 freeswitch_lab_profile_up() {
     ( cd interop && docker compose exec -T freeswitch \
-        fs_cli -x 'sofia status profile lab' 2>/dev/null ) | grep -q 'sofia_reg_lab'
+        fs_cli -x 'sofia status profile lab' 2>/dev/null ) | found 'sofia_reg_lab'
 }
 tries=0
 profile_seen=0
@@ -848,7 +855,7 @@ python_agent() {
 
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent; do
         tries=$((tries + 1))
         # an agent that died on start is not going to register however long
         # it is given, and what it said as it died is the useful part
@@ -866,7 +873,7 @@ python_agent() {
         "channel originate PJSIP/labuser-agent extension s@agent-call" ) >/dev/null 2>&1
 
     tries=0
-    until docker logs "$AGENT_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$AGENT_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -875,15 +882,15 @@ python_agent() {
     docker rm -f "$AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | sed 's/^/    /'
 
-    printf '%s\n' "$log" | grep -q '^answered ' \
+    printf '%s\n' "$log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf #' \
+    printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "'packets_received': [1-9]" \
+        | grep '^ended ' | found -E "'packets_received': [1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "'packets_sent': [1-9]" \
+        | grep '^ended ' | found -E "'packets_sent': [1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -934,7 +941,7 @@ kotlin_agent() {
 
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-kotlin; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent-kotlin; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$KOTLIN_AGENT_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 90 ]; then
@@ -950,7 +957,7 @@ kotlin_agent() {
         "channel originate PJSIP/labuser-agent-kotlin extension s@agent-call" ) >/dev/null 2>&1
 
     tries=0
-    until docker logs "$KOTLIN_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$KOTLIN_AGENT_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -959,19 +966,19 @@ kotlin_agent() {
     docker rm -f "$KOTLIN_AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | sed 's/^/    /'
 
-    printf '%s\n' "$log" | grep -q '^answered ' \
+    printf '%s\n' "$log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf 1' \
+    printf '%s\n' "$log" | found '^dtmf 1' \
         || { printf '  it never heard the digit "1"\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf 2' \
+    printf '%s\n' "$log" | found '^dtmf 2' \
         || { printf '  it never heard the digit "2"\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf #' \
+    printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "packets_received=[1-9]" \
+        | grep '^ended ' | found -E "packets_received=[1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq "packets_sent=[1-9]" \
+        | grep '^ended ' | found -E "packets_sent=[1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1003,7 +1010,7 @@ swift_agent() {
 
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-swift; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent-swift; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$SWIFT_AGENT_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 60 ]; then
@@ -1019,7 +1026,7 @@ swift_agent() {
         "channel originate PJSIP/labuser-agent-swift extension s@agent-call" ) >/dev/null 2>&1
 
     tries=0
-    until docker logs "$SWIFT_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$SWIFT_AGENT_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -1028,13 +1035,13 @@ swift_agent() {
     docker rm -f "$SWIFT_AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | sed 's/^/    /'
 
-    printf '%s\n' "$log" | grep -q '^answered ' \
+    printf '%s\n' "$log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf #' \
+    printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1072,7 +1079,7 @@ csharp_agent() {
 
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-csharp; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent-csharp; do
         tries=$((tries + 1))
         # a container that died, or a `dotnet build` that already came back
         # and printed nothing further, is not going to register however
@@ -1091,7 +1098,7 @@ csharp_agent() {
         "channel originate PJSIP/labuser-agent-csharp extension s@agent-call" ) >/dev/null 2>&1
 
     tries=0
-    until docker logs "$CSHARP_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$CSHARP_AGENT_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -1100,15 +1107,15 @@ csharp_agent() {
     docker rm -f "$CSHARP_AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | tail -20 | sed 's/^/    /'
 
-    printf '%s\n' "$log" | grep -q '^answered ' \
+    printf '%s\n' "$log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf #' \
+    printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq 'packets_received=[1-9]' \
+        | grep '^ended ' | found -E 'packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
     printf '%s\n' "$log" \
-        | grep '^ended ' | grep -Eq 'packets_sent=[1-9]' \
+        | grep '^ended ' | found -E 'packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1146,7 +1153,7 @@ headless_socket_agent() {
         || { printf '  could not start the application container\n'; return 1; }
 
     tries=0
-    until docker logs "$HEADLESS_APP_NAME" 2>&1 | grep -q '^waiting for the agent'; do
+    until docker logs "$HEADLESS_APP_NAME" 2>&1 | found '^waiting for the agent'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$HEADLESS_APP_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 30 ]; then
@@ -1169,7 +1176,7 @@ headless_socket_agent() {
 
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-headless; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent-headless; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$HEADLESS_APP_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 60 ]; then
@@ -1185,7 +1192,7 @@ headless_socket_agent() {
         "channel originate PJSIP/labuser-agent-headless extension s@agent-call" ) >/dev/null 2>&1
 
     tries=0
-    until docker logs "$HEADLESS_APP_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$HEADLESS_APP_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -1195,13 +1202,13 @@ headless_socket_agent() {
     printf '%s\n' "$app_log" | sed 's/^/    app    /'
     docker rm -f "$HEADLESS_APP_NAME" "$HEADLESS_CLIENT_NAME" >/dev/null 2>&1
 
-    printf '%s\n' "$app_log" | grep -q '^answered ' \
+    printf '%s\n' "$app_log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -q '^dtmf #' \
+    printf '%s\n' "$app_log" | found '^dtmf #' \
         || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -1591,7 +1598,7 @@ start_lite_agent() {
                 --host "$own" --port 5060 --socket 0.0.0.0:7001' >/dev/null \
         || { printf '  could not start the application container\n'; return 1; }
     tries=0
-    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^waiting for the agent'; do
+    until docker logs "$ICE_APP_NAME" 2>&1 | found '^waiting for the agent'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$ICE_APP_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 30 ]; then
@@ -1607,7 +1614,7 @@ start_lite_agent() {
         debian:trixie-slim /sipral/agent --addr "$ICE_APP_NAME:7001" >/dev/null \
         || { printf '  could not start the agent container\n'; stop_lite_agent; return 1; }
     tries=0
-    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^agent connected'; do
+    until docker logs "$ICE_APP_NAME" 2>&1 | found '^agent connected'; do
         tries=$((tries + 1))
         if [ "$tries" -ge 30 ]; then
             printf '  the agent never connected\n'
@@ -1629,7 +1636,7 @@ stop_lite_agent() {
 # Wait for the application to report its call over, then keep its log.
 lite_agent_log() {
     local tries=0
-    until docker logs "$ICE_APP_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$ICE_APP_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge "$1" ] && break
         sleep 1
@@ -1659,9 +1666,9 @@ ice_lite_flow() {
     app_log=$(lite_agent_log 10)
     stop_lite_agent
     [ "$status" -eq 0 ] || return 1
-    printf '%s\n' "$app_log" | grep -q '^path chosen ' \
+    printf '%s\n' "$app_log" | found '^path chosen ' \
         || { printf '  the lite end never took a nominated pair\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  the lite end sent no audio on the pair\n'; return 1; }
 }
 
@@ -1687,7 +1694,7 @@ ice_lite_asterisk() {
     if [ "$status" -eq 0 ] && start_lite_agent labuser-agent-ice; then
         tries=0
         until ( cd interop && docker compose exec -T asterisk \
-                asterisk -rx "pjsip show contacts" 2>/dev/null ) | grep -q labuser-agent-ice; do
+                asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-agent-ice; do
             tries=$((tries + 1))
             if [ "$tries" -ge 30 ]; then
                 printf '  the application never registered\n'
@@ -1713,13 +1720,13 @@ ice_lite_asterisk() {
     ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
     wait_for asterisk "Asterisk Ready" >/dev/null || true
     [ "$status" -eq 0 ] || return 1
-    printf '%s\n' "$app_log" | grep -q '^path chosen ' \
+    printf '%s\n' "$app_log" | found '^path chosen ' \
         || { printf '  Asterisk never nominated a pair on the lite end\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -q '^dtmf #' \
+    printf '%s\n' "$app_log" | found '^dtmf #' \
         || { printf '  it never heard the "#" the dialplan sends\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_received=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_received=[1-9]' \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$app_log" | grep -Eq '^ended .*packets_sent=[1-9]' \
+    printf '%s\n' "$app_log" | found -E '^ended .*packets_sent=[1-9]' \
         || { printf '  it sent no audio back\n'; return 1; }
     # a fifth of a second of Asterisk's audio, which a packet or two sent
     # before its checks finished cannot reach
@@ -1750,7 +1757,7 @@ start_c_listener() {
         debian:trixie-slim /harness-c listen asterisk 5060 >/dev/null \
         || { printf '  could not start the C listener\n'; return 1; }
     tries=0
-    until docker logs "$C_LISTENER_NAME" 2>&1 | grep -q '^waiting for a call or a referral'; do
+    until docker logs "$C_LISTENER_NAME" 2>&1 | found '^waiting for a call or a referral'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$C_LISTENER_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 30 ]; then
@@ -1774,7 +1781,7 @@ c_listener_address() {
 # what it said.
 c_listener_log() {
     local tries=0
-    until docker logs "$C_LISTENER_NAME" 2>&1 | grep -Eq '^(ended |nothing arrived|referral lapsed)'; do
+    until docker logs "$C_LISTENER_NAME" 2>&1 | found -E '^(ended |nothing arrived|referral lapsed)'; do
         tries=$((tries + 1))
         [ "$tries" -ge "$1" ] && break
         sleep 1
@@ -1813,7 +1820,7 @@ referral_refused_flow() {
     log=$(docker logs "$C_LISTENER_NAME" 2>&1)
     stop_c_listener
     [ "$status" -eq 0 ] || return 1
-    if printf '%s\n' "$log" | grep -q '^referral asked'; then
+    if printf '%s\n' "$log" | found '^referral asked'; then
         printf '  the program heard a referral its stack was never told to take\n'
         return 1
     fi
@@ -1831,7 +1838,7 @@ referral_taken_flow() {
     log=$(c_listener_log 15)
     stop_c_listener
     [ "$status" -eq 0 ] || return 1
-    printf '%s\n' "$log" | grep -q '^referral taken: ok$' \
+    printf '%s\n' "$log" | found '^referral taken: ok$' \
         || { printf '  the program never took the referral\n'; return 1; }
     audible=$(printf '%s\n' "$log" | sed -n 's/^ended .*audible=\([0-9]*\).*/\1/p')
     [ "${audible:-0}" -ge 25 ] \
@@ -1858,9 +1865,9 @@ ice_lite_c_flow() {
     log=$(c_listener_log 10)
     stop_c_listener
     [ "$status" -eq 0 ] || return 1
-    printf '%s\n' "$log" | grep -q '^path chosen' \
+    printf '%s\n' "$log" | found '^path chosen' \
         || { printf '  the lite end never took a nominated pair\n'; return 1; }
-    printf '%s\n' "$log" | grep -Eq '^ended packets_sent=[1-9]' \
+    printf '%s\n' "$log" | found -E '^ended packets_sent=[1-9]' \
         || { printf '  the lite end sent no audio on the pair\n'; return 1; }
 }
 
@@ -1999,7 +2006,7 @@ nat_pair_call() {
         status=1
     fi
     until [ "$status" -ne 0 ] \
-        || docker logs "$ICE_CALLEE_NAME" 2>&1 | grep -q '^waiting for the call'; do
+        || docker logs "$ICE_CALLEE_NAME" 2>&1 | found '^waiting for the call'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$ICE_CALLEE_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 30 ]; then
@@ -2385,7 +2392,7 @@ turn_forked() {
             -j DNAT --to-destination $address:5062" \
         || { printf '  could not forward SIP to the phones\n'; status=1; }
     until [ "$status" -ne 0 ] \
-        || docker logs "$phones" 2>&1 | grep -q '^waiting for the call'; do
+        || docker logs "$phones" 2>&1 | found '^waiting for the call'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$phones" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 30 ]; then
@@ -3069,7 +3076,7 @@ move_flow() {
         -v "$HARNESS:/harness:ro" \
         debian:trixie-slim /harness asterisk 5060 9000 >/dev/null \
         || { printf '  could not start the harness\n'; return 1; }
-    until docker logs "$MOVE_NAME" 2>&1 | grep -q '^  move  the call is up at'; do
+    until docker logs "$MOVE_NAME" 2>&1 | found '^  move  the call is up at'; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$MOVE_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 45 ]; then
@@ -3301,15 +3308,15 @@ robust_link_flow() {
     said=$(docker logs "$name" 2>&1)
     docker rm -f "$name" >/dev/null 2>&1
     printf '%s\n' "$said" | sed 's/^/  listener  /'
-    if ! printf '%s\n' "$said" | grep -q '^udp 200 SIPRAL-CONTROL-SMALL'; then
+    if ! printf '%s\n' "$said" | found '^udp 200 SIPRAL-CONTROL-SMALL'; then
         printf '  the 200-byte control never arrived: the link drops more than fragments\n'
         return 1
     fi
-    if printf '%s\n' "$said" | grep -q '^udp 1600 '; then
+    if printf '%s\n' "$said" | found '^udp 1600 '; then
         printf '  the 1600-byte control arrived: the link does not drop fragments, and the run proves nothing\n'
         return 1
     fi
-    printf '%s\n' "$said" | grep -q '^udp 1300 INVITE ' \
+    printf '%s\n' "$said" | found '^udp 1300 INVITE ' \
         || { printf '  the 1300-byte INVITE never arrived as a datagram\n'; status=1; }
     # the INVITE placed again on the stream comes to within a byte or two of
     # the one refused, so what is counted is two over the line, whole
@@ -3398,7 +3405,7 @@ datagram_call() {
 
 # Whether the caller's own lines say `$1`.
 datagram_said() {
-    printf '%s\n' "$DATAGRAM_LOG" | grep -Eq "$1"
+    printf '%s\n' "$DATAGRAM_LOG" | found -E "$1"
 }
 
 # SIP over TCP and TLS through the four idiomatic layers (docs/22-tls.md,
@@ -3511,7 +3518,7 @@ tls_agent_call() {
     ( cd interop && docker compose exec -T asterisk asterisk -rx \
         "channel originate PJSIP/$user extension s@agent-call" ) >/dev/null 2>&1
     tries=0
-    until docker logs "$TLS_AGENT_NAME" 2>&1 | grep -q '^ended '; do
+    until docker logs "$TLS_AGENT_NAME" 2>&1 | found '^ended '; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && break
         sleep 1
@@ -3520,23 +3527,23 @@ tls_agent_call() {
     docker rm -f "$TLS_AGENT_NAME" >/dev/null 2>&1
     printf '%s\n' "$log" | grep -E '^(probe|listening|answered|dtmf|ended|transport failed|call failed)' \
         | sed 's/^/    /'
-    printf '%s\n' "$contact" | grep -q "transport=$over" \
+    printf '%s\n' "$contact" | found "transport=$over" \
         || { printf '  Asterisk holds its contact over another transport\n'; return 1; }
     if [ "$over" = tls ]; then
-        printf '%s\n' "$log" | grep -q '^probe 5061: transport failed .*tls=untrusted' \
+        printf '%s\n' "$log" | found '^probe 5061: transport failed .*tls=untrusted' \
             || { printf '  the platform'"'"'s authorities alone did not refuse the lab'"'"'s certificate as untrusted\n'; return 1; }
-        printf '%s\n' "$log" | grep -q '^probe 5062: transport failed .*tls=name_mismatch' \
+        printf '%s\n' "$log" | found '^probe 5062: transport failed .*tls=name_mismatch' \
             || { printf '  the certificate for another name was not refused as a name mismatch\n'; return 1; }
-        printf '%s\n' "$log" | grep -q '^probe 5063: transport failed .*tls=expired' \
+        printf '%s\n' "$log" | found '^probe 5063: transport failed .*tls=expired' \
             || { printf '  the expired certificate was not refused as expired\n'; return 1; }
     fi
-    printf '%s\n' "$log" | grep -q '^answered ' \
+    printf '%s\n' "$log" | found '^answered ' \
         || { printf '  it never answered\n'; return 1; }
-    printf '%s\n' "$log" | grep -q '^dtmf #' \
+    printf '%s\n' "$log" | found '^dtmf #' \
         || { printf '  it never heard the "#" it hangs up on\n'; return 1; }
-    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_received'?[:=] ?[1-9]" \
+    printf '%s\n' "$log" | grep '^ended ' | found -E "packets_received'?[:=] ?[1-9]" \
         || { printf '  it heard no audio\n'; return 1; }
-    printf '%s\n' "$log" | grep '^ended ' | grep -Eq "packets_sent'?[:=] ?[1-9]" \
+    printf '%s\n' "$log" | grep '^ended ' | found -E "packets_sent'?[:=] ?[1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
 }
 
@@ -3656,7 +3663,7 @@ tls_two_lines_flow() {
             SIPRAL_UDP_SERVER=\"\$udp:5060\" SIPRAL_TLS_SERVER=\"\$tls:5061\" \
                 exec python3 -u /lines/caller.py" 2>&1)
     printf '%s\n' "$log" | sed 's/^/    /'
-    said() { printf '%s\n' "$log" | grep -Eq "$1"; }
+    said() { printf '%s\n' "$log" | found -E "$1"; }
     if said '^both registered$' && said '^both up$' \
         && said '^udp media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
         && said '^tls media sent [1-9][0-9]* received [1-9][0-9]* audible [1-9]' \
@@ -3738,7 +3745,7 @@ datagram_flow() {
     if datagram_said '^wanted 2 [0-9.]+:5060 1[3-9][0-9][0-9] 1300$' \
         && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
+        && printf '%s\n' "$DATAGRAM_SEEN" | found -E '\(1[3-9][0-9][0-9] bytes\) from TCP:'; then
         pass "a challenged INVITE past 1300 bytes, taken over TCP: Asterisk on UDP and TCP, the answer to its challenge went on a connection the Python layer opened, and the call was held 45 seconds in, resumed and hung up"
     else
         fail "a challenged INVITE past 1300 bytes, taken over TCP"
@@ -3751,7 +3758,7 @@ datagram_flow() {
     if datagram_said '^wanted 2 [0-9.]+:5070 ' && datagram_said '^transport failed [0-9]+ 1$' \
         && datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && ! printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from TCP:'; then
+        && ! printf '%s\n' "$DATAGRAM_SEEN" | found 'from TCP:'; then
         pass "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP: Asterisk on UDP alone refused the connection, the INVITE went again over UDP with one SDES suite, and the call was held, resumed and hung up"
     else
         fail "a challenged INVITE past 1300 bytes, trimmed to one SDES suite over UDP"
@@ -3777,8 +3784,8 @@ datagram_flow() {
         -e SIPRAL_UDP_ANYWAY_BYTES=1600
     if datagram_said '^confirmed$' && datagram_said '^held$' && datagram_said '^resumed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && printf '%s\n' "$DATAGRAM_SEEN" | grep -Eq '\(1[3-9][0-9][0-9] bytes\) from UDP:' \
-        && ! printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from TCP:'; then
+        && printf '%s\n' "$DATAGRAM_SEEN" | found -E '\(1[3-9][0-9][0-9] bytes\) from UDP:' \
+        && ! printf '%s\n' "$DATAGRAM_SEEN" | found 'from TCP:'; then
         pass "a challenged INVITE past 1300 bytes, sent over UDP anyway: one suite and a long From to UDP alone, UDP past the limit allowed up to 1600 bytes, the INVITE went as one datagram and the call was held, resumed and hung up"
     else
         fail "a challenged INVITE past 1300 bytes, sent over UDP anyway"
@@ -3874,7 +3881,7 @@ locate_flow() {
         -e SIPRAL_SERVER_URI=sip:lab.sipral.test -e "SIPRAL_SRV=60 10 50 5070 asterisk"
     if datagram_said '^located [0-9.]+:5070(,|$)' && datagram_said '^confirmed$' \
         && datagram_said '^ended LOCAL_HANGUP ' \
-        && printf '%s\n' "$DATAGRAM_SEEN" | grep -q 'from UDP:'; then
+        && printf '%s\n' "$DATAGRAM_SEEN" | found 'from UDP:'; then
         pass "a server named by a domain, located by an SRV record from the application's resolver: the domain has no address of its own, the record named port 5070 of the lab's Asterisk, and the call went there and was hung up"
     else
         fail "a server named by a domain, located by an SRV record from the application's resolver"

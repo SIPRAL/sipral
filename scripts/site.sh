@@ -15,6 +15,13 @@
 # Needs mdbook (cargo install mdbook --locked) and python3.
 set -euo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 OUT="$ROOT/target/site"
@@ -35,7 +42,7 @@ if [ "$REBUILD" -eq 1 ]; then
     # mdbook exits 0 even when a renderer fails, so its log is the verdict
     log=$(mdbook build site 2>&1) || { printf '%s\n' "$log" >&2; exit 1; }
     printf '%s\n' "$log"
-    if printf '%s\n' "$log" | grep -qE '^ *(ERROR|WARN)'; then
+    if printf '%s\n' "$log" | found -E '^ *(ERROR|WARN)'; then
         printf 'mdbook reported a problem, see above\n' >&2
         exit 1
     fi
