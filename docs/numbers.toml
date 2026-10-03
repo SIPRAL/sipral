@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Tiberiu Balasea
+#
+# The figures Sipral publishes, and how far the code may drift from each
+# before the gate fails: `scripts/check.sh --only numbers` measures every
+# `key` below and holds it to its limit. docs/11-testing.md, "The published
+# figures", says how each is measured and how to change one.
+#
+# Each figure:
+#   key        the measurement's name, as the gate's measurements print it
+#   what       what the figure is, in the words the failure message uses
+#   unit       B (bytes) or us (microseconds a frame)
+#   published  the value as published, in `unit`
+#   margin     how far over `published` a measurement may read, in `unit`:
+#              the limit is published + margin
+#   share      instead of margin, for a measurement that is one part of a
+#              published figure rather than the figure itself: the limit
+#              is published x share
+#   ceiling    a limit no published value may move past either
+#   where      every place the figure is published; a change to it changes
+#              all of them, and this file, together
+#
+# A frame's processor time is measured against a yardstick: the detector's
+# time over the time of one fixed resonator loop the test carries, run
+# alternately on the same thread, so that a loaded machine or a slower core
+# slows both alike. That ratio times the yardstick's own time on the machine
+# the figures were published from is the figure in microseconds.
+
+[yardstick]
+# the yardstick's best time a 20 ms frame at 8 kHz on that machine, release
+# build: an Apple M2, 4 October 2026
+us = 0.390
+machine = "Apple M2, macOS, rustc 1.95.0, release profile"
+
+[[figure]]
+key = "library.bytes"
+what = "the shared library, libsipral_ffi.dylib, as built"
+unit = "B"
+published = 5201264
+# 5 % over the 1.0.0 figure: under it the README's "5 MB" still holds
+margin = 260000
+where = [
+    "README.md: a 5 MB shared library",
+    "docs/19-numbers.md, 2 October 2026, 1.0.0: 5.20 MB, 5 201 264 bytes",
+]
+
+[[figure]]
+key = "invite.default.first"
+what = "the first INVITE, every default codec, no ICE"
+unit = "B"
+published = 923
+margin = 0
+where = [
+    "docs/23-compared-with-pjsip.md, The INVITE with ICE: without ICE, 923 and 1222",
+    "the website (sipral.org), its comparison table: 923 / 1222 B",
+]
+
+[[figure]]
+key = "invite.default.authenticated"
+what = "the authenticated INVITE, every default codec, no ICE"
+unit = "B"
+published = 1222
+margin = 0
+ceiling = 1300
+where = [
+    "docs/23-compared-with-pjsip.md, The INVITE with ICE: without ICE, 923 and 1222",
+    "the website (sipral.org), its comparison table: 923 / 1222 B",
+]
+
+[[figure]]
+key = "invite.default_ice.first"
+what = "the first INVITE, every default codec, ICE"
+unit = "B"
+published = 1088
+margin = 0
+where = [
+    "docs/23-compared-with-pjsip.md, The INVITE with ICE: 1088 bytes, 1 candidate",
+    "the website (sipral.org), its comparison table: 1088 / 1236 B",
+]
+
+[[figure]]
+key = "invite.default_ice.authenticated"
+what = "the authenticated INVITE, every default codec, ICE"
+unit = "B"
+published = 1236
+margin = 0
+ceiling = 1300
+where = [
+    "docs/23-compared-with-pjsip.md, The INVITE with ICE: with credentials 1236 bytes, sent over UDP whole",
+    "the website (sipral.org), its INVITE bar chart and comparison table: 1236 B",
+]
+
+[[figure]]
+key = "invite.g711_ice.first"
+what = "the first INVITE, G.711 alone, ICE"
+unit = "B"
+published = 954
+# the lab run's session id drew 19 digits; the gate counts the 20 it may draw
+margin = 1
+where = [
+    "docs/23-compared-with-pjsip.md, The INVITE with ICE: G.711 alone, ICE, 954 bytes",
+    "the website (sipral.org), its comparison table: 954 / 1253 B",
+]
+
+[[figure]]
+key = "invite.g711_ice.authenticated"
+what = "the authenticated INVITE, G.711 alone, ICE"
+unit = "B"
+published = 1253
+# as above: one more digit of session id
+margin = 1
+ceiling = 1300
+where = [
+    "the website (sipral.org), its comparison table: 954 / 1253 B",
+]
+
+[[figure]]
+key = "memory.call.signalling"
+what = "a live call's signalling memory at one end, counted by the allocator"
+unit = "B"
+published = 18600
+# the callee's figure moves by a few kilobytes from run to run with the
+# order its tables fill in; 10 % over the published top of the range
+margin = 1860
+where = [
+    "docs/19-numbers.md, 2 October 2026, 1.0.0: 16.3-18.6 KB signalling per end",
+]
+
+[[figure]]
+key = "memory.call.media"
+what = "a live call's media memory at one end, counted by the allocator"
+unit = "B"
+published = 48500
+# 5 % over the published top of the range
+margin = 2425
+where = [
+    "docs/19-numbers.md, 2 October 2026, 1.0.0: 48.4-48.5 KB media per end",
+]
+
+[[figure]]
+key = "memory.call.total"
+what = "a live call's memory at one end, signalling and media, counted by the allocator"
+unit = "B"
+published = 72000
+# the published figure is resident memory, of which what the library
+# allocates is a part: the part alone may not pass it
+margin = 0
+where = [
+    "README.md: about 72 KB each",
+    "docs/19-numbers.md, 29 September 2026: about 72 KB of resident memory at this end",
+    "the website (sipral.org), its headline facts: 72 KB of memory per call",
+]
+
+[[figure]]
+key = "memory.idle"
+what = "a stack's own memory with no call, counted by the allocator"
+unit = "B"
+# the smallest idle figure published, resident memory of the whole agent
+published = 4600000
+# the library's own heap is a few kilobytes of it; past a tenth of it the
+# published idle figures would no longer be what a reader gets
+share = 0.1
+where = [
+    "docs/23-compared-with-pjsip.md, Memory and CPU: idle, 4.6 MB resident",
+    "the website (sipral.org), its memory chart: 5.4 MB registered and idle",
+]
+
+[[figure]]
+key = "cpu.dtmf.silence"
+what = "the in-band digit detector, a frame of silence"
+unit = "us"
+published = 0.17
+# twice the published figure: a time is never as exact as a size
+margin = 0.17
+where = [
+    "README.md: under 1 us a frame, the in-band digit detector included while the far end is quiet",
+    "docs/19-numbers.md, 3 October 2026: the detector alone, silence, 0.17 us",
+]
+
+[[figure]]
+key = "cpu.dtmf.speech"
+what = "the in-band digit detector, a frame of speech"
+unit = "us"
+published = 1.35
+margin = 1.35
+where = [
+    "README.md: about 1.4 us more while the library listens for digits in a far end that is talking",
+    "docs/19-numbers.md, 3 October 2026: the detector alone, speech at -20 dBm0, 1.35 us",
+]
+
+[[figure]]
+key = "cpu.dtmf.noise"
+what = "the in-band digit detector, a frame of loud noise"
+unit = "us"
+published = 2.71
+margin = 2.71
+where = [
+    "docs/19-numbers.md, 3 October 2026: the detector alone, white noise at -10 dBm0, 2.71 us",
+]

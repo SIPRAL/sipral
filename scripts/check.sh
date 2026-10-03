@@ -29,7 +29,7 @@ ROOT="$PWD"
 export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
 
 # In the order the complete gate reports them.
-AREAS="hygiene rust abi swift dotnet kotlin jvm python dart rn site"
+AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python dart rn site"
 # The layers: every area that loads the C library built from sipral-ffi.
 LAYERS="swift dotnet kotlin jvm python dart rn"
 
@@ -53,6 +53,10 @@ areas:
   abi      the C library and its symbols, bindings/c/smoke.c linked and run,
            the C against glibc, abi-gen --check, the version rule, and the
            layout and offsets on every target.
+  numbers  the figures the README, docs/19-numbers.md, docs/23 and the
+           website publish -- the library's size, the INVITE's, a call's
+           memory and an idle stack's, a frame of the in-band digit
+           detector -- measured and held to docs/numbers.toml.
   swift    bindings/ (SwiftPM) built and tested, xcframework.sh --dry-run
            and the root Package.swift.
   dotnet   bindings/dotnet built and tested, nuget.sh collect and pack.
@@ -138,12 +142,14 @@ step() { printf '\n%s\n' "$1"; }
 # tests are printed under the FAIL line, with the log's path.
 # Usage: cargo_test "<what the FAIL line says>" <cargo test arguments...>
 TEST_LOGS="$ROOT/target/check-logs"
+# test_log LABEL: where cargo_test keeps the output of the run it calls LABEL
+test_log() { printf '%s/%s.log' "$TEST_LOGS" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"; }
 cargo_test() {
     local label="$1"
     shift
     mkdir -p "$TEST_LOGS"
     local log
-    log="$TEST_LOGS/$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120).log"
+    log="$(test_log "$label")"
     if cargo test "$@" >"$log" 2>&1; then
         pass "$label"
         return 0
@@ -2629,6 +2635,58 @@ step_secrets() {
     fi
 }
 
+# The figures the README, docs/19-numbers.md, docs/23-compared-with-pjsip.md
+# and the website publish, measured and held to docs/numbers.toml, which says
+# for each one its published value, how far a measurement may pass it and
+# where it is published. A change that makes one of them untrue fails here,
+# naming the figure, what it now measures, its budget and every place it is
+# published, rather than waiting for somebody to measure it again by hand.
+#
+# Every measurement here is one that does not move with the machine: the
+# library as the release build leaves it, the INVITEs as the stack writes
+# them for the lab's call (crates/sipral/src/numbers_tests.rs), a call's
+# memory and an idle stack's counted by the signalling test's own allocator,
+# and a frame of the in-band digit detector as a multiple of a fixed
+# arithmetic loop timed beside it on the same thread, in a release build
+# (crates/sipral-media/src/inband/tests.rs, published_cost_of_a_frame). Each
+# test prints `numbers:` lines, and scripts/numbers.py judges them.
+step_published_figures() {
+    step "the published figures"
+    local measured="$AREA_WORK/measured" verdicts="$AREA_WORK/verdicts"
+    local label status verdict text failed=0
+    : >"$measured"
+    if need_library; then
+        if [ -s "$DYLIB" ]; then
+            printf 'numbers: library.bytes=%s\n' "$(wc -c <"$DYLIB" | tr -d ' ')" >>"$measured"
+        else
+            fail "$DYLIB is not there to be measured"
+        fi
+    fi
+    cargo_test "the INVITE sizes, measured" -p sipral --lib numbers_tests -- --nocapture
+    cargo_test "a call's memory, counted" -p sipral-ffi --test signalling_load -- --nocapture
+    cargo_test "a frame of the digit detector, timed" --release -p sipral-media --lib -- \
+        --ignored --exact inband::tests::published_cost_of_a_frame --nocapture
+    for label in "the INVITE sizes, measured" "a call's memory, counted" \
+        "a frame of the digit detector, timed"; do
+        grep 'numbers: ' "$(test_log "$label")" >>"$measured"
+    done
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python3 not found, and scripts/numbers.py needs it"
+        return
+    fi
+    python3 scripts/numbers.py docs/numbers.toml "$measured" >"$verdicts" 2>&1
+    status=$?
+    while IFS=$'\t' read -r verdict text; do
+        case "$verdict" in
+            ok) pass "$text" ;;
+            fail) fail "$text"; failed=1 ;;
+            detail) printf '        %s\n' "$text" ;;
+            *) fail "scripts/numbers.py: $verdict${text:+ $text}"; failed=1 ;;
+        esac
+    done <"$verdicts"
+    [ "$status" -eq 0 ] || [ "$failed" -eq 1 ] || fail "scripts/numbers.py exited $status and said why nowhere"
+}
+
 # The areas. Each is the list of steps the complete gate runs for it, in the
 # order it runs them; an area gate runs the same list.
 area_hygiene() {
@@ -2670,6 +2728,7 @@ area_abi() {
     step_header_and_bindings
     step_layout
 }
+area_numbers() { step_published_figures; }
 area_swift() { need_library; step_swift; step_xcframework; }
 area_dotnet() { need_library; step_dotnet_compiles; step_dotnet_tests; step_nuget; }
 area_kotlin() { need_library; step_kotlin_compiles; step_kotlin_on_a_jvm; step_aar; }
@@ -2701,6 +2760,18 @@ route() {
     ROUTED_PATH="$1"
     case "$1" in
         *.md|THIRD-PARTY-LICENSES.txt) route_to site "the documentation site carries it" ;;
+    esac
+    case "$1" in
+        docs/numbers.toml|scripts/numbers.py)
+            route_to numbers "the published figures' budgets, or what holds the figures to them" ;;
+        Cargo.toml|Cargo.lock|rust-toolchain.toml|crates/sipral-ffi/*|crates/sipral/*)
+            route_to numbers "what the published figures are measured on" ;;
+        crates/*)
+            crate=${1#crates/}
+            crate=${crate%%/*}
+            if [ -z "$FFI_GRAPH" ] || printf '%s\n' "$FFI_GRAPH" | found -x "$crate"; then
+                route_to numbers "linked into the C library the published figures are measured on"
+            fi ;;
     esac
     case "$1" in
         scripts/check.sh)
@@ -2838,11 +2909,11 @@ run_area() {
 }
 
 # What an area may not start before. The layers load the library the abi
-# area builds and checks, so they start once it is done; the others start
-# at once.
+# area builds and checks, and numbers measures it, so they start once it is
+# done; the others start at once.
 waits_for() {
     case "$1" in
-        swift|dotnet|kotlin|jvm|python|dart|rn) printf 'abi\n' ;;
+        numbers|swift|dotnet|kotlin|jvm|python|dart|rn) printf 'abi\n' ;;
     esac
 }
 

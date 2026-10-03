@@ -180,6 +180,10 @@ mod log;
 #[cfg(feature = "stun")]
 mod nat;
 mod payloads;
+// the published INVITE sizes, measured on the shipped build's catalogue:
+// Opus in it, ICE offered
+#[cfg(all(test, feature = "opus", feature = "ice"))]
+mod numbers_tests;
 #[cfg(test)]
 mod pin_tests;
 mod pipeline;

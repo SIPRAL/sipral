@@ -346,6 +346,95 @@ fn cpu_per_channel() {
     }
 }
 
+/// The yardstick the DTMF detector's cost is read against: one second-order
+/// resonator run over a frame, the arithmetic of a single filter of a bank,
+/// with nothing of this crate's in it. A loaded machine, or an efficiency
+/// core in place of a performance one, slows it about as much as it slows
+/// the detector, so the ratio of the two holds where either time alone does
+/// not.
+fn yardstick(frame: &[i16]) -> f64 {
+    let coefficient = std::hint::black_box(1.5_f64);
+    let (mut last, mut before) = (0.0_f64, 0.0_f64);
+    for &sample in frame {
+        let next = f64::from(sample) + coefficient * last - before;
+        before = last;
+        last = next;
+    }
+    last * last + before * before - coefficient * last * before
+}
+
+/// Seconds `run` takes over `pcm` in 20 ms frames at 8 kHz.
+fn timed(pcm: &[i16], mut run: impl FnMut(&[i16])) -> f64 {
+    let began = std::time::Instant::now();
+    for chunk in pcm.chunks(SampleRate::Hz8000.samples(20)) {
+        run(std::hint::black_box(chunk));
+    }
+    began.elapsed().as_secs_f64()
+}
+
+/// The middle value of `values`.
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
+/// What a frame of the DTMF detector costs, as `docs/19-numbers.md`
+/// publishes it: `DtmfDetector::process` on ten seconds of silence, of the
+/// crate's speech at −20 dBm0 with its pauses, and of white noise at
+/// −10 dBm0, in 20 ms frames at 8 kHz. Each of 41 rounds times the
+/// yardstick, the detector and the yardstick again over the same audio; the
+/// line printed carries the median of the detector's time over the
+/// yardstick's for each signal, which `scripts/check.sh --only numbers`
+/// turns into microseconds on the machine the figures were published from,
+/// and the best time in microseconds a frame this machine read. Ignored by
+/// a plain `cargo test`: a time read in a debug build says nothing. Run
+/// with `cargo test --release -p sipral-media --lib -- --ignored --exact
+/// inband::tests::published_cost_of_a_frame --nocapture`.
+#[test]
+#[ignore = "a measurement in a release build, run by scripts/check.sh --only numbers"]
+fn published_cost_of_a_frame() {
+    const ROUNDS: usize = 41;
+    let rate = SampleRate::Hz8000;
+    let len = span(rate.hz(), 10_000.0);
+    let mut rng = Rng::new(0xF1A7);
+    let signals = [
+        ("silence", vec![0_i16; len]),
+        ("speech", to_pcm(&speech(&mut rng, rate.hz(), 10.0, -20.0))),
+        ("noise", to_pcm(&white(&mut rng, -10.0, len))),
+    ];
+    let frames = len.div_ceil(rate.samples(20));
+    let per_frame = |seconds: f64| seconds * 1e6 / f64::from(u32::try_from(frames).unwrap());
+    let mut said = Vec::new();
+    let mut sink = 0.0_f64;
+    for (name, pcm) in &signals {
+        let mut detector = DtmfDetector::new(rate);
+        let mut ratios = Vec::with_capacity(ROUNDS);
+        let mut best = f64::INFINITY;
+        for _ in 0..ROUNDS {
+            let before = timed(pcm, |frame| sink += yardstick(frame));
+            detector.reset();
+            let spent = timed(pcm, |frame| detector.process(frame, |_| {}));
+            let after = timed(pcm, |frame| sink += yardstick(frame));
+            ratios.push(spent / f64::midpoint(before, after));
+            best = best.min(spent);
+        }
+        said.push(format!(
+            "cpu.dtmf.{name}.ratio={:.3} cpu.dtmf.{name}.us={:.3}",
+            median(ratios),
+            per_frame(best)
+        ));
+    }
+    let yardstick_best = (0..ROUNDS)
+        .map(|_| timed(&signals[1].1, |frame| sink += yardstick(frame)))
+        .fold(f64::INFINITY, f64::min);
+    std::hint::black_box(sink);
+    println!(
+        "numbers: {} cpu.yardstick.us={:.3}",
+        said.join(" "),
+        per_frame(yardstick_best)
+    );
+}
+
 /// Tables no network plays: no frequencies, frequencies no filter can hold,
 /// no bursts, bursts of nothing and of forever.
 static ODD_TONES: [ToneSpec; 4] = [

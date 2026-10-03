@@ -903,6 +903,20 @@ fn a_hundred_calls_are_challenged_answered_held_resumed_and_hung_up_with_nothing
         callee_rate,
     );
 
+    // The same memory as `scripts/check.sh --only numbers` reads it against
+    // docs/numbers.toml: a live call's signalling and media at whichever end
+    // holds more of each, the two together at the end that holds more, and
+    // what the calling stack holds with no call at all -- its user agent,
+    // its transport and its account, and its media engine.
+    println!(
+        "numbers: memory.call.signalling={} memory.call.media={} memory.call.total={} \
+         memory.idle={}",
+        caller_dialog.max(callee_dialog),
+        caller_media.max(callee_media),
+        (caller_dialog + caller_media).max(callee_dialog + callee_media),
+        bare[0] + bare[1],
+    );
+
     // A call is brought up once and held for minutes. Anything near ten
     // milliseconds of one core to set one up would put a dialler's burst of
     // a hundred calls a second past a core of its own; this is a floor under

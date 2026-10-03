@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **The published figures are held by the gate.** A new area, `scripts/check.sh --only numbers`, part of the complete gate, measures what the README, `docs/19-numbers.md`, `docs/23-compared-with-pjsip.md` and the website publish -- the shared library's size, the first and authenticated INVITE of the lab's call with and without ICE, a live call's memory and an idle stack's, counted by the signalling test's allocator, and a frame of the in-band digit detector, timed against a fixed loop on the same thread so that a loaded machine does not read as a regression -- and fails when one passes its budget in `docs/numbers.toml`, naming the figure, what it now measures, the budget and every place it is published. `docs/11-testing.md`, "The published figures", says how each is measured and how to change one on purpose.
+
 ### Changed
 
 - **A security report is acknowledged within 7 business days.** `SECURITY.md` promised 3; the triage, fix and disclosure commitments are unchanged.

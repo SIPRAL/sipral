@@ -1280,8 +1280,9 @@ exists.
 The checks are grouped into areas, and `scripts/check.sh --help` lists
 them: `hygiene` (the tree checks, the ABI's declarations against `abi.rs`,
 the interop matrix, the third-party licences and `gitleaks`, with no build
-of the workspace), `rust`, `abi`, one area per layer -- `swift`, `dotnet`,
-`kotlin`, `jvm`, `python`, `dart`, `rn` -- and `site`. An area is a list of
+of the workspace), `rust`, `abi`, `numbers` (the published figures, below),
+one area per layer -- `swift`, `dotnet`, `kotlin`, `jvm`, `python`, `dart`,
+`rn` -- and `site`. An area is a list of
 the gate's own step functions, so `scripts/check.sh --only kotlin,jvm` runs
 exactly what the complete gate runs for those two and nothing else, and
 `--hygiene-only` is `--only hygiene`. `--only rust --crates
@@ -1313,6 +1314,7 @@ The mapping errs towards running more:
 | `scripts/package/` | the layers whose packages the script makes |
 | `docs/`, `site/`, `scripts/site.sh`, any Markdown | site |
 | `scripts/`, `interop/`, `assets/`, licence and Git files | hygiene |
+| `docs/numbers.toml`, `scripts/numbers.py`, the workspace's manifests, any crate the C library links | numbers, besides the areas above |
 
 `hygiene` runs on every change. Whether a crate is linked into the C library
 is read from `cargo tree -p sipral-ffi`, not kept in a list.
@@ -1341,6 +1343,73 @@ makes a test that waits on a timer more likely to miss it, and a step that
 fails in the parallel gate and passes alone under `--only` is that, until
 it is not: `SIPRAL_CHECK_JOBS=1` runs the areas one at a time to tell the
 two apart.
+
+### The published figures
+
+The README, `docs/19-numbers.md`, `docs/23-compared-with-pjsip.md` and the
+website publish figures, and a change that makes one of them untrue fails
+the `numbers` area rather than waiting for somebody to measure it again by
+hand. `docs/numbers.toml` is the one list of them: for each, the value as
+published, the margin a measurement may read over it, and every place it is
+published. `scripts/check.sh --only numbers` measures each, and
+`scripts/numbers.py` holds the measurements to that list. A failure names
+the figure, the published value, what it now measures and the budget, and
+lists every place that publishes it:
+
+```
+  FAIL  the authenticated INVITE, every default codec, ICE: published as 1236 B, now 1288 B, over the budget of 1236 B
+        published in docs/23-compared-with-pjsip.md, The INVITE with ICE: with credentials 1236 bytes, sent over UDP whole
+        published in the website (sipral.org), its INVITE bar chart and comparison table: 1236 B
+```
+
+Each figure is measured the way that does not move with the machine, so
+that the area holds on a loaded one:
+
+| Figure | Published | Measured as | Budget |
+|---|---|---|---|
+| The shared library | 5.20 MB, "a 5 MB shared library" | `libsipral_ffi.dylib` as the `abi` area's release build leaves it, in bytes | 5 % over |
+| The INVITE, first and authenticated, every default codec, without ICE and with it | 923 and 1222 B, 1088 and 1236 B | `crates/sipral/src/numbers_tests.rs`: the lab's call rebuilt -- its user, target, addresses and Asterisk's challenge, the same lengths -- and the bytes the stack writes, counted with the `o=` line's random session id at its longest | exactly the published size; RFC 3261 §18.1.1's 1300 B is a ceiling no budget may pass, and the test asserts it too |
+| The same, G.711 alone, ICE | 954 and 1253 B | the same | one byte over: the published run's session id drew 19 digits, the gate counts 20 |
+| A live call's memory at one end: signalling, media, and the two together | 16.3–18.6 KB, 48.4–48.5 KB; about 72 KB of resident memory | `crates/sipral-ffi/tests/signalling_load.rs`, its own counting allocator, a hundred calls settled | 10 % over the signalling's top, 5 % over the media's; the two together no more than the 72 KB |
+| An idle stack | 4.6 MB resident (5.4 MB on the website) | the same allocator: a stack's user agent with its transport and account, and its media engine, with no call | a tenth of the published figure, which is what the library's own few kilobytes may grow to before that figure stops being what a reader gets |
+| A frame of the in-band digit detector: silence, speech, loud noise | 0.17, 1.35, 2.71 µs | `published_cost_of_a_frame` in `crates/sipral-media/src/inband/tests.rs`, release build: 41 rounds of the yardstick, the detector and the yardstick again over the same ten seconds, the median ratio, times the yardstick's own time on the Apple M2 the figures were published from (`[yardstick]` in the list) | twice the published figure |
+
+A frame's time is read against a yardstick, a fixed resonator loop the test
+carries, rather than by the clock alone. Confined to the efficiency cores
+(`taskpolicy -b`), the same build read 0.39–0.47 µs for silence and
+5.3–6.6 µs for noise against 0.17 and 2.7–2.8 µs on a performance core, past
+twice the published figure on a machine that changed nothing; its ratios
+moved from 0.45 to 0.52 and from 7.1 to 7.3. The 6.0–7.2 µs the detector
+cost at 1.0.0 is 15 to 18 yardsticks, where the budget allows 0.9 for
+silence, 6.9 for speech and 13.9 for noise. The
+speech figure reads about 1.5 µs here: the published 1.35 came from a draw
+of the crate's speech generator the measurement did not keep, and this test
+keeps its own.
+
+The area waits for `abi`, whose library it measures, and then runs beside
+the layers. On the 8-core Mac it took 25 seconds with the caches warm and
+the library already built, 46 seconds building the library itself, and
+120 seconds beside a rust area compiling from nothing, its frame figures
+within a hundredth of a microsecond of a quiet run's.
+
+Not held: a frame of the whole media path with two hundred calls on four
+threads (the README's "under 1 µs"), setting a call up, and resident memory
+per call or at idle. Each wants a release build of the whole stack or a
+machine with nothing else on it, minutes either way, and a wall-clock time
+taken across four threads on a shared machine reads the machine;
+`scripts/bench.sh` and the lab measure them, and the detector, nine tenths
+of that frame's cost at 1.0.0, is the part of it the area holds.
+
+When a figure changes on purpose -- a feature that costs more, a run on new
+hardware, a smaller INVITE -- the change carries the new figure everywhere at
+once: the document that records the measurement (`docs/19-numbers.md` or
+`docs/23-compared-with-pjsip.md`, dated), the README where it is quoted,
+`published` in `docs/numbers.toml` with `where` saying what each place now
+says, and the website's facts in its own repository, in a commit of the same
+day. A margin is changed only with a reason written beside it. A figure taken
+on another machine than the yardstick's takes the yardstick's best time on
+that machine into `[yardstick]` with it: run the test above with
+`--nocapture` on that machine and read `cpu.yardstick.us`.
 
 The linux-arm64 native cross-compiles in an unprivileged Docker container
 (`scripts/package/aarch64-cross.sh`), so what the gate proves of it depends
