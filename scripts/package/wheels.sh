@@ -54,6 +54,13 @@
 # bindings load changes; what ships now is what was missing.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 
@@ -98,7 +105,7 @@ scripts/version.sh --check || { printf '\nwheels.sh: failed\n'; exit 1; }
 dry_run_without_docker() {
     step "$2, --dry-run on a host without Docker"
     package_features 0
-    if ! rustup target list --installed 2>/dev/null | grep -qx "$1"; then
+    if ! rustup target list --installed 2>/dev/null | found -x "$1"; then
         fail "$1 is not installed: rustup target add $1"
     elif cargo check -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$1" >"$OUT/check-$1.log" 2>&1; then
         pass "cargo check -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $1"
@@ -426,18 +433,18 @@ print(next((l[6:] for l in z.read(m[0]).decode().splitlines() if l.startswith("N
     else
         fail "$(basename "$FINAL") names itself '$named' in METADATA, not $DIST_NAME"
     fi
-    if printf '%s\n' "$listing" | grep -q "sipral/$NATIVE"; then
+    if printf '%s\n' "$listing" | found "sipral/$NATIVE"; then
         pass "$(basename "$FINAL") carries sipral/$NATIVE"
     else
         fail "$(basename "$FINAL") is missing sipral/$NATIVE"
     fi
-    if printf '%s\n' "$listing" | grep -q 'sipral/stack.py'; then
+    if printf '%s\n' "$listing" | found 'sipral/stack.py'; then
         pass "$(basename "$FINAL") carries the idiomatic layer (stack.py)"
     else
         fail "$(basename "$FINAL") is missing sipral/stack.py"
     fi
     for f in "${LICENCE_FILES[@]}"; do
-        printf '%s\n' "$listing" | grep -q "\.dist-info/licenses/$f" \
+        printf '%s\n' "$listing" | found "\.dist-info/licenses/$f" \
             && pass "$(basename "$FINAL") carries .dist-info/licenses/$f" \
             || fail "$(basename "$FINAL") is missing .dist-info/licenses/$f"
     done

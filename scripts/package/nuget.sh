@@ -42,6 +42,13 @@
 # Sipral.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 
@@ -128,7 +135,7 @@ if [ "$CMD" = "collect" ]; then
                 if [ "$HOST_OS" != "Darwin" ]; then
                     note "$rid: skipped, this host is $HOST_OS"; continue
                 fi
-                if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+                if ! rustup target list --installed 2>/dev/null | found -x "$triple"; then
                     fail "$rid: $triple not installed (rustup target add $triple)"; continue
                 fi
                 rm -f "$OUT/$rid/$FEATURES_MARKER"
@@ -207,7 +214,7 @@ if [ "$CMD" = "collect" ]; then
                         # Git Bash on Windows, with Rust's MSVC toolchain and
                         # the Visual Studio build tools for the target's
                         # architecture
-                        if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+                        if ! rustup target list --installed 2>/dev/null | found -x "$triple"; then
                             fail "$rid: $triple not installed (rustup target add $triple)"; continue
                         fi
                         rm -f "$OUT/$rid/$FEATURES_MARKER"
@@ -318,7 +325,7 @@ if [ -n "$NUPKG" ]; then
     for rid in "${RIDS[@]}"; do
         native="$(native_name_of "$rid")"
         if [ -f "$STAGING/$rid/$native" ]; then
-            if printf '%s\n' "$listing" | grep -q "runtimes/$rid/native/$native"; then
+            if printf '%s\n' "$listing" | found "runtimes/$rid/native/$native"; then
                 pass "$NUPKG carries runtimes/$rid/native/$native"
             else
                 fail "$NUPKG is missing runtimes/$rid/native/$native, though it was staged"
@@ -326,11 +333,11 @@ if [ -n "$NUPKG" ]; then
         fi
     done
     for f in README.md "${LICENCE_FILES[@]}"; do
-        printf '%s\n' "$listing" | grep -q " $f\$" && pass "carries $f" || fail "$NUPKG is missing $f"
+        printf '%s\n' "$listing" | found " $f\$" && pass "carries $f" || fail "$NUPKG is missing $f"
     done
     nuspec=$(unzip -p "$NUPKG" "$PACKAGE_ID.nuspec" 2>/dev/null)
     for element in '<license type="expression">' '<projectUrl>' '<repository type="git"' '<readme>' '<icon>' '<copyright>' '<tags>'; do
-        printf '%s\n' "$nuspec" | grep -qF "$element" && pass "the nuspec carries $element" || fail "the nuspec has no $element"
+        printf '%s\n' "$nuspec" | found -F "$element" && pass "the nuspec carries $element" || fail "the nuspec has no $element"
     done
 else
     fail "no $PACKAGE_ID.<version>.nupkg landed in $OUT"

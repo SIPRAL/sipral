@@ -11,6 +11,13 @@
 # which.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
@@ -259,14 +266,14 @@ need_library() {
 step_licence_headers() {
     step "licence headers"
     missing=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.podspec' | while read -r f; do
-        head -3 "$f" | grep -q 'SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial' || echo "$f"
+        head -3 "$f" | found 'SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial' || echo "$f"
     done)
     if [ -z "$missing" ]; then pass "SPDX header present"; else
         fail "SPDX header missing:"; printf '        %s\n' $missing
     fi
 
     nocopy=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.podspec' | while read -r f; do
-        head -4 "$f" | grep -q 'Copyright (c) 2026 Tiberiu Balasea' || echo "$f"
+        head -4 "$f" | found 'Copyright (c) 2026 Tiberiu Balasea' || echo "$f"
     done)
     [ -z "$nocopy" ] && pass "copyright line present" || {
         fail "copyright line missing:"; printf '        %s\n' $nocopy
@@ -718,7 +725,7 @@ crates/sipral-diag/src/redact.rs:Mode"
             continue
         fi
         before=$((line - 1))
-        if [ "$before" -ge 1 ] && sed -n "${before}p" "$file" | grep -q 'derive(.*Debug'; then
+        if [ "$before" -ge 1 ] && sed -n "${before}p" "$file" | found 'derive(.*Debug'; then
             derived="$derived
         $file:$line $name derives Debug"
         fi
@@ -1133,7 +1140,7 @@ step_c_against_glibc() {
 # interop/pipewire/run.sh is where the Linux half meets a real PipeWire.
 step_other_targets() {
     step "the code this machine does not compile"
-    if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc; then
+    if rustup target list --installed 2>/dev/null | found -x x86_64-pc-windows-msvc; then
         cargo clippy -p sipral-io-wasapi --target x86_64-pc-windows-msvc --all-targets \
             -- -D warnings >/dev/null 2>&1 \
             && pass "cargo clippy -p sipral-io-wasapi for Windows" \
@@ -1153,7 +1160,7 @@ step_other_targets() {
     fi
     if [ "$(uname -s)" = Linux ]; then
         pass "sipral-io-pipewire compiles natively here, with the rest of the workspace"
-    elif rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
+    elif rustup target list --installed 2>/dev/null | found -x x86_64-unknown-linux-gnu; then
         cargo clippy -p sipral-io-pipewire --target x86_64-unknown-linux-gnu --all-targets \
             -- -D warnings >/dev/null 2>&1 \
             && pass "cargo clippy -p sipral-io-pipewire for Linux" \
@@ -1169,7 +1176,7 @@ step_other_targets() {
     else
         fail "x86_64-unknown-linux-gnu is not installed: rustup target add x86_64-unknown-linux-gnu"
     fi
-    if rustup target list --installed 2>/dev/null | grep -qx aarch64-apple-ios; then
+    if rustup target list --installed 2>/dev/null | found -x aarch64-apple-ios; then
         cargo clippy -p sipral-io-coreaudio --target aarch64-apple-ios --all-targets \
             -- -D warnings >/dev/null 2>&1 \
             && pass "cargo clippy -p sipral-io-coreaudio for iOS" \
@@ -1196,7 +1203,7 @@ step_other_targets() {
     # the Android half: sipral-ffi's graph as scripts/package/aar.sh builds it,
     # with the AAudio backend in it. Type-checked and linted only; the streams
     # themselves run on a phone or an emulator (docs/15-mobile.md).
-    if rustup target list --installed 2>/dev/null | grep -qx aarch64-linux-android; then
+    if rustup target list --installed 2>/dev/null | found -x aarch64-linux-android; then
         cargo clippy -p sipral-io-aaudio -p sipral-audio -p sipral-ffi --no-default-features \
             --target aarch64-linux-android -- -D warnings >/dev/null 2>&1 \
             && pass "cargo clippy -p sipral-io-aaudio -p sipral-audio -p sipral-ffi for Android" \
@@ -1281,7 +1288,7 @@ step_without_opus() {
     facade_tree=$(cargo tree -p sipral --no-default-features -e normal --prefix none 2>/dev/null)
     if [ -z "$facade_tree" ]; then
         fail "cargo tree -p sipral --no-default-features printed nothing"
-    elif printf '%s\n' "$facade_tree" | grep -qE '^(hmac|sha2|p256) '; then
+    elif printf '%s\n' "$facade_tree" | found -E '^(hmac|sha2|p256) '; then
         fail "cargo tree -p sipral --no-default-features names a crate only dtls should bring"
     else
         pass "no RustCrypto crate in the facade without dtls"
@@ -1339,7 +1346,7 @@ step_without_opus() {
     # and still carries p256 is a build whose flash the feature saved nothing of.
     for crate in sipral sipral-ffi; do
         if graph=$(cargo tree -p "$crate" --no-default-features -e normal 2>&1); then
-            if printf '%s' "$graph" | grep -qiE '(^| )(p256|sipral-dtls|sipral-nat)( |$| v)'; then
+            if printf '%s' "$graph" | found -iE '(^| )(p256|sipral-dtls|sipral-nat)( |$| v)'; then
                 fail "a DTLS dependency is in the graph of $crate, the build meant to be without it"
             else
                 pass "nothing links a DTLS primitive ($crate)"
@@ -1367,7 +1374,7 @@ step_without_opus() {
         listed=$?
         if [ "$listed" -ne 0 ] || [ -z "$tree" ]; then
             fail "cargo tree -p $crate --no-default-features listed nothing, so nothing was checked"
-        elif printf '%s\n' "$tree" | grep -qi opus; then
+        elif printf '%s\n' "$tree" | found -i opus; then
             fail "libopus is in the dependency graph of $crate, the build meant to be without it"
         else
             pass "nothing links libopus ($crate)"
@@ -1384,7 +1391,7 @@ step_without_opus() {
     listed=$?
     if [ "$listed" -ne 0 ] || [ -z "$tree" ]; then
         fail "cargo tree -p sipral listed nothing, so the default was not checked"
-    elif printf '%s\n' "$tree" | grep -qi opus; then
+    elif printf '%s\n' "$tree" | found -i opus; then
         pass "the default still links libopus"
     else
         fail "the default build does not link libopus: the feature is meant to be on"
@@ -1413,7 +1420,7 @@ step_without_opus() {
         read_ok=$?
         if [ "$read_ok" -ne 0 ] || [ -z "$dynamic" ]; then
             fail "otool -L read nothing out of $(basename "$FFI_DEBUG_DYLIB"), so nothing was checked"
-        elif printf '%s\n' "$dynamic" | grep -qi opus; then
+        elif printf '%s\n' "$dynamic" | found -i opus; then
             fail "the no-default-features build links opus dynamically:"
             printf '%s\n' "$dynamic" | grep -i opus | sed 's/^/        /'
         else
@@ -1667,7 +1674,7 @@ step_fuzz_targets() {
     NIGHTLY=$(awk -F'"' '/^channel = /{print $2; exit}' fuzz/rust-toolchain.toml 2>/dev/null)
     if [ -z "$NIGHTLY" ]; then
         fail "fuzz/rust-toolchain.toml names no toolchain, so nothing says what to build with"
-    elif ! rustup toolchain list 2>/dev/null | grep -q "^$NIGHTLY"; then
+    elif ! rustup toolchain list 2>/dev/null | found "^$NIGHTLY"; then
         skip "fuzz/: $NIGHTLY is not installed (rustup toolchain install $NIGHTLY)"
     else
         # these two need the pinned nightly and nothing else, so they run even
@@ -2359,7 +2366,7 @@ step_linux_arm64() {
             scripts/package/wheels.sh --out "$PKG_WORK/wheels-arm64" --linux-arm64 --dry-run
         pkg_run "nuget.sh collect (linux-arm64)" \
             scripts/package/nuget.sh collect --out "$PKG_WORK/nuget-natives" --rid linux-arm64
-    elif ! rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-gnu; then
+    elif ! rustup target list --installed 2>/dev/null | found -x aarch64-unknown-linux-gnu; then
         fail "linux-arm64 without Docker: aarch64-unknown-linux-gnu is not installed: rustup target add aarch64-unknown-linux-gnu"
     else
         . "$ROOT/scripts/package/features.sh"
@@ -2539,7 +2546,7 @@ step_react_native() {
                 missing=""
                 for class in org/sipral/reactnative/NativeSipralSpec.class org/sipral/reactnative/SipralModule.class \
                     org/sipral/reactnative/SipralPackage.class org/sipral/reactnative/core/SipralReactCore.class; do
-                    printf '%s\n' "$classes" | grep -q " $class\$" || missing="$missing $class"
+                    printf '%s\n' "$classes" | found " $class\$" || missing="$missing $class"
                 done
                 [ -z "$missing" ] && pass "gradle assembleRelease, bindings/react-native/android: the TurboModule over the codegen spec" || {
                     fail "the React Native Android library was built without:"; printf '        %s\n' $missing
@@ -2711,7 +2718,7 @@ route() {
         crates/*)
             crate=${1#crates/}
             crate=${crate%%/*}
-            if [ -z "$FFI_GRAPH" ] || printf '%s\n' "$FFI_GRAPH" | grep -qx "$crate"; then
+            if [ -z "$FFI_GRAPH" ] || printf '%s\n' "$FFI_GRAPH" | found -x "$crate"; then
                 route_to "rust abi $LAYERS" "below the facade and linked into the C library every layer loads"
             else
                 route_to rust "a crate the C library does not link"

@@ -22,6 +22,11 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
   the moment it binds, choosing the two as a pair, where it bound RTCP only
   once the call's plan named it and lost that port to another call in about
   one call in twenty-five at a thousand at once.
+- The gate and the packaging scripts read a whole listing before deciding a
+  line is not in it: `grep -q` stopping at the first match made the writer
+  die of SIGPIPE under `pipefail`, which read a match as none under load —
+  the parallel gate's AAR dry run missing classes it had — and could pass
+  the check that libopus is out of a graph that has it.
 
 ## [1.0.0] - 2026-10-02
 

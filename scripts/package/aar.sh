@@ -60,6 +60,13 @@
 # sipral.aar.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 
@@ -345,7 +352,7 @@ rm -f "$AAR"
 if [ -f "$AAR" ]; then
     listing=$(unzip -l "$AAR" 2>/dev/null)
     for entry in AndroidManifest.xml classes.jar proguard.txt; do
-        printf '%s\n' "$listing" | grep -q "$entry" && pass "carries $entry" || fail "missing $entry"
+        printf '%s\n' "$listing" | found "$entry" && pass "carries $entry" || fail "missing $entry"
     done
     # One class from each layer: the printed binding, the idiomatic layer
     # and the telecom helper's logic. A classes.jar that compiled but lost
@@ -353,17 +360,17 @@ if [ -f "$AAR" ]; then
     classes=$(unzip -l "$STAGE/aar/classes.jar" 2>/dev/null)
     for class in org/sipral/SipralNative.class org/sipral/idiomatic/SipralClient.class \
         org/sipral/telecom/TelecomBridge.class; do
-        printf '%s\n' "$classes" | grep -q " $class\$" \
+        printf '%s\n' "$classes" | found " $class\$" \
             && pass "classes.jar carries $class" || fail "classes.jar is missing $class"
     done
     for f in "${LICENCE_FILES[@]}"; do
-        printf '%s\n' "$classes" | grep -q " $LICENCE_DIR/$f\$" \
+        printf '%s\n' "$classes" | found " $LICENCE_DIR/$f\$" \
             && pass "classes.jar carries $LICENCE_DIR/$f" || fail "classes.jar is missing $LICENCE_DIR/$f"
     done
     for abi in "${ABIS[@]}"; do
         for lib in "${NATIVE_LIBS[@]}"; do
             [ -f "$NATIVES/jni/$abi/$lib" ] || continue
-            printf '%s\n' "$listing" | grep -q "jni/$abi/$lib" \
+            printf '%s\n' "$listing" | found "jni/$abi/$lib" \
                 && pass "carries jni/$abi/$lib" \
                 || fail "missing jni/$abi/$lib"
         done

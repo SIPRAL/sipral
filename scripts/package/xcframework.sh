@@ -51,6 +51,13 @@
 # of every other script in this directory.
 set -uo pipefail
 
+# found [GREP OPTIONS] PATTERN: whether standard input has a line PATTERN
+# matches, read to its end. `grep -q` stops at the first match, and under
+# pipefail whatever is still writing into the pipe then dies of SIGPIPE and
+# fails the pipeline: a match read as none, and more often the busier the
+# machine. A gate run in parallel lost classes.jar's first entries that way.
+found() { grep "$@" >/dev/null; }
+
 cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 
@@ -130,7 +137,7 @@ IFS=$'\n' read -r -d '' -a all_triples < <(
 )
 installed="$(rustup target list --installed 2>/dev/null || true)"
 for t in "${all_triples[@]}"; do
-    if printf '%s\n' "$installed" | grep -qx "$t"; then
+    if printf '%s\n' "$installed" | found -x "$t"; then
         pass "$t installed"
     else
         fail "$t not installed: rustup target add $t"
