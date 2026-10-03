@@ -107,7 +107,9 @@ pub(crate) struct Registration {
     pub(crate) due: Option<Instant>,
     /// Consecutive failures worth retrying, which is what the back-off counts.
     pub(crate) failures: u32,
-    /// A de-registration is in flight, so its 200 is not read as a binding.
+    /// A de-registration is in flight, or waiting for a lookup or a
+    /// connection to go: its 200 is not read as a binding, and whatever this
+    /// account sends next -- the wait ending, a retry -- is one again.
     pub(crate) unregistering: bool,
     /// A challenge came back and it is not yet known whether anything could
     /// read it. The refusal is kept for the event that says so.

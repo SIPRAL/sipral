@@ -11,6 +11,14 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Fixed
+
+- A de-registration asked for while the account waited for its registrar's
+  lookup or for its own connection reads `UNREGISTERED` at once, as one sent
+  at once does, and goes as `Expires: 0` when the wait ends; it used to keep
+  the old state and could be sent, or retried, as a REGISTER asking for the
+  binding back.
+
 ## [1.0.0] - 2026-10-02
 
 The first release, at C ABI 1.0. What it promises, for every 1.x release:

@@ -872,6 +872,34 @@ impl UserAgent {
         Ok(())
     }
 
+    /// A REGISTER for `account` that has to wait -- for a lookup, or for
+    /// its connection -- says now what it will be once it goes.
+    ///
+    /// A de-registration is the application's decision from the moment it is
+    /// asked for: the account reads `Unregistered` at once, as it does when
+    /// the request leaves at once, and whatever goes when the wait ends or a
+    /// retry falls due is the `Expires: 0`, never a REGISTER that asks for the
+    /// binding back. A REGISTER still running is superseded here, as
+    /// `send_register` supersedes one when it sends, so that its answer no
+    /// longer reaches this account. A registration asked for while nothing
+    /// is in flight takes the place of a de-registration that was waiting.
+    pub(crate) fn hold_register(&mut self, account: AccountId, unregistering: bool) {
+        let Some(reg) = self.registrations.get_mut(&account) else {
+            return;
+        };
+        if !unregistering {
+            if reg.transaction.is_none() {
+                reg.unregistering = false;
+            }
+            return;
+        }
+        reg.unregistering = true;
+        reg.state = RegistrationState::Unregistered;
+        if reg.transaction.take().is_some() {
+            self.owners.retain(|_, owner| *owner != account);
+        }
+    }
+
     /// Whatever this layer scheduled for itself: a refresh, or a retry.
     fn fire_due(&mut self, now: Instant) {
         let due: Vec<AccountId> = self
