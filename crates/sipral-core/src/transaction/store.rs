@@ -43,7 +43,7 @@ use super::non_invite_server::NonInviteServerMachine;
 use super::slab::Slab;
 use super::timer::TimerConfig;
 use crate::endpoint::{Flow, TransportId};
-use crate::msg::{HeaderError, OwnedMessage, RawMessage};
+use crate::msg::{HeaderError, OwnedMessage, RawMessage, Uri};
 
 /// A transaction we started: the machine, where its messages go, and the key
 /// it is indexed by. The machine owns the request, since it is the thing that
@@ -136,14 +136,46 @@ fn merge_key(request: &RawMessage<'_>) -> Option<MergeKey> {
     ))
 }
 
+/// The line of this end a request was sent to: its Request-URI, as it
+/// arrived. Empty for a message with none, which never reaches the index.
+fn line_of(request: &RawMessage<'_>) -> Box<[u8]> {
+    request.request_uri_bytes().unwrap_or_default().into()
+}
+
+/// Whether two Request-URIs name the same line: the same bytes, or two
+/// spellings RFC 3261 §19.1.4 holds equivalent. A URI that does not parse is
+/// only ever the same line as its own bytes.
+///
+/// Asked only of the transactions that already share a request's merge key,
+/// which is one in the common case, so the parse costs nothing on a request
+/// that is not a second copy of another.
+fn same_line(held: &[u8], arrived: &[u8]) -> bool {
+    held == arrived
+        || matches!(
+            (Uri::parse(held), Uri::parse(arrived)),
+            (Ok(held), Ok(arrived)) if held.equivalent(&arrived)
+        )
+}
+
+/// Take `request`'s place in the merge index.
+fn remember_merge_key(merge: &mut HashMap<MergeKey, Vec<Box<[u8]>>>, request: &RawMessage<'_>) {
+    if let Some(key) = merge_key(request) {
+        merge.entry(key).or_default().push(line_of(request));
+    }
+}
+
 /// Give back the place `request` held in the merge index.
-fn forget_merge_key(merge: &mut HashMap<MergeKey, usize>, request: &OwnedMessage) {
-    let Some(key) = merge_key(&request.as_raw()) else {
+fn forget_merge_key(merge: &mut HashMap<MergeKey, Vec<Box<[u8]>>>, request: &OwnedMessage) {
+    let raw = request.as_raw();
+    let Some(key) = merge_key(&raw) else {
         return;
     };
-    if let Some(count) = merge.get_mut(&key) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
+    let line = line_of(&raw);
+    if let Some(lines) = merge.get_mut(&key) {
+        if let Some(at) = lines.iter().position(|held| *held == line) {
+            lines.swap_remove(at);
+        }
+        if lines.is_empty() {
             merge.remove(&key);
         }
     }
@@ -158,15 +190,16 @@ pub(crate) struct Transactions {
     non_invite_servers: Slab<ServerEntry<NonInviteServerMachine>>,
     clients: HashMap<ClientKey, Client>,
     servers: HashMap<ServerKey, Server>,
-    /// How many live server transactions share each (`From` tag, `Call-ID`,
-    /// `CSeq`) — RFC 3261 §8.2.2.2's merged-request check, kept as a count
-    /// rather than a set of handles because the check only ever asks "is
-    /// there already one of these", never "which". Raised when a server
-    /// transaction starts and lowered by [`Transactions::release_invite_merge`]
-    /// and [`Transactions::release_non_invite_merge`], so it never outlives
-    /// the transactions it counts and is exactly as bounded as the two server
+    /// The Request-URI of every live server transaction, grouped by its
+    /// (`From` tag, `Call-ID`, `CSeq`) — RFC 3261 §8.2.2.2's merged-request
+    /// check. One entry per transaction rather than a set of handles, because
+    /// the check only ever asks "is there already one of these on this line",
+    /// never "which". Grown when a server transaction starts and shrunk by
+    /// [`Transactions::release_invite_merge`] and
+    /// [`Transactions::release_non_invite_merge`], so it never outlives the
+    /// transactions it counts and is exactly as bounded as the two server
     /// arenas are.
-    merge: HashMap<MergeKey, usize>,
+    merge: HashMap<MergeKey, Vec<Box<[u8]>>>,
 }
 
 impl Transactions {
@@ -270,9 +303,7 @@ impl Transactions {
         });
         let id = TransactionId::new(raw);
         self.servers.insert(key, Server::Invite(id));
-        if let Some(counted) = merge_key(request) {
-            *self.merge.entry(counted).or_insert(0) += 1;
-        }
+        remember_merge_key(&mut self.merge, request);
         Ok((id, effects))
     }
 
@@ -298,9 +329,7 @@ impl Transactions {
         });
         let id = TransactionId::new(raw);
         self.servers.insert(key, Server::NonInvite(id));
-        if let Some(counted) = merge_key(request) {
-            *self.merge.entry(counted).or_insert(0) += 1;
-        }
+        remember_merge_key(&mut self.merge, request);
         Ok(id)
     }
 
@@ -412,19 +441,34 @@ impl Transactions {
     /// Whether `request` is a merged request (RFC 3261 §8.2.2.2): one with no
     /// To tag whose From tag, `Call-ID` and `CSeq` already belong to a server
     /// transaction this store is running, under a branch that does not itself
-    /// match that transaction (§17.2.3) — the same request, arrived by a
-    /// second path, almost always a fork.
+    /// match that transaction (§17.2.3), and sent to the same line — the same
+    /// request, arrived by a second path, almost always a fork.
+    ///
+    /// The line is the Request-URI, compared by §19.1.4. §8.2.2.2 is written
+    /// for one UAS, and one stack with several accounts is several: each
+    /// registered a contact of its own, and a proxy forking to two of them
+    /// rewrites the Request-URI to each contact (§16.6). Two copies that
+    /// differ there are one request offered to two lines, and each line is
+    /// asked; two that agree are one line reached twice, and the second is
+    /// refused.
     ///
     /// The caller only calls this once `request` has already failed to match
     /// anything through [`Transactions::server_for`], and before it creates a
     /// transaction of its own, so a hit here is necessarily a different
     /// transaction sharing the same fields, never the request comparing equal
-    /// to itself; and `O(1)` through [`Transactions::merge`] rather than a
-    /// visit per slot, because it is asked of every request that opens a
-    /// transaction, unlike [`Transactions::cancelled_by`]'s scan.
+    /// to itself; and a hash lookup through [`Transactions::merge`] rather
+    /// than a visit per slot, because it is asked of every request that opens
+    /// a transaction, unlike [`Transactions::cancelled_by`]'s scan.
     pub(crate) fn merged_with(&self, request: &RawMessage<'_>) -> bool {
         let untagged = request.to().is_ok_and(|to| to.tag().is_none());
-        untagged && merge_key(request).is_some_and(|key| self.merge.contains_key(&key))
+        if !untagged {
+            return false;
+        }
+        let Some(lines) = merge_key(request).and_then(|key| self.merge.get(&key)) else {
+            return false;
+        };
+        let arrived = request.request_uri_bytes().unwrap_or_default();
+        lines.iter().any(|held| same_line(held, arrived))
     }
 
     /// Give a retiring INVITE server transaction's place in the §8.2.2.2

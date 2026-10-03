@@ -230,14 +230,20 @@ in the clear at the smaller size or dropped silently.
 **The 482 for a merged request.** RFC 3261 §8.2.2.2's case — a forked INVITE
 answered by more than one branch, so the same `From`-tag/`Call-ID`/`CSeq`
 arrives twice with different `Via branch` values and no `To` tag naming an
-existing dialog. `Transactions` tracks a refcounted `MergeKey`
-(`crates/sipral-core/src/transaction/store.rs:117`) per those four fields;
-`merged_with()` (`store.rs:369`) is asked on every new INVITE and non-INVITE
-request, and a second one that matches an existing key while itself carrying
-no `To` tag is answered `StatusCode::LOOP_DETECTED` (482) on a transaction of
-its own, in `refuse_merged_invite` and its non-INVITE sibling
+existing dialog. `Transactions` keeps a `MergeKey` per those four fields,
+holding the Request-URI of each live server transaction under it
+(`crates/sipral-core/src/transaction/store.rs`); `merged_with()` is asked on
+every new INVITE and non-INVITE request, and a second one that matches an
+existing key on the same line — a Request-URI equal or equivalent by §19.1.4
+to one held — while itself carrying no `To` tag is answered
+`StatusCode::LOOP_DETECTED` (482) on a transaction of its own, in
+`refuse_merged_invite` and its non-INVITE sibling
 (`crates/sipral-core/src/endpoint/inbound.rs`), rather than delivered to the
-application a second time.
+application a second time. A copy sent to another contact of the stack is
+another line's request and is delivered: a peer that wants a request handed
+up twice has to address two lines, each of which would take a request of
+its own from it anyway, and every copy still costs a server transaction
+under the same ceilings as any other request.
 
 **The per-dialog transaction budget.** Past the parser, a well-formed request
 still costs a server transaction, and a peer that owns a dialog can otherwise

@@ -332,11 +332,20 @@ INVITE that names no `Contact` gives a dialog no remote target (§8.1.1.8,
 own rather than rung and answered into a dialog nobody could reach. §8.2.2.2 is the other side of the same
 fallback's absence: a request with no `To` tag whose `From` tag, `Call-ID`
 and `CSeq` already belong to a transaction it does not itself match by
-§17.2.3 has reached this end by a second path, almost always a fork, and is
-answered 482 on a transaction of its own rather than handed up a second
-time — a second call for an INVITE, a second request for any other method. A
-request whose `To` carries a tag, even one naming no dialog here, is
-§12.2.2's case rather than this one.
+§17.2.3, and whose Request-URI names the same line, has reached this end by
+a second path, almost always a fork, and is answered 482 on a transaction of
+its own rather than handed up a second time — a second call for an INVITE, a
+second request for any other method. The line is part of the check because
+§8.2.2.2 is written for one UAS and a stack with several accounts is
+several: a proxy forking one request to two contacts this stack registered
+rewrites the Request-URI to each (§16.6), and each copy is that line's own
+request, handed up and rung there. Two Request-URIs name the same line when
+they are the same bytes or equivalent by §19.1.4, so a second path that adds
+a parameter such as `;ob` to the same contact is still refused. A copy that
+reaches one line through a Request-URI that is not equivalent to the first
+copy's — the address of record on one path and the registered contact on
+the other — is taken as a request of its own. A request whose `To` carries a
+tag, even one naming no dialog here, is §12.2.2's case rather than this one.
 
 ### PRACK
 

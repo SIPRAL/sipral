@@ -3459,9 +3459,11 @@ fails.
   account it reached, so a branch of one INVITE that reaches a second
   account of the stack after the first branch's transaction is gone
   verifies there, while the same PASSporT in another request is still
-  refused. A branch arriving while that transaction is kept (parallel
-  forking, or a hunt within five seconds over UDP) is still answered 482 by
-  RFC 3261 §8.2.2.2 (`docs/04-ua.md`).
+  refused. At 0.36 a branch arriving while that transaction was kept
+  (parallel forking, or a hunt within five seconds over UDP) was still
+  answered 482 by RFC 3261 §8.2.2.2; from release 1.1.0, with no ABI change,
+  the core refuses a merged copy only on the same line, and such a branch
+  rings and verifies on its own (`docs/04-ua.md`).
 
 **In the layers.** Every idiomatic layer spells the three: the realms as a
 list on adding an account, joined one per line on the way down; the held
