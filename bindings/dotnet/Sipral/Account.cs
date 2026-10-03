@@ -115,6 +115,16 @@ public sealed class Account
         Advertised = advertised;
     }
 
+    /// <summary><c>sipral_account_rebind</c> after a network change, reached
+    /// at <paramref name="advertised"/>, the route toward its server: always,
+    /// since the stack it is on has moved whether or not that route
+    /// did.</summary>
+    internal void Readvertise(string advertised)
+    {
+        Rebind(RegistrarAddress, DefaultContact(Aor, advertised, ContactParametersOf(_stack, StreamProtocol)));
+        Advertised = advertised;
+    }
+
     /// <summary><c>sipral_account_check_certificate</c>: the verdict of this
     /// account's <c>tlsPin</c> on <paramref name="certificate"/>, the DER bytes
     /// of the leaf a TLS server presented, from inside the application's own

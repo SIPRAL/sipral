@@ -553,8 +553,10 @@ class Stack:
         self._streamed = signalling != lib.SIPRAL_TRANSPORT_UDP
         self._bind_host = bind_host
         #: Whether this class picks the address peers reach this stack at --
-        #: no ``bind_host`` was given -- and whether it has picked it yet:
-        #: the route toward the first server an account names.
+        #: no ``bind_host`` was given, and it keeps picking across every
+        #: :meth:`move_to` -- and whether it has picked it yet: the route
+        #: toward the first server an account names, since creation or since
+        #: the network last moved it.
         self._routes = bind_host is None
         self._route_chosen = not self._routes or self._streamed or stream_server is not None
         self._resolver = resolver or lookup
@@ -847,23 +849,28 @@ class Stack:
         if not self._route_chosen:
             self._route_chosen = True
             if address != self.bind_address:
-                local = address.encode("utf-8")
-                _retry(
-                    lambda: lib.sipral_stack_transport_bind(
-                        self.handle,
-                        lib.SIPRAL_TRANSPORT_MAIN,
-                        lib.SIPRAL_TRANSPORT_UDP,
-                        local,
-                        len(local),
-                        ffi.NULL,
-                        0,
-                        self.now_ms(),
-                        ffi.NULL,
-                    ),
-                    "sipral_stack_transport_bind",
-                )
-                self.bind_address = address
+                self._advertise_main(address)
         return address
+
+    def _advertise_main(self, address: str) -> None:
+        """The UDP transport the stack writes in its `Via` named ``address``
+        from now on, on a stack that picks its own address."""
+        local = address.encode("utf-8")
+        _retry(
+            lambda: lib.sipral_stack_transport_bind(
+                self.handle,
+                lib.SIPRAL_TRANSPORT_MAIN,
+                lib.SIPRAL_TRANSPORT_UDP,
+                local,
+                len(local),
+                ffi.NULL,
+                0,
+                self.now_ms(),
+                ffi.NULL,
+            ),
+            "sipral_stack_transport_bind",
+        )
+        self.bind_address = address
 
     # -- accounts and calls --------------------------------------------
 
@@ -1571,12 +1578,19 @@ class Stack:
         sending to an address this machine no longer has. An account added
         with an explicit ``contact`` is the application's to rebind with
         :meth:`sipral.account.Account.rebind`.
+
+        A stack created with no ``bind_host`` keeps its socket on every
+        interface, and its port, and keeps picking its own address: it
+        advertises the route toward its first account's server again, as when
+        it was created -- ``host`` only when no account names a server by its
+        address -- and each account is reached at the route toward its own.
         """
         previous = parse_address(self.bind_address)[0]
-        # the application names the address from here on
-        self._routes = False
+        picks = self._routes and not self._streamed
         if self._streamed:
             self._move_link(host)
+        elif picks:
+            self._advertise_again(host)
         else:
             self._move_socket(host)
 
@@ -1608,8 +1622,41 @@ class Stack:
         for account in accounts:
             if account.contact_given:
                 continue
-            account.rebind()
+            # on a stack that picks its own address, each account is reached
+            # at the route toward its own server, as when it was added
+            if picks and _is_address(account.registrar_address):
+                advertised = self._advertise_toward(account.registrar_address)
+                account.rebind(
+                    contact=_default_contact(account.aor, advertised, account.contact_parameters)
+                )
+                account.advertised = advertised
+            else:
+                account.rebind()
         return Recovery(int(recovery[0]))
+
+    def _advertise_again(self, host: str) -> None:
+        """What a stack bound on every interface advertises after a move,
+        chosen again as it was at creation: the route toward its first
+        account's server, or with no server to route toward, ``host`` -- the
+        new network's own address -- on the same port. The socket on every
+        interface already receives there, on the port it had, and stays; an
+        address this machine lacks raises, as binding the socket there
+        would."""
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.bind((host, 0))
+        self.kept_signalling_port = True
+        self._route_chosen = False
+        with self._lock:
+            servers = [account.registrar_address for account in self._accounts]
+        server = next((one for one in servers if one and _is_address(one)), None)
+        if server is not None:
+            self._advertise_toward(server)
+            return
+        local = format_address(host, parse_address(self.bind_address)[1])
+        if local != self.bind_address:
+            self._advertise_main(local)
+
 
     def _move_link(self, host: str) -> None:
         """The signalling connection made again from ``host``: the old one

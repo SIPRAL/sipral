@@ -360,6 +360,36 @@ private fun aMoveToAnAddressThisMachineLacksKeepsTheSocketItHad(): String {
     return "a move to an address this machine lacks kept the socket it had"
 }
 
+/** A client bound on every interface keeps picking its own address across
+ * a move: its socket stays where it was, on its port, and what it advertises
+ * is the route toward each account's server again rather than the address
+ * the platform named, taken as fixed from then on. */
+private fun aClientOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove(): String {
+    val elsewhere = otherAddress()
+    SipralClient.open(audio = SipralAudioMode.Application).use { client ->
+        val port = client.bindAddress.substringAfterLast(':')
+        val away = client.addAccount(aor = "sip:alice@192.0.2.1", registrarAddress = "192.0.2.1:5060")
+        assertEquals("$elsewhere:$port", client.bindAddress)
+
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, elsewhere, interfaceName = "moved"))
+        val here = client.addAccount(aor = "sip:bob@127.0.0.1", registrarAddress = "127.0.0.1:5060")
+        assertTrue(
+            here.contact.contains("127.0.0.1:$port"),
+            "an account added after the move is reached at the route toward its server: ${here.contact}",
+        )
+
+        client.networkChanged(SipralNetwork(SipralLink.WIRED, "127.0.0.1", interfaceName = "back"))
+        assertEquals(
+            "$elsewhere:$port", client.bindAddress,
+            "the route toward the first account's server, not the address the platform named",
+        )
+        assertTrue(client.keptSignallingPort)
+        assertTrue(away.contact.contains("$elsewhere:$port"), away.contact)
+        assertTrue(here.contact.contains("127.0.0.1:$port"), here.contact)
+    }
+    return "a client on every interface kept choosing its route across a move"
+}
+
 /** A clock reading the poll thread overtook is read again, as a collision
  * with it is; anything else goes straight through. */
 private fun aClockBehindIsRetriedLikeABusy(): String {
@@ -413,6 +443,7 @@ internal suspend fun signallingChecks(): String = listOf(
     theSignallingPortSurvivesAMoveToAnotherAddress(),
     aPortTakenAtTheNewAddressFallsBackAndSaysSo(),
     aMoveToAnAddressThisMachineLacksKeepsTheSocketItHad(),
+    aClientOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove(),
     aClockBehindIsRetriedLikeABusy(),
     aCallPlacedPastMaxDialogsIsRefused(),
 ).joinToString(", ")

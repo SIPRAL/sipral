@@ -1272,18 +1272,25 @@ public sealed partial class SipralStack : IDisposable
     /// <see cref="Call.Readdress"/> answers — the far end is still sending to
     /// an address this machine no longer has. An account added with an
     /// explicit <c>contact</c> is the application's to
-    /// <see cref="Account.Rebind"/>.</summary>
+    /// <see cref="Account.Rebind"/>.
+    ///
+    /// A stack created with no <c>bindHost</c> keeps its socket on every
+    /// interface, and its port, and keeps picking its own address: it
+    /// advertises the route toward its first account's server again, as when
+    /// it was created — <paramref name="host"/> only when no account names a
+    /// server by its address — and each account is reached at the route
+    /// toward its own.</summary>
     public SipralRecovery MoveTo(string host, SipralLink link = SipralLink.Wired)
     {
         var previous = ParseAddress(BindAddress).Host;
-        lock (_routeLock)
-        {
-            // the application names the address from here on
-            _routes = false;
-        }
+        var picks = PicksAddress;
         if (Streamed)
         {
             MoveLink(host);
+        }
+        else if (picks)
+        {
+            AdvertiseAgain(host);
         }
         else
         {
@@ -1305,7 +1312,16 @@ public sealed partial class SipralStack : IDisposable
         }
         foreach (var account in accounts.Where(a => !a.ContactGiven))
         {
-            account.Rebind();
+            // on a stack that picks its own address, each account is reached
+            // at the route toward its own server, as when it was added
+            if (picks && IsAddress(account.RegistrarAddress))
+            {
+                account.Readvertise(AdvertiseToward(account.RegistrarAddress));
+            }
+            else
+            {
+                account.Rebind();
+            }
         }
         return (SipralRecovery)recovery;
     }

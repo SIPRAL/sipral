@@ -240,7 +240,10 @@ every account is pointed at it, and every call up raises
 `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: `call.moveMedia()` binds a socket on
 the new network and offers the call there with a re-INVITE that moves only
 `c=` and the port (RFC 3264 §8.3.1). A call under ICE moves with
-`restartIce()` instead.
+`restartIce()` instead. A client opened with no `bindHost` keeps its socket on
+every interface, and its port, and goes on choosing its own address: it
+advertises the route toward its first account's server again, and each account
+the route toward its own, rather than taking the new address as fixed.
 
 `src/test/kotlin/org/sipral/idiomatic/SignallingCheck.kt` proves all of the
 above between two clients on loopback, and `AudioCheck.kt` the engine on this

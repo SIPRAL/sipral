@@ -223,7 +223,11 @@ on, and Windows Defender asks for any socket bound to an address other
 than loopback. An application that wants one interface names it with
 `bindHost`; after a network change the Swift, Kotlin, .NET and Python
 layers bind the UDP socket again at the new address on the same port, and
-say when that port was taken there (`keptSignallingPort`).
+say when that port was taken there (`keptSignallingPort`). A stack given no
+bind address keeps its wildcard socket across the change and goes on choosing
+its own address: the route toward its first account's server again, and each
+account's toward its own, so a server reached over a VPN is still told the
+VPN's address after the Wi-Fi under it changes.
 
 ## STUN
 

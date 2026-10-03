@@ -344,7 +344,10 @@ every account is pointed at it, and every call up raises
 `SipralEventKind.callAddressWanted`: `call.moveMedia()` binds a socket on the
 new network and offers the call there with a re-INVITE that moves only `c=`
 and the port (RFC 3264 §8.3.1). A call under ICE moves with `restartIce()`
-instead.
+instead. A stack created with no `bindHost` keeps its socket on every
+interface, and its port, and goes on choosing its own address: it advertises
+the route toward its first account's server again, and each account the route
+toward its own, rather than taking the new address as fixed.
 
 An incoming call has no `Call` until the application decides what to do
 with it: read `SipralEventKind.incomingCall` off `stack.events()` and call

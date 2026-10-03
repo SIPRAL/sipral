@@ -45,10 +45,13 @@ def _loud(pcm: bytes) -> bool:
 
 class _Pair(unittest.IsolatedAsyncioTestCase):
     srtp = 0
+    #: Where alice's signalling socket is bound; ``None`` for every
+    #: interface.
+    alice_host: str | None = None
 
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
-        self.alice = Stack(loop=loop, audio=AudioMode.APPLICATION, srtp=self.srtp)
+        self.alice = Stack(self.alice_host, loop=loop, audio=AudioMode.APPLICATION, srtp=self.srtp)
         self.bob = Stack(loop=loop, audio=AudioMode.APPLICATION, srtp=self.srtp)
         self.addAsyncCleanup(self._close)
 
@@ -82,6 +85,11 @@ class _Pair(unittest.IsolatedAsyncioTestCase):
 
 
 class ACallMovesWithTheNetwork(_Pair):
+    # bound at one address, which a move binds again at the next: a stack on
+    # every interface keeps advertising the route toward its server, loopback
+    # here (TheSignallingPortSurvivesAMove below)
+    alice_host = "127.0.0.1"
+
     async def asyncSetUp(self) -> None:
         self.host = _routable_address()
         if self.host is None or self.host.startswith("127."):
@@ -218,6 +226,27 @@ class TheSignallingPortSurvivesAMove(unittest.TestCase):
             stack.move_to(self.host)
             self.assertEqual(stack.bind_address, f"{self.host}:{port}")
             self.assertTrue(stack.kept_signalling_port)
+
+
+    def test_a_stack_on_every_interface_keeps_choosing_its_route_across_a_move(self) -> None:
+        with Stack(audio=AudioMode.APPLICATION) as stack:
+            port = stack.bind_address.rsplit(":", 1)[1]
+            away = stack.add_account("sip:alice@192.0.2.1", registrar_address="192.0.2.1:5060")
+            self.assertEqual(stack.bind_address, f"{self.host}:{port}")
+
+            stack.move_to(self.host)
+            here = stack.add_account("sip:bob@127.0.0.1", registrar_address="127.0.0.1:5060")
+            self.assertEqual(here.advertised, f"127.0.0.1:{port}")
+
+            stack.move_to("127.0.0.1")
+            self.assertEqual(
+                stack.bind_address,
+                f"{self.host}:{port}",
+                "the route toward the first account's server, not the address the move named",
+            )
+            self.assertTrue(stack.kept_signalling_port)
+            self.assertEqual(away.advertised, f"{self.host}:{port}")
+            self.assertEqual(here.advertised, f"127.0.0.1:{port}")
 
 
 class ACallSaysWhichTransformSecuresIt(_Pair):

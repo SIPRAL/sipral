@@ -104,11 +104,13 @@ public final class SipralStack: @unchecked Sendable {
     private var linkHost: String?
     /// What a socket bound on every interface advertises, `host:port`:
     /// `nil` for a stack whose socket is bound at one address. Guarded by
-    /// `signallingQueue`, like whether this stack picks its own address --
-    /// it was given no `bindHost` -- and has picked it yet.
+    /// `signallingQueue`, like whether this stack has picked its own address
+    /// yet -- since it was created, or since the network last moved it.
     private var advertisedLocal: String?
-    private var routes: Bool
     private var routeChosen: Bool
+    /// Whether this stack picks its own address: it was given no `bindHost`,
+    /// and keeps picking across every `networkChanged(to:)`.
+    private let routes: Bool
     /// The port the application chose for the signalling socket, zero when
     /// it let the system choose: what `networkChanged(to:)` binds again.
     private let chosenPort: UInt16
@@ -1393,7 +1395,7 @@ public final class SipralStack: @unchecked Sendable {
             }
         }
         var advertised: String?
-        if contact == nil, signalling == .udp, let registrarAddress, signallingQueue.sync(execute: { routes }) {
+        if contact == nil, signalling == .udp, let registrarAddress, routes {
             advertised = try advertise(toward: registrarAddress)
         }
         let account = try Account.add(
@@ -1434,19 +1436,42 @@ public final class SipralStack: @unchecked Sendable {
             return !routeChosen
         }
         if first, address != bindAddress {
-            try retryingBusy {
-                var bound: UInt32 = 0
-                let status = address.withCString {
-                    sipral_stack_transport_bind(
-                        handle, Sipral.transportMain, SipralTransport.udp.rawValue, $0, address.utf8.count, nil, 0,
-                        nowMs(), &bound
-                    )
-                }
-                try Sipral.check(status)
-            }
-            signallingQueue.sync { advertisedLocal = address }
+            try advertiseMain(at: address)
         }
         return address
+    }
+
+    /// The UDP transport the stack writes in its `Via` named `address` from
+    /// now on, on a stack that picks its own address.
+    private func advertiseMain(at address: String) throws {
+        try retryingBusy {
+            var bound: UInt32 = 0
+            let status = address.withCString {
+                sipral_stack_transport_bind(
+                    handle, Sipral.transportMain, SipralTransport.udp.rawValue, $0, address.utf8.count, nil, 0,
+                    nowMs(), &bound
+                )
+            }
+            try Sipral.check(status)
+        }
+        signallingQueue.sync { advertisedLocal = address }
+    }
+
+    /// What a stack bound on every interface advertises after a move, chosen
+    /// again as it was at creation: the route toward its first account's
+    /// server, or with no server to route toward, `address` -- the new
+    /// network's own -- on the same port. Called with `movingQueue` held.
+    private func advertiseAgain(after address: String?) throws -> String {
+        signallingQueue.sync { routeChosen = false }
+        let servers = accounts.sorted { $0.key < $1.key }.map { $0.value.registrarAddress }
+        if let server = servers.first(where: Self.isAddress) {
+            return try advertise(toward: server)
+        }
+        let local = "\(address ?? Self.routeHost(toward: streamServer)):\(UDPSocket.parse(bindAddress).port)"
+        if local != bindAddress {
+            try advertiseMain(at: local)
+        }
+        return local
     }
 
     /// Answer what `.lookupWanted` asked in the poll that just ran, each
@@ -1473,7 +1498,7 @@ public final class SipralStack: @unchecked Sendable {
         for (handle, target) in located {
             guard let account = movingQueue.sync(execute: { accounts[handle] }) else { continue }
             account.located(at: target)
-            let picks = signallingQueue.sync { routes } && signalling == .udp
+            let picks = routes && signalling == .udp
             guard picks, account.derivesContact, let advertised = try? advertise(toward: target) else { continue }
             try? account.reach(at: advertised, remote: target)
         }
@@ -2126,7 +2151,12 @@ public final class SipralStack: @unchecked Sendable {
     /// there), and handed to the stack as its transport, and every account
     /// is pointed at it
     /// (`sipral_account_rebind`), so the REGISTER that follows names where
-    /// this end is now. Every call up at the time then raises
+    /// this end is now. A stack created with no `bindHost` keeps its socket
+    /// on every interface, and port, and keeps picking its own address: it
+    /// advertises the route toward its first account's server again, as
+    /// when it was created -- `to.address` only when no account names a
+    /// server by its address -- and each account is reached at the route
+    /// toward its own. Every call up at the time then raises
     /// `SipralEventKind.callAddressWanted`: the far end is still sending its
     /// audio to the old address, and `Call.moveMedia()` offers it the new
     /// one. Anything less -- a roam that keeps the address -- only
@@ -2136,6 +2166,7 @@ public final class SipralStack: @unchecked Sendable {
     public func networkChanged(to next: Network) throws -> SipralRecovery {
         try movingQueue.sync {
             let previous = stateQueue.sync { network }
+            let picksRoutes = routes && signalling == .udp
             let moves = next.link != .down && (next.address != previous.address || next.interface != previous.interface)
             var rebound: String?
             if moves, signalling != .udp {
@@ -2157,14 +2188,20 @@ public final class SipralStack: @unchecked Sendable {
                     report(refusal)
                     reconnectLater()
                 }
+            } else if moves, picksRoutes {
+                // a socket bound on every interface already receives at the
+                // new address, on the port it had: only what this end
+                // advertises moves. An address this machine lacks is refused
+                // as a stack bound at one refuses it
+                if let address = next.address {
+                    let probe = try UDPSocket(host: address, port: 0)
+                    probe.close()
+                }
+                signallingQueue.sync { _keptSignallingPort = true }
+                rebound = try advertiseAgain(after: next.address)
             } else if moves {
                 let host = next.address ?? UDPSocket.parse(bindAddress).host
                 let fresh = try signallingSocket(at: host)
-                // the application names the address from here on
-                signallingQueue.sync {
-                    advertisedLocal = nil
-                    routes = false
-                }
                 do {
                     // called directly: a datagram transport has no remote,
                     // which only a null pointer says, and the generated
@@ -2210,7 +2247,15 @@ public final class SipralStack: @unchecked Sendable {
             let recovery = SipralRecovery(rawValue: raw) ?? .unknown
             if let rebound {
                 for account in accounts.values {
-                    try account.rebind(local: rebound, previous: previous.address)
+                    // on a stack that picks its own address, each account is
+                    // reached at the route toward its own server, as when it
+                    // was added
+                    let server = account.registrarAddress
+                    var local = rebound
+                    if picksRoutes, account.derivesContact, Self.isAddress(server) {
+                        local = try advertise(toward: server)
+                    }
+                    try account.rebind(local: local, previous: previous.address)
                 }
             }
             return recovery

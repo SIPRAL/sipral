@@ -18,6 +18,13 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
   at once does, and goes as `Expires: 0` when the wait ends; it used to keep
   the old state and could be sent, or retried, as a REGISTER asking for the
   binding back.
+- A stack created with no bind address keeps choosing its own address after
+  a network change, in the Swift, Kotlin, .NET and Python layers: its socket
+  stays on every interface and its port, and it advertises the route toward
+  its first account's server again, and each account the route toward its
+  own. It used to take the new address as fixed from then on, so a server
+  reached over a VPN, or a second account's server reached another way, was
+  told an address it could not reach.
 - The examples' media socket holds the RTCP port next to its RTP port from
   the moment it binds, choosing the two as a pair, where it bound RTCP only
   once the call's plan named it and lost that port to another call in about

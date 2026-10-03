@@ -647,8 +647,10 @@ class SipralClient private constructor(
     fun nowMs(): Long = (System.nanoTime() - origin) / 1_000_000
 
     /** Whether this client picks the address peers reach it at -- it was
-     * opened with no `bindHost` -- and whether it has picked it yet: the
-     * route toward the first server an account names. Under [movingLock]. */
+     * opened with no `bindHost`, and keeps picking across every
+     * [networkChanged] -- and whether it has picked it yet: the route toward
+     * the first server an account names, since open or since the network
+     * last moved it. Under [movingLock]. */
     private var routes = false
     private var routeChosen = true
 
@@ -673,17 +675,40 @@ class SipralClient private constructor(
         val address = formatAddress(routeHost(peer), bindAddress.substringAfterLast(':').toInt())
         val first = synchronized(movingLock) { (!routeChosen).also { routeChosen = true } }
         if (first && address != bindAddress) {
-            val status = retryBusy {
-                SipralSignalNative.stackTransportRebind(handle, address.toByteArray(Charsets.UTF_8), nowMs()).also {
-                    throwIfPassing(it)
-                }
-            }
-            if (status != SipralStatus.OK.value) {
-                throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
-            }
-            bindAddress = address
+            advertiseMain(address)
         }
         return address
+    }
+
+    /** The UDP transport the stack writes in its `Via` named [address] from
+     * now on, on a client that picks its own address. */
+    private fun advertiseMain(address: String) {
+        val status = retryBusy {
+            SipralSignalNative.stackTransportRebind(handle, address.toByteArray(Charsets.UTF_8), nowMs()).also {
+                throwIfPassing(it)
+            }
+        }
+        if (status != SipralStatus.OK.value) {
+            throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
+        }
+        bindAddress = address
+    }
+
+    /** What a client bound on every interface advertises after a move,
+     * chosen again as it was at open: the route toward its first account's
+     * server, or with no server to route toward, [address] -- the new
+     * network's own -- on the same port. Under [movingLock]. */
+    private fun advertiseAgain(address: String?): String {
+        routeChosen = false
+        val server = accounts.values.map { it.registrarAddress }.firstOrNull(::isAddress)
+        if (server != null) {
+            return advertiseToward(server)
+        }
+        val local = formatAddress(address ?: routeHost(streamServer), bindAddress.substringAfterLast(':').toInt())
+        if (local != bindAddress) {
+            advertiseMain(local)
+        }
+        return local
     }
 
     /** Where a call's media socket is bound: [mediaHost] when one was given,
@@ -2128,7 +2153,12 @@ class SipralClient private constructor(
      * there), and handed to the stack as its transport, and every account is
      * pointed at it
      * (`sipral_account_rebind`), so the REGISTER that follows names where
-     * this end is now. Every call up at the time then raises
+     * this end is now. A client opened with no `bindHost` keeps its socket
+     * on every interface, and its port, and keeps picking its own address:
+     * it advertises the route toward its first account's server again, as
+     * at open -- [next]'s address only when no account names a server by
+     * its address -- and each account is reached at the route toward its
+     * own. Every call up at the time then raises
      * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: the far end is still sending
      * its audio to the old address, and [SipralCall.moveMedia] offers it the
      * new one. Anything less -- a roam that keeps the address -- only
@@ -2141,13 +2171,20 @@ class SipralClient private constructor(
             (next.address != previous.address || next.interfaceName != previous.interfaceName)
         var rebound: String? = null
         val link = link
+        val picks = picksAddress
         if (moves && link != null) {
             rebound = link.move(next.address ?: bindAddress.substringBeforeLast(':'))
+        } else if (moves && picks) {
+            // a socket bound on every interface already receives at the new
+            // address, on the port it had: only what this end advertises
+            // moves. An address this machine lacks is refused as a client
+            // bound at one refuses it
+            next.address?.let { DatagramSocket(0, InetAddress.getByName(it)).close() }
+            keptSignallingPort = true
+            rebound = advertiseAgain(next.address)
         } else if (moves) {
             val host = next.address ?: bindAddress.substringBeforeLast(':')
             val fresh = signallingSocket(InetAddress.getByName(host))
-            // the application names the address from here on
-            routes = false
             fresh.soTimeout = 20
             val local = formatAddress(fresh.localAddress.hostAddress, fresh.localPort)
             val status = retryBusy {
@@ -2178,7 +2215,12 @@ class SipralClient private constructor(
         network = next.copy(address = next.address ?: previous.address)
         if (rebound != null) {
             for (account in accounts.values) {
-                account.rebind(rebound, previous.address)
+                // on a client that picks its own address, each account is
+                // reached at the route toward its own server, as when it
+                // was added
+                val server = account.registrarAddress
+                val local = if (picks && account.derivesContact && isAddress(server)) advertiseToward(server) else rebound
+                account.rebind(local, previous.address)
             }
         }
         SipralRecovery.of(raw.toInt()) ?: SipralRecovery.UNKNOWN
