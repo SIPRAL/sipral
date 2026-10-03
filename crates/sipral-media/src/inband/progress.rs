@@ -568,11 +568,12 @@ impl ProgressDetector {
     }
 
     /// Which signature, if any, the last window holds.
-    fn classify(&self) -> Option<Claim<usize>> {
-        let total = self.bank.total_power();
+    fn classify(&mut self) -> Option<Claim<usize>> {
+        let bank = self.bank.window();
+        let total = bank.total_power();
         let power_at = |bin: usize| {
-            self.bank.reading(bin).map_or(0.0, |r| {
-                let amplitude = self.bank.amplitude_at_centre(r.magnitude);
+            bank.reading(bin).map_or(0.0, |r| {
+                let amplitude = bank.amplitude_at_centre(r.magnitude);
                 amplitude * amplitude / 2.0
             })
         };
@@ -735,7 +736,7 @@ impl ProgressDetector {
     /// Which of the special information tone's frequencies, if any, the
     /// last window of its own bank holds.
     fn classify_sit(&mut self) -> Option<Claim<usize>> {
-        let sit_bank = &self.sit_bank;
+        let sit_bank = self.sit_bank.window();
         let total = sit_bank.total_power();
         let (band, reading) = (0..SIT_FREQUENCIES.len())
             .filter_map(|i| sit_bank.reading(i).map(|r| (i, r)))

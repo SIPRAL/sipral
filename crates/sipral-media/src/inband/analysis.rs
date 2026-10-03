@@ -42,7 +42,7 @@
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 
-use super::{SampleRate, count_f64};
+use super::{SampleRate, count_f64, position_f64};
 
 /// The response of a Hann window to a sine `delta` bins from the frequency
 /// it is evaluated at, relative to its response at zero offset, with its
@@ -80,7 +80,6 @@ struct Bin {
     /// to the DFT's own phase.
     end_cos: f64,
     end_sin: f64,
-    previous: Option<(f64, f64)>,
 }
 
 /// What one window says about one tracked frequency.
@@ -99,14 +98,29 @@ pub(crate) struct Reading {
     pub(crate) dft: (f64, f64),
 }
 
-/// One tone's share of a probe's DFT: see [`Analyzer::leak`].
+/// One tone's share of a probe's DFT: see [`Window::leak`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Leak {
     pub(crate) dft: (f64, f64),
     pub(crate) coupling: f64,
 }
 
+/// How many filters run through a window side by side: their recurrences
+/// do not depend on each other, so a fixed number of them, held where the
+/// processor keeps its working values rather than in memory, runs in about
+/// the time of one. Eight is every filter a digit detector has.
+const LANES: usize = 8;
+
 /// A sliding Hann-windowed Goertzel bank.
+///
+/// Sliding it is cheap; evaluating the filters over a window is what costs,
+/// and it is done only for a window somebody reads, through
+/// [`Analyzer::window`]. A detector that can tell from the energy alone that
+/// a window holds nothing for it ([`Analyzer::quieter_than`]) skips the
+/// filters for it altogether. The phase a filter turns through needs the
+/// window one hop earlier as well, so the samples of that window are kept,
+/// and its filters run when they are first needed: the readings are the
+/// same whichever windows were skipped.
 #[derive(Clone, Debug)]
 pub(crate) struct Analyzer {
     rate: f64,
@@ -114,22 +128,41 @@ pub(crate) struct Analyzer {
     window: Vec<f64>,
     window_sum: f64,
     window_square_sum: f64,
-    /// The last `window.len()` samples, oldest first.
+    /// The last `window.len() + hop` samples of the hops completed, oldest
+    /// first: the window one hop earlier is the first `window.len()` of
+    /// them, the last window the last `window.len()`.
     buffer: Vec<f64>,
-    windowed: Vec<f64>,
+    /// The hop arriving, until it is complete: kept apart so that the last
+    /// window stays whole to be read until the next one ends.
+    incoming: Vec<f64>,
     /// How many samples of the current hop have arrived.
     filled: usize,
-    hop_energy: f64,
+    /// The energy of the hop arriving: a sum of squared samples, exact.
+    hop_energy: i64,
+    /// The energy of the last hops, enough of them to cover a window, in
+    /// the order a ring keeps them. The samples are whole numbers, so these
+    /// sums are exact.
+    recent: Vec<f64>,
     bins: Vec<Bin>,
-    /// Each filter's last two outputs, while a window is run through.
-    states: Vec<(f64, f64)>,
-    readings: Vec<Reading>,
-    total_power: f64,
     hop_power: f64,
-    /// Index of the hop the last analysed window ended with, counting the
-    /// first hop of the stream as zero.
+    /// Index of the hop the last window ended with, counting the first hop
+    /// of the stream as zero.
     hop_index: u64,
-    started: bool,
+    /// How many windows have ended since the bank was made, the first being
+    /// window one: never reset, so that a window counted before a reset is
+    /// never taken for one after it.
+    windows: u64,
+    /// The first window of the stream being heard.
+    first: u64,
+    /// The window `evaluated_at` weighted, its power, and each filter's
+    /// output over it; zero is no window.
+    windowed: Vec<f64>,
+    total_power: f64,
+    outputs: Vec<(f64, f64)>,
+    evaluated_at: u64,
+    /// Each filter's output over window `earlier_at`.
+    earlier: Vec<(f64, f64)>,
+    earlier_at: u64,
 }
 
 impl Analyzer {
@@ -159,49 +192,43 @@ impl Analyzer {
                     hop_sin: turn.sin(),
                     end_cos: end.cos(),
                     end_sin: end.sin(),
-                    previous: None,
                 }
             })
             .collect();
-        let readings = vec![
-            Reading {
-                magnitude: 0.0,
-                offset_hz: None,
-                power: 0.0,
-                dft: (0.0, 0.0),
-            };
-            bins.len()
-        ];
         Self {
             rate: rate_hz,
             hop,
-            states: vec![(0.0, 0.0); bins.len()],
-            buffer: vec![0.0; len],
+            buffer: vec![0.0; len + hop],
+            incoming: vec![0.0; hop],
+            filled: 0,
+            hop_energy: 0,
+            recent: vec![0.0; len.div_ceil(hop)],
+            outputs: vec![(0.0, 0.0); bins.len()],
+            evaluated_at: 0,
+            earlier: vec![(0.0, 0.0); bins.len()],
+            earlier_at: 0,
             windowed: vec![0.0; len],
+            total_power: 0.0,
             window,
             window_sum,
             window_square_sum,
-            filled: 0,
-            hop_energy: 0.0,
             bins,
-            readings,
-            total_power: 0.0,
             hop_power: 0.0,
             hop_index: 0,
-            started: false,
+            windows: 0,
+            first: 1,
         }
     }
 
     /// Forget everything heard: the next sample is the first of a stream.
     pub(crate) fn reset(&mut self) {
         self.buffer.iter_mut().for_each(|s| *s = 0.0);
+        self.recent.iter_mut().for_each(|e| *e = 0.0);
         self.filled = 0;
-        self.hop_energy = 0.0;
-        self.bins.iter_mut().for_each(|b| b.previous = None);
-        self.total_power = 0.0;
+        self.hop_energy = 0;
         self.hop_power = 0.0;
         self.hop_index = 0;
-        self.started = false;
+        self.first = self.windows + 1;
     }
 
     /// Samples per hop.
@@ -214,25 +241,14 @@ impl Analyzer {
         (self.window.len() / self.hop).max(1)
     }
 
-    /// Index of the hop the last analysed window ended with.
+    /// Index of the hop the last window ended with.
     pub(crate) const fn hop_index(&self) -> u64 {
         self.hop_index
-    }
-
-    /// Mean-square power of the last window, weighted by the window so that
-    /// it compares directly with [`Reading::power`].
-    pub(crate) const fn total_power(&self) -> f64 {
-        self.total_power
     }
 
     /// Mean-square power of the last hop alone, unweighted.
     pub(crate) const fn hop_power(&self) -> f64 {
         self.hop_power
-    }
-
-    /// What the last window says about the `index`th tracked frequency.
-    pub(crate) fn reading(&self, index: usize) -> Option<Reading> {
-        self.readings.get(index).copied()
     }
 
     /// Hertz per bin: the spacing of the window's own frequency grid.
@@ -250,13 +266,291 @@ impl Analyzer {
         }
     }
 
-    /// The windowed DFT of the last window at an arbitrary frequency, phase
+    /// Whether the last window's power, as [`Window::total_power`] would
+    /// measure it, is certainly under `power`, read from the energy of the
+    /// hops it covers without weighting a sample.
+    ///
+    /// The window weights every sample by at most one, so the hops' own
+    /// energy bounds what it measures. That energy is exact, and the margin
+    /// taken off `power` is far wider than the rounding the weighted sum can
+    /// gather, so a window this says is quieter is one the weighted
+    /// measurement would say is too.
+    pub(crate) fn quieter_than(&self, power: f64) -> bool {
+        let energy: f64 = self.recent.iter().sum();
+        energy < power * self.window_square_sum * (1.0 - 1e-9)
+    }
+
+    /// Take one sample. Returns whether it completed a hop, in which case
+    /// [`Analyzer::window`] reads the window that ends with it.
+    pub(crate) fn push(&mut self, sample: i16) -> bool {
+        self.feed(&[sample]).1
+    }
+
+    /// Take samples from the front of `samples`, up to the end of the hop
+    /// arriving: how many it took, and whether they completed the hop, in
+    /// which case [`Analyzer::window`] reads the window that ends with it.
+    pub(crate) fn feed(&mut self, samples: &[i16]) -> (usize, bool) {
+        let room = self.hop.saturating_sub(self.filled);
+        let taken = samples.len().min(room);
+        let mut energy = 0_i64;
+        for (slot, &sample) in self
+            .incoming
+            .get_mut(self.filled..self.filled + taken)
+            .unwrap_or_default()
+            .iter_mut()
+            .zip(samples)
+        {
+            *slot = f64::from(sample);
+            energy += i64::from(i32::from(sample) * i32::from(sample));
+        }
+        self.hop_energy += energy;
+        self.filled += taken;
+        if self.filled < self.hop {
+            return (taken, false);
+        }
+        self.filled = 0;
+        self.buffer.copy_within(self.hop.., 0);
+        let len = self.window.len();
+        if let Some(tail) = self.buffer.get_mut(len..) {
+            tail.copy_from_slice(&self.incoming);
+        }
+        // a sum of squares of 16-bit samples, exact as a float for any hop
+        // shorter than eight million samples
+        let hop_energy = position_f64(self.hop_energy.unsigned_abs());
+        self.hop_power = hop_energy / count_f64(self.hop);
+        let ring = u64::try_from(self.recent.len().max(1)).unwrap_or(1);
+        if let Some(slot) = usize::try_from(self.windows % ring)
+            .ok()
+            .and_then(|at| self.recent.get_mut(at))
+        {
+            *slot = hop_energy;
+        }
+        self.hop_energy = 0;
+        if self.windows >= self.first {
+            self.hop_index += 1;
+        }
+        self.windows += 1;
+        (taken, true)
+    }
+
+    /// The window that ended with the last hop, with its filters run: what
+    /// every reading, probe and leak is taken from.
+    pub(crate) fn window(&mut self) -> Window<'_> {
+        let current = self.windows;
+        if self.evaluated_at == current {
+            return Window { bank: self };
+        }
+        let len = self.window.len();
+        let before = current.saturating_sub(1);
+        if self.evaluated_at == before {
+            std::mem::swap(&mut self.outputs, &mut self.earlier);
+            self.earlier_at = before;
+        } else if self.earlier_at != before && before >= self.first {
+            // the window a hop earlier was skipped: its samples are still
+            // the first of the buffer, weighted the same way
+            let earlier = self
+                .buffer
+                .get(..len)
+                .unwrap_or_default()
+                .iter()
+                .zip(&self.window)
+                .map(|(sample, weight)| sample * weight);
+            filter_bank(&earlier, &self.bins, &mut self.earlier);
+            self.earlier_at = before;
+        }
+        // the window weighted, its energy summed, and the first filters run
+        // in one pass: the sum's chain of additions runs beside theirs
+        let first = self.bins.len().min(LANES);
+        let (bins, more_bins) = self.bins.split_at(first);
+        let (outputs, more_outputs) = self.outputs.split_at_mut(first);
+        let mut lanes = Lanes::new(bins);
+        let mut energy = 0.0;
+        for ((out, sample), weight) in self
+            .windowed
+            .iter_mut()
+            .zip(self.buffer.get(self.hop..).unwrap_or_default())
+            .zip(&self.window)
+        {
+            let x = sample * weight;
+            *out = x;
+            energy += x * x;
+            lanes.step(x);
+        }
+        lanes.finish(bins, outputs);
+        filter_bank(&self.windowed.iter().copied(), more_bins, more_outputs);
+        self.total_power = if self.window_square_sum > 0.0 {
+            energy / self.window_square_sum
+        } else {
+            0.0
+        };
+        self.evaluated_at = current;
+        Window { bank: self }
+    }
+}
+
+/// Up to [`LANES`] filters' recurrences, run side by side over one window.
+struct Lanes {
+    coefficients: [f64; LANES],
+    s1: [f64; LANES],
+    s2: [f64; LANES],
+}
+
+impl Lanes {
+    fn new(bins: &[Bin]) -> Self {
+        let mut coefficients = [0.0; LANES];
+        for (coefficient, bin) in coefficients.iter_mut().zip(bins) {
+            *coefficient = bin.coefficient;
+        }
+        Self {
+            coefficients,
+            s1: [0.0; LANES],
+            s2: [0.0; LANES],
+        }
+    }
+
+    /// One weighted sample through every filter: [`goertzel`]'s step.
+    fn step(&mut self, x: f64) {
+        for ((s1, s2), coefficient) in self
+            .s1
+            .iter_mut()
+            .zip(self.s2.iter_mut())
+            .zip(&self.coefficients)
+        {
+            let s0 = x + coefficient * *s1 - *s2;
+            *s2 = *s1;
+            *s1 = s0;
+        }
+    }
+
+    /// Each filter's output, as [`goertzel`] returns it.
+    fn finish(&self, bins: &[Bin], outputs: &mut [(f64, f64)]) {
+        for ((output, bin), (s1, s2)) in outputs
+            .iter_mut()
+            .zip(bins)
+            .zip(self.s1.iter().zip(&self.s2))
+        {
+            *output = (s1 - bin.cos * s2, bin.sin * s2);
+        }
+    }
+}
+
+/// Every filter of `bins` over the weighted samples of a window, each one's
+/// output in `outputs`, [`LANES`] filters at a time.
+fn filter_bank(
+    windowed: &(impl Iterator<Item = f64> + Clone),
+    bins: &[Bin],
+    outputs: &mut [(f64, f64)],
+) {
+    for (bins, outputs) in bins.chunks(LANES).zip(outputs.chunks_mut(LANES)) {
+        let mut lanes = Lanes::new(bins);
+        for x in windowed.clone() {
+            lanes.step(x);
+        }
+        lanes.finish(bins, outputs);
+    }
+}
+
+/// The last window of an [`Analyzer`], its filters run.
+pub(crate) struct Window<'a> {
+    bank: &'a Analyzer,
+}
+
+impl Window<'_> {
+    /// Mean-square power of the window, weighted by the window so that it
+    /// compares directly with [`Reading::power`].
+    pub(crate) const fn total_power(&self) -> f64 {
+        self.bank.total_power
+    }
+
+    /// Amplitude of a sine exactly at a filter's frequency that would
+    /// produce `magnitude` there.
+    pub(crate) fn amplitude_at_centre(&self, magnitude: f64) -> f64 {
+        self.bank.amplitude_at_centre(magnitude)
+    }
+
+    /// Which of the tracked filters `from..to` has the largest magnitude
+    /// as [`Window::reading`] states it, the last of equal ones; `None`
+    /// when the range holds none.
+    ///
+    /// The squared magnitudes, which cost no square root, rule out every
+    /// filter clearly weaker than the strongest; the margin is far wider
+    /// than their rounding, so only filters within it of the strongest are
+    /// compared by magnitude, and the answer is the one comparing every
+    /// magnitude would give.
+    pub(crate) fn strongest(&self, from: usize, to: usize) -> Option<usize> {
+        let outputs = self.bank.outputs.get(from..to)?;
+        let squared = |&(re, im): &(f64, f64)| re * re + im * im;
+        let loudest = outputs
+            .iter()
+            .map(squared)
+            .fold(None, |most: Option<f64>, power| {
+                Some(most.map_or(power, |most| most.max(power)))
+            })?;
+        outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| squared(output) >= loudest * (1.0 - 1e-9))
+            .map(|(index, &(re, im))| (from + index, re.hypot(im)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    }
+
+    /// What the window says about the `index`th tracked frequency.
+    pub(crate) fn reading(&self, index: usize) -> Option<Reading> {
+        let bank = self.bank;
+        let bin = bank.bins.get(index)?;
+        let &(re, im) = bank.outputs.get(index)?;
+        let previous = (bank.windows > bank.first && bank.earlier_at + 1 == bank.windows)
+            .then(|| bank.earlier.get(index).copied())
+            .flatten();
+        let rate = bank.rate;
+        let hop = count_f64(bank.hop);
+        let bin_width = bank.bin_width();
+        let window_sum = bank.window_sum;
+        let dft = rotate((re, im), bin.end_cos, -bin.end_sin);
+        let magnitude = re.hypot(im);
+        let offset_hz = match previous {
+            // a magnitude is above zero exactly when either part is not
+            // zero, which is cheaper to ask of the window before
+            Some((p_re, p_im)) if magnitude > 0.0 && (p_re != 0.0 || p_im != 0.0) => {
+                // this window times the conjugate of the last, turned
+                // back by what the bin's own frequency accounts for
+                let turn_re = re * p_re + im * p_im;
+                let turn_im = im * p_re - re * p_im;
+                let rest_re = turn_re * bin.hop_cos + turn_im * bin.hop_sin;
+                let rest_im = turn_im * bin.hop_cos - turn_re * bin.hop_sin;
+                Some(rest_im.atan2(rest_re) * rate / (2.0 * PI * hop))
+            }
+            _ => None,
+        };
+        let power = match offset_hz {
+            Some(offset) => {
+                let response = hann_response(offset / bin_width);
+                if response > 0.05 && window_sum > 0.0 {
+                    let amplitude = 2.0 * magnitude / (window_sum * response);
+                    amplitude * amplitude / 2.0
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        };
+        Some(Reading {
+            magnitude,
+            offset_hz,
+            power,
+            dft,
+        })
+    }
+
+    /// The windowed DFT of the window at an arbitrary frequency, phase
     /// referred to the window's first sample, for a filter that is not
     /// tracked from window to window.
     pub(crate) fn probe(&self, frequency: f64) -> (f64, f64) {
-        let omega = 2.0 * PI * frequency / self.rate;
-        let y = goertzel(&self.windowed, 2.0 * omega.cos(), omega.cos(), omega.sin());
-        let end = omega * count_f64(self.window.len() - 1);
+        let bank = self.bank;
+        let omega = 2.0 * PI * frequency / bank.rate;
+        let y = goertzel(&bank.windowed, 2.0 * omega.cos(), omega.cos(), omega.sin());
+        let end = omega * count_f64(bank.window.len() - 1);
         rotate(y, end.cos(), -end.sin())
     }
 
@@ -282,116 +576,21 @@ impl Analyzer {
             dft: (0.0, 0.0),
             coupling: 0.0,
         };
-        let (Some(bin), Some(reading)) = (self.bins.get(index), self.readings.get(index)) else {
+        let bank = self.bank;
+        let (Some(bin), Some(reading)) = (bank.bins.get(index), self.reading(index)) else {
             return none;
         };
-        let width = self.bin_width();
+        let width = bank.bin_width();
         let own = hann_shape((bin.frequency - tone_hz) / width);
         if own.abs() < 0.05 {
             return none;
         }
         let ratio = hann_shape((probe_hz - tone_hz) / width) / own;
-        let turn = PI * (bin.frequency - probe_hz) / self.rate * count_f64(self.window.len());
+        let turn = PI * (bin.frequency - probe_hz) / bank.rate * count_f64(bank.window.len());
         let (re, im) = rotate(reading.dft, turn.cos(), turn.sin());
         Leak {
             dft: (re * ratio, im * ratio),
             coupling: ratio * hann_shape((bin.frequency - probe_hz) / width),
-        }
-    }
-
-    /// Take one sample. Returns whether it completed a hop, in which case
-    /// the readings describe the window that ends with it.
-    pub(crate) fn push(&mut self, sample: i16) -> bool {
-        let value = f64::from(sample);
-        let offset = self.window.len() - self.hop + self.filled;
-        if let Some(slot) = self.buffer.get_mut(offset) {
-            *slot = value;
-        }
-        self.hop_energy += value * value;
-        self.filled += 1;
-        if self.filled < self.hop {
-            return false;
-        }
-        self.filled = 0;
-        self.hop_power = self.hop_energy / count_f64(self.hop);
-        self.hop_energy = 0.0;
-        if self.started {
-            self.hop_index += 1;
-        }
-        self.started = true;
-        self.analyse();
-        self.buffer.copy_within(self.hop.., 0);
-        true
-    }
-
-    fn analyse(&mut self) {
-        let mut energy = 0.0;
-        for ((out, sample), weight) in self.windowed.iter_mut().zip(&self.buffer).zip(&self.window)
-        {
-            *out = sample * weight;
-            energy += *out * *out;
-        }
-        self.total_power = if self.window_square_sum > 0.0 {
-            energy / self.window_square_sum
-        } else {
-            0.0
-        };
-        let rate = self.rate;
-        let hop = count_f64(self.hop);
-        let bin_width = rate / count_f64(self.window.len());
-        let window_sum = self.window_sum;
-        // every filter over the window in one pass, sample by sample: the
-        // recurrences do not depend on each other, so the processor runs
-        // them side by side instead of waiting on one chain at a time
-        for state in &mut self.states {
-            *state = (0.0, 0.0);
-        }
-        for &x in &self.windowed {
-            for (state, bin) in self.states.iter_mut().zip(&self.bins) {
-                let next = x + bin.coefficient * state.0 - state.1;
-                *state = (next, state.0);
-            }
-        }
-        for ((bin, reading), &(s1, s2)) in self
-            .bins
-            .iter_mut()
-            .zip(self.readings.iter_mut())
-            .zip(&self.states)
-        {
-            let (re, im) = (s1 - bin.cos * s2, bin.sin * s2);
-            let dft = rotate((re, im), bin.end_cos, -bin.end_sin);
-            let magnitude = re.hypot(im);
-            let offset_hz = match bin.previous {
-                Some((p_re, p_im)) if magnitude > 0.0 && p_re.hypot(p_im) > 0.0 => {
-                    // this window times the conjugate of the last, turned
-                    // back by what the bin's own frequency accounts for
-                    let turn_re = re * p_re + im * p_im;
-                    let turn_im = im * p_re - re * p_im;
-                    let rest_re = turn_re * bin.hop_cos + turn_im * bin.hop_sin;
-                    let rest_im = turn_im * bin.hop_cos - turn_re * bin.hop_sin;
-                    Some(rest_im.atan2(rest_re) * rate / (2.0 * PI * hop))
-                }
-                _ => None,
-            };
-            bin.previous = Some((re, im));
-            let power = match offset_hz {
-                Some(offset) => {
-                    let response = hann_response(offset / bin_width);
-                    if response > 0.05 && window_sum > 0.0 {
-                        let amplitude = 2.0 * magnitude / (window_sum * response);
-                        amplitude * amplitude / 2.0
-                    } else {
-                        0.0
-                    }
-                }
-                None => 0.0,
-            };
-            *reading = Reading {
-                magnitude,
-                offset_hz,
-                power,
-                dft,
-            };
         }
     }
 }
@@ -555,7 +754,7 @@ mod tests {
         let mut last = (0.0, 0.0);
         for &s in &pcm {
             if bank.push(s) {
-                let reading = bank.reading(0).unwrap();
+                let reading = bank.window().reading(0).unwrap();
                 if let Some(offset) = reading.offset_hz {
                     last = (offset, reading.power);
                 }
@@ -588,9 +787,10 @@ mod tests {
                         for &s in &to_pcm(&sine(tone, 9_000.0, phase, rate.hz(), 1_000)) {
                             bank.push(s);
                         }
-                        let (re, im) = bank.probe(probe);
-                        let leak = bank.leak(0, tone, probe).dft;
-                        let left = bank.amplitude_at_centre((re - leak.0).hypot(im - leak.1));
+                        let window = bank.window();
+                        let (re, im) = window.probe(probe);
+                        let leak = window.leak(0, tone, probe).dft;
+                        let left = window.amplitude_at_centre((re - leak.0).hypot(im - leak.1));
                         // what is left is quantisation, far under the tone
                         assert!(left < 2.0, "{rate:?} {tone} {probe} {phase}: {left}");
                     }
@@ -610,10 +810,11 @@ mod tests {
             for &s in &to_pcm(&signal) {
                 bank.push(s);
             }
-            let (re, im) = bank.probe(1_394.0);
-            let leak = bank.leak(0, 1_336.0, 1_394.0);
+            let window = bank.window();
+            let (re, im) = window.probe(1_394.0);
+            let leak = window.leak(0, 1_336.0, 1_394.0);
             let left = (re - leak.dft.0).hypot(im - leak.dft.1) / (1.0 - leak.coupling);
-            let heard = bank.amplitude_at_centre(left);
+            let heard = window.amplitude_at_centre(left);
             assert!((heard / 3_000.0 - 1.0).abs() < 0.05, "{phase}: {heard}");
         }
     }
@@ -625,7 +826,7 @@ mod tests {
             bank.push(s);
         }
         let expected = 8_000.0_f64 * 8_000.0 / 2.0;
-        assert!((bank.total_power() / expected - 1.0).abs() < 0.02);
+        assert!((bank.window().total_power() / expected - 1.0).abs() < 0.02);
         assert!((bank.hop_power() / expected - 1.0).abs() < 0.1);
     }
 

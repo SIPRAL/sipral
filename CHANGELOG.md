@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Changed
+
+- **Listening for keypad digits in a call's audio costs a fraction of what it did.** The in-band detector, which runs on every frame of a call that negotiated no telephone event, passes over a window whose samples alone carry too little energy for a digit before any of its filters runs, keeps that window's samples so that the next window's frequency reading still has the one before it, runs its filters beside the window's own power in one pass, and takes the square root and the phase of only the filters it goes on to read. What it hears is unchanged: every reading it takes is the same to the bit, and so is every digit, edge and refusal, on every test in the tree and on three thousand generated cases compared against 1.0. `docs/19-numbers.md` has the cost a frame before and after.
+
 ## [1.0.0] - 2026-10-02
 
 The first release, at C ABI 1.0. What it promises, for every 1.x release:
