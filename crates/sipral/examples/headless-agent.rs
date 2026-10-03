@@ -159,15 +159,58 @@ const INVITE_REFILL: Duration = Duration::from_secs(2);
 const QUIT_GRACE: Duration = Duration::from_secs(5);
 
 /// While a call has a socket for its audio, the loop turns at least this
-/// often to read it: what a packet's arrival is timed at is the turn that
-/// read it, and the jitter and delay every call's last line reports are
-/// measured from those times.
-const MEDIA_LOOK: Duration = Duration::from_millis(5);
+/// often to read it, on a fixed grid of instants ([`Grid`]): what a
+/// packet's arrival is timed at is the turn that read it, and the jitter
+/// and delay every call's last line reports are measured from those times.
+/// A frame is twenty milliseconds, two of these, so every frame a call
+/// sends falls due on the grid too.
+///
+/// Every turn reads every call's socket, which is most of what a call
+/// costs the agent: on the lab's Linux host the waits this grid replaced
+/// ended on scheduler ticks and the loop turned about every 8 ms, and a
+/// 5 ms grid cost a hundred calls 39 % of a core where those turns had cost
+/// 27 % (`docs/19-numbers.md`). Ten keeps the reads about as fine as they
+/// were and costs less than either.
+const MEDIA_LOOK: Duration = Duration::from_millis(10);
 
 /// While standard input is open, the longest a command waits to be read
 /// when nothing else turns the loop: the thread reading it cannot wake a
-/// loop waiting on a socket, so the loop looks.
+/// loop waiting for SIP, so the loop looks.
 const COMMAND_LOOK: Duration = Duration::from_millis(50);
+
+/// The instants the calls' audio moves at: every [`MEDIA_LOOK`] from the
+/// moment the agent started.
+///
+/// A call's first frame goes out on the grid and each one after it twenty
+/// milliseconds later, so every frame falls due on an instant the loop
+/// wakes at, whichever turn of the loop happens to come first. The media
+/// of a turn is run at the last grid instant the turn has reached, not at
+/// the moment it began: a turn a SIP datagram woke between two instants
+/// sends nothing early, and a wake that comes a little late sends the frame
+/// of the instant it was for, so the far end receives one frame every
+/// twenty milliseconds give or take how late the loop wakes, rather than
+/// give or take how far apart its turns happen to fall. On the lab's Linux
+/// host, before the grid, a call's frames left 16, 24 or 28 ms apart
+/// rather than 20 (`docs/19-numbers.md`).
+#[derive(Clone, Copy, Debug)]
+struct Grid {
+    epoch: Instant,
+}
+
+impl Grid {
+    /// The last instant of the grid at or before `now`.
+    fn at_or_before(self, now: Instant) -> Instant {
+        let since = now.saturating_duration_since(self.epoch);
+        let look = MEDIA_LOOK.as_nanos().max(1);
+        let whole = since.as_nanos() / look * look;
+        self.epoch + Duration::from_nanos(u64::try_from(whole).unwrap_or(u64::MAX))
+    }
+
+    /// The first instant of the grid after `now`.
+    fn after(self, now: Instant) -> Instant {
+        self.at_or_before(now) + MEDIA_LOOK
+    }
+}
 
 /// Server transactions per call that `--max-calls` makes room for: the
 /// INVITE's own, kept 32 seconds after it is answered (RFC 6026's timer L),
@@ -533,6 +576,8 @@ struct Agent {
     route: Option<Route>,
     call: Option<String>,
     echoes: Echoes,
+    /// When the calls' audio moves.
+    grid: Grid,
     /// Set by `quit`: when the process exits whether or not everything it
     /// hung up and gave up has been answered by then.
     leaving: Option<Instant>,
@@ -620,21 +665,21 @@ impl Agent {
     }
 
     /// When the loop has to turn again if no SIP datagram arrives first —
-    /// [`run`] waits on the SIP socket until then: the earliest of the
-    /// stack's own timers, the next look at the route, the end of `quit`'s
-    /// grace, the next look at the calls' audio while there are any, and
-    /// the next look at standard input while it is open (`listening`).
-    /// `None` is nothing to do until a datagram arrives.
+    /// [`run`] waits for SIP until then: the earliest of the stack's own
+    /// timers, the next look at the route, the end of `quit`'s grace, the
+    /// next instant of the [`Grid`] while any call has audio, and the next
+    /// look at standard input while it is open (`listening`). `None` is
+    /// nothing to do until a datagram arrives.
     ///
-    /// Only the SIP socket is waited on. Every call's socket is read on
-    /// every turn, and the turns come at least every [`MEDIA_LOOK`] while a
-    /// call has one, so a call's audio sitting unread in its socket never
-    /// wakes the loop by itself: with a thousand calls, a wait that woke
-    /// for any readable socket would wake at once, every time, for audio
-    /// that is read on the next turn anyway.
+    /// Only SIP is waited for. Every call's socket is read on every turn,
+    /// and the turns come at every instant of the grid while a call has
+    /// one, so a call's audio sitting unread in its socket never wakes the
+    /// loop by itself: with a thousand calls, a wait that woke for any
+    /// readable socket would wake at once, every time, for audio that is
+    /// read on the next turn anyway.
     fn next_turn(&self, now: Instant, listening: bool) -> Option<Instant> {
         [
-            (!self.endpoint.media.is_empty()).then(|| now + MEDIA_LOOK),
+            (!self.endpoint.media.is_empty()).then(|| self.grid.after(now)),
             listening.then(|| now + COMMAND_LOOK),
             self.route.as_ref().map(|route| route.next_check),
             self.leaving,
@@ -725,9 +770,10 @@ impl Agent {
     }
 }
 
-/// Read what arrived and answer it, and let every call's session move one
-/// frame: what it said comes back out, and what it says now is kept for the
-/// next turn. `true` when a SIP datagram arrived.
+/// Read what arrived and answer it, and let every call's session move the
+/// frames due by the last instant of the [`Grid`]: what it said comes back
+/// out, and what it says now is kept for the next frame. `true` when a SIP
+/// datagram arrived.
 ///
 /// What the turn decided goes out before it ends: an answer queued while
 /// the events are handled is written by the drain that finds no more of
@@ -738,27 +784,42 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
     agent.endpoint.timers(now);
     settle(agent, now);
     let echoes = &mut agent.echoes;
-    agent.endpoint.run_media(now, |call, media, session, now| {
-        // one closure plays what was captured last turn, the other captures
-        // what is heard this turn — two different `Vec`s, since both
-        // closures exist at once and neither may borrow the same one
-        let said_last_turn = echoes.remove(&call).unwrap_or_default();
-        let mut said_this_turn = Vec::with_capacity(said_last_turn.len());
+    // the audio moves on the grid, whenever in it this turn came
+    let beat = agent.grid.at_or_before(now);
+    agent.endpoint.run_media(beat, |call, media, session, now| {
+        // one closure says what was heard at the last frame, the other
+        // keeps what is heard at this one — two different `Vec`s, since
+        // both closures exist at once and neither may borrow the same one
+        let heard_before = echoes.remove(&call).unwrap_or_default();
+        let mut heard_now = Vec::with_capacity(heard_before.len());
+        let mut said = false;
         media.turn(
             session,
             now,
             |room| {
-                let filled = room.len().min(said_last_turn.len());
+                let filled = room.len().min(heard_before.len());
                 if let Some(dst) = room.get_mut(..filled) {
-                    dst.copy_from_slice(said_last_turn.get(..filled).unwrap_or(&[]));
+                    dst.copy_from_slice(heard_before.get(..filled).unwrap_or(&[]));
                 }
                 if let Some(rest) = room.get_mut(filled..) {
                     rest.fill(0);
                 }
+                said = true;
             },
-            |room| said_this_turn.extend_from_slice(room),
+            |room| heard_now.extend_from_slice(room),
         );
-        echoes.insert(call, said_this_turn);
+        // A turn that moved no frame leaves what was heard for the turn
+        // that does: the loop turns more than once a frame, and keeping
+        // only what each turn heard handed the frame that is said an empty
+        // one, which went out as silence.
+        let kept = if !heard_now.is_empty() {
+            heard_now
+        } else if said {
+            Vec::new()
+        } else {
+            heard_before
+        };
+        echoes.insert(call, kept);
     });
     settle(agent, now);
     arrived
@@ -946,6 +1007,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         (account, None)
     };
 
+    // waited for on a channel from here on, which ends a wait on time
+    endpoint.read_in_background()?;
     let mut agent = Agent {
         endpoint,
         account,
@@ -953,6 +1016,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         route,
         call: args.call,
         echoes: Echoes::new(),
+        grid: Grid { epoch: now },
         leaving: None,
         unregistering: false,
     };
@@ -1058,6 +1122,8 @@ mod tests {
             agent_endpoint.transport,
             agent_address,
         ));
+        // read the way `run` reads, on a thread of its own
+        agent_endpoint.read_in_background().unwrap();
         let mut agent = Agent {
             endpoint: agent_endpoint,
             account: agent_account,
@@ -1065,6 +1131,7 @@ mod tests {
             route: None,
             call: None,
             echoes: Echoes::new(),
+            grid: Grid { epoch: now },
             leaving: None,
             unregistering: false,
         };
@@ -1107,14 +1174,24 @@ mod tests {
         let mut up = false;
         const TONE: i16 = 8_000;
         const WARM_UP_FRAMES: u32 = 5;
+        // G.711's twenty milliseconds, and how many of them are listened to
+        // once the tone is first heard back
+        const FRAME: usize = 160;
+        const LISTENED: usize = 25;
+        let loud = |frame: &[i16]| frame.iter().any(|sample| sample.abs() > 1_000);
+        let after_first_loud = |heard: &[i16]| {
+            heard
+                .chunks(FRAME)
+                .position(|frame| loud(frame))
+                .map_or(0, |first| heard.len() / FRAME - first)
+        };
 
-        // Runs until the tone has plainly come back, or the deadline says it
-        // never will — not until `heard` reaches some fixed length, since the
-        // early frames the agent echoes are its own opening silence and only
-        // a loud one proves anything.
+        // Runs until the tone has plainly come back and gone on coming back
+        // for a while, or the deadline says it never will — not until `heard`
+        // reaches some fixed length, since the early frames the agent echoes
+        // are its own opening silence and only a loud one proves anything.
         let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline && !(up && heard.iter().any(|sample| sample.abs() > 1_000))
-        {
+        while Instant::now() < deadline && !(up && after_first_loud(&heard) > LISTENED) {
             let turn = Instant::now();
             for event in caller_endpoint.pump(turn) {
                 if matches!(
@@ -1162,6 +1239,18 @@ mod tests {
             return Err(format!(
                 "nothing came back louder than silence in {} samples — the agent did not echo it",
                 heard.len()
+            ));
+        }
+        // the tone is sent without a pause, so it comes back without one:
+        // an agent that said only the frames it happened to hear on the turn
+        // it said them sent back mostly silence, three frames in four
+        let frames: Vec<&[i16]> = heard.chunks(FRAME).collect();
+        let first = frames.iter().position(|frame| loud(frame)).unwrap_or(0);
+        let listened = frames.iter().skip(first).take(LISTENED);
+        let quiet = listened.filter(|frame| !loud(frame)).count();
+        if quiet > LISTENED / 4 {
+            return Err(format!(
+                "{quiet} of the {LISTENED} frames after the tone first came back were silent"
             ));
         }
         let media = agent
@@ -1359,6 +1448,7 @@ mod tests {
             route,
             call: None,
             echoes: Echoes::new(),
+            grid: Grid { epoch: now },
             leaving: None,
             unregistering: false,
         }
@@ -1660,6 +1750,82 @@ mod tests {
         assert_eq!(route.moved(later, |_| new), Some((old, new)));
         let later = later + ROUTE_CHECK;
         assert_eq!(route.moved(later, |_| new), None, "moved once, not again");
+    }
+
+    #[test]
+    fn the_audio_moves_on_a_grid_every_frame_falls_on() {
+        let epoch = Instant::now();
+        let grid = Grid { epoch };
+        let look = MEDIA_LOOK;
+        assert_eq!(grid.at_or_before(epoch), epoch);
+        assert_eq!(grid.after(epoch), epoch + look);
+        // anywhere inside a look is the look's start, and the next one after
+        for inside in [1, look.as_micros() / 2, look.as_micros() - 1] {
+            let now = epoch + 7 * look + Duration::from_micros(u64::try_from(inside).unwrap());
+            assert_eq!(grid.at_or_before(now), epoch + 7 * look);
+            assert_eq!(grid.after(now), epoch + 8 * look);
+        }
+        // a frame is a whole number of looks, so a call's frames, twenty
+        // milliseconds apart from an instant of the grid, all fall on it
+        let frame = media_socket::PACE;
+        assert_eq!(frame.as_nanos() % look.as_nanos(), 0);
+        let first = epoch + 3 * look;
+        for n in 0..1_000_u32 {
+            let due = first + frame * n;
+            assert_eq!(grid.at_or_before(due), due);
+        }
+        // a day in, the arithmetic has not run out
+        let later = epoch + Duration::from_secs(86_400) + Duration::from_micros(2_500);
+        assert_eq!(
+            grid.at_or_before(later),
+            epoch + Duration::from_secs(86_400)
+        );
+    }
+
+    /// The loop waits for SIP on the reader thread's channel: a wait ends
+    /// at its deadline and never before it, which a wait on the socket's own
+    /// timeout does not promise (it counts in scheduler ticks), and a
+    /// datagram ends it at once.
+    #[test]
+    fn a_wait_for_sip_ends_at_its_deadline_or_when_a_datagram_arrives() {
+        let now = Instant::now();
+        let mut endpoint = Endpoint::bind(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            UserAgent::new(EndpointConfig::default(), [0x31; 32]).unwrap(),
+            MediaEngine::new(
+                CodecCatalog::with_order(&["PCMU"]).unwrap(),
+                MediaConfig::default(),
+                WallClock::from_unix(now, 0, 0),
+                [0x32; 32],
+            ),
+            now,
+        )
+        .unwrap();
+        endpoint.read_in_background().unwrap();
+        for _ in 0..20 {
+            let deadline = Instant::now() + Duration::from_millis(2);
+            endpoint.wait_sip(Some(deadline));
+            assert!(Instant::now() >= deadline, "the wait ended early");
+        }
+
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let waiting = Instant::now();
+        let target = endpoint.local;
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            peer.send_to(b"OPTIONS sip:x SIP/2.0\r\n\r\n", target)
+                .unwrap();
+        });
+        endpoint.wait_sip(Some(waiting + Duration::from_secs(5)));
+        assert!(
+            waiting.elapsed() < Duration::from_secs(4),
+            "the datagram did not end the wait"
+        );
+        assert!(
+            endpoint.read_sip(Instant::now()),
+            "the datagram was not handed over"
+        );
+        sender.join().unwrap();
     }
 
     #[test]

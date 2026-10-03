@@ -21,10 +21,13 @@
 //! an example that has no reason to make one.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use sipral::{
     AccountId, CallHandle, Event, Input, MediaEngine, TransportId, TransportProtocol, UserAgent,
@@ -43,6 +46,118 @@ pub(crate) struct Endpoint {
     /// placed or answered so its port can go in the offer or the answer.
     pub(crate) media: HashMap<CallHandle, MediaSocket>,
     sip_inbox: Vec<u8>,
+    /// The thread reading the SIP socket, once [`Endpoint::read_in_background`]
+    /// started one; until then the socket is read where the loop turns.
+    reader: Option<Reader>,
+}
+
+/// One SIP datagram as the reader thread took it off the socket.
+type Datagram = (Vec<u8>, SocketAddr);
+
+/// How long the reader thread blocks on the SIP socket before it looks
+/// whether the socket is still the endpoint's: the most a socket given up
+/// (a move to another address, the endpoint dropped) stays bound after.
+const READER_LOOK: Duration = Duration::from_millis(100);
+
+/// The SIP socket read on a thread of its own, every datagram handed over a
+/// channel.
+///
+/// A loop that waits on the socket itself waits with `SO_RCVTIMEO`, which
+/// Linux counts in scheduler ticks: a 5 ms wait at the common 250 ticks a
+/// second is two of them, and ends anywhere from 4 to 8 ms later. A
+/// channel's wait ends at its deadline to within the system's timer slack,
+/// and as soon as a datagram is sent on it, so a loop waiting there turns
+/// when it said it would and still answers SIP the moment it arrives. One
+/// thread for the process, whatever the number of calls.
+struct Reader {
+    inbox: mpsc::Receiver<Datagram>,
+    /// Taken off the channel by a wait, not yet handed to the user agent.
+    held: VecDeque<Datagram>,
+    /// Set when the socket the thread reads is no longer the endpoint's; the
+    /// thread sees it within [`READER_LOOK`] and ends, closing its copy.
+    retired: Arc<AtomicBool>,
+}
+
+impl Reader {
+    /// Start a thread reading `sip`, which is switched to blocking reads
+    /// with a timeout of [`READER_LOOK`]: the endpoint only writes to it
+    /// from then on, which a blocking UDP socket does as well.
+    fn spawn(sip: &UdpSocket) -> std::io::Result<Self> {
+        let socket = sip.try_clone()?;
+        socket.set_nonblocking(false)?;
+        socket.set_read_timeout(Some(READER_LOOK))?;
+        let (sender, inbox) = mpsc::channel();
+        let retired = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&retired);
+        std::thread::Builder::new()
+            .name("sip-reader".to_owned())
+            .spawn(move || {
+                let mut buffer = vec![0_u8; 65_535];
+                while !seen.load(Ordering::Relaxed) {
+                    match socket.recv_from(&mut buffer) {
+                        Ok((length, from)) => {
+                            let data = buffer.get(..length).unwrap_or_default().to_vec();
+                            // the endpoint has gone, and the thread with it
+                            if sender.send((data, from)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::WouldBlock | ErrorKind::TimedOut
+                            ) => {}
+                        // whatever else a datagram socket reports is about one
+                        // datagram, not the socket; the next read is tried a
+                        // look later rather than at once, so a report that
+                        // repeats cannot spin
+                        Err(_) => std::thread::sleep(READER_LOOK),
+                    }
+                }
+            })?;
+        Ok(Self {
+            inbox,
+            held: VecDeque::new(),
+            retired,
+        })
+    }
+
+    /// Wait for the next datagram no later than `until`, or for as long as
+    /// it takes with `None`. `false` when the thread has ended.
+    fn wait(&mut self, until: Option<Instant>) -> bool {
+        if !self.held.is_empty() {
+            return true;
+        }
+        let got = match until {
+            Some(until) => match until.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => self.inbox.recv_timeout(left),
+                _ => return true,
+            },
+            None => self
+                .inbox
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match got {
+            Ok(datagram) => {
+                self.held.push_back(datagram);
+                true
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => false,
+        }
+    }
+
+    /// The next datagram already read, without waiting.
+    fn take(&mut self) -> Option<Datagram> {
+        self.held.pop_front().or_else(|| self.inbox.try_recv().ok())
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        self.retired.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Endpoint {
@@ -80,7 +195,23 @@ impl Endpoint {
             transport,
             media: HashMap::new(),
             sip_inbox: vec![0_u8; 65_535],
+            reader: None,
         })
+    }
+
+    /// Read the SIP socket on a thread of its own from now on, so that
+    /// [`Endpoint::wait_sip`] waits on a channel, which ends on time, rather
+    /// than on the socket, which ends on the next scheduler tick ([`Reader`]
+    /// says why that matters). [`Endpoint::read_sip`] then takes what the
+    /// thread read, and [`Endpoint::rebind_sip`] starts a thread on the new
+    /// socket.
+    ///
+    /// # Errors
+    /// Copying the socket, switching it to blocking reads, or starting the
+    /// thread.
+    pub(crate) fn read_in_background(&mut self) -> std::io::Result<()> {
+        self.reader = Some(Reader::spawn(&self.sip)?);
+        Ok(())
     }
 
     /// Bind a fresh RTP socket for a call about to be placed or answered, and
@@ -127,6 +258,16 @@ impl Endpoint {
                 now,
             )
             .map_err(|error| format!("cannot bind the transport again: {error}"))?;
+        if let Some(old) = self.reader.as_mut() {
+            // what the old socket had already been sent is still for this
+            // agent, and is handed over before anything the new one reads
+            let mut new = Reader::spawn(&sip)
+                .map_err(|error| format!("cannot read the new SIP socket: {error}"))?;
+            while let Some(datagram) = old.take() {
+                new.held.push_back(datagram);
+            }
+            self.reader = Some(new);
+        }
         self.sip = sip;
         self.local = local;
         Ok(local)
@@ -222,8 +363,10 @@ impl Endpoint {
         self.agent.handle_timeout(now);
     }
 
-    /// Read whatever SIP datagrams have arrived, non-blockingly. `true` when
-    /// at least one did.
+    /// Read whatever SIP datagrams have arrived, non-blockingly: off the
+    /// socket, or what the reader thread took off it once
+    /// [`Endpoint::read_in_background`] started one. `true` when at least one
+    /// did.
     ///
     /// A datagram the parser refused is said on standard error: the stack has
     /// already answered it 400 or 513 when it could be addressed, and counted
@@ -231,23 +374,20 @@ impl Endpoint {
     /// process sees without asking.
     pub(crate) fn read_sip(&mut self, now: Instant) -> bool {
         let mut arrived = false;
+        if self.reader.is_some() {
+            while let Some((data, from)) = self.reader.as_mut().and_then(Reader::take) {
+                arrived = true;
+                self.deliver(&data, from, now);
+            }
+            return arrived;
+        }
         loop {
             match self.sip.recv_from(&mut self.sip_inbox) {
                 Ok((length, from)) => {
                     arrived = true;
-                    let data = self.sip_inbox.get(..length).unwrap_or_default();
-                    let received = self.agent.receive(
-                        Input::Datagram {
-                            transport: self.transport,
-                            remote: from,
-                            local: self.local,
-                            data,
-                        },
-                        now,
-                    );
-                    if let Err(error) = received {
-                        eprintln!("refused {length} bytes from {from}: {error}");
-                    }
+                    let data = std::mem::take(&mut self.sip_inbox);
+                    self.deliver(data.get(..length).unwrap_or_default(), from, now);
+                    self.sip_inbox = data;
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(_) => break,
@@ -256,15 +396,45 @@ impl Endpoint {
         arrived
     }
 
+    /// Hand one datagram to the user agent, and say on standard error when
+    /// it refused it.
+    fn deliver(&mut self, data: &[u8], from: SocketAddr, now: Instant) {
+        let received = self.agent.receive(
+            Input::Datagram {
+                transport: self.transport,
+                remote: from,
+                local: self.local,
+                data,
+            },
+            now,
+        );
+        if let Err(error) = received {
+            eprintln!("refused {} bytes from {from}: {error}", data.len());
+        }
+    }
+
     /// Wait until a SIP datagram is waiting to be read or `until` has come,
     /// whichever is first; with `until` `None`, until a datagram. Nothing
-    /// is read: [`Endpoint::read_sip`] reads it.
+    /// is handed to the user agent: [`Endpoint::read_sip`] does that.
     ///
-    /// The socket stays non-blocking everywhere else; for the wait it blocks,
-    /// with a timeout, on a look at the next datagram that leaves it queued.
-    /// A failure to switch either way is a wait that does not happen — the
-    /// caller turns at once — never one that does not end.
-    pub(crate) fn wait_sip(&self, until: Option<Instant>) {
+    /// With a reader thread the wait is on its channel, and ends on time.
+    /// Without one it is on the socket itself, which is non-blocking
+    /// everywhere else and blocks, with a timeout, on a look at the next
+    /// datagram that leaves it queued; that timeout is counted in scheduler
+    /// ticks ([`Reader`]). A failure to switch either way is a wait that
+    /// does not happen — the caller turns at once — never one that does not
+    /// end, and a reader thread that has ended leaves the socket to be
+    /// waited on and read here again.
+    pub(crate) fn wait_sip(&mut self, until: Option<Instant>) {
+        if let Some(reader) = self.reader.as_mut() {
+            if reader.wait(until) {
+                return;
+            }
+            self.reader = None;
+            if self.sip.set_nonblocking(true).is_err() {
+                return;
+            }
+        }
         let timeout = match until {
             Some(until) => match until.checked_duration_since(Instant::now()) {
                 Some(left) if !left.is_zero() => Some(left),
