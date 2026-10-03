@@ -1104,8 +1104,10 @@ this code, every edge included.
 So the 2 October paragraph's "about 7 µs a frame more" for a call that has to
 be listened to is, on the same load test, the difference between 0.72 µs and
 the 0.54–0.60 µs it read with detection off: under two tenths of a
-microsecond while the far end is quiet, and about 1.4 µs a frame while it
-talks.
+microsecond while the far end is quiet. While it talks, the load test was
+not run with speech in its packets; the detector-alone rows put the cost at
+about 1.4 µs a frame for speech with its pauses, and 2.7 µs for loud noise
+with none.
 
 ## 3 October 2026 — unreleased, for `1.1.0`: the headless agent waiting on its socket
 
