@@ -2798,6 +2798,10 @@ static void a_call_restarts_its_ice(void)
 static void the_abi_check_keeps_the_1x_rule(void)
 {
     sipral_abi_version_t version = { 0 };
+    /* Held in a variable, not compared as the macro: at minor 0 the
+     * comparison below is `unsigned >= 0`, which gcc's -Wtype-limits
+     * (under -Wextra -Werror) refuses as always true. */
+    uint32_t header_minor = SIPRAL_ABI_VERSION_MINOR;
     uint32_t minor;
     char said[32] = { 0 };
     char error[512] = { 0 };
@@ -2808,7 +2812,7 @@ static void the_abi_check_keeps_the_1x_rule(void)
     expect("the library is at another major than its header",
            version.major == SIPRAL_ABI_VERSION_MAJOR);
     expect("the library is at an earlier minor than its header",
-           version.minor >= SIPRAL_ABI_VERSION_MINOR);
+           version.minor >= header_minor);
     for (minor = 0; minor <= version.minor; minor++) {
         expect("a caller at an earlier or equal minor of this major was refused",
                sipral_abi_check(version.major, minor) == SIPRAL_STATUS_OK);

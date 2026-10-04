@@ -404,7 +404,7 @@ if [ -f "$AAR" ]; then
     </license>
     <license>
       <name>LicenseRef-Sipral-Commercial</name>
-      <url>https://github.com/SIPRAL/sipral/blob/main/LICENSE-COMMERCIAL.md</url>
+      <url>https://sipral.org/terms/</url>
       <distribution>repo</distribution>
     </license>
   </licenses>

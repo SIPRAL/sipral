@@ -454,24 +454,34 @@ fi
 
 # The SBOM sits beside the wheel it describes, from sipral-ffi's own
 # dependency graph at the features and single target this wheel was actually
-# built with (docs/10-roadmap.md). --notices only for the variant whose feature
-# list is THIRD-PARTY-LICENSES.txt's own (no flags at all, opus included):
-# that is the one file this tool's crate list can be checked against exactly.
+# built with (docs/10-roadmap.md). THIRD-PARTY-LICENSES.txt lists the graph
+# across every target, not one: a single target's graph is a subset of it
+# (x86_64 Linux has no libc crate, which aarch64 and macOS pull in), so the
+# variant whose feature list is that file's own (no flags at all, opus
+# included) is checked against it with a second, all-target graph, written
+# to a scratch file and thrown away.
 if [ -n "$FINAL" ]; then
     step "SBOM"
     SBOM="$FINAL.cdx.json"
-    # Expanded as ${NOTICES_ARGS[@]+...}: bash 3.2 under `set -u` calls an
-    # empty array's [@] an unbound variable (android.sh's own comment on
-    # VARIANT_ARGS says the same).
-    NOTICES_ARGS=()
-    [ "$WITH_OPUS" -eq 1 ] && NOTICES_ARGS=(--notices "$ROOT/THIRD-PARTY-LICENSES.txt")
     if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- \
         --crate sipral-ffi --features "$FFI_FEATURES" --target "$RUST_TRIPLE" \
         --artifact-name "$DIST_NAME" --artifact-version "$DIST_VERSION" \
-        --artifact "$FINAL" --out "$SBOM" ${NOTICES_ARGS[@]+"${NOTICES_ARGS[@]}"} 2>&1); then
+        --artifact "$FINAL" --out "$SBOM" 2>&1); then
         pass "$(basename "$SBOM")"
     else
         fail "sbom-gen:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
+    fi
+    if [ "$WITH_OPUS" -eq 1 ]; then
+        ALL_SBOM=$(mktemp)
+        if sbom_out=$(cargo run --quiet -p sipral-sbom-gen -- \
+            --crate sipral-ffi --features "$FFI_FEATURES" --target all \
+            --artifact-name "$DIST_NAME" --artifact-version "$DIST_VERSION" \
+            --out "$ALL_SBOM" --notices "$ROOT/THIRD-PARTY-LICENSES.txt" 2>&1); then
+            pass "THIRD-PARTY-LICENSES.txt lists exactly the all-target graph"
+        else
+            fail "sbom-gen --notices:"; printf '%s\n' "$sbom_out" | sed 's/^/        /'
+        fi
+        rm -f "$ALL_SBOM"
     fi
 fi
 [ "$FAIL" -ne 0 ] && { printf '\nwheels.sh: failed\n'; exit 1; }
