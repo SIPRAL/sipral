@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+
+name: Bug report
+description: Something in Sipral does not do what the documentation says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems never go in a public issue.** Report them privately through
+        the Security tab of this repository ("Report a vulnerability"), as SECURITY.md describes.
+  - type: input
+    id: version
+    attributes:
+      label: Sipral version
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and language binding
+      placeholder: "iOS 18, Swift / Android 15, Kotlin / Linux, Python ..."
+    validations:
+      required: true
+  - type: input
+    id: peer
+    attributes:
+      label: PBX, proxy or carrier involved
+      placeholder: "Asterisk 22, FreeSWITCH 1.10, a hosted PBX ..."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: The smallest steps that make it happen again
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Decision record or capture
+      description: The call's decision record and a capture from the diagnostic export, which strips credentials, keys and personal data. Never paste a raw capture or a password.

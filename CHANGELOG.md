@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Changed
+
+- **The .NET assembly names no build path, and the repository asks for a bug report or feature request in a form.** `Sipral.csproj` maps the project directory to `/_/`; GitHub issue forms for bugs and features, with questions sent to Discussions and vulnerabilities to private reporting.
+
 ## [1.1.0] - 2026-10-04
 
 The headless agent sends its audio on a steady 20 ms clock and waits on its socket instead of sleeping, Opus rebuilds lost frames from in-band FEC, the in-band DTMF detector costs a fraction of what it did, and the gate holds every published figure to its budget.

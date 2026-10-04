@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+
+name: Feature request
+description: Something your product needs that Sipral does not do yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What your product needs to do
+      description: The situation and the outcome, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Specification, if there is one
+      placeholder: "RFC 8898, a carrier's interconnect document ..."
+  - type: textarea
+    id: today
+    attributes:
+      label: How you work around it today

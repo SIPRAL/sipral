@@ -20,6 +20,9 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- the shipped assembly names no path of the machine that built it -->
+    <PathMap>$(MSBuildProjectDirectory)=/_/</PathMap>
+    <Deterministic>true</Deterministic>
   </PropertyGroup>
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
