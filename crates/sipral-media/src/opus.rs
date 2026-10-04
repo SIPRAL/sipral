@@ -807,11 +807,181 @@ impl fmt::Debug for Decoder {
     }
 }
 
+/// Whether `packet` carries an in-band FEC copy of the frame sent before it,
+/// which [`Decoder::recover`] can decode when that frame was lost.
+///
+/// The copy is a low-bitrate redundancy ("LBRR") frame of the SILK layer
+/// (RFC 6716 §4.2.4), so a CELT-only packet never has one, and a SILK or
+/// hybrid packet says whether it does in its first few bits: after the voice
+/// activity flag of each of its SILK frames comes the LBRR flag (§4.2.3,
+/// mid channel first, then side). Those bits are read here with the range
+/// decoder of §4.1, taken as far as the flag and no further. A packet too
+/// short or too malformed to say carries none.
+///
+/// [`Decoder::recover`] on a packet without a copy conceals instead, which
+/// sounds the same as [`Decoder::conceal`]; asking first is how a receiver
+/// counts what FEC actually brought back.
+#[must_use]
+pub fn carries_fec(packet: &[u8]) -> bool {
+    let Some((&toc, rest)) = packet.split_first() else {
+        return false;
+    };
+    let config = toc >> 3;
+    // SILK frames in each Opus frame: a 10 or 20 ms frame holds one, a 40
+    // ms frame two and a 60 ms frame three (§4.2.2); configurations 16 and
+    // up are CELT alone (§3.1, Table 2)
+    let silk_frames = match config {
+        0..=11 => match config % 4 {
+            0 | 1 => 1,
+            2 => 2,
+            _ => 3,
+        },
+        12..=15 => 1,
+        _ => return false,
+    };
+    let channels = if toc & 0x04 == 0 { 1 } else { 2 };
+    let Some(frame) = first_frame(toc & 0x03, rest) else {
+        return false;
+    };
+    if frame.is_empty() {
+        return false;
+    }
+    let mut bits = RangeBits::new(frame);
+    for _ in 0..channels {
+        for _ in 0..silk_frames {
+            // the voice activity flag of each SILK frame
+            bits.bit();
+        }
+        if bits.bit() {
+            return true;
+        }
+    }
+    false
+}
+
+/// The bytes of the first Opus frame in a packet whose table of contents
+/// ends in `code` (RFC 6716 §3.2), `rest` being everything after that byte.
+fn first_frame(code: u8, rest: &[u8]) -> Option<&[u8]> {
+    match code {
+        // one frame
+        0 => Some(rest),
+        // two of equal length
+        1 => rest.get(..rest.len() / 2),
+        // two, the first one's length given
+        2 => {
+            let (length, used) = frame_length(rest)?;
+            rest.get(used..used.checked_add(length)?)
+        }
+        // any number, behind a count byte and its optional padding (§3.2.5)
+        _ => {
+            let (&count, mut at) = rest.split_first().map(|(count, _)| (count, 1))?;
+            let frames = usize::from(count & 0x3F);
+            if frames == 0 {
+                return None;
+            }
+            let mut padding = 0_usize;
+            if count & 0x40 != 0 {
+                loop {
+                    let byte = *rest.get(at)?;
+                    at += 1;
+                    padding += if byte == 255 { 254 } else { usize::from(byte) };
+                    if byte != 255 {
+                        break;
+                    }
+                }
+            }
+            let end = rest.len().checked_sub(padding)?;
+            if count & 0x80 == 0 {
+                // constant bitrate: the frames share what is left alike
+                let data = rest.get(at..end)?;
+                return data.get(..data.len() / frames);
+            }
+            // variable bitrate: every frame's length but the last's, in order
+            let mut first = None;
+            for _ in 1..frames {
+                let (length, used) = frame_length(rest.get(at..end)?)?;
+                first.get_or_insert(length);
+                at += used;
+            }
+            let data = rest.get(at..end)?;
+            data.get(..first.unwrap_or(data.len()))
+        }
+    }
+}
+
+/// A frame length as §3.2.1 codes it, and the bytes it took: one byte under
+/// 252, else that byte plus four times the next.
+fn frame_length(bytes: &[u8]) -> Option<(usize, usize)> {
+    let first = usize::from(*bytes.first()?);
+    if first < 252 {
+        return Some((first, 1));
+    }
+    let second = usize::from(*bytes.get(1)?);
+    Some((first + 4 * second, 2))
+}
+
+/// Just enough of RFC 6716's range decoder (§4.1) to read the equiprobable
+/// bits a SILK frame begins with: initialisation (§4.1.1), renormalisation
+/// (§4.1.2.1) and `ec_dec_bit_logp` with a probability of one half
+/// (§4.1.3.1). Bytes past the end of the frame read as zero, as §4.1.2.1
+/// has it.
+struct RangeBits<'a> {
+    data: &'a [u8],
+    next: usize,
+    rng: u32,
+    val: u32,
+    /// The low bit of the last byte read, which is the high bit of the next
+    /// symbol.
+    left_over: u8,
+}
+
+impl<'a> RangeBits<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let first = data.first().copied().unwrap_or(0);
+        let mut bits = Self {
+            data,
+            next: 1,
+            rng: 128,
+            val: 127 - u32::from(first >> 1),
+            left_over: first & 1,
+        };
+        bits.normalise();
+        bits
+    }
+
+    fn normalise(&mut self) {
+        while self.rng <= 1 << 23 {
+            self.rng <<= 8;
+            let byte = self.data.get(self.next).copied().unwrap_or(0);
+            self.next += 1;
+            let symbol = (self.left_over << 7) | (byte >> 1);
+            self.left_over = byte & 1;
+            self.val = ((self.val << 8) + (255 - u32::from(symbol))) & 0x7FFF_FFFF;
+        }
+    }
+
+    /// One bit at a probability of one half: a 1 takes the lower half of
+    /// the range, a 0 the upper.
+    fn bit(&mut self) -> bool {
+        let half = self.rng >> 1;
+        let one = self.val < half;
+        if one {
+            self.rng = half;
+        } else {
+            self.val -= half;
+            self.rng -= half;
+        }
+        self.normalise();
+        one
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CHANNELS, CLOCK_RATE, CodecError, DEFAULT_PTIME_MS, Decoder, ENCODING_NAME, Encoder,
         FrameDuration, MAX_BITRATE, MAX_FRAME_BYTES, MIN_BITRATE, RTPMAP_CHANNELS, SampleRate,
+        carries_fec,
     };
 
     const RATES: [SampleRate; 5] = [
@@ -1195,6 +1365,133 @@ mod tests {
         // lands nearer to it than an extrapolation does
         let truth = frame_of(rate, frame, 8);
         assert!(distance(&recovered, &truth) < distance(&concealed, &truth));
+        assert!(carries_fec(&packets[9]), "the packet the copy came out of");
+    }
+
+    /// Packets of `frames` frames of the voiced signal, from an encoder at
+    /// `bitrate` with FEC `fec` and `loss` per cent expected.
+    fn packets(
+        rate: SampleRate,
+        bitrate: u32,
+        fec: bool,
+        loss: u32,
+        frames: usize,
+    ) -> Vec<Vec<u8>> {
+        let frame = FrameDuration::Micros20000;
+        let mut encoder = Encoder::new(rate, frame).unwrap();
+        encoder.set_bitrate(bitrate).unwrap();
+        encoder.set_inband_fec(fec).unwrap();
+        encoder.set_expected_loss(loss).unwrap();
+        (0..frames)
+            .map(|n| {
+                let mut packet = vec![0_u8; frame.max_packet_bytes()];
+                let written = encoder
+                    .encode(&frame_of(rate, frame, n), &mut packet)
+                    .unwrap();
+                packet.truncate(written);
+                packet
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_packet_says_whether_it_carries_a_copy_of_the_one_before() {
+        let frame = FrameDuration::Micros20000;
+        for rate in [SampleRate::Wideband, SampleRate::Fullband] {
+            // Asked for, with loss to spend it on. libopus decides frame by
+            // frame whether a copy is worth its bits, so what the flag says
+            // is checked against what decoding does: with each packet's
+            // predecessor lost, recovering from the packet decodes something
+            // other than concealment exactly when it carries a copy.
+            let with = packets(rate, 24_000, true, 20, 50);
+            let mut carrying = 0;
+            for lost in 1..with.len() - 1 {
+                let mut concealing = Decoder::new(rate, frame).unwrap();
+                let mut recovering = Decoder::new(rate, frame).unwrap();
+                let mut scratch = vec![0_i16; frame.samples(rate)];
+                for packet in with.iter().take(lost) {
+                    concealing.decode(packet, &mut scratch).unwrap();
+                    recovering.decode(packet, &mut scratch).unwrap();
+                }
+                let mut concealed = vec![0_i16; frame.samples(rate)];
+                let mut recovered = vec![0_i16; frame.samples(rate)];
+                concealing.conceal(&mut concealed).unwrap();
+                recovering.recover(&with[lost + 1], &mut recovered).unwrap();
+                let says = carries_fec(&with[lost + 1]);
+                carrying += usize::from(says);
+                // where the encoder changed mode or bandwidth between the two,
+                // the decoder conceals in the new packet's configuration
+                // rather than the old one's, which differs from concealment
+                // with or without a copy
+                if with[lost + 1][0] != with[lost][0] {
+                    continue;
+                }
+                assert_eq!(
+                    says,
+                    concealed != recovered,
+                    "{rate:?}, packet {}: the flag and the decoder disagree",
+                    lost + 1
+                );
+            }
+            assert!(
+                carrying >= 10,
+                "{rate:?}: only {carrying} packets carry a copy"
+            );
+            // never asked for, or asked for with no loss expected: none
+            for (fec, loss) in [(false, 20), (true, 0)] {
+                let without = packets(rate, 24_000, fec, loss, 50);
+                assert!(
+                    !without.iter().any(|p| carries_fec(p)),
+                    "{rate:?}, FEC {fec}, {loss} %: a copy nobody asked for"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn what_carries_no_copy_says_so() {
+        assert!(!carries_fec(&[]));
+        // a table of contents alone, SILK at 20 ms: no frame to read
+        assert!(!carries_fec(&[1 << 3]));
+        // CELT-only configurations have no SILK layer to copy from, whatever
+        // the bits after them
+        for config in 16_u8..32 {
+            assert!(!carries_fec(&[config << 3, 0x00, 0x00, 0x00]));
+        }
+        // the frame count byte of a code 3 packet saying no frames
+        assert!(!carries_fec(&[(1 << 3) | 3, 0x00]));
+        // a code 2 packet whose first frame runs past its end
+        assert!(!carries_fec(&[(1 << 3) | 2, 200, 0x00]));
+    }
+
+    #[test]
+    fn the_flag_is_read_from_the_first_frame_however_the_packet_is_framed() {
+        let rate = SampleRate::Wideband;
+        let with = packets(rate, 24_000, true, 20, 4);
+        let without = packets(rate, 24_000, false, 20, 4);
+        let (copy, plain) = (&with[3], &without[3]);
+        assert!(carries_fec(copy) && !carries_fec(plain));
+        // the same frame framed as code 2 (two frames, the first one's length
+        // given) and code 3 (a count, lengths of all but the last), its table
+        // of contents otherwise kept: the first frame is what is read
+        for (first, second, expected) in [(copy, plain, true), (plain, copy, false)] {
+            let toc = first[0] & !0x03;
+            let (a, b) = (&first[1..], &second[1..]);
+            assert!(a.len() < 252);
+            let mut code2 = vec![toc | 2, u8::try_from(a.len()).unwrap()];
+            code2.extend_from_slice(a);
+            code2.extend_from_slice(b);
+            assert_eq!(carries_fec(&code2), expected, "code 2");
+            let mut code3 = vec![toc | 3, 0x80 | 2, u8::try_from(a.len()).unwrap()];
+            code3.extend_from_slice(a);
+            code3.extend_from_slice(b);
+            assert_eq!(carries_fec(&code3), expected, "code 3, variable");
+            let mut padded = vec![toc | 3, 0xC0 | 2, 3, u8::try_from(a.len()).unwrap()];
+            padded.extend_from_slice(a);
+            padded.extend_from_slice(b);
+            padded.extend_from_slice(&[0, 0, 0]);
+            assert_eq!(carries_fec(&padded), expected, "code 3, padded");
+        }
     }
 
     /// Mean squared difference between two frames of the same length.

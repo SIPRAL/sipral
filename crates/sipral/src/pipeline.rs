@@ -49,6 +49,41 @@ use sipral_media::{g722, g729, l16};
 use crate::codec::Codec;
 use crate::error::MediaError;
 
+/// The loss, in per cent, an Opus encoder is told to expect before the far
+/// end has reported any: a rate at which a call is already audibly
+/// suffering, so the copies of each frame it pays for start where they are
+/// worth their bits, and the first report replaces it.
+pub(crate) const EXPECTED_LOSS_AT_START: u32 = 5;
+
+/// The most an Opus encoder is told to expect, in per cent. Its in-band FEC
+/// carries one copy of one frame in the next packet, which brings back a
+/// loss only when the packet after it arrives; past a third of the packets
+/// lost, most losses come in runs that one copy cannot bridge, and every
+/// further point would buy a coarser copy with bits taken from the frames
+/// that do arrive.
+pub(crate) const EXPECTED_LOSS_CEILING: u32 = 30;
+
+/// The loss to tell the encoder after the far end reported losing
+/// `fraction_lost` 256ths of what this end sent over its last interval
+/// (RFC 3550 §6.4.1), where it was told `current` per cent before.
+///
+/// More loss is believed at once, rounded up to a whole per cent: the
+/// packets lost while the encoder still expected less are packets nothing
+/// brings back. Less loss is believed halfway, one report at a time, so one
+/// quiet interval on a link that loses in bursts does not take the copies
+/// away just before the next burst; on a link that has gone clean the
+/// expectation still falls to nothing within a few reports. Never above
+/// [`EXPECTED_LOSS_CEILING`].
+pub(crate) fn expected_loss(current: u32, fraction_lost: u8) -> u32 {
+    let reported = (u32::from(fraction_lost) * 100).div_ceil(256);
+    let next = if reported >= current {
+        reported
+    } else {
+        reported + (current - reported) / 2
+    };
+    next.min(EXPECTED_LOSS_CEILING)
+}
+
 /// The encoder and decoder a call is running, and the concealment that goes
 /// with them.
 pub(crate) struct Coder {
@@ -123,12 +158,11 @@ impl Coder {
     /// The pair for a codec, cutting frames of `frame_ms` milliseconds.
     ///
     /// Opus is asked for in-band forward error correction and told what loss
-    /// to expect. Both are §7.1 of RFC 7587 and both are free where the peer
-    /// does not use them: the flag says this end will *decode* redundancy, and
-    /// the expected loss is what makes libopus put redundancy in what it
-    /// sends. Five percent is a rate at which a call is already audibly
-    /// suffering, so it is the point at which the extra bits are worth
-    /// spending rather than a guess about this particular network.
+    /// to expect. Both are §7.1 of RFC 7587: the flag says this end will
+    /// *decode* redundancy ([`Coder::recover`]), and the expected loss is
+    /// what makes libopus put redundancy in what it sends. It starts at
+    /// [`EXPECTED_LOSS_AT_START`] per cent and follows what the far end
+    /// reports losing from there ([`Coder::expect_loss`]).
     ///
     /// # Errors
     // the variant is Opus's and exists only where Opus does, so the link has
@@ -161,7 +195,7 @@ impl Coder {
                 let frame = FrameDuration::from_micros(frame_ms.saturating_mul(1_000))?;
                 let mut encoder = opus::Encoder::new(rate, frame)?;
                 encoder.set_inband_fec(true)?;
-                encoder.set_expected_loss(5)?;
+                encoder.set_expected_loss(EXPECTED_LOSS_AT_START)?;
                 Kind::Opus(Box::new((encoder, opus::Decoder::new(rate, frame)?)))
             }
             Codec::L16Narrowband | Codec::L16Wideband => Kind::Linear(
@@ -432,6 +466,41 @@ impl Coder {
             Kind::Opus(pair) => Ok(pair.1.conceal(out)?),
         }
     }
+
+    /// Fill a frame the far end sent and this end did not get out of the
+    /// copy of it the packet sent after it carries — Opus's in-band forward
+    /// error correction (RFC 7587 §3.3) — and say how many samples that
+    /// wrote. `None` leaves the frame to [`Coder::conceal`]: every other
+    /// codec, an Opus packet that carries no copy
+    /// ([`opus::carries_fec`]), and one the decoder refuses. The packet
+    /// itself is decoded as usual when its own turn comes.
+    #[cfg_attr(not(feature = "opus"), allow(clippy::unused_self))]
+    pub(crate) fn recover(&mut self, following: &[u8], out: &mut [i16]) -> Option<usize> {
+        #[cfg(feature = "opus")]
+        if let Kind::Opus(pair) = &mut self.kind
+            && opus::carries_fec(following)
+        {
+            return pair.1.recover(following, out).ok();
+        }
+        #[cfg(not(feature = "opus"))]
+        let _ = (following, out);
+        None
+    }
+
+    /// Tell the encoder what share of what it sends, in per cent, is
+    /// expected to go missing: what decides how much of its bitrate Opus
+    /// spends on the copy of each frame it carries in the next packet. Every
+    /// other codec carries no copy, and nothing changes for it.
+    #[cfg_attr(not(feature = "opus"), allow(clippy::unused_self))]
+    pub(crate) fn expect_loss(&mut self, percent: u32) {
+        #[cfg(feature = "opus")]
+        if let Kind::Opus(pair) = &mut self.kind {
+            // refused only above a hundred, which the caller never asks
+            let _ = pair.0.set_expected_loss(percent);
+        }
+        #[cfg(not(feature = "opus"))]
+        let _ = percent;
+    }
 }
 
 /// One frame of G.729 with Annex B's DTX, cut into a payload as
@@ -510,7 +579,9 @@ impl core::fmt::Debug for Coder {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coder, Decoded, Sent, cut};
+    use super::{
+        Coder, Decoded, EXPECTED_LOSS_AT_START, EXPECTED_LOSS_CEILING, Sent, cut, expected_loss,
+    };
     use crate::codec::{Codec, DEFAULT_FRAME_MS};
     use sipral_media::g729::{Encoded, Sid};
 
@@ -534,6 +605,74 @@ mod tests {
         }
         let total: i64 = samples.iter().map(|s| i64::from(s.saturating_abs())).sum();
         total / i64::try_from(samples.len()).unwrap_or(1).max(1)
+    }
+
+    /// What the far end reports losing, in 256ths, moves what the encoder
+    /// is told to expect: up at once, down halfway a report, never past the
+    /// ceiling.
+    #[test]
+    fn the_loss_expected_follows_the_far_ends_reports() {
+        // nothing lost, from the starting guess: halfway down each report,
+        // and nothing left within a few
+        let mut expected = EXPECTED_LOSS_AT_START;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            expected = expected_loss(expected, 0);
+            seen.push(expected);
+        }
+        assert_eq!(seen, [2, 1, 0, 0]);
+        // a fifth lost is 51 256ths, 19.9 %, which is said as 20; believed
+        // at once, however little was expected before
+        assert_eq!(expected_loss(0, 51), 20);
+        assert_eq!(expected_loss(5, 51), 20);
+        // a single packet in a report's worth is still loss
+        assert_eq!(expected_loss(0, 1), 1);
+        // less than expected comes down halfway: 31 256ths is 12.1 %, said
+        // as 13, and 20 comes down to 16
+        assert_eq!(expected_loss(20, 31), 16);
+        // and no further than the ceiling, whatever is reported
+        assert_eq!(expected_loss(0, 128), EXPECTED_LOSS_CEILING);
+        assert_eq!(expected_loss(0, u8::MAX), EXPECTED_LOSS_CEILING);
+        assert_eq!(
+            expected_loss(EXPECTED_LOSS_CEILING, 0),
+            EXPECTED_LOSS_CEILING / 2
+        );
+    }
+
+    /// Every codec but Opus carries no copy of a frame to rebuild it from,
+    /// and an Opus packet without one is left to concealment as well.
+    #[test]
+    fn only_a_packet_carrying_a_copy_rebuilds_a_lost_frame() {
+        let mut out = vec![0_i16; 960];
+        for codec in [Codec::Pcmu, Codec::Pcma, Codec::G722, Codec::G729] {
+            let mut coder = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
+            let mut payload = vec![0_u8; 400];
+            let mut samples = vec![0_i16; coder.frame_samples()];
+            let mut phase = 0;
+            tone(&mut samples, codec.sample_rate(), &mut phase);
+            let sent = coder.encode(&samples, &mut payload).unwrap();
+            let room = out.get_mut(..coder.frame_samples()).unwrap();
+            assert_eq!(
+                coder.recover(&payload[..sent.octets], room),
+                None,
+                "{codec:?}"
+            );
+        }
+        #[cfg(feature = "opus")]
+        {
+            let mut coder = Coder::new(Codec::Opus, DEFAULT_FRAME_MS).unwrap();
+            // nothing expected lost: no copy is spent, and none is decoded
+            coder.expect_loss(0);
+            let mut payload = vec![0_u8; 1_500];
+            let mut samples = vec![0_i16; coder.frame_samples()];
+            let mut phase = 0;
+            for _ in 0..10 {
+                tone(&mut samples, Codec::Opus.sample_rate(), &mut phase);
+                let sent = coder.encode(&samples, &mut payload).unwrap();
+                assert!(!sipral_media::opus::carries_fec(&payload[..sent.octets]));
+                assert_eq!(coder.recover(&payload[..sent.octets], &mut out), None);
+            }
+        }
     }
 
     /// Every codec has to carry a frame there and back at its own rate, and

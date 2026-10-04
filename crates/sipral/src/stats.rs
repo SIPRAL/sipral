@@ -55,6 +55,16 @@ pub struct StreamStatistics {
     pub packets_sent: u64,
     /// Payload octets in them, not counting headers.
     pub octets_sent: u64,
+    /// Frames lost on the way here that were rebuilt from the copy of them
+    /// the packet after them carried, rather than concealed: Opus's in-band
+    /// forward error correction (RFC 7587 §3.3), which needs the far end to
+    /// have sent the copy and the next packet to have arrived in time. Part
+    /// of [`Quality::lost`], which counts the network's losses; the share
+    /// that reached the earpiece as invented audio is the difference. Zero
+    /// for every other codec.
+    ///
+    /// [`Quality::lost`]: sipral_rtp::Quality::lost
+    pub fec_recovered: u64,
     /// How long since a packet last arrived. A live call sits at one frame;
     /// anything larger is the beginning of [`MediaEvent::Stalled`].
     ///
@@ -153,6 +163,7 @@ mod tests {
             round_trip: None,
             packets_sent: 0,
             octets_sent: 0,
+            fec_recovered: 0,
             silent_for: Duration::ZERO,
             voip_metrics: None,
             feedback: None,

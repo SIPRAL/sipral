@@ -93,7 +93,9 @@
 //! `transport wanted`, since this agent opens no stream transport to carry
 //! it. Every call's end prints one line of
 //! what its receiving side measured, the E-model's R factor and MOS among
-//! it, so a run is compared by reading its output rather than a capture —
+//! it and, as `recovered`, the lost frames an Opus call rebuilt from the
+//! copy the next packet carried, so a run is compared by reading its output
+//! rather than a capture —
 //! `scripts/lab.sh compare` reads it that way.
 //!
 //! This is the shape a voice agent embeds: a socket, a
@@ -514,6 +516,9 @@ struct Ending {
     codec: String,
     sent: u64,
     quality: Quality,
+    /// Of the packets lost, the frames rebuilt from the copy the next packet
+    /// carried (Opus's in-band FEC), not concealed.
+    recovered: u64,
     round_trip: Option<Duration>,
     r_factor: Option<u8>,
     mos_x10: Option<u8>,
@@ -526,6 +531,7 @@ impl Ending {
             codec: stats.codec.to_string(),
             sent: stats.packets_sent,
             quality: stats.quality,
+            recovered: stats.fec_recovered,
             round_trip: stats.round_trip,
             r_factor: stats.voip_metrics.and_then(|block| known(block.r_factor)),
             mos_x10: stats.voip_metrics.and_then(|block| known(block.mos_lq)),
@@ -554,12 +560,13 @@ impl Ending {
             .mos_x10
             .map_or_else(unknown, |mos| format!("{:.1}", f64::from(mos) / 10.0));
         format!(
-            "codec={} sent={} received={} lost={} loss_pct={loss_pct:.2} late={} reordered={} \
-             jitter_ms={:.2} delay_ms={:.1} rtt_ms={rtt} r={r} mos={mos}",
+            "codec={} sent={} received={} lost={} recovered={} loss_pct={loss_pct:.2} late={} \
+             reordered={} jitter_ms={:.2} delay_ms={:.1} rtt_ms={rtt} r={r} mos={mos}",
             self.codec,
             self.sent,
             quality.received,
             quality.lost,
+            self.recovered,
             quality.discarded_late,
             quality.reordered,
             quality.jitter.as_secs_f64() * 1e3,
@@ -1853,29 +1860,31 @@ mod tests {
             ..Quality::default()
         };
         let rated = Ending {
-            codec: "PCMU".to_owned(),
+            codec: "opus".to_owned(),
             sent: 1_000,
             quality,
+            recovered: 4,
             round_trip: Some(Duration::from_micros(12_340)),
             r_factor: Some(88),
             mos_x10: Some(42),
         };
         assert_eq!(
             rated.line(),
-            "codec=PCMU sent=1000 received=990 lost=10 loss_pct=1.00 late=2 reordered=3 \
-             jitter_ms=4.25 delay_ms=60.0 rtt_ms=12.3 r=88 mos=4.2"
+            "codec=opus sent=1000 received=990 lost=10 recovered=4 loss_pct=1.00 late=2 \
+             reordered=3 jitter_ms=4.25 delay_ms=60.0 rtt_ms=12.3 r=88 mos=4.2"
         );
         let unrated = Ending {
             codec: "PCMA".to_owned(),
             sent: 0,
             quality: Quality::default(),
+            recovered: 0,
             round_trip: None,
             r_factor: None,
             mos_x10: None,
         };
         assert_eq!(
             unrated.line(),
-            "codec=PCMA sent=0 received=0 lost=0 loss_pct=0.00 late=0 reordered=0 \
+            "codec=PCMA sent=0 received=0 lost=0 recovered=0 loss_pct=0.00 late=0 reordered=0 \
              jitter_ms=0.00 delay_ms=0.0 rtt_ms=- r=- mos=-"
         );
     }

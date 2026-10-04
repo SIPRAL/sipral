@@ -4302,9 +4302,96 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     }
 
     assert!(concealed > 0, "nothing was ever concealed");
-    let quality = receiver.statistics(at).quality;
+    let statistics = receiver.statistics(at);
+    let quality = statistics.quality;
     assert!(quality.received > 0);
     assert!(quality.lost > 0, "the loss was not counted");
+    assert_eq!(
+        statistics.fec_recovered, 0,
+        "G.711 carries no copy to recover from"
+    );
+}
+
+/// A voiced-sounding signal for Opus to code as speech: a triangle at about
+/// 200 Hz under an envelope that opens and closes five times a second.
+#[cfg(feature = "opus")]
+fn voiced(index: usize, rate: usize) -> i16 {
+    let period = rate / 200;
+    let phase = index % period;
+    let half = period / 2;
+    let shape = if phase < half {
+        16_000 * phase / half
+    } else {
+        16_000 - 16_000 * (phase - half) / (period - half)
+    };
+    let level = 4_096 + index % (rate / 5) % 4_096;
+    i16::try_from((shape * level / 8_192).saturating_sub(level)).unwrap_or(0)
+}
+
+/// Opus over a path that loses one packet in five, both ends Sipral: the
+/// receiver reports the loss, the sender's encoder is told to expect it and
+/// puts a copy of each frame in the packet after it, and the receiver
+/// rebuilds the lost frames out of those copies instead of concealing them.
+#[cfg(feature = "opus")]
+#[test]
+fn opus_follows_the_loss_reported_and_rebuilds_lost_frames_from_the_next_packet() {
+    let now = Instant::now();
+    let (ours, theirs) = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=fmtp:96 useinbandfec=1\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\na=fmtp:96 useinbandfec=1\r\n",
+    );
+    let mut sender = session(&theirs, &ours, now);
+    let mut receiver = session(&ours, &theirs, now);
+    let from_sender: SocketAddr = "192.0.2.2:40002".parse().expect("an address");
+    let from_receiver: SocketAddr = "192.0.2.1:40001".parse().expect("an address");
+    assert_eq!(sender.expected_loss_for_test(), 5, "before any report");
+
+    let frame = sender.frame_samples();
+    let mut samples = vec![0_i16; frame];
+    let mut played = vec![0_i16; frame];
+    let mut at = now;
+    let mut told = None;
+    let mut lost_after_told = 0_u64;
+    let mut recovered_when_told = 0_u64;
+    for index in 0..1_500_usize {
+        for (n, slot) in samples.iter_mut().enumerate() {
+            *slot = voiced(index * frame + n, 48_000);
+        }
+        let datagram = sender
+            .capture(&samples, at)
+            .expect("it encodes")
+            .map(|out| out.payload.to_vec());
+        if let Some(mut datagram) = datagram {
+            if index % 5 == 2 {
+                lost_after_told += u64::from(told.is_some());
+            } else {
+                receiver.receive(&mut datagram, from_sender, at);
+            }
+        }
+        let _ = receiver.playback(&mut played);
+        while let Some(report) = receiver.poll_rtcp(at) {
+            let mut report = report.payload.to_vec();
+            sender.receive_control(&mut report, from_receiver, at);
+        }
+        if told.is_none() && sender.expected_loss_for_test() != 5 {
+            told = Some(sender.expected_loss_for_test());
+            recovered_when_told = receiver.statistics(at).fec_recovered;
+        }
+        at += TICK;
+    }
+
+    // a fifth lost is 20 %, which the report says as 51 or 52 256ths
+    let told = told.expect("the sender never followed a report");
+    assert!((19..=21).contains(&told), "told to expect {told} %");
+    let statistics = receiver.statistics(at);
+    let recovered = statistics.fec_recovered - recovered_when_told;
+    assert!(
+        recovered * 3 >= lost_after_told,
+        "{recovered} of the {lost_after_told} frames lost once the sender was told came back"
+    );
+    assert!(statistics.fec_recovered <= statistics.quality.lost);
 }
 
 /// A burst of loss longer than the jitter buffer's delay is played as

@@ -1173,6 +1173,29 @@ impl JitterBuffer {
         })
     }
 
+    /// The packet the next [`Self::pull`] plays, when it is already held,
+    /// without taking it.
+    ///
+    /// After a [`Pull::Conceal`] it is the packet sent right after the lost
+    /// one, if it has arrived: a codec that carries a copy of each frame in
+    /// the packet after it (Opus's in-band FEC, RFC 7587 §3.3) rebuilds the
+    /// lost frame out of it rather than inventing one. Nothing about the
+    /// buffer moves; the next pull plays it as usual.
+    #[must_use]
+    pub fn following(&self) -> Option<Frame<'_>> {
+        if !self.anchored {
+            return None;
+        }
+        let slot = self.slots.get(self.index_of(self.next))?;
+        slot.filled.then_some(Frame {
+            sequence: slot.sequence,
+            timestamp: slot.timestamp,
+            payload_type: slot.payload_type,
+            marker: slot.marker,
+            payload: &slot.payload,
+        })
+    }
+
     /// Throw away what is held and wait to be anchored again, keeping the
     /// counters and what has been learned about the path. For a far end that
     /// has restarted its stream, where what is still in the window belongs to
@@ -2118,6 +2141,28 @@ mod tests {
         assert_eq!(insert(&mut buffer, 1), Insert::Late);
         let metrics = buffer.burst_gap_metrics();
         assert_eq!((metrics.loss_rate, metrics.discard_rate), (0, 64));
+    }
+
+    #[test]
+    fn after_a_loss_the_packet_behind_it_can_be_looked_at_without_taking_it() {
+        let mut buffer = buffer(20, 1);
+        assert!(buffer.following().is_none(), "nothing anchored yet");
+        for sequence in [0_u16, 1, 3, 4] {
+            insert(&mut buffer, sequence);
+        }
+        assert_eq!(buffer.following().map(|frame| frame.sequence), Some(0));
+        assert_eq!(pull(&mut buffer), Some(0));
+        assert_eq!(pull(&mut buffer), Some(1));
+        // 2 never came: concealed, and 3 is there to be looked at
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
+        assert_eq!(buffer.following().map(|frame| frame.sequence), Some(3));
+        // looking took nothing: the next pull plays it
+        assert_eq!(pull(&mut buffer), Some(3));
+        assert_eq!(pull(&mut buffer), Some(4));
+        // a gap with nothing behind it yet has nothing to show
+        insert(&mut buffer, 7);
+        assert!(matches!(buffer.pull(Activity::Speech), Pull::Conceal));
+        assert!(buffer.following().is_none(), "6 has not arrived");
     }
 
     #[test]

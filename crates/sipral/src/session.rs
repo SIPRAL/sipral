@@ -64,7 +64,7 @@ use crate::error::MediaError;
 use crate::event::MediaEvent;
 use crate::inband::{ConsentTone, DtmfDetection, ProgressDetection, Signals};
 use crate::keying::{self, Opening, Shape};
-use crate::pipeline::{Coder, Decoded};
+use crate::pipeline::{self, Coder, Decoded, EXPECTED_LOSS_AT_START};
 use crate::record::{Recorder, RecordingOptions, RecordingSink};
 use crate::share::{Outbox, Ready};
 use crate::stats::StreamStatistics;
@@ -172,7 +172,11 @@ pub enum Arrival {
 pub enum Playback {
     /// A packet the far end sent.
     Packet,
-    /// One it sent and this end did not get, filled in by the concealment.
+    /// One it sent and this end did not get, filled in by the concealment —
+    /// or, for Opus, rebuilt from the copy of it the packet after it carried
+    /// ([`StreamStatistics::fec_recovered`] counts those).
+    ///
+    /// [`StreamStatistics::fec_recovered`]: crate::StreamStatistics::fec_recovered
     Concealed,
     /// Comfort noise, from an RFC 3389 payload the far end sent instead of
     /// audio, or from a G.729 payload that held nothing but an Annex B SID
@@ -397,6 +401,14 @@ pub struct MediaSession {
     payload: Vec<u8>,
     packets_sent: u64,
     octets_sent: u64,
+    /// Frames lost on the way here and rebuilt from the copy the packet
+    /// after them carried ([`Coder::recover`]).
+    recovered: u64,
+    /// The loss, in per cent, the encoder is told to expect, and how many of
+    /// the far end's reports about this end's audio it has followed
+    /// ([`MediaSession::follow_far_loss`]).
+    expected_loss: u32,
+    far_reports: u64,
     last_inbound: Instant,
     /// When the far end's last control report was believed: what says it is
     /// still there while it sends no audio on purpose, in a pause it
@@ -632,6 +644,9 @@ impl MediaSession {
             payload: vec![0; agreed.max_payload(frame_ms)],
             packets_sent: 0,
             octets_sent: 0,
+            recovered: 0,
+            expected_loss: EXPECTED_LOSS_AT_START,
+            far_reports: 0,
             last_inbound: now,
             last_control: now,
             stall_after: config.stall_after,
@@ -879,6 +894,12 @@ impl MediaSession {
         self.events.take_for_engine()
     }
 
+    /// The loss, in per cent, the encoder is being told to expect.
+    #[cfg(all(test, feature = "opus"))]
+    pub(crate) const fn expected_loss_for_test(&self) -> u32 {
+        self.expected_loss
+    }
+
     /// Queue an event as the session itself would.
     #[cfg(test)]
     pub(crate) fn push_event_for_test(&mut self, event: MediaEvent) {
@@ -901,6 +922,7 @@ impl MediaSession {
             round_trip: self.rtp.round_trip_time(),
             packets_sent: self.packets_sent,
             octets_sent: self.octets_sent,
+            fec_recovered: self.recovered,
             silent_for: now.saturating_duration_since(self.last_inbound),
             voip_metrics: self.rtp.voip_metrics(self.codec().quality_model()),
             feedback: feedback.map(|(negotiated, _)| negotiated),
@@ -1623,6 +1645,7 @@ impl MediaSession {
             // alone, which RFC 5506 lets it send between its reports
             RtcpReceived::Report | RtcpReceived::Feedback => {
                 self.last_control = now;
+                self.follow_far_loss();
                 Arrival::Control
             }
             RtcpReceived::Goodbye { .. } => Arrival::Goodbye,
@@ -1631,6 +1654,23 @@ impl MediaSession {
             | RtcpReceived::Malformed(_)
             | RtcpReceived::Insecure(_) => Arrival::ControlRefused,
         }
+    }
+
+    /// Tell the encoder the loss the far end's latest report says it saw of
+    /// this end's audio, once per report ([`pipeline::expected_loss`] says
+    /// how a report moves it): what an Opus encoder sizes the copy of each
+    /// frame it carries in the next packet by. Every other codec carries no
+    /// copy, and the figure is kept for the codec a re-negotiation may bring.
+    fn follow_far_loss(&mut self) {
+        let Some((fraction_lost, reports)) = self.rtp.far_loss() else {
+            return;
+        };
+        if reports == self.far_reports {
+            return;
+        }
+        self.far_reports = reports;
+        self.expected_loss = pipeline::expected_loss(self.expected_loss, fraction_lost);
+        self.coder.expect_loss(self.expected_loss);
     }
 
     /// Take the frame that is due for the earpiece, and say where it came
@@ -1751,7 +1791,22 @@ impl MediaSession {
                 }
                 conceal(coder, room)
             }
-            Pull::Conceal => conceal(coder, room),
+            // Opus carries a copy of each frame in the packet after it: when
+            // that packet is already held, the lost frame is rebuilt out of
+            // it, and the packet is played as itself at its own turn
+            Pull::Conceal => {
+                let rebuilt = self
+                    .rtp
+                    .following()
+                    .filter(|next| next.payload_type == payload_type)
+                    .and_then(|next| coder.recover(next.payload, room));
+                if rebuilt.is_some() {
+                    self.recovered = self.recovered.saturating_add(1);
+                    Playback::Concealed
+                } else {
+                    conceal(coder, room)
+                }
+            }
             // a pause being made longer, or one the far end is keeping: a
             // G.729 far end in an Annex B pause sent nothing on purpose, and
             // its decoder carries the comfort noise on (B.4.5)
@@ -2803,6 +2858,8 @@ impl MediaSession {
         self.retain_processor(resized, rate, samples);
         self.dialling.reformat(was_clock, plan.codec.clock_rate());
 
+        // what the far end has reported losing is the path's, not the codec's
+        coder.expect_loss(self.expected_loss);
         self.coder = coder;
         self.frame_ms = frame_ms;
         self.frame_ticks = frame_ticks;

@@ -14,7 +14,9 @@ use crate::avpf::rsize::{
 use crate::avpf::session::{FeedbackCounts, FeedbackState, Negotiated, Send as FeedbackSend};
 use crate::dtmf::{EVENT_LEN, EventSender, HALF_CLOCK, Outgoing};
 use crate::emodel::{self, BurstRatio, CodecQualityModel, EModelInputs};
-use crate::playout::{Activity, BufferConfig, Insert, JitterBuffer, Pull, Quality, clock_ticks};
+use crate::playout::{
+    Activity, BufferConfig, Frame, Insert, JitterBuffer, Pull, Quality, clock_ticks,
+};
 use crate::rtcp::{
     CNAME, ChunkBuilder, CompoundBuilder, CompoundPacket, GoodbyeBuilder, ReceiverReportBuilder,
     ReportBlock, RtcpBuildError, RtcpError, RtcpPacket, SdesItem, SenderInfo, SenderOrReceiver,
@@ -232,6 +234,9 @@ pub struct RtpSession {
     cname: String,
     timer: IntervalTimer,
     round_trip: Option<Duration>,
+    /// The fraction of this session's own packets the far end last reported
+    /// lost (RFC 3550 §6.4.1), in 256ths, and how many reports have said so.
+    far_loss: Option<(u8, u64)>,
     /// The last RFC 3611 §4.7 VoIP Metrics block the far end sent about this
     /// session's own stream: what it measured of the audio it received from
     /// here.
@@ -445,6 +450,7 @@ impl RtpSession {
             cname: config.cname.clone(),
             timer: IntervalTimer::new(config.rtcp_bandwidth, first_report_size, unit_interval),
             round_trip: None,
+            far_loss: None,
             far_voip_metrics: None,
             security: Protection::Clear,
             feedback: None,
@@ -791,6 +797,14 @@ impl RtpSession {
     /// started, which is worse but not wrong.
     pub fn pull(&mut self, activity: Activity) -> Pull<'_> {
         self.inbound.buffer.pull(activity)
+    }
+
+    /// The packet the next [`RtpSession::pull`] plays, when it is already
+    /// held: after a [`Pull::Conceal`], the one sent right after the packet
+    /// that was lost ([`JitterBuffer::following`]).
+    #[must_use]
+    pub fn following(&self) -> Option<Frame<'_>> {
+        self.inbound.buffer.following()
     }
 
     /// Write the next packet into `out` and say how long it is.
@@ -1647,9 +1661,9 @@ impl RtpSession {
                     if Some(sr.ssrc()) == self.inbound.source {
                         self.inbound.rtcp.on_sender_report(sr.info().ntp, ntp);
                     }
-                    self.note_round_trip(sr.reports(), ntp);
+                    self.note_report(sr.reports(), ntp);
                 }
-                RtcpPacket::ReceiverReport(rr) => self.note_round_trip(rr.reports(), ntp),
+                RtcpPacket::ReceiverReport(rr) => self.note_report(rr.reports(), ntp),
                 RtcpPacket::Goodbye(bye) => {
                     // Matched against whichever identifier this session
                     // actually has for the remote side — `source` when
@@ -1781,11 +1795,14 @@ impl RtpSession {
 
     /// Whichever of a report's blocks describes this session's own SSRC
     /// carries the round trip to whoever sent it (§6.4.1, A.3: LSR and
-    /// DLSR).
-    fn note_round_trip(&mut self, reports: impl Iterator<Item = ReportBlock>, arrival_ntp: u64) {
+    /// DLSR), and how much of what this end sent it lost since its last
+    /// report.
+    fn note_report(&mut self, reports: impl Iterator<Item = ReportBlock>, arrival_ntp: u64) {
         for block in reports {
             if block.ssrc == self.outbound.ssrc {
                 self.round_trip = round_trip_time(&block, arrival_ntp);
+                let count = self.far_loss.map_or(0, |(_, count)| count);
+                self.far_loss = Some((block.fraction_lost, count.saturating_add(1)));
             }
         }
     }
@@ -1797,6 +1814,17 @@ impl RtpSession {
     #[must_use]
     pub const fn round_trip_time(&self) -> Option<Duration> {
         self.round_trip
+    }
+
+    /// The fraction of this session's own packets the far end lost over the
+    /// interval its last report covers, in 256ths (RFC 3550 §6.4.1's
+    /// "fraction lost"), and how many reports about them have arrived so
+    /// far — which changes with every one, so a caller that acts on each
+    /// report can tell a new one from the same one read again. `None` until
+    /// the first.
+    #[must_use]
+    pub const fn far_loss(&self) -> Option<(u8, u64)> {
+        self.far_loss
     }
 
     /// What the far end measured of the audio this session sent it: the last
