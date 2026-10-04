@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! In-process proof that `sipral::HeadlessSession` carries real audio, real
 //! voice activity, a real digit and real call state across a real call.

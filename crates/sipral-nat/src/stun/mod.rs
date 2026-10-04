@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STUN: the codec, the two message-integrity mechanisms, the fingerprint and
 //! a binding client.

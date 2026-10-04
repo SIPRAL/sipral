@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What the octets of a T140block mean once they arrive: ITU-T T.140 text,
 //! UTF-8 encoded (RFC 4103 §3.3), with the handful of control characters

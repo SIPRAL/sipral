@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // CallAudio against a fake device whose streams can be made to fail the way
 // Android's do when the audio server dies (a negative code from read or

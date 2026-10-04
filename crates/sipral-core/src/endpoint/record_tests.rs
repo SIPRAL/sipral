@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The record, read back off an endpoint that was driven the ordinary way.
 //!

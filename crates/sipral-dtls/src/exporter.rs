@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Keying material exporters (RFC 5705), and the SRTP keys DTLS-SRTP takes
 //! out of one (RFC 5764 §4.2).

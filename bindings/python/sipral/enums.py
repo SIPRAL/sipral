@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """Named integers, built from ``lib`` instead of copied out of it by hand.
 

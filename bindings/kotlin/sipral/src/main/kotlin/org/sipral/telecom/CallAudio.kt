@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // One call's audio device, kept alive through what a phone does to it in
 // the middle of a call: the platform holding the call for a cellular one,

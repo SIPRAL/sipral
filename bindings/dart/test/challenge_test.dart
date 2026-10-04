@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Whose challenge an account's password answers, and what a held party is
 // sent: the realms an account names reach the library, a challenge under

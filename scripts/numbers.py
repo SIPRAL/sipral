@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Holds what `scripts/check.sh --only numbers` measured to docs/numbers.toml.
 #

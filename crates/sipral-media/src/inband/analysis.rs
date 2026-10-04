@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The measurement every tone detector here stands on: a Hann-windowed
 //! Goertzel filter bank evaluated on a sliding window, with the frequency of

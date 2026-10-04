@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
- * Copyright (c) 2026 Tiberiu Balasea
+ * Copyright (c) 2026 Sytek
  *
  * Hand-written, not printed by tools/abi-gen: the idiomatic layer's own
  * small shim, sitting beside the generated sipral_jni.c rather than inside

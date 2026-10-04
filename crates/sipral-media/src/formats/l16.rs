@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! L16: sixteen-bit linear PCM on RTP, RFC 3551 §4.5.11 and the `audio/L16`
 //! media type of RFC 2586.

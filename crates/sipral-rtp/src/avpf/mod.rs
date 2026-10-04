@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! RTCP feedback for audio: the parts of RTP/AVPF (RFC 4585) and of
 //! reduced-size RTCP (RFC 5506) a voice call has a use for.

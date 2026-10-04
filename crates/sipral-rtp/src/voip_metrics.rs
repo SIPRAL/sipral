@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Burst/gap loss classification for the VoIP Metrics Report Block (RFC
 //! 3611 §4.7.2), by the event-driven algorithm RFC 3611 Appendix A.2

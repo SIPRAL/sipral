@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 // iOS only, for the reason `CallKitAdapter.swift` itself is: `CXProvider`
 // and its actions exist nowhere else. On macOS and Linux this file compiles

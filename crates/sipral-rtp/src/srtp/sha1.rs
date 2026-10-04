@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! SHA-1 (RFC 3174) and HMAC-SHA-1 (RFC 2104), which is the authentication
 //! transform RFC 3711 §4.2 makes mandatory.

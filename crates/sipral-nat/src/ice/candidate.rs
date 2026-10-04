@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Host candidates: the only kind a lite agent ever gathers or reads
 //! (RFC 8445 §5.2, RFC 8839 §5.1).

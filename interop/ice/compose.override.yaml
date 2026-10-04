@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Gives the lab's Asterisk one endpoint with ICE on, for scripts/lab.sh's
 # ICE-lite step alone: Asterisk's own ICE, as the full agent, calling the

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Whose challenge an account's password answers (RFC 3261 §22.1): its own
 //! server's, for the account's realms, and nobody else's — not the far end of

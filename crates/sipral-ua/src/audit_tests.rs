@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Audit probes. Not part of the delivered suite: each one asserts the
 //! behaviour the surrounding documentation promises, so a failure here names a

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The arithmetic of a checklist: pair priorities, pruning, the pair limit and
 //! the states the frozen algorithm starts from (RFC 8445 §6.1.2).

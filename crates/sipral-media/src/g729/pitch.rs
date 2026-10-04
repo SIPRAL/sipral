@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The adaptive codebook: the delay a subframe's index names, and the past
 //! excitation read back at that delay (§3.7, §4.1.3).

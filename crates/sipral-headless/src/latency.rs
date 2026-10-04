@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The arithmetic `docs/07-headless.md`'s Latency section names: buffer depth
 //! plus decode plus one frame from the wire to the agent, encode plus one

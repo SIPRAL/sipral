@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """Two lines in one stack: one account on the stack's UDP socket, one on a
 TLS connection of its own, each to a server of its own.

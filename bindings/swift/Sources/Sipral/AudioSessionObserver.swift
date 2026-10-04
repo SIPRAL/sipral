@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 // iOS only: `AVAudioSession` exists nowhere else a call runs. A Mac has no
 // session to be interrupted, and its device changes reach an `AVAudioEngine`

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The lab's NAT: forward from `inside` to the lab network and masquerade on
 # the way out, the way a home router does.

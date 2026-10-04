@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! AES-128-GCM record protection (RFC 5246 §6.2.3.3, RFC 5288 §3), with the
 //! DTLS sequence number of RFC 6347 §4.1.2.1.

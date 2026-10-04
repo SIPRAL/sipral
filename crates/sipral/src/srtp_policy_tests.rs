@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! SRTP policy per account, the suites an account allows and orders, the
 //! calls a policy refuses, and the encryption report — two stacks calling

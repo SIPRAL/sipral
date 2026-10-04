@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Turns one scripts/lab.sh run's own stdout into the generated half of
 # docs/11-testing.md's "Interoperability matrix" section: a results table

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STIR/SHAKEN in calls, end to end between two agents: one signs what it
 //! places, the other verifies what arrives, with the certificate fetched in

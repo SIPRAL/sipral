@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The loader's choice: which pair each os.name and os.arch get, that each
 // pair the build staged is an ELF shared object for the machine its

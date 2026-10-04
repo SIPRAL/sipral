@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Cross-compiling sipral-ffi for aarch64-unknown-linux-gnu, from a host with
 # no arm64 hardware, so wheels.sh --linux-arm64 and nuget.sh's linux-arm64

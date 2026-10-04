@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STIR/SHAKEN through the facade: one stack signs the call it places, the
 //! other verifies it before its engine is told of the call, and the call

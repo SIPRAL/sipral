@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What the encoder does to the signal before any codebook is searched: the
 //! input filter (§3.1), the LP analysis (§3.2.1, §3.2.2) and the conversion

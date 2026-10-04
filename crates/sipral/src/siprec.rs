@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Recording a call to a recording server (SIPREC, RFC 7866): the recording
 //! session's offer and metadata, and the copies of a call's audio that go to

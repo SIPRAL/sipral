@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 /// A TURN server (RFC 8656) and the long-term credential it knows this end
 /// by: `sipral_stack_config_t::turn_server`, `turn_username` and

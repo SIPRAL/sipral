@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The three seams TelecomBridge talks through: the telecom framework as a
 // whole, one call the framework is showing, and the SIP side. Each is small

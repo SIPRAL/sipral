@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The three things done with a set of LP coefficients: bandwidth
 //! expansion, inverse filtering through `A(z)` and synthesis through

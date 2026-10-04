@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The official image, plus the one package it leaves out. OpenSIPS 4.0 ships
 # digest authentication (auth.so: pv_www_authorize(), www_challenge()) in

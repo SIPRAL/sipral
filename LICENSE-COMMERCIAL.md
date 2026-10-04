@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 -->
 
 # Sipral Commercial Licence
@@ -10,7 +10,8 @@ grants nothing: rights under the commercial arm arise only from an agreement
 signed by the Licensor and the Licensee, which prevails over this description.
 `LICENSING.md` explains in plain words which arm applies to you.
 
-"Licensor" is the party named as licensor in the signed agreement. "Licensee" is
+"Licensor" is Sytek Electro SRL (Str. Paraului 2B, 400651 Cluj-Napoca, Romania;
+CUI 36734431, J2016004065121), the holder of the copyright in Sipral. "Licensee" is
 the company named in the signed agreement. "Software" is Sipral in source and binary form,
 as delivered.
 

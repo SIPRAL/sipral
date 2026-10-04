@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The ConnectionService helper's logic, on a plain JVM with no Android in
 // it: TelecomBridge driven through recording fakes of the telecom framework

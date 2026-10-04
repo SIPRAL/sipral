@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A self-signed X.509 v3 certificate for an ECDSA P-256 key, and the public
 //! key read back out of a peer's certificate: P-256, or RSA.

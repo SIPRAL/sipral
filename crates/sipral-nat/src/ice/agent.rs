@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The lite agent: a STUN server that never checks anything itself
 //! (RFC 8445 §7.3, §7.3.2, §2.5).

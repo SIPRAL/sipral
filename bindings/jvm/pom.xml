@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 -->
 <!--
 The JVM server artefact: bindings/kotlin's classes, compiled for a plain JVM,
@@ -44,7 +44,9 @@ own tests, and the loopback tests then fail at the first native call.
 
     <developers>
         <developer>
-            <name>Tiberiu Balasea</name>
+            <name>Sytek</name>
+            <organization>Sytek</organization>
+            <organizationUrl>https://sytek.ro</organizationUrl>
         </developer>
     </developers>
 

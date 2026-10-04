@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The .NET artefact: a Sipral.nupkg carrying the C ABI's native library under
 # runtimes/<rid>/native/ for every RID this build reaches, over the printed

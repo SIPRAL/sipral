@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 -->
 
 # 16 — A lifecycle model for a machine that suspends

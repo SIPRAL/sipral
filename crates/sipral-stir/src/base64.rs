@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Base64 in its two alphabets (RFC 4648): base64url without padding, which
 //! every JWS segment is written in (RFC 7515 §2), and the standard alphabet

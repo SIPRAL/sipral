@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // SIP over TCP or TLS for SipralClient: which authorities a TLS connection
 // trusts, the one connection a client signals on, and what a refused

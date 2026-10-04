@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What a call carries inside its audio rather than beside it: keypad digits
 //! both ways, the tones a network plays to a caller, who or what answered,

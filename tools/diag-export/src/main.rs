@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! `diag-export`: turn a D2 replay recording (`docs/18-replay.md`) into a
 //! pcapng file a NOC can open in Wireshark, optionally redacting the

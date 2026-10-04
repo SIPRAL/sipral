@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // org.sipral.idiomatic as a Java caller reaches it. Most of that layer is
 // already plain methods Java calls as they are -- hangup, hold, resume,

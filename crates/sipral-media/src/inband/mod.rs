@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Signals carried inside the audio itself: keypad digits, the tones a
 //! network plays to a caller, and whether a person or a machine answered.

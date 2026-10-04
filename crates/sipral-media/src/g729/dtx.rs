@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Annex B's discontinuous transmission at the encoder (B.4.1, B.4.2): for
 //! each frame the detector finds silent, whether to send a SID frame or

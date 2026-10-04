@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! After selection: which pair data goes on (RFC 8445 §12.1), consent to keep
 //! sending on it (RFC 7675), keepalives (RFC 8445 §11), and the selected pair

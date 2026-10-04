@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Where the jar's natives come from. bindings/kotlin loads its shim with
 // System.loadLibrary("sipral_jni"), which only ever searches

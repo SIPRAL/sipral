@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A relay on a TURN server (RFC 8656), allocated from a media socket before
 //! the call that will use it, and handed to that call as its relayed ICE

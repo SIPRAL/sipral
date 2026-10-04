@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Synthesised test signals: tones, noise, and something that sounds enough
 //! like speech to try to fool a tone detector. Nothing here is recorded;

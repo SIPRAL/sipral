@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Any bytes at all, through [`sipral_media::comfort_noise::ComfortNoise`]'s
 //! wire decoder and back out through its encoder, and through

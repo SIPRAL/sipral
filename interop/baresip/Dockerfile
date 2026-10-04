@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The lab's phone-to-phone peer, built from source rather than pulled as an
 # image: nobody publishes a baresip container pinned the way the other three

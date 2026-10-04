@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The Android half of the Kotlin binding: the ConnectionService helper as an
 // Android library (:telecom) and a Compose sample over it (:sample). Built by

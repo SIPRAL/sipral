@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A user agent and a media engine, with a plain UDP socket for SIP under
 //! them: the plumbing `call.rs`, `register-and-call.rs` and

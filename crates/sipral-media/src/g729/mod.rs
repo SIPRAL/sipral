@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! G.729: eight kilobits of narrowband speech, CS-ACELP, written from the
 //! Recommendation — the encoder and the decoder of Annex A, its

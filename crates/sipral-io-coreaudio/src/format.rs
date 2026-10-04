@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The shape of what crosses the boundary: mono sixteen-bit samples, a fixed
 //! number of them per frame, at a stated rate.

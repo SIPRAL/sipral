@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Connectivity checks, from the checklist to the nomination (RFC 8445
 //! §6.1.2, §6.1.4, §7.2 and §8.1).

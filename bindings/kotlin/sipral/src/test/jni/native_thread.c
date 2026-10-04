@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
- * Copyright (c) 2026 Tiberiu Balasea
+ * Copyright (c) 2026 Sytek
  *
  * The two things BindingCheck.kt cannot do from Kotlin. The first is to poll
  * a stack on a thread no JVM made. The event callback then lands on a thread

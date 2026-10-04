@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Gathering (RFC 8445 §5.1.1), keeping what was gathered alive until ICE
 //! concludes (§5.1.1.4), and giving back what was not used (§8.3.1).

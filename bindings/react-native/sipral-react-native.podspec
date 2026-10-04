@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The iOS half: the Objective-C++ TurboModule and the Swift beside it
 # (ios/Bridge), over the Sipral Swift package. That package is the root

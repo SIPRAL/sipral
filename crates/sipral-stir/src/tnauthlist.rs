@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The TNAuthList certificate extension of RFC 8226 §9, which says which
 //! telephone numbers a STIR certificate speaks for.

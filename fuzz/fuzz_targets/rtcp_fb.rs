@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Anything at all, through the RTCP feedback readers: a datagram read as
 //! compound or reduced-size RTCP under both answers to whether `a=rtcp-rsize`

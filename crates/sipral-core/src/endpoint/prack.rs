@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The endpoint's half of RFC 3262: sending a provisional response reliably,
 //! acknowledging one, and the retransmissions in between.

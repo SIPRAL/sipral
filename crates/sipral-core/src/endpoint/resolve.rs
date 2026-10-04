@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Where a dialog's requests go, and who decides it (RFC 3261 §8.1.2,
 //! §12.2.1.1, RFC 3263).

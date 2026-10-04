@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A simplified ITU-T G.107 E-model: the transmission rating factor R and
 //! the mean opinion scores RFC 3611 §4.7.5 asks a VoIP Metrics block to

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Runs the distribution's pjsua binary with its console on a named pipe, so
 # interop/compare/compare.sh can type at it (`docker exec ... sh -c 'echo dq

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The built-in audio engine across the boundary: the platform's devices
 //! listed, chosen, opened and pumped by the library — A2 and A3, and the

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STIR/SHAKEN, the SRTP policy per account and the encryption report,
 //! through the C ABI: two stacks in one process, one signing the call it

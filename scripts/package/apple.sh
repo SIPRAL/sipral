@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The oldest macOS and iOS a packaged native is built for. Sourced, not run,
 # by every script in this directory that builds for an Apple platform, so

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Credentials for tests of the crates that sign and verify with this one:
 //! a root to trust, a chain to serve at an `x5u`, and the private key of the

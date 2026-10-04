@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The SDP that negotiates a text stream: an `m=text` line offering `red`
 //! ahead of bare `t140`, both at 1000 Hz, the `red` format parameters that

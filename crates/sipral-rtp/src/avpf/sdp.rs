@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What a session description says about feedback: the AVPF profile names
 //! (RFC 4585 §4.1, RFC 5124), `a=rtcp-fb` (RFC 4585 §4.2) and

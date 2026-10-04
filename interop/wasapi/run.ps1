@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # interop/pipewire/run.sh's sibling, for the platform where the lab's audio
 # is real hardware rather than a container's own virtual cables: builds the

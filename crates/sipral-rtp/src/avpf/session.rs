@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! RTP/AVPF in a running stream: which packets to report lost, in which kind
 //! of RTCP packet and when, and what the far end reported.

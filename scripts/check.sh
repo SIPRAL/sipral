@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Everything that must hold before a commit. Run it, do not read it.
 #
@@ -279,7 +279,7 @@ step_licence_headers() {
     fi
 
     nocopy=$(tracked '*.rs' '*.sh' '*.h' '*.c' '*.swift' '*.cs' '*.kt' '*.kts' '*.ts' '*.js' '*.mm' '*.podspec' | while read -r f; do
-        head -4 "$f" | found 'Copyright (c) 2026 Tiberiu Balasea' || echo "$f"
+        head -4 "$f" | found 'Copyright (c) 2026 Sytek' || echo "$f"
     done)
     [ -z "$nocopy" ] && pass "copyright line present" || {
         fail "copyright line missing:"; printf '        %s\n' $nocopy

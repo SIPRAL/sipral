@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """A local conference through this package: made on its own and asked
 about, recorded, refused at a rate it cannot mix, and -- with three stacks

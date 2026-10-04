@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The message on the wire: the header, the type field with its interleaved
 //! class and method bits, and the attributes after it (RFC 8489 §5 and §14).

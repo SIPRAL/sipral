@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 -->
 
 # 13 — What a production softphone asks of this stack

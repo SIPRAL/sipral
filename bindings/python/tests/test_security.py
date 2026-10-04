@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """STIR/SHAKEN, the SRTP policy per account and the encryption report,
 through this package: two stacks on 127.0.0.1 with no registrar between

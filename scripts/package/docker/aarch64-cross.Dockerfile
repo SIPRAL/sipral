@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # An x86_64 image that cross-compiles sipral-ffi for aarch64-unknown-linux-gnu,
 # for a host with no arm64 hardware. Built and run by scripts/package/wheels.sh

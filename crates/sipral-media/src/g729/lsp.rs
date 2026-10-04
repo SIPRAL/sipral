@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The short-term filter, from four indices to two sets of LP coefficients
 //! (§3.2.4 to §3.2.6, §4.1.1, §4.4.1).

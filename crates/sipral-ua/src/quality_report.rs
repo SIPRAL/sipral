@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! End-of-call voice quality reporting: the SIP event package RFC 6035
 //! defines, carried by a PUBLISH (RFC 3903) rather than the NOTIFY that

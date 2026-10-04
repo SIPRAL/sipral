@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What a tick of the pump costs in allocations: none, once it has run long
 //! enough for its buffers to reach their size. The pump runs as audio

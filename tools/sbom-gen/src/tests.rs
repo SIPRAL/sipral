@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Narrow tests over the parsing and rendering this tool does not get to
 //! prove against a real `cargo tree` in `scripts/check.sh` alone: the SPDX

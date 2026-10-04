@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // What a Kotlin integrator does on the first afternoon, compiled and run by
 // scripts/check.sh against the shared library: load the binding and have it

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Segmental SNR and splice continuity for the tone the lab's own dialplan
 //! plays back — the audio quality gate `scripts/lab.sh netem` runs on top of

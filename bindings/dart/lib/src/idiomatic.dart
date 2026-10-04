@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The idiomatic Dart layer over `sipral_abi.dart`, which tools/abi-gen
 // prints and nothing here edits: a stack with its signalling socket, an

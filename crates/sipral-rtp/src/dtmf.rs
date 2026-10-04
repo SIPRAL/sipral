@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! RFC 4733 named telephone events: "telephone-event", DTMF and whatever
 //! else the peer's dial plan sends, carried on its own dynamic payload type

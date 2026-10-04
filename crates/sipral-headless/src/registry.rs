@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Many sessions, one process — `docs/07-headless.md`'s Concurrency section:
 //! a lookup keyed by call, and nothing shared between the entries it holds.

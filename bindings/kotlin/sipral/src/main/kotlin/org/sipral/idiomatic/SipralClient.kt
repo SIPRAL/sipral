@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The idiomatic Kotlin layer over org.sipral.Sipral (SipralAbi.kt, printed
 // by tools/abi-gen and never edited here): classes over the handles, events

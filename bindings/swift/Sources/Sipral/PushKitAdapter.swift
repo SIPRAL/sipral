@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 // Same reasoning as `CallKitAdapter.swift`: `PushKit` is importable on plain
 // macOS, but every type in it is unavailable there.

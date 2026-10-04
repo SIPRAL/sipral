@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A stream of real frames and gaps through [`sipral_media::plc::Concealer`],
 //! in whatever order and of whatever length the input names.

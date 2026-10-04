@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // What SipralClient.open(ice, stunServer, turn) carries, proven on the wire
 // rather than by reading a field back: a STUN and TURN server in the test

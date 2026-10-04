@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 //! Enumeration and hotplug: watching the graph's registry for nodes that are
 //! sinks or sources, and the metadata object for which one is the session's

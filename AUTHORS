@@ -1,16 +1,16 @@
 Copyright in Sipral is held in full by:
 
-    Tiberiu Balasea
+    Sytek Electro SRL
+    Str. Paraului 2B, 400651 Cluj-Napoca, Romania
+    CUI 36734431, J2016004065121
 
 Every source and documentation file carries a copyright line naming that
 holder, next to its SPDX licence identifier. Sole ownership is what makes the
 dual licence in LICENSING.md possible: only the holder of all rights can offer
 the same code under a commercial arm.
 
-External code contributions are not accepted before 1.0. After that they are
-accepted only under a contributor licence agreement that grants the holder above
-a perpetual, worldwide, irrevocable, non-exclusive and sublicensable licence to
-the contribution. That agreement is not written yet; it will be published in
-CONTRIBUTING.md before the first patch is taken. Issues, test captures and
-interoperability reports are welcome at any time and are not code
-contributions.
+External code contributions are accepted only under a contributor licence
+agreement that grants the holder above a perpetual, worldwide, irrevocable,
+non-exclusive and sublicensable licence to the contribution, as CONTRIBUTING.md
+sets out. Issues, test captures and interoperability reports are welcome at any
+time and are not code contributions.

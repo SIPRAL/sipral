@@ -1,6 +1,6 @@
 // swift-tools-version: 5.9
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The package sits at the root of bindings/ so that the Swift target and the
 // C target share one header. SwiftPM will not look outside a package's own

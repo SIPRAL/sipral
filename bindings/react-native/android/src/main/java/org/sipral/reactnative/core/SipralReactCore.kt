@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Everything the React Native module does, with nothing of React Native in
 // it: one SipralClient from org.sipral.idiomatic, its accounts and calls

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! `AEAD_AES_128_GCM` and `AEAD_AES_256_GCM` (RFC 7714), over the `aes-gcm`
 //! crate: the same, already-vetted dependency `sipral-dtls` seals its own

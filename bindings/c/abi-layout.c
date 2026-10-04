@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
- * Copyright (c) 2026 Tiberiu Balasea
+ * Copyright (c) 2026 Sytek
  *
  * Printed from the declarations in crates/sipral-ffi by tools/abi-gen.
  * Do not edit.

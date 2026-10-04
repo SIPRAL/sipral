@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The handshake messages after the hellos, in the forms an ECDHE_ECDSA
 //! handshake gives them, ChangeCipherSpec, and one type for any message.

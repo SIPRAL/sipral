@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Putting fragmented handshake messages back together (RFC 6347 §4.2.2 and
 //! §4.2.3), with a bound on everything a peer can make it hold.

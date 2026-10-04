@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! ICE, in both roles (RFC 8445; the SDP attributes from RFC 8839, which RFC
 //! 8445 leaves to a companion document; consent freshness from RFC 7675).

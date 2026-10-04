@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // ABI 0.29's signalling surface through org.sipral.idiomatic, between two
 // clients on 127.0.0.1: why a call ended (RFC 3326) both ways, who is

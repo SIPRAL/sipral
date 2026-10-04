@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 /// Sipral for Dart and Flutter: a SIP stack, its accounts and calls, and
 /// its events as a stream, over the C ABI through dart:ffi.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Octets nobody's encoder produced, through
 //! [`sipral_media::g722::Decoder::decode_into`] at each of the three modes,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // A REFER outside any dialog through org.sipral.idiomatic -- the Kotlin
 // counterpart of bindings/python/tests/test_referral.py. The referrer is a

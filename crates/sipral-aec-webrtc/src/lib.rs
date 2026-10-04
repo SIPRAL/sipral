@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! An echo canceller, gain controller and noise suppressor over
 //! `webrtc-audio-processing` (BSD-3-Clause), attached to a `MediaSession`

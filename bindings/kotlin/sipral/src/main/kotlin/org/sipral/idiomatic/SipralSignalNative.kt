@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Hand-written, beside bindings/kotlin/sipral/src/main/jni/idiomatic_media.c
 // -- see SipralMediaNative.kt's own note. sipral_transmit_t is the other

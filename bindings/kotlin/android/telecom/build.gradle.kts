@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The ConnectionService helper: org.sipral.telecom's TelecomBridge (inside
 // sipral.aar, and tested on a plain JVM by scripts/check.sh) put behind

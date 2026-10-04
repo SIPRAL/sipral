@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // What an integrator does on the first afternoon with org.sipral.idiomatic:
 // two stacks on loopback, one dialling the other directly (no registrar

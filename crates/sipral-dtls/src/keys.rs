@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The P-256 keys of a handshake: the ephemeral ECDH key each side sends in
 //! ServerKeyExchange or ClientKeyExchange, and the ECDSA key a certificate

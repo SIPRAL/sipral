@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Diagnostics a NOC can act on, out of what `docs/14-diagnostics.md` (D1)
 //! and `docs/18-replay.md` (D2) already produce.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! One call, one agent on the other end of a socket — `docs/07-headless.md`'s
 //! Concurrency section: a state that says whether the call is ringing, up,

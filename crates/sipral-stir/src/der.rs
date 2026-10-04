@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The few DER reads this crate makes by itself: one tag-length-value at a
 //! time (X.690 §8.1, restricted as §10.1 restricts it), for the TNAuthList

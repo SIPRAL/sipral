@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A throwaway PKI for the tests: a root, an intermediate and a signing
 //! certificate carrying a TNAuthList, written field by field from RFC 5280

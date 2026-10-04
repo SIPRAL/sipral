@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 # The interop lab. Three servers on default-ish settings, one capture, and the
 # harness talking to all of them over a bridge network so that no port has to

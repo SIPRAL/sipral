@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The structures and constants PipeWire and SPA read, declared from their
 //! public headers (`spa/pod/pod.h`, `spa/utils/hook.h`, `spa/utils/dict.h`,

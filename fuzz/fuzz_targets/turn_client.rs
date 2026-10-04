@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A TURN client driven by a relay that answers whatever it likes: every
 //! response it writes, every datagram it sends unasked, and the clock.

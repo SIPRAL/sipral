@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Real-time text in a call (RFC 4103): T.140 over RTP, with the redundancy
 //! of RFC 2198, on a socket of its own.

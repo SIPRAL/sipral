@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The TypeScript layer on Node, against a fake of the native module:
 // Babel only strips the types (tsc checks them, `npm run typecheck`), and

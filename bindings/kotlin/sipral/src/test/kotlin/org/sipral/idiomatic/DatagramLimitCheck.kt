@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // RFC 3261 §18.1.1 through org.sipral.idiomatic: a call whose answer to a
 // challenge is too large for a datagram -- the Kotlin counterpart of

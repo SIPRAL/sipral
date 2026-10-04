@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Real-time text: RFC 4103, ITU-T T.140 text conversation over RTP, with
 //! the RFC 2198 redundancy RFC 4103 §4 recommends.

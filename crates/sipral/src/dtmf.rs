@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Dialling into a call that is already up: the keys, and the schedule
 //! `sipral-rtp` has to be driven on to put them on the wire.

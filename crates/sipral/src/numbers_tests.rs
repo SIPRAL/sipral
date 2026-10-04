@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The INVITE sizes `docs/numbers.toml` lists, as the comparison document
 //! under `docs/` and the website publish them, rebuilt from the call that

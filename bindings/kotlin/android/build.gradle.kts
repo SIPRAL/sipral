@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Versions checked 2026-09-23: the Android Gradle Plugin's newest stable
 // release on Google's Maven, and the Kotlin release the image's kotlinc is,

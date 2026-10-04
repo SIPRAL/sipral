@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The skeleton sample: registration, a call, hold, DTMF and audio routes,
 // through the ConnectionService helper. Not a product. The AndroidX and

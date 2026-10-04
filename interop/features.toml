@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The one thing `scripts/interop-matrix.py` cannot read out of a lab run: which
 # flows stand for which feature, and whether that feature is implemented and

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! How a call asks to be answered: `Answer-Mode` and `Priv-Answer-Mode`
 //! (RFC 5373), and `Alert-Info` (RFC 3261 §20.4, RFC 7462) with the

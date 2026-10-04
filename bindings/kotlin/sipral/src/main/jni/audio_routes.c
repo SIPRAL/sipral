@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
- * Copyright (c) 2026 Tiberiu Balasea
+ * Copyright (c) 2026 Sytek
  *
  * Hand-written, not printed by tools/abi-gen: a phone's audio devices and
  * the route of its calls, for the library's own audio engine on Android.

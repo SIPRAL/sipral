@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 """interop/compare/wire.py against captures and logs written here, byte by
 byte, so what it reads out of a real run is known to be what the wire held.
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # A geostationary hop each way: about 250 ms of pure distance, half a second of
 # round trip, and very little jitter, because the delay is the speed of light

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Two stacks on 127.0.0.1, one calling the other directly with no
 // registrar between them: placed, answered, confirmed, RTP both ways,

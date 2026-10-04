@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Turns the lab's coturn from a STUN server into a TURN server, for
 # scripts/lab.sh's relay step alone: the call between two stacks behind two

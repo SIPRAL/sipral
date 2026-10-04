@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Thousands of calls at once between two of this stack's own endpoints on
 //! one machine, each carrying audio both ways for as long as it is held.

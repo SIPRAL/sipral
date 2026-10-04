@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """``turn_transport``: a TURN server reached over TCP, or over TLS, from a
 network that lets no UDP through to it (RFC 8656 Section 3.1).

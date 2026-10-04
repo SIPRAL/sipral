@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A signer's private key, in the forms it is kept in: the bare 32-octet
 //! scalar, an `ECPrivateKey` (RFC 5915 §3), or one wrapped in a PKCS #8

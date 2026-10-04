@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STIR/SHAKEN in calls: the authentication service of RFC 8224 §6.1 on the
 //! INVITEs an account places, and the verification service of §6.2 on the

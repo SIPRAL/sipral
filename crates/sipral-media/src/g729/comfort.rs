@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Annex B's comfort noise (B.4.4): the excitation a pause is synthesised
 //! from, built the same way at both ends so that they stay in step.

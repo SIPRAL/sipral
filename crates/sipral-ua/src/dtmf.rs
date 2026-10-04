@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A digit sent or received by SIP INFO (RFC 6086), and the validation every
 //! way a digit crosses this stack's boundary shares.

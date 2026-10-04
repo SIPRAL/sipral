@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The sixteen- and thirty-two-bit arithmetic the codec is defined in (§5.2,
 //! Tables 10 and 11), and the three table-driven functions built on it.

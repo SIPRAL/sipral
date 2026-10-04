@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The library's own audio engine as a CallAudio device: on Android from API
 // level 28 the engine runs every call over AAudio, and what a call's

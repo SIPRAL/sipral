@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The names the native halves hand over, as types. Each is the library's own
 // enumeration in lower camel case -- SIPRAL_CALL_STATE_EARLY_MEDIA is

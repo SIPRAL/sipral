@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Sending a call somewhere else: a 3xx answer with the places to try
 //! (RFC 3261 §21.3), and the `Diversion` that says why (RFC 5806).

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # A Linux desktop's audio stack with no desktop and no sound card:
 # PipeWire, its session manager, and a session bus for the two of them, next

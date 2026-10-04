@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The server's side: the stateless cookie exchange, flights 2, 4 and 6 of
 //! RFC 6347 §4.2.4, and what it checks in the client's.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The documentation site. Every page is a symlink under src/ into the
 # repository, so docs/ stays the only copy of the text; scripts/site.sh
@@ -7,7 +7,7 @@
 
 [book]
 title = "Sipral"
-authors = ["Tiberiu Balasea"]
+authors = ["Sytek"]
 description = "Design documents for Sipral, a clean-room SIP stack in Rust"
 language = "en"
 src = "src"

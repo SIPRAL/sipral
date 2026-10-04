@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A stream through [`sipral_media::resample::Resampler`], at whatever rate
 //! pair and whatever cadence of frames the input names.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The ICE side of a session description (RFC 8839 §5), on top of the
 //! generic SDP model `sipral-core` already parses and writes.

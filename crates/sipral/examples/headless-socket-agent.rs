@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The SIP and RTP half of a socket-framed voice agent: answers whatever
 //! calls it, and carries the audio, the voice activity, the DTMF and the

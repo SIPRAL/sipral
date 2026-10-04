@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The conference event package: `application/conference-info+xml`, and the
 //! picture of a conference a subscriber keeps from it (RFC 4575).

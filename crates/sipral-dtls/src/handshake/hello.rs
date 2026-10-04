@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The hello messages: ClientHello with the cookie DTLS adds to it (RFC 6347
 //! §4.2.1), ServerHello, and HelloVerifyRequest.

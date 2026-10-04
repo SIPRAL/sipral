@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 
 The lab profile again (lab_profile.xml says why the lab has one of its own),
 on another port and with one difference: an offer is read only once the

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """Two ways `_sipral_cffi.py` could quietly stop matching the ABI it was
 printed for, that a call placed between two stacks never exercises.

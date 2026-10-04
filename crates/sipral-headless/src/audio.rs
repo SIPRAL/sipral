@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The PCM carried in an audio frame (`docs/07-headless.md`): signed 16-bit
 //! little-endian, mono, at one of four sample rates, in frames of a fixed

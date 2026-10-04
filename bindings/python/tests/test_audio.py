@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """The library's own audio engine through ``Stack(audio=...)`` and
 ``stack.audio``: which mode a stack gets, the device list, roles, gain,

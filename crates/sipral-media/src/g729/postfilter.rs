@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What the decoder does to its own output before anyone hears it: the
 //! Annex A postfilter (A.4.2) and the output high-pass filter (§4.2.5).

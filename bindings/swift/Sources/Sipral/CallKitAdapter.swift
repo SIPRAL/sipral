@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 // `CallKit` is importable on plain macOS too (the module exists in the SDK),
 // but every type in it is `API_UNAVAILABLE(macos)`; `canImport` alone would

@@ -1,6 +1,6 @@
 // swift-tools-version: 5.9
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The Swift half of the iOS module, built on its own: what scripts/check.sh
 // compiles against bindings/swift and tests on macOS, the Objective-C++

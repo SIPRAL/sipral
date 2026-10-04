@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Gives the lab's Asterisk SIP over TCP and TLS, for scripts/lab.sh's `tls`
 # step alone: the four idiomatic layers registering and called over a

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Outside the workspace on purpose: webrtc-audio-processing-sys needs meson,
 # ninja and a C++ toolchain to build its bundled copy of libwebrtc-audio-
@@ -17,7 +17,7 @@ version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
-authors = ["Tiberiu Balasea"]
+authors = ["Sytek"]
 repository = "https://github.com/SIPRAL/sipral"
 homepage = "https://sipral.org"
 keywords = ["sip", "voip", "rtp", "telephony", "softphone"]

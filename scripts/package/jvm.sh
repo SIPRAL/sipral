@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The JVM server artefact: sipral-jvm-<version>.jar, built by bindings/jvm's
 # Maven project from bindings/kotlin's classes, with libsipral_ffi.so and

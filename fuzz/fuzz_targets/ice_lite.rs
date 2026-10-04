@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The lite agent's own state machine, driven directly rather than through
 //! `IceAgent` (which the `ice` target already fuzzes, and which reaches

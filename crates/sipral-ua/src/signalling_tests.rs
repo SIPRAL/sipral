@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! What a call says about itself beyond its session: why it ended
 //! (RFC 3326), who is on it (RFC 3323, RFC 3325), how it asked to be

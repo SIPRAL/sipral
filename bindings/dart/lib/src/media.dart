@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // A call's media: the `sipral_call_media` handle, the socket's datagrams
 // into it, and a frame clock that plays, captures and sends.

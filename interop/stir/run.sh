@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # STIR/SHAKEN between two stacks of this library (scripts/lab.sh's
 # `security` step): a certificate authority made for this run and gone with

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! SHA-256 (FIPS 180-4 §6.2), for MESSAGE-INTEGRITY-SHA256 and for the SHA-256
 //! password algorithm of RFC 8489 §18.5.1.2.

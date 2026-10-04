@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Getting whole messages back out of a byte stream (RFC 8656 §12.5, §12.6,
 //! RFC 8489 §6.2.2).

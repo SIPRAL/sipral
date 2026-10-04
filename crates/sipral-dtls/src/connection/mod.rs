@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The DTLS 1.2 handshake of DTLS-SRTP, for either end, and the connection it
 //! leaves behind (RFC 6347, RFC 5246, RFC 5763, RFC 5764).

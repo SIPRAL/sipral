@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """A server reached at one address whose answer names another in its
 `Contact` -- the lab's Asterisk, published on a mapped port and naming the

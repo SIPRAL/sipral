@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 
 Vanilla's own event_socket.conf.xml listens on "::", which mod_event_socket
 cannot bind on this lab's network: the container gets no non-loopback IPv6

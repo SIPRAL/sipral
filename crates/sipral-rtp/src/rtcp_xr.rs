@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! RTCP Extended Reports (RFC 3611): the XR packet header (§2), the generic
 //! per-block framework every block type shares (§3), and the one block this

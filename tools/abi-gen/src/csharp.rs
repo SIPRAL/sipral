@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The .NET binding.
 //!
@@ -970,7 +970,7 @@ pub(crate) fn binding(surface: &Surface) -> Result<String, Refused> {
     let mut out = String::new();
     out.push_str(
         "// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
-         // Copyright (c) 2026 Tiberiu Balasea\n\
+         // Copyright (c) 2026 Sytek\n\
          //\n\
          // Printed from the declarations in crates/sipral-ffi by tools/abi-gen.\n\
          // Do not edit: `cargo run -p sipral-abi-gen` writes it again, and\n\

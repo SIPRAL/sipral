@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 
 A user vanilla does not ship, under a name vanilla does not use. The image's
 entrypoint copies the whole vanilla tree over /etc/freeswitch on every start,

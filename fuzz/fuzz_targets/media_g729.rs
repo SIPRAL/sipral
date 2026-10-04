@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Octets nobody's encoder produced, through the G.729 decoder twice over:
 //! once as one RTP payload, read by [`sipral_media::g729::Payload`] and

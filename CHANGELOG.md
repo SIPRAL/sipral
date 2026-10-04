@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-Copyright (c) 2026 Tiberiu Balasea
+Copyright (c) 2026 Sytek
 -->
 
 # Changelog
@@ -22,6 +22,7 @@ The fixes: a forked INVITE rings on both lines of one stack, a waiting de-regist
 
 ### Changed
 
+- **Sytek holds the copyright in Sipral and grants the commercial licence.** Every file's copyright line and the package manifests name it; `AUTHORS` and `LICENSE-COMMERCIAL.md` give its full legal identity.
 - **A security report is acknowledged within 7 business days.** `SECURITY.md` promised 3; the triage, fix and disclosure commitments are unchanged.
 - **Listening for keypad digits in a call's audio costs a fraction of what it did.** The in-band detector, which runs on every frame of a call that negotiated no telephone event, passes over a window whose samples alone carry too little energy for a digit before any of its filters runs, keeps that window's samples so that the next window's frequency reading still has the one before it, runs its filters beside the window's own power in one pass, and takes the square root and the phase of only the filters it goes on to read. What it hears is unchanged: every reading it takes is the same to the bit, and so is every digit, edge and refusal, on every test in the tree and on three thousand generated cases compared against 1.0. Measured on an Apple M2 (`docs/19-numbers.md`): the load test's frame, which carries silence, from 7.2 to 0.72 µs with two hundred calls; the detector alone on speech from 6.7 to 1.35 µs a frame, and on loud noise, where every window runs the filters, from 7.2 to 2.7 µs.
 - **The headless agent waits for SIP instead of sleeping.** Its loop slept 5 ms whenever a turn read nothing, and an answer decided in one turn went out in the next. It now writes what a turn decided before the turn ends, and waits until a SIP datagram arrives or the next thing it has to do falls due: the stack's next timer, the next look at the route, the next instant of its audio grid while it holds calls (below), and a look at standard input every 50 ms while that is open. Every call's own socket is still read on every turn rather than waited on, so a thousand calls with audio waiting cost no extra wake-up. Measured on the Linux lab machine, two runs each, logs kept (`docs/19-numbers.md`): a call set up on loopback, INVITE to 200 at the caller, in a median 1.3 ms where it took 8.9 to 10.0 ms; no measurable processor time idle; and a thousand calls held with the median set-up at 8.0 to 11.0 ms where it was 14.8 to 16.2 ms, at 0.86 of one core where the loop that rested after each turn took 0.78. Against the lab's Asterisk (`docs/23-compared-with-pjsip.md`), it registers in 3.3 to 6.7 ms, places a call in 5.2 to 7.6 ms and answers one in 0.7 to 1.1 ms, where the comparison's run read 7.7, 10.8 and 9.5 ms.

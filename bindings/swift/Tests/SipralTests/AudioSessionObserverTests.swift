@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 // iOS only, as `AudioSessionObserver` is. The simulator cannot raise a real
 // interruption, route change or media services reset, so each notification

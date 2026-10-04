@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 """Who is calling, why a call ended, where it went, and what an account
 asks for: the caller's typed identity behind a per-account trust gate,

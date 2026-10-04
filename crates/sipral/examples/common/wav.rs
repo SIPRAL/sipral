@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The smallest WAV file that holds what a call was heard saying: PCM, mono,
 //! sixteen-bit, at whatever rate the call negotiated.

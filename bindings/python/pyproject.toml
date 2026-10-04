@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 
 [build-system]
 requires = ["hatchling"]
@@ -16,7 +16,7 @@ requires-python = ">=3.9"
 # root (scripts/package/wheels.sh), since PEP 639 keeps license-files inside
 # this directory
 license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
-authors = [{ name = "Tiberiu Balasea" }]
+authors = [{ name = "Sytek" }]
 keywords = ["sip", "voip", "rtp", "telephony", "softphone"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

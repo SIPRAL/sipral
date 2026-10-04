@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! When feedback may go out (RFC 4585 §3): Early RTCP packets, the
 //! `allow_early` flag that rations them, and the `T_rr_interval` that

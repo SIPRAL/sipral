@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Gives the lab's Asterisk SIP over TCP beside UDP on 5060, and UDP alone on
 # 5070, for scripts/lab.sh's `datagram` step alone: a call whose answer to a

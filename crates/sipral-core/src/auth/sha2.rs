@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! SHA-256 and SHA-512/256 (FIPS 180-4), the two algorithms RFC 8760 adds to
 //! SIP digest.

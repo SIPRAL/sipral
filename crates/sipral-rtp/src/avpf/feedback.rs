@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Feedback messages on the wire (RFC 4585 §6): the common packet format
 //! every one of them shares (§6.1) and the one an audio stream has a use

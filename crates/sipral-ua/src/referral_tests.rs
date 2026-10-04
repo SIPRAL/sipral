@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A REFER outside any dialog, scripted on a fake clock (RFC 3515, RFC 4488),
 //! and the subscription a taken REFER opens, in a call or out of one.

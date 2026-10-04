@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # A phone on a cell that is not quite good enough. Two per cent loss sounds
 # harmless averaged out; in bursts it takes whole syllables, which is what a

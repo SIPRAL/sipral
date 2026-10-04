@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A byte stream cut at arbitrary places, through the TURN stream framer, and
 //! ChannelData read both ways it can arrive: already delimited (UDP) and

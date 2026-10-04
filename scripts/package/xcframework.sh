@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The Apple artefact: one XCFramework carrying macOS (arm64+x86_64, universal),
 # iOS device (arm64) and iOS Simulator (arm64+x86_64, universal), built from
@@ -300,7 +300,7 @@ fi
 cat >"$SPM/Package.swift" <<EOF
 // swift-tools-version: 5.9
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Printed by scripts/package/xcframework.sh, over the CSipral.xcframework
 // beside it, for a consumer who links the built library instead of compiling

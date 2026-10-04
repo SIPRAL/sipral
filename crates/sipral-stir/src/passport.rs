@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The PASSporT of RFC 8225 with the `shaken` extension of RFC 8588: its
 //! header, its claims, and both in the deterministic JSON form of RFC 8225 §9

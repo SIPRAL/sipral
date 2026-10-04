@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The quadrature mirror filters that split sixteen kilohertz into two bands
 //! of eight and put them back together (ITU-T G.722 §5).

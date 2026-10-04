@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // A certificate fingerprint as an administrator copies it, read here before
 // it crosses to the native half, which then only ever sees bare digits.

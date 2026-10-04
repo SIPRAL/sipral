@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! Conferences across the boundary: the picture a `conference` subscription
 //! keeps (RFC 4575), and the conference focus of RFC 4579.

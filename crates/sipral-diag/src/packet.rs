@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A synthetic Ethernet frame around one UDP or TCP segment, for a pcapng
 //! packet that Wireshark's transport and SIP dissectors will both read.

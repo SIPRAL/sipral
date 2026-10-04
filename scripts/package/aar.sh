@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The Android artefact: sipral.aar, carrying libsipral_ffi.so (the C ABI) and
 # libsipral_jni.so (the three shims in bindings/kotlin/sipral/src/main/jni,
@@ -410,7 +410,9 @@ if [ -f "$AAR" ]; then
   </licenses>
   <developers>
     <developer>
-      <name>Tiberiu Balasea</name>
+      <name>Sytek</name>
+      <organization>Sytek</organization>
+      <organizationUrl>https://sytek.ro</organizationUrl>
     </developer>
   </developers>
   <scm>

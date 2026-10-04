@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The RFC 2198 redundancy payload, "red", as RFC 4103 §4 uses it to carry
 //! a new T140block together with copies of the ones sent before it.

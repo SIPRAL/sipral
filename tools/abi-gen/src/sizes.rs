@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The pinned lengths and the layouts, written out so that changing one is
 //! visible, and a C file that makes a C compiler say they are right.
@@ -96,7 +96,7 @@ pub(crate) fn rendered(surface: &Surface) -> Result<String, Refused> {
 pub(crate) fn layout_check(surface: &Surface) -> Result<String, Refused> {
     let mut out = String::from(
         "/* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial\n\
-         \x20* Copyright (c) 2026 Tiberiu Balasea\n\
+         \x20* Copyright (c) 2026 Sytek\n\
          \x20*\n\
          \x20* Printed from the declarations in crates/sipral-ffi by tools/abi-gen.\n\
          \x20* Do not edit.\n\

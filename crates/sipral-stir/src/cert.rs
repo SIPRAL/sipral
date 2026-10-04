@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! STIR certificates (RFC 8226): reading the chain an `x5u` URI yields,
 //! building a path from the signing certificate to one of the application's

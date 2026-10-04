@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # The host behind the NAT (Dockerfile's own second use), for the Swift
 # binding's lab agent instead of the Rust harness: the same `swift:6.1`

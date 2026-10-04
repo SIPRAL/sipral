@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-# Copyright (c) 2026 Tiberiu Balasea
+# Copyright (c) 2026 Sytek
 #
 # Makes the lab's Asterisk reachable from another machine on the LAN, for a
 # call carried on real devices (interop/harness/src/wasapi.rs,

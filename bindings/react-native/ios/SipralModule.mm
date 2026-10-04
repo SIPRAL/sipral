@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // The TurboModule on iOS. NativeSipralSpec is what codegen writes from
 // src/NativeSipral.ts; each method here reads what JavaScript handed over

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 //
 // Hand-written, beside bindings/kotlin/sipral/src/main/jni/audio_routes.c:
 // the one call that hands the library's audio engine an Android Context, so

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The envelope every message on the socket travels in (`docs/07-headless.md`):
 //! one byte of kind, a big-endian length, then that many bytes of payload.

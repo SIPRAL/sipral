@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! An agent with no device anywhere near it: it answers whatever calls it,
 //! and repeats back whatever it hears, one twenty-millisecond frame later.

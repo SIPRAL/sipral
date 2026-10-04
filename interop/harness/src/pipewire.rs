@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! A call whose microphone and earpiece are a Linux desktop's: PipeWire
 //! nodes, reached through `sipral-io-pipewire`, the way a softphone on Linux

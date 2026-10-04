@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! RTCP as it appears on the wire: sender and receiver reports, source
 //! description, and goodbye (RFC 3550 §6), stacked into the compound

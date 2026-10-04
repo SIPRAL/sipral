@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
-// Copyright (c) 2026 Tiberiu Balasea
+// Copyright (c) 2026 Sytek
 
 //! The two keystream generators RFC 3711 §4.1 defines over AES: counter mode
 //! (§4.1.1, mandatory) and f8 (§4.1.2, optional, and what 3GPP asks for).
