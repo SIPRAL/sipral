@@ -5,8 +5,7 @@ Session Initiation Protocol Rust Audio Layer.
 A SIP client stack in Rust -- signalling, media, encryption and NAT traversal
 behind one C ABI -- and this package is its .NET binding: `SipralStack`,
 `Account`, `Call` and `CallMedia` over the native library, which the package
-carries for win-x64, win-arm64, osx-arm64, osx-x64, linux-x64 and
-linux-arm64.
+carries for win-x64, osx-arm64, osx-x64, linux-x64 and linux-arm64.
 
 ```sh
 dotnet add package Sipral

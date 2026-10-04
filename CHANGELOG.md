@@ -14,6 +14,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 ### Fixed
 
 - **The Linux packaging runs to the end.** The AAR's POM links the commercial licence at <https://sipral.org/terms/>, as the JVM POM does; the `--with-opus` wheel for x86_64 Linux checks `THIRD-PARTY-LICENSES.txt` against the all-target graph it lists rather than its own target's; and `bindings/c/smoke.c` compiles under gcc's `-Wextra -Werror` at ABI minor 0, which the linux-arm64 wheel's run under qemu builds it with.
+- **The NuGet package names only the runtimes it carries.** Its README listed win-arm64, which no release has built yet: Windows on ARM64 needs the MSVC ARM64 build tools, and the package carries win-x64, osx-arm64, osx-x64, linux-x64 and linux-arm64.
 
 ## [1.1.0] - 2026-10-04
 
