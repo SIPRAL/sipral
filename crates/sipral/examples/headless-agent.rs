@@ -1826,6 +1826,19 @@ mod tests {
             "the datagram was not handed over"
         );
         sender.join().unwrap();
+
+        // the endpoint gone, its reader is woken to end and lets the port go
+        // at once, not at the end of its next read's timeout
+        let port = endpoint.local;
+        drop(endpoint);
+        let gone = Instant::now();
+        while std::net::UdpSocket::bind(port).is_err() {
+            assert!(
+                gone.elapsed() < Duration::from_secs(2),
+                "the reader still holds {port}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

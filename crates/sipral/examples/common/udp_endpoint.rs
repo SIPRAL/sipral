@@ -55,9 +55,17 @@ pub(crate) struct Endpoint {
 type Datagram = (Vec<u8>, SocketAddr);
 
 /// How long the reader thread blocks on the SIP socket before it looks
-/// whether the socket is still the endpoint's: the most a socket given up
-/// (a move to another address, the endpoint dropped) stays bound after.
-const READER_LOOK: Duration = Duration::from_millis(100);
+/// whether the socket is still the endpoint's. A socket given up (a move to
+/// another address, the endpoint dropped) is sent an empty datagram that
+/// ends the read at once ([`Reader`]'s `Drop`); this is the most it stays
+/// bound when that datagram cannot reach it, an address gone with the
+/// network that held it. Long, so an idle agent's reader wakes twelve times
+/// a minute and no more.
+const READER_LOOK: Duration = Duration::from_secs(5);
+
+/// How long the reader thread pauses after a read that failed for a reason
+/// other than its timeout, so that a failure which repeats cannot spin.
+const READER_PAUSE: Duration = Duration::from_millis(10);
 
 /// The SIP socket read on a thread of its own, every datagram handed over a
 /// channel.
@@ -74,8 +82,10 @@ struct Reader {
     /// Taken off the channel by a wait, not yet handed to the user agent.
     held: VecDeque<Datagram>,
     /// Set when the socket the thread reads is no longer the endpoint's; the
-    /// thread sees it within [`READER_LOOK`] and ends, closing its copy.
+    /// thread sees it at its next read and ends, closing its copy.
     retired: Arc<AtomicBool>,
+    /// Where the socket the thread reads is bound, which `Drop` wakes it at.
+    bound: SocketAddr,
 }
 
 impl Reader {
@@ -86,6 +96,7 @@ impl Reader {
         let socket = sip.try_clone()?;
         socket.set_nonblocking(false)?;
         socket.set_read_timeout(Some(READER_LOOK))?;
+        let bound = socket.local_addr()?;
         let (sender, inbox) = mpsc::channel();
         let retired = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&retired);
@@ -95,6 +106,10 @@ impl Reader {
                 let mut buffer = vec![0_u8; 65_535];
                 while !seen.load(Ordering::Relaxed) {
                     match socket.recv_from(&mut buffer) {
+                        // whatever arrived once the socket was given up is
+                        // not the endpoint's any more, the datagram that
+                        // woke this read to say so among it
+                        Ok(_) if seen.load(Ordering::Relaxed) => return,
                         Ok((length, from)) => {
                             let data = buffer.get(..length).unwrap_or_default().to_vec();
                             // the endpoint has gone, and the thread with it
@@ -108,10 +123,8 @@ impl Reader {
                                 ErrorKind::WouldBlock | ErrorKind::TimedOut
                             ) => {}
                         // whatever else a datagram socket reports is about one
-                        // datagram, not the socket; the next read is tried a
-                        // look later rather than at once, so a report that
-                        // repeats cannot spin
-                        Err(_) => std::thread::sleep(READER_LOOK),
+                        // datagram, not the socket
+                        Err(_) => std::thread::sleep(READER_PAUSE),
                     }
                 }
             })?;
@@ -119,6 +132,7 @@ impl Reader {
             inbox,
             held: VecDeque::new(),
             retired,
+            bound,
         })
     }
 
@@ -155,8 +169,17 @@ impl Reader {
 }
 
 impl Drop for Reader {
+    /// Retire the thread, and wake its read with an empty datagram so that it
+    /// ends now rather than at its next [`READER_LOOK`].
     fn drop(&mut self) {
         self.retired.store(true, Ordering::Relaxed);
+        let to = if self.bound.ip().is_unspecified() {
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), self.bound.port())
+        } else {
+            self.bound
+        };
+        let _ = UdpSocket::bind(SocketAddr::new(to.ip(), 0))
+            .and_then(|waker| waker.send_to(&[], to));
     }
 }
 
