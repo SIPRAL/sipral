@@ -626,7 +626,30 @@ read while writing it; see [02-clean-room.md](02-clean-room.md).
 
 Loss on a real mobile network is not exceptional. Concealment is per codec:
 
-- Opus has in-band forward error correction and its own concealment; use them.
+- Opus has in-band forward error correction and its own concealment, and
+  both are used. Each packet can carry a low-bitrate copy of the frame
+  before it (RFC 7587 §3.3, the SILK layer's LBRR frame). When the jitter
+  buffer finds a frame missing and the packet after it is already held
+  (`JitterBuffer::following`) and carries a copy — read from that packet's
+  first header bits with RFC 6716's range decoder,
+  `sipral_media::opus::carries_fec` — the lost frame is decoded from the copy
+  rather than concealed; it is played as `Playback::Concealed` and counted in
+  `StreamStatistics::fec_recovered`, beside `Quality::lost`, which still
+  counts the network's losses. Opus's own concealment fills the rest: a run
+  of losses longer than one, a packet that came too late to be held, a frame
+  whose packet carried no copy. On the sending side the encoder decides
+  frame by frame whether a copy is worth its bits, by the loss it is told to
+  expect: 5 % until the far end's first reception report about this end's
+  audio, then the fraction lost each report gives, believed at once when it
+  rises and halfway each report when it falls, at most 30 %
+  (`pipeline::expected_loss`). A clean link stops paying for copies after
+  the first report. Its bitrate is libopus's own choice for the rate, about
+  35 kbit/s on speech at 48 kHz, and the copy is paid for out of it rather
+  than on top. Measured between two stacks over the lab's `lossy` and
+  `mobile` profiles (`docs/19-numbers.md`, 4 October 2026), the copies
+  rebuild 37 % and 39 % of the frames lost, which is nearly every loss the
+  copies can reach: a loss followed by another loss, or by a packet carrying
+  no copy, cannot be rebuilt.
 - G.711 has neither. Pitch-based waveform extension for short gaps, with
   amplitude decay into silence for long ones, and a smoothed cross-fade when the
   stream resumes. Bounded: past a few frames, concealment sounds worse than

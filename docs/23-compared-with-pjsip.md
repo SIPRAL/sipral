@@ -130,17 +130,34 @@ two is a few milliseconds either way; the agent measured here read its socket
 in a loop that slept 5 ms when there was nothing to read, which is where most
 of its extra answering time went. It has since stopped sleeping and waits on
 the socket instead (unreleased, for 1.1). The same flow run again for Sipral
-alone on 3 October, with that agent against the same Asterisk 22.10.1:
-registration 3.5 ms, the outgoing call 5.5 ms, and the incoming call answered
-in 0.7 ms. Registered and idle it used no measurable processor time (0.00 %,
-where the table below has 0.65 %), and 0.90, 1.70, 3.05 and 26.30 % of a core
-at 1, 4, 10 and 100 calls (below: 1.40, 2.30, 4.35 and 28.65 %). Its memory
-in that run, 5.8 MB resident and 3.9 MB private idle, is above the
-29 September agent's below; the 1.0.0 agent and this one measure the same on
-the host (4.4 to 4.6 MB idle), so that growth is older than the change to the
-loop. The bad links and the moved address came out within what two draws of
-the same profiles differ by. `docs/19-numbers.md` has the set-up time on
-loopback, before and after. The INVITE sizes are not noise: pjsua offers every
+alone on 3 October, with that agent against the same Asterisk 22.10.1, read
+registration 3.5 ms, the outgoing call 5.5 ms, the incoming call answered in
+0.7 ms, no measurable processor time idle, and 0.90, 1.70, 3.05 and 26.30 % of
+a core at 1, 4, 10 and 100 calls; no log of that run was kept.
+
+**Run again on 4 October, with the logs kept.** The waiting agent (`0939022`)
+twice, and the 1.1 agent, whose audio leaves on a steady clock
+(`docs/19-numbers.md`, 4 October), twice, the same harness and Asterisk:
+
+| | Waiting agent, two runs | 1.1 agent, two runs | pjsua, two runs |
+|---|---|---|---|
+| Registration, first REGISTER to its 200 | 3.3, 6.7 ms | 3.3, 3.3 ms | 11.8, 12.1 ms |
+| Outgoing call, first INVITE to its 200 | 5.2, 7.6 ms | 5.2, 5.4 ms | 3.9, 4.1 ms |
+| Incoming call, INVITE to the client's 200 | 0.7, 0.7 ms | 1.1, 0.7 ms | 3.3, 3.8 ms |
+| CPU registered and idle, % of one core | 0.00, 0.00 | 0.00, 0.05 | 0.50, 0.60 |
+| CPU at 1, 4, 10 and 100 calls | 1.00, 1.70, 3.30, 27.45; 1.00, 2.00, 3.30, 26.50 | 1.15, 2.15, 3.95, 27.40; 1.35, 1.95, 3.85, 29.15 | 5.15, 17.65, 4 up 18.45, 4 up 18.40; 5.15, 17.95, 4 up 18.25, 4 up 18.75 |
+| Resident and private memory, idle | 5.8 / 3.8 MB; 5.8 / 3.8 MB | 5.8 / 3.8 MB; 5.9 / 3.9 MB | 13.1 / 12.5 MB; 13.0 / 12.5 MB |
+
+The 3 October figures sit inside what two runs differ by — registration and
+the outgoing call at the low end of their spread, which a single run on a
+shared machine moves by 2 to 3 ms — and stand as that run's. Idle, 0.05 % is
+one tick of the process's 10 ms clock in the 20 seconds measured. The agent's
+memory, 5.8 MB resident and 3.8 MB private idle, is above the 29 September
+agent's below; the 1.0.0 agent and this one measure the same on the host (4.4
+to 4.6 MB idle), so that growth is older than the change to the loop. The bad
+links and the moved address came out within what two draws of the same
+profiles differ by. `docs/19-numbers.md` has the set-up time on loopback,
+before and after. The INVITE sizes are not noise: pjsua offers every
 codec its build has (Speex three ways, iLBC, GSM, G.722, Opus, G.711) and
 Sipral its default catalogue (Opus, G.722, G.711, telephone-event).
 
@@ -224,6 +241,30 @@ three profiles — because the stack rates G.711 with the Bpl of 4.3 that
 G.113 gives it without concealment (`sipral-rtp`'s `emodel.rs`) where the
 uniform rating assumes concealment; it is printed beside the uniform one in
 the `cmp` lines (`own_r`, `own_mos`).
+
+**The senders, 4 October.** The 2 October run read the same on the mobile
+profile (Asterisk: 34 ms on Sipral's audio against 13 on pjsua's), so the
+bad-link phase was run again with a capture in each client's network
+namespace, the profiles' rules unchanged, beside a call over a clean link.
+Two things were found. The agent's frames did leave unevenly: 16, 24 or
+28 ms apart rather than 20 on a clean link, a standard deviation of 5.7 ms
+where pjsua's was 0.5 to 0.7, and Asterisk read 5 ms of jitter on them with
+no impairment at all. The 1.1 agent sends on a steady clock
+(`docs/19-numbers.md`, 4 October): 0.05 to 0.20 ms, and 0 or 1 ms at
+Asterisk. But that is not what the mobile rows show. Read where the packets
+leave the impaired link, the audio each client sent carries the same jitter
+by RFC 3550's own estimator — a mean of 34.3 to 36.1 ms for the agent before
+and after the change, 33.7 to 35.3 ms for pjsua, over 30 ms of netem's normal
+spread — and yet Asterisk's reading of the same calls was 38 and 39 ms for the
+waiting agent, 27, 29, 40 and 27 ms for the agent on the steady clock, and
+14, 19 and 23 ms for pjsua. Whatever separates those readings is in how
+Asterisk measured the two streams, not in what either sent, and this lab
+does not say what it is. Leaving out the packets that arrive behind a later
+one, the same captures read about 22 ms for both clients. The clients' own
+reports of Asterisk's audio through the same link differ the same way — the
+agent 29.5 to 46.6 ms, its estimate at the call's end with every packet in
+arrival order; pjsua 17.6 to 18.4 ms, its average over the call — two ways of
+reading one link, not two links.
 
 ### A moved address
 

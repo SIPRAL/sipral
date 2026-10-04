@@ -1055,6 +1055,14 @@ Read together:
   72 KB the 29 September harness held per call at five thousand: the
   example's socket per call and its echo buffer are in it.
 
+Run again on 4 October, the same 1.0.0 agent and flow on the same machine,
+twice, with the logs kept: a thousand of a thousand up, set-up 14.8, 84.8,
+151.3 ms and 16.2, 83.9, 150.7 ms, 5.1 MB before the first call and 93.2 and
+93.9 MB with the thousand held (about 88 KB a call, as above), and 0.78 of a
+core both times where this run read 0.92. The processor time is the figure
+that moves from one day to another on this shared machine; compare agents
+within one day's runs, as the 3 and 4 October sections below do.
+
 The same run on the Apple M2 (macOS, 24 GB) that day was tried twice while
 the machine was swapping, 12 GB of its 13 GB of swap in use: both processes
 stalled together with their memory paged out, for 36 seconds in the first
@@ -1153,6 +1161,154 @@ Read together:
   already due: that is the tenth of a core more, and it bought the earlier
   answers and a quarter fewer frames played dry. One thread is still the
   agent's limit, as on 2 October.
+
+**Corrected on 4 October.** No log of the runs above was kept, and a review
+could not reproduce some of them. Both agents were run again on the same
+machine, twice each, the same flow and flags, with every log kept
+(`--max-calls 1000`, standard input closed, the caller's report and the
+agent's processor ticks and resident memory from `/proc` every two seconds):
+
+| Run again on 4 October | 1.0.0, sleeping | Waiting (`0939022`) |
+|---|---|---|
+| Set-up, fifty calls at 5 a second: p50, p90, max | 8.9, 11.1, 11.3 ms; 10.0, 11.2, 13.0 ms | 1.3, 1.6, 2.5 ms; 1.4, 1.6, 2.7 ms |
+| Processor time over a minute with no call, standard input closed | 0.39 s, 196 wake-ups a second | none measurable (no tick of 10 ms), its loop never woke |
+| The same, standard input open | 0.36 s, 196 wake-ups a second | 0.10 s, 18 wake-ups a second |
+| A thousand calls: set-up p50, p90, max | 14.8, 84.8, 151.3 ms; 16.2, 83.9, 150.7 ms | 9.7, 45.5, 108.5 ms; 8.0, 34.5, 81.8 ms |
+| The agent's processor time while it holds them | 0.78 and 0.78 of one core | 0.86 and 0.86 of one core |
+| Its resident memory, before the first call and with the thousand held | 5.1 MB, 93.2 and 93.9 MB | 5.8 MB, 93.7 and 93.2 MB |
+| Frames the caller played with its buffer run dry | 0.08 % and 0.41 % | 0.47 % and 0.11 % |
+
+What holds: the set-up times, idle, the memory within 1 to 3 MB of the
+thousand held, and the direction of the processor time — the waiting loop
+costs the thousand calls about a tenth of a core more than the sleeping one.
+What does not: the absolute processor time, 0.90 and 0.99 of a core above and
+0.78 and 0.86 here, the same machine on another day, which these figures
+replace; and "a quarter fewer frames played dry", which two runs of each
+agent do not bear out: they spread from 0.08 to 0.47 % either way.
+
+## 4 October 2026 — unreleased, for `1.1.0`: the headless agent's audio on a steady clock
+
+`crates/sipral/examples/headless-agent.rs` as of `0939022` (the waiting
+agent above) against this tree's, on the Linux lab machine, both built there
+with `rustc 1.95.0`, release profile.
+
+**What was wrong.** Captured in the agent's own network namespace over a
+clean link, during a call from the lab's Asterisk (`scripts/lab.sh compare`,
+its netem phase with no impairment), the frames it sent left 16, 24 or 28 ms
+apart rather than 20: of 1 527 gaps, 98.4 % were more than 2 ms off 20, the
+median gap 23.98 ms, the standard deviation 5.66 ms (5.80 in a second run).
+The loop waited for SIP with the socket's own read timeout, which Linux
+counts in scheduler ticks — 4 ms at the 250 a second Debian's kernel runs —
+so a 5 ms wait ended 4 to 8 ms later, and a frame went out on whichever turn
+came after it fell due. Asterisk measured 5 ms of jitter on the agent's
+audio over that clean link, in both runs, and none on pjsua's.
+
+**What changed.** One thread reads the SIP socket and hands each datagram
+over a channel, and the loop waits on the channel, whose timeout ends on
+time and which a datagram ends at once. While calls have audio the loop
+turns on a fixed 10 ms grid from the agent's start and moves the frames due
+at the grid's last instant: a call's frames, twenty milliseconds apart from
+an instant of the grid, each fall due on an instant the loop wakes at. The
+reports and everything else the engine sends are polled at the time the turn
+runs. No thread per call, no busy wait.
+
+| | Before (`0939022`) | Now |
+|---|---|---|
+| Gaps between the frames one call sent, clean link: standard deviation, 99th percentile, share off 20 ms by more than 2 ms | 5.66 and 5.80 ms; 28.0 ms; 98.4 % | 0.05 and 0.20 ms; 20.1 ms; 0.1 % or none |
+| The same for pjsua 2.17, three runs beside them | 0.66, 0.52 and 0.49 ms; 21.3 to 22.1 ms; 0.9 to 2.9 % | |
+| Asterisk's jitter on the agent's audio, clean link | 5 and 5 ms | 1 and 0 ms |
+| The agent's own jitter on Asterisk's audio, clean link | 6.1 and 5.5 ms | 0 and 0 ms |
+
+Each column is two runs of the comparison's netem phase, the capture taken in
+the client's network namespace, which sees its packets as they leave.
+
+The waits of the old loop had ended about every 8 ms, and every turn reads
+every call's socket, so the grid's step decides much of what a call costs:
+on loopback, a hundred calls from the lab harness's `scale` flow held thirty
+seconds cost the agent, as a share of one core, two runs each:
+
+| A hundred calls on loopback | Processor time while held |
+|---|---|
+| 1.0.0, sleeping 5 ms | 14.96 and 13.66 % |
+| `0939022`, waiting on the socket | 11.74 and 12.39 % |
+| Now, a 10 ms grid | 13.91, 13.29, 13.32 and 13.29 % |
+| A 5 ms grid instead, for the measurement | 16.73 and 16.33 % |
+| Now, with the echo as it was (below), for the measurement | 12.89 and 12.51 % |
+
+Of the point and a half the steady clock costs over the waiting loop, half a
+point is the echo carrying the audio it hears where it carried silence. The
+two variants were local changes for the measurement, not committed. A first
+version of the grid polled the reports at the grid's instant too: a report
+falling due between two instants left the engine's next deadline already
+passed, and the loop turned without resting until the next instant came, at
+23.7 and 23.9 % of a core for the same hundred calls; the reports are now
+polled at the time the turn runs.
+
+A thousand calls on loopback and fifty at 5 a second, as above, two runs:
+
+| | `0939022` | Now |
+|---|---|---|
+| Set-up, fifty calls at 5 a second: p50, p90, max | 1.3, 1.6, 2.5 ms; 1.4, 1.6, 2.7 ms | 1.3, 1.4, 2.7 ms; 1.3, 1.4, 2.5 ms |
+| Processor time over a minute with no call, standard input closed | none measurable | none measurable |
+| The same, standard input open | 0.10 s | 0.10 s |
+| A thousand calls: set-up p50, p90, max | 9.7, 45.5, 108.5 ms; 8.0, 34.5, 81.8 ms | 11.0, 49.2, 110.1 ms; 8.9, 41.1, 101.7 ms |
+| The agent's processor time while it holds them | 0.86 and 0.86 of one core | 0.86 and 0.86 of one core |
+| Its resident memory, before the first call and with the thousand held | 5.8 MB, 93.7 and 93.2 MB | 5.8 and 5.9 MB, 94.1 and 95.0 MB |
+| Frames the caller played with its buffer run dry | 0.47 % and 0.11 % | 0.25 % and 0.14 % |
+
+**The echo was mostly silence.** The agent kept only what the latest turn
+of its loop heard, and the loop turns more than once a frame: the frame it
+said back was most often an empty one. In the clean-link capture, 355 of
+1 527 packets it sent carried audio. A turn that moves no frame now leaves
+what was heard for the turn that does, and the agent's echo test fails when
+more than a quarter of the frames after the tone first comes back are
+silent, which they were 24 times in 25 before.
+
+## 4 October 2026 — unreleased, for `1.1.0`: Opus's in-band FEC on lossy links
+
+Two stacks in one process, each a `MediaSession` with Opus at 48 kHz and
+20 ms, talking to each other through the lab's `lossy` and `mobile` netem
+profiles emulated packet by packet — the same Gilbert-Elliott loss
+(`gemodel 4% 40% 60% 2%` and `2% 40% 60% 1%`), the same delay and its
+variation (40 ms ± 15 uniform, and 60 ms with a normal spread of 30), the
+`lossy` profile's reordering — in each direction, RTCP through the same
+path. Each end says generated speech (`sipral-media`'s syllable generator:
+voiced syllables with moving formants, consonant noise and pauses, at
+−20 dBm0), two minutes a run, three seeds a profile; the same seeds lose the
+same packets before and after. Apple M2, release profile. A test written for
+the measurement, not committed; its source and logs are kept with the
+project's records.
+
+| Profile, both directions, three runs | Lost on the way | Rebuilt from the copy in the next packet | Left to concealment |
+|---|---|---|---|
+| `lossy`, before (`0939022`) | 7.60 % | none | 7.60 % |
+| `lossy`, now | 7.60 % | 36.8 % of the losses | 4.81 % |
+| `mobile`, before | 3.92 % | none | 3.92 % |
+| `mobile`, now | 3.92 % | 39.4 % of the losses | 2.38 % |
+| clean, before and now | none | — | none |
+
+| What the sender did | Before | Now |
+|---|---|---|
+| Packets carrying a copy of the frame before them, clean link | 55.4 % | 1.9 %, until the first report |
+| The same, `lossy` / `mobile` | 55.4 % / 55.4 % | 56.0 % / 54.9 % |
+| Expected loss the encoder was told, at the end of the runs | 5 % always | 0 % clean; 4 to 11 % `lossy`; 1 to 7 % `mobile` |
+| Mean payload, every profile | 85.0 B a packet | 84.9 to 87.6 B a packet |
+
+Read together:
+
+- **Before, the copies were sent and never used.** The encoder was told to
+  expect 5 % loss on every call and put a copy in a little over half the
+  packets — the frames its own voice detector called speech — whatever the
+  link did; the receiving end concealed every lost frame regardless.
+- **Now a loss is rebuilt when it can be.** Of the `lossy` profile's
+  losses, 71 % had the packet after them arrive, and 40 % had one that
+  carried a copy; 37 % were rebuilt, nearly all of what the copies made
+  reachable. A run of losses, and a loss in a pause, where the encoder sends
+  no copy, are concealed as before.
+- **The bits for the copy come out of the frame.** libopus chooses its own
+  bitrate for the rate, about 35 kbit/s on this speech, and pays for the copy
+  out of it: the payload is the same size either way. A clean link stops
+  paying after the first report.
 
 ## What would make these numbers worse
 
