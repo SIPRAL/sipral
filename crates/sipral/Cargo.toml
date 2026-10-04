@@ -111,29 +111,29 @@ all-features = true
 
 [dependencies]
 sipral-core.workspace = true
-sipral-ua = { path = "../sipral-ua", version = "1.0.0" }
-sipral-rtp = { path = "../sipral-rtp", version = "1.0.0" }
+sipral-ua = { path = "../sipral-ua", version = "1.1.0" }
+sipral-rtp = { path = "../sipral-rtp", version = "1.1.0" }
 # the redaction behind `redacted_call_record` and `redacted_recording`, behind
 # the `redaction` feature; `hmac` and `sha2` come with it, at the pins `dtls`
 # links them at
-sipral-diag = { path = "../sipral-diag", version = "1.0.0", optional = true }
+sipral-diag = { path = "../sipral-diag", version = "1.1.0", optional = true }
 # `default-features = false` is what makes this crate's own feature mean
 # anything: without it, `--no-default-features` on this crate would still link
 # libopus through `sipral-media` and prove nothing.
-sipral-media = { path = "../sipral-media", version = "1.0.0", default-features = false }
+sipral-media = { path = "../sipral-media", version = "1.1.0", default-features = false }
 # DTLS-SRTP, behind the `dtls` feature. Two crates rather than one: the
 # handshake that produces the keys, and the one octet of RFC 7983 that tells a
 # DTLS record from the RTP beside it on the same socket. The second is written
 # where ICE will need it too, so it is read from there rather than copied.
-sipral-dtls = { path = "../sipral-dtls", version = "1.0.0", optional = true }
-sipral-nat = { path = "../sipral-nat", version = "1.0.0", optional = true }
+sipral-dtls = { path = "../sipral-dtls", version = "1.1.0", optional = true }
+sipral-nat = { path = "../sipral-nat", version = "1.1.0", optional = true }
 # behind `headless` alone: the one edge `docs/01-architecture.md`'s diagram
 # marks as an exception, and only in this manifest — see the feature's own
 # comment above.
-sipral-headless = { path = "../sipral-headless", version = "1.0.0", optional = true }
+sipral-headless = { path = "../sipral-headless", version = "1.1.0", optional = true }
 # behind `stir`, re-exported whole as `sipral::stir`: the signer, the trust
 # anchors and the verdicts an application builds and reads
-sipral-stir = { path = "../sipral-stir", version = "1.0.0", optional = true }
+sipral-stir = { path = "../sipral-stir", version = "1.1.0", optional = true }
 # already a dependency of `sipral-rtp` and `sipral-dtls`, pinned to the same
 # version here: wiping the SRTP master key and salt draw_key hands out (8.2.9)
 # needs a write the optimiser is not allowed to remove, and that needs
@@ -173,7 +173,7 @@ rustls-pki-types = { version = "1.15.1", optional = true }
 rcgen = "0.14.10"
 # the throwaway STIR PKI a signed call between two stacks is verified
 # against, built in memory from fixed keys; tests only
-sipral-stir = { path = "../sipral-stir", version = "1.0.0", features = ["testing"] }
+sipral-stir = { path = "../sipral-stir", version = "1.1.0", features = ["testing"] }
 # the examples' seeds, from the operating system's entropy. The library draws
 # no randomness of its own and takes its seeds from the application, which is
 # what an example has to show being done; a constant there would give every
@@ -187,7 +187,7 @@ getrandom = "0.2.17"
 # no cycle; on every other target the examples that need it write a WAV file
 # instead (see `crates/sipral/examples/call.rs`).
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
-sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "1.0.0" }
+sipral-io-coreaudio = { path = "../sipral-io-coreaudio", version = "1.1.0" }
 
 # without this, `cargo build --examples` fails on every target that has not
 # opted into `example-tls`, and `cargo test --workspace` is one of them

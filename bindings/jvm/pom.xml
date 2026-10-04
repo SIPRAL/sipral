@@ -55,7 +55,7 @@ own tests, and the loopback tests then fail at the first native call.
 
     <properties>
         <sipral.groupId>org.sipral</sipral.groupId>
-        <revision>1.0.0</revision>
+        <revision>1.1.0</revision>
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.release>17</java.release>

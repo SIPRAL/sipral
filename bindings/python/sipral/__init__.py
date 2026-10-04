@@ -63,7 +63,7 @@ from .signalling import InviteLimit, TlsTrust
 from .stack import TRACE, Stack, features
 from .subscription import ConferencePicture, Participant, Subscription
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Account",

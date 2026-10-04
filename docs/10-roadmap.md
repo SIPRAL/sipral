@@ -33,6 +33,12 @@ below still names as left: the adversarial review of DTLS-SRTP (phase 2), a
 device chosen per call (phase 3), and video (phase 6), which comes after 1.0
 by decision.
 
+**1.1.0 is released** (4 October 2026), still at ABI 1.0, since it changed no
+part of the C surface: the headless agent's steady 20 ms clock and its wait
+on the SIP socket, Opus rebuilding lost frames from in-band FEC, a lighter
+in-band DTMF detector, the gate holding every published figure to its
+budget, and the fixes `CHANGELOG.md` lists.
+
 ## Phase 0 — design
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the

@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sipral"
-version = "1.0.0"
+version = "1.1.0"
 description = "Sipral - Session Initiation Protocol Rust Audio Layer. The Python binding over the C ABI, with the native library inside the wheel."
 readme = "README.md"
 requires-python = ">=3.9"

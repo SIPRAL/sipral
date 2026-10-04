@@ -81,7 +81,7 @@ signalling over UDP with an account's own TCP or TLS connection beside it.
 
 ## Status
 
-**1.0.0, at C ABI 1.0.** These are two numbers on purpose: 1.0.0 is the
+**1.1.0, at C ABI 1.0.** These are two numbers on purpose: 1.1.0 is the
 release every package ships under, and 1.0 is the version of the C
 interface, which `sipral_abi_check` compares when a binding loads
 ([`docs/08-ffi.md`, "Versioning"](docs/08-ffi.md#versioning)).

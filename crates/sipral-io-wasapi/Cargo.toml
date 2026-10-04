@@ -13,7 +13,7 @@ categories.workspace = true
 publish.workspace = true
 
 [dependencies]
-sipral-io-common = { path = "../sipral-io-common", version = "1.0.0" }
+sipral-io-common = { path = "../sipral-io-common", version = "1.1.0" }
 
 [lints.rust]
 unsafe_code = "allow"

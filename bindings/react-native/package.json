@@ -1,6 +1,6 @@
 {
   "name": "sipral-react-native",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Sipral - Session Initiation Protocol Rust Audio Layer. The SIP stack for React Native: accounts, registration, calls and events over the New Architecture.",
   "keywords": [
     "sip",

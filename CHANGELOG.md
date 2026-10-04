@@ -11,6 +11,11 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-04
+
+The headless agent sends its audio on a steady 20 ms clock and waits on its socket instead of sleeping, Opus rebuilds lost frames from in-band FEC, the in-band DTMF detector costs a fraction of what it did, and the gate holds every published figure to its budget.
+The fixes: a forked INVITE rings on both lines of one stack, a waiting de-registration goes as one, the agent echoes every frame, and more below. Still at C ABI 1.0: no surface changed.
+
 ### Added
 
 - **The published figures are held by the gate.** A new area, `scripts/check.sh --only numbers`, part of the complete gate, measures what the README, `docs/19-numbers.md`, `docs/23-compared-with-pjsip.md` and the website publish -- the shared library's size, the first and authenticated INVITE of the lab's call with and without ICE, a live call's memory and an idle stack's, counted by the signalling test's allocator, and a frame of the in-band digit detector, timed against a fixed loop on the same thread so that a loaded machine does not read as a regression -- and fails when one passes its budget in `docs/numbers.toml`, naming the figure, what it now measures, the budget and every place it is published. `docs/11-testing.md`, "The published figures", says how each is measured and how to change one on purpose.

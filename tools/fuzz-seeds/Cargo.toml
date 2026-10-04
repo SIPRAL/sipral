@@ -17,15 +17,15 @@ path = "src/main.rs"
 [dependencies]
 # the facade without libopus, DTLS or ICE: `HeadlessSession`, for the
 # `headless_media` seeds, is the one thing read from it
-sipral = { path = "../../crates/sipral", version = "1.0.0", default-features = false, features = ["headless"] }
-sipral-core = { path = "../../crates/sipral-core", version = "1.0.0" }
-sipral-dtls = { path = "../../crates/sipral-dtls", version = "1.0.0" }
-sipral-headless = { path = "../../crates/sipral-headless", version = "1.0.0" }
-sipral-media = { path = "../../crates/sipral-media", version = "1.0.0" }
-sipral-nat = { path = "../../crates/sipral-nat", version = "1.0.0" }
-sipral-rtp = { path = "../../crates/sipral-rtp", version = "1.0.0" }
-sipral-stir = { path = "../../crates/sipral-stir", version = "1.0.0" }
-sipral-ua = { path = "../../crates/sipral-ua", version = "1.0.0" }
+sipral = { path = "../../crates/sipral", version = "1.1.0", default-features = false, features = ["headless"] }
+sipral-core = { path = "../../crates/sipral-core", version = "1.1.0" }
+sipral-dtls = { path = "../../crates/sipral-dtls", version = "1.1.0" }
+sipral-headless = { path = "../../crates/sipral-headless", version = "1.1.0" }
+sipral-media = { path = "../../crates/sipral-media", version = "1.1.0" }
+sipral-nat = { path = "../../crates/sipral-nat", version = "1.1.0" }
+sipral-rtp = { path = "../../crates/sipral-rtp", version = "1.1.0" }
+sipral-stir = { path = "../../crates/sipral-stir", version = "1.1.0" }
+sipral-ua = { path = "../../crates/sipral-ua", version = "1.1.0" }
 # the stir_identity seeds carry a certificate chain, and its signatures are
 # P-256 like the PASSporT's: the same crate, at the same version, that
 # sipral-stir verifies them with

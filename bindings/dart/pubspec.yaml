@@ -5,7 +5,7 @@ name: sipral
 description: >-
   Sipral - Session Initiation Protocol Rust Audio Layer. The Dart and Flutter
   binding over the C ABI, through dart:ffi.
-version: 1.0.0
+version: 1.1.0
 homepage: https://sipral.org
 repository: https://github.com/SIPRAL/sipral/tree/main/bindings/dart
 topics: [sip, voip, rtp, telephony, softphone]

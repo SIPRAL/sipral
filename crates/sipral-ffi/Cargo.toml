@@ -81,14 +81,14 @@ stun = ["sipral/stun"]
 # they are the same crates the facade re-exports, so no type is duplicated.
 # `redaction` always: the log and the state snapshot redact what they write
 # (`crate::log`), and a build that could not would have to leave both out
-sipral = { path = "../sipral", version = "1.0.0", default-features = false, features = ["redaction"] }
+sipral = { path = "../sipral", version = "1.1.0", default-features = false, features = ["redaction"] }
 sipral-core.workspace = true
-sipral-ua = { path = "../sipral-ua", version = "1.0.0" }
+sipral-ua = { path = "../sipral-ua", version = "1.1.0" }
 # the built-in audio engine behind `sipral_stack_config_t::audio`: the
 # platform's devices opened and pumped by the library, for the stack that
 # asks. Its `ice` follows this crate's, so that what the pump captures says
 # how it leaves a media socket the way `sipral_media_capture` does.
-sipral-audio = { path = "../sipral-audio", version = "1.0.0" }
+sipral-audio = { path = "../sipral-audio", version = "1.1.0" }
 # the two seeds a stack is created with, wiped once the engine and the agent
 # hold their own copies; the version `sipral` names, so nothing new enters
 # the build
@@ -98,19 +98,19 @@ zeroize = "=1.9.0"
 # the engine's fake platform, for this crate's own tests of device mode:
 # a feature turned on from here reaches only the test build, so no release
 # build of the library carries a fake device
-sipral-audio = { path = "../sipral-audio", version = "1.0.0", features = ["fake"] }
+sipral-audio = { path = "../sipral-audio", version = "1.1.0", features = ["fake"] }
 # the far end's connectivity checks, signed with the password this end's offer
 # gave out, for the tests of what reaches a call's socket before its media
 # handle does. The same STUN code the facade already links, so nothing new
 # enters the build.
-sipral-nat = { path = "../sipral-nat", version = "1.0.0" }
+sipral-nat = { path = "../sipral-nat", version = "1.1.0" }
 # the throwaway STIR PKI the tests of a signed call through this ABI verify
 # against, built in memory from fixed keys
-sipral-stir = { path = "../sipral-stir", version = "1.0.0", features = ["testing"] }
+sipral-stir = { path = "../sipral-stir", version = "1.1.0", features = ["testing"] }
 # the far end's audio for the tests of what a call hears in it -- a digit's
 # two tones, a greeting -- written and companded with the same code the
 # facade already links, so nothing new enters the build either
-sipral-media = { path = "../sipral-media", version = "1.0.0", default-features = false }
+sipral-media = { path = "../sipral-media", version = "1.1.0", default-features = false }
 
 [lints.rust]
 unsafe_code = "allow"
