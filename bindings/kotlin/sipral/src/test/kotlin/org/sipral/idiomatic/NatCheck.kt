@@ -407,7 +407,12 @@ private fun turnRelayIsAllocatedAndOffered(host: String): String {
                 val seen = recordEvents(client, 60_000)
                 val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = peerAddress)
                 client.placeCall(account, target = "sip:bob@$peerAddress", mediaHost = host).use {
-                    val relay = assertNotNull(seen.toList().mapNotNull { relayOf(it) }.firstOrNull(), "no relay event")
+                    // The relay event reaches `seen` on the recorder's thread,
+                    // which a loaded machine can run after placeCall returns.
+                    fun relayed() = seen.toList().mapNotNull { relayOf(it) }.firstOrNull()
+                    val deadline = System.currentTimeMillis() + 10_000
+                    while (relayed() == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
+                    val relay = assertNotNull(relayed(), "no relay event")
                     assertEquals(SipralNatRelay.ALLOCATED.value.toLong(), relay.outcome, "relay failed: ${relay.code} ${relay.reason}")
                     val relayed = parseHostPort(relay.relayed!!)
                     assertEquals(FakeStunServer.RELAY_HOST, relayed.hostString)
@@ -890,7 +895,10 @@ private suspend fun callThrough(
                 val (aliceCall, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
                     alice.placeCall(aliceAccount, target = "sip:bob@${bob.bindAddress}", mediaHost = host)
                 }
-                val relay = assertNotNull(seen.toList().mapNotNull { relayOf(it) }.firstOrNull(), "no relay event")
+                val relayDeadline = System.currentTimeMillis() + 10_000
+                fun relayEvent() = seen.toList().mapNotNull { relayOf(it) }.firstOrNull()
+                while (relayEvent() == null && System.currentTimeMillis() < relayDeadline) Thread.sleep(20)
+                val relay = assertNotNull(relayEvent(), "no relay event")
                 val bobCall = bob.answerCall(incoming, mediaHost = host)
                 val mediaDeadline = System.currentTimeMillis() + 8_000
                 while (aliceCall.media == null && System.currentTimeMillis() < mediaDeadline) delay(20)
