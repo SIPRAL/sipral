@@ -90,6 +90,7 @@ if [ "$RELEASE" -eq 1 ] && [ "$WITH_OPUS" -eq 1 ]; then
 fi
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/neutral-paths.sh"
 . "$ROOT/scripts/package/apple.sh"
 APPLE_TARGET="$(apple_target_dir "${CARGO_TARGET_DIR:-$ROOT/target}")"
 mkdir -p "$OUT"
@@ -156,19 +157,22 @@ step "building $CRATE, release, per target, for macOS $APPLE_MACOS_MIN and iOS $
 # automatically for an Xcode-built app, but not for a bare `cargo build`
 # against an iOS target: nothing in that link line names the runtime that
 # provides it. The device slice and both simulator architectures each need
-# their own archive.
+# their own archive. It goes in as a `--config` target table beside
+# neutral-paths.sh's, which cargo joins, where RUSTFLAGS would drop that one.
 CLANG_RT_DIR="$(xcrun --sdk iphoneos clang --print-resource-dir 2>/dev/null)/lib/darwin"
-rustflags_for() {
+clang_rt_for() {
     case "$1" in
-        aarch64-apple-ios) [ -f "$CLANG_RT_DIR/libclang_rt.ios.a" ] && printf -- '-Clink-arg=%s' "$CLANG_RT_DIR/libclang_rt.ios.a" ;;
-        aarch64-apple-ios-sim|x86_64-apple-ios) [ -f "$CLANG_RT_DIR/libclang_rt.iossim.a" ] && printf -- '-Clink-arg=%s' "$CLANG_RT_DIR/libclang_rt.iossim.a" ;;
+        aarch64-apple-ios) printf '%s' "$CLANG_RT_DIR/libclang_rt.ios.a" ;;
+        aarch64-apple-ios-sim|x86_64-apple-ios) printf '%s' "$CLANG_RT_DIR/libclang_rt.iossim.a" ;;
     esac
 }
 for t in "${all_triples[@]}"; do
-    extra_rustflags="$(rustflags_for "$t")"
-    if env RUSTFLAGS="${RUSTFLAGS:-} $extra_rustflags" \
-        cargo build --release -p "$CRATE" "${FFI_FEATURE_ARGS[@]}" --target "$t" --target-dir "$APPLE_TARGET" \
-        >"$STAGE/build-$t.log" 2>&1; then
+    neutral_cargo_args "$t"
+    clang_rt="$(clang_rt_for "$t")"
+    [ -n "$clang_rt" ] && [ -f "$clang_rt" ] \
+        && NEUTRAL_CARGO_ARGS+=(--config "target.$t.rustflags=['-Clink-arg=$clang_rt']")
+    if cargo build --release -p "$CRATE" "${FFI_FEATURE_ARGS[@]}" --target "$t" "${NEUTRAL_CARGO_ARGS[@]}" \
+        --target-dir "$APPLE_TARGET" >"$STAGE/build-$t.log" 2>&1; then
         pass "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t"
     else
         fail "cargo build --release -p $CRATE ${FFI_FEATURE_ARGS[*]} --target $t:"
@@ -223,6 +227,7 @@ for s in "${SLICES[@]}"; do
     fi
     lipo -info "$dest/$LIBNAME" >"$dest/lipo-info.txt" 2>&1
     pass "$name: $(cat "$dest/lipo-info.txt")"
+    neutral_paths_held "$name/$LIBNAME" "$dest/$LIBNAME"
     LIB_ARGS+=(-library "$dest/$LIBNAME" -headers "$HDRDIR")
 done
 [ "$FAIL" -ne 0 ] && exit 1

@@ -24,7 +24,9 @@
 #     aarch64-unknown-linux-gnu` inside that image, with $ROOT mounted
 #     read-only at /work and TARGET_DIR mounted at /tmp/target (so the
 #     result lands at TARGET_DIR/aarch64-unknown-linux-gnu/release/, the
-#     same layout a host-native `--target` build leaves).
+#     same layout a host-native `--target` build leaves), with the
+#     container's paths mapped as neutral-paths.sh says, which the caller
+#     has sourced.
 #
 # aarch64_glibc_check SO_PATH
 #     reads SO_PATH's own dynamic symbol versions (aarch64-linux-gnu-objdump,
@@ -49,11 +51,13 @@ aarch64_cross_ensure_image() {
 aarch64_cross_build() {
     local target_dir="$1"
     mkdir -p "$target_dir"
+    neutral_docker_env /usr/local/cargo /usr/local/rustup /work
     docker run --rm \
         -v "$ROOT:/work:ro" -v "$target_dir:/tmp/target" -w /work \
-        -e CARGO_TARGET_DIR=/tmp/target \
+        -e CARGO_TARGET_DIR=/tmp/target "${NEUTRAL_DOCKER_ENV[@]}" \
         "$AARCH64_CROSS_IMAGE" \
-        cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target aarch64-unknown-linux-gnu
+        sh -c 'cargo build --release -p sipral-ffi "$@" --target aarch64-unknown-linux-gnu --config "$NEUTRAL_PATHS_CONFIG"' \
+        sh "${FFI_FEATURE_ARGS[@]}"
 }
 
 aarch64_glibc_check() {

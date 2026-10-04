@@ -118,6 +118,7 @@ OUT="$(cd "$OUT" && pwd)"
 [ "${#RIDS[@]}" -eq 0 ] && RIDS=("${ALL_RIDS[@]}")
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/neutral-paths.sh"
 . "$ROOT/scripts/package/apple.sh"
 APPLE_TARGET="$(apple_target_dir "${CARGO_TARGET_DIR:-$ROOT/target}")"
 PACKAGE_ID="Sipral"
@@ -142,16 +143,18 @@ if [ "$CMD" = "collect" ]; then
                 # built for apple.sh's oldest macOS, in its own target
                 # directory, and checked object by object in the static
                 # archive the same build writes, libopus's included
+                neutral_cargo_args "$triple"
                 if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" \
-                    --target-dir "$APPLE_TARGET" >"$OUT/.build-$rid.log" 2>&1; then
+                    "${NEUTRAL_CARGO_ARGS[@]}" --target-dir "$APPLE_TARGET" >"$OUT/.build-$rid.log" 2>&1; then
                     if ! newest=$(apple_min_at_most "$APPLE_TARGET/$triple/release/libsipral_ffi.a" "$APPLE_MACOS_MIN"); then
                         fail "$rid: an object was built for macOS ${newest:-(no minimum named)}, newer than $APPLE_MACOS_MIN"
                         continue
                     fi
                     mkdir -p "$OUT/$rid"
                     cp "$APPLE_TARGET/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
-                    printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                     pass "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+                    neutral_paths_held "$rid/$(native_name_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")" || continue
+                    printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                 else
                     fail "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple:"
                     tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
@@ -166,12 +169,14 @@ if [ "$CMD" = "collect" ]; then
                     continue
                 fi
                 rm -f "$OUT/$rid/$FEATURES_MARKER"
+                neutral_docker_env /usr/local/cargo /usr/local/rustup /work
                 if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -w /work \
-                    -e CARGO_TARGET_DIR=/tmp/target \
+                    -e CARGO_TARGET_DIR=/tmp/target "${NEUTRAL_DOCKER_ENV[@]}" \
                     rust:1.95-trixie \
-                    sh -c "apt-get update -qq && apt-get install -qq -y --no-install-recommends cmake >/dev/null && cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple && mkdir -p /out/$rid && cp /tmp/target/$triple/release/$(cargo_artifact_of "$rid") /out/$rid/$(native_name_of "$rid") && echo $FFI_FEATURES >/out/$rid/$FEATURES_MARKER" \
+                    sh -c "apt-get update -qq && apt-get install -qq -y --no-install-recommends cmake >/dev/null && cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple --config \"\$NEUTRAL_PATHS_CONFIG\" && mkdir -p /out/$rid && cp /tmp/target/$triple/release/$(cargo_artifact_of "$rid") /out/$rid/$(native_name_of "$rid") && echo $FFI_FEATURES >/out/$rid/$FEATURES_MARKER" \
                     >"$OUT/.build-$rid.log" 2>&1; then
                     pass "$rid: docker run rust:1.95-trixie, cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+                    neutral_paths_held "$rid/$(native_name_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
                 else
                     fail "$rid: docker build failed:"
                     tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
@@ -198,8 +203,9 @@ if [ "$CMD" = "collect" ]; then
                     if highest=$(aarch64_glibc_check "$native_so" 28); then
                         mkdir -p "$OUT/$rid"
                         cp "$native_so" "$OUT/$rid/$(native_name_of "$rid")"
-                        printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                         pass "$rid: cross-compiled ($AARCH64_CROSS_IMAGE), manylinux_2_28-compatible ($highest)"
+                        neutral_paths_held "$rid/$(native_name_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")" \
+                            && printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                     else
                         fail "$rid: $native_so is not manylinux_2_28-compatible: $highest"
                     fi
@@ -219,12 +225,14 @@ if [ "$CMD" = "collect" ]; then
                         fi
                         rm -f "$OUT/$rid/$FEATURES_MARKER"
                         win_target="${CARGO_TARGET_DIR:-$ROOT/target}"
+                        neutral_cargo_args "$triple"
                         if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$triple" \
-                            --target-dir "$win_target" >"$OUT/.build-$rid.log" 2>&1; then
+                            "${NEUTRAL_CARGO_ARGS[@]}" --target-dir "$win_target" >"$OUT/.build-$rid.log" 2>&1; then
                             mkdir -p "$OUT/$rid"
                             cp "$win_target/$triple/release/$(cargo_artifact_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")"
-                            printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                             pass "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple"
+                            neutral_paths_held "$rid/$(native_name_of "$rid")" "$OUT/$rid/$(native_name_of "$rid")" \
+                                && printf '%s\n' "$FFI_FEATURES" >"$OUT/$rid/$FEATURES_MARKER"
                         else
                             fail "$rid: cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple:"
                             tail -20 "$OUT/.build-$rid.log" | sed 's/^/        /'
@@ -232,10 +240,9 @@ if [ "$CMD" = "collect" ]; then
                         continue
                         ;;
                 esac
-                note "$rid: not built by this subcommand; on a Windows host run"
-                note "         cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $triple,"
-                note "         place the result at $OUT/$rid/$(native_name_of "$rid")"
-                note "         and the line $FFI_FEATURES at $OUT/$rid/$FEATURES_MARKER"
+                note "$rid: not built by this subcommand here; in Git Bash on a Windows host run"
+                note "         scripts/package/nuget.sh collect --out DIR --rid $rid${VARIANT_SUFFIX:+ --with-opus}"
+                note "         and copy DIR/$rid/ (the native and $FEATURES_MARKER) to $OUT/$rid/"
                 ;;
         esac
     done
@@ -285,6 +292,8 @@ for rid in "${RIDS[@]}"; do
         cp "$src" "$dest_dir/$native"
         size=$(stat -f%z "$src" 2>/dev/null || stat -c%s "$src" 2>/dev/null)
         pass "$rid: $native ($size bytes)"
+        # built elsewhere, so held again here to what any host leaves behind
+        neutral_paths_held "$rid/$native" "$src"
         ITEMS="$ITEMS    <None Include=\"runtimes/$rid/native/$native\" Pack=\"true\" PackagePath=\"runtimes/$rid/native/\" />\n"
         populated=$((populated + 1))
     elif [ "$DRY_RUN" -eq 1 ]; then

@@ -96,6 +96,7 @@ OUT="$(cd "$OUT" && pwd)"
 
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/neutral-paths.sh"
 
 VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
 ARTIFACT="sipral-jvm$VARIANT_SUFFIX"
@@ -242,8 +243,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     stage="$NATIVES/$RESOURCE_ROOT/$HOST_PLATFORM"
     mkdir -p "$stage"
     target_dir="$OUT/cargo-host"
+    neutral_cargo_args "$(uname -m)-unknown-linux-gnu"
     if CARGO_TARGET_DIR="$target_dir" cargo build --release --locked -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" \
-        >"$OUT/cargo-host.log" 2>&1; then
+        "${NEUTRAL_CARGO_ARGS[@]}" >"$OUT/cargo-host.log" 2>&1; then
         cp "$target_dir/release/libsipral_ffi.so" "$stage/"
         pass "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]}"
     else
@@ -286,7 +288,7 @@ if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
 fi
 export PATH="$CARGO_HOME/bin:$PATH"
 cd /work
-cargo build --release --locked -p sipral-ffi --no-default-features --features "$FFI_FEATURES"
+cargo build --release --locked -p sipral-ffi --no-default-features --features "$FFI_FEATURES" --config "$NEUTRAL_PATHS_CONFIG"
 cp /tmp/target/release/libsipral_ffi.so /natives/
 gcc -std=c11 -shared -fPIC -O2 -Wall -Wextra -Werror -I/jdk -I/jdk/linux -I/work/bindings/c/include \
     -o /natives/libsipral_jni.so \
@@ -294,7 +296,8 @@ gcc -std=c11 -shared -fPIC -O2 -Wall -Wextra -Werror -I/jdk -I/jdk/linux -I/work
     /work/bindings/kotlin/sipral/src/main/jni/idiomatic_media.c \
     /work/bindings/kotlin/sipral/src/main/jni/audio_routes.c \
     -L/natives -lsipral_ffi -Wl,-soname,libsipral_jni.so "-Wl,-rpath,\$ORIGIN"'
-    if docker run --rm --user "$(id -u):$(id -g)" \
+    neutral_docker_env /home/build/cargo /home/build/rustup /work
+    if docker run --rm --user "$(id -u):$(id -g)" "${NEUTRAL_DOCKER_ENV[@]}" \
         -v "$ROOT:/work:ro" -v "$JDK/include:/jdk:ro" -v "$stage:/natives" \
         -v "$OUT/cargo-x64:/tmp/target" -v "$CACHE/x64-home:/home/build" \
         -e HOME=/home/build -e RUSTUP_HOME=/home/build/rustup -e CARGO_HOME=/home/build/cargo \
@@ -377,6 +380,7 @@ for platform in "${EXPECTED[@]}"; do
             fail "$platform/$lib was not produced"
         elif elf_is "$file" "$machine"; then
             pass "$platform/$lib ($(wc -c <"$file" | tr -d ' ') bytes, ELF machine $machine)"
+            neutral_paths_held "$platform/$lib" "$file"
         else
             fail "$platform/$lib is not a 64-bit ELF shared object for machine $machine"
         fi

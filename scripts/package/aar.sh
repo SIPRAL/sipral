@@ -134,6 +134,7 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/neutral-paths.sh"
 
 MIN_SDK="21" # matches AndroidManifest.xml's minSdkVersion, below, and the
              # platform cargo-ndk is told to build against: the floor the
@@ -153,8 +154,10 @@ if [ "$CMD" = "collect-natives" ]; then
     command -v cargo-ndk >/dev/null 2>&1 || { fail "cargo-ndk not found (cargo install cargo-ndk --locked)"; printf '\naar.sh: failed\n'; exit 1; }
 
     rm -f "$OUT/$FEATURES_MARKER"
+    neutral_cargo_args android
     if cargo ndk --platform "$MIN_SDK" -t arm64-v8a -t armeabi-v7a -t x86_64 -o "$OUT/jni" \
-        build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" >"$OUT/collect-natives.log" 2>&1; then
+        build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" "${NEUTRAL_CARGO_ARGS[@]}" \
+        >"$OUT/collect-natives.log" 2>&1; then
         printf '%s\n' "$FFI_FEATURES" >"$OUT/$FEATURES_MARKER"
         pass "cargo ndk build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]}"
     else
@@ -190,6 +193,7 @@ if [ "$CMD" = "collect-natives" ]; then
             elif elf_matches "$f" "${expected%%:*}" "${expected#*:}"; then
                 size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
                 pass "jni/$abi/$lib ($size bytes, ELF machine ${expected%%:*}, ${expected#*:}-bit)"
+                neutral_paths_held "jni/$abi/$lib" "$f"
             else
                 fail "jni/$abi/$lib is not an ELF shared object for machine ${expected%%:*}, ${expected#*:}-bit"
             fi

@@ -94,6 +94,7 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
 package_features "$WITH_OPUS" || { printf 'no default feature list in crates/sipral-ffi/Cargo.toml\n' >&2; exit 1; }
+. "$ROOT/scripts/package/neutral-paths.sh"
 
 step "one version"
 scripts/version.sh --check || { printf '\nwheels.sh: failed\n'; exit 1; }
@@ -261,8 +262,9 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 [ "$UNAME_S" = "Darwin" ] && [ "$MANYLINUX" -eq 0 ] && TARGET_DIR="$(apple_target_dir "$TARGET_DIR")"
 
 step "building sipral-ffi, release, $VARIANT_LABEL (features $FFI_FEATURES)"
+neutral_cargo_args "$RUST_TRIPLE"
 if cargo build --release -p sipral-ffi "${FFI_FEATURE_ARGS[@]}" --target "$RUST_TRIPLE" \
-    --target-dir "$TARGET_DIR" >"$STAGE/build.log" 2>&1; then
+    "${NEUTRAL_CARGO_ARGS[@]}" --target-dir "$TARGET_DIR" >"$STAGE/build.log" 2>&1; then
     pass "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE"
 else
     fail "cargo build --release -p sipral-ffi ${FFI_FEATURE_ARGS[*]} --target $RUST_TRIPLE:"
@@ -271,6 +273,7 @@ else
 fi
 NATIVE_PATH="$TARGET_DIR/$RUST_TRIPLE/release/$NATIVE"
 [ -f "$NATIVE_PATH" ] || { fail "$NATIVE_PATH was not produced"; printf '\nwheels.sh: failed\n'; exit 1; }
+neutral_paths_held "$NATIVE" "$NATIVE_PATH" || { printf '\nwheels.sh: failed\n'; exit 1; }
 
 # On macOS the tag is read back from the library itself, so the wheel
 # promises what was built. The static archive the same build wrote beside it
