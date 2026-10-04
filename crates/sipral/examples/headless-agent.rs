@@ -791,9 +791,15 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
     agent.endpoint.timers(now);
     settle(agent, now);
     let echoes = &mut agent.echoes;
-    // the audio moves on the grid, whenever in it this turn came
+    // The frames move on the grid, whenever in it this turn came; the
+    // reports and everything else the engine sends are polled at the time it
+    // is. Polled at the grid's instant, a report that fell due between two
+    // instants stayed due — the engine's next deadline already past, the
+    // wait for it over at once — and the loop turned without resting until
+    // the next instant: a hundred calls, each with a report due every few
+    // seconds, cost twice the processor time they had cost.
     let beat = agent.grid.at_or_before(now);
-    agent.endpoint.run_media(beat, |call, media, session, now| {
+    agent.endpoint.run_media(now, |call, media, session, _| {
         // one closure says what was heard at the last frame, the other
         // keeps what is heard at this one — two different `Vec`s, since
         // both closures exist at once and neither may borrow the same one
@@ -802,7 +808,7 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
         let mut said = false;
         media.turn(
             session,
-            now,
+            beat,
             |room| {
                 let filled = room.len().min(heard_before.len());
                 if let Some(dst) = room.get_mut(..filled) {

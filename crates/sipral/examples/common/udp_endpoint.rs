@@ -178,8 +178,8 @@ impl Drop for Reader {
         } else {
             self.bound
         };
-        let _ = UdpSocket::bind(SocketAddr::new(to.ip(), 0))
-            .and_then(|waker| waker.send_to(&[], to));
+        let _ =
+            UdpSocket::bind(SocketAddr::new(to.ip(), 0)).and_then(|waker| waker.send_to(&[], to));
     }
 }
 
