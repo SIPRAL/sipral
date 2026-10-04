@@ -3,4 +3,4 @@
 #
 # A test's PEM armour around a key it builds at run time from the scalar
 # 0x33..33; the line has since been written so that no armour is in it.
-d98a8319b37f676970d595e62a56ee726725e9ee:crates/sipral-stir/src/tests.rs:private-key:154
+490e459abb1892dc4f1858da57e6c40e56985f31:crates/sipral-stir/src/tests.rs:private-key:154
