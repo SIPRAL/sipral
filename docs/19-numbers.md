@@ -1220,7 +1220,12 @@ runs. No thread per call, no busy wait.
 | The agent's own jitter on Asterisk's audio, clean link | 6.1 and 5.5 ms | 0 and 0 ms |
 
 Each column is two runs of the comparison's netem phase, the capture taken in
-the client's network namespace, which sees its packets as they leave.
+the client's network namespace, which sees its packets as they leave. The
+last row is the agent's reading, not Asterisk's sending: the agent times a
+packet's arrival at the turn of its loop that reads it, so what it reads of a
+clean link is its own turns' regularity. Its turns were 4 to 8 ms apart and
+are now the grid's 10 ms, so a steady stream reads 0, and jitter finer than
+the grid's step is not resolved.
 
 The waits of the old loop had ended about every 8 ms, and every turn reads
 every call's socket, so the grid's step decides much of what a call costs:

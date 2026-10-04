@@ -169,10 +169,11 @@ const QUIT_GRACE: Duration = Duration::from_secs(5);
 ///
 /// Every turn reads every call's socket, which is most of what a call
 /// costs the agent: on the lab's Linux host the waits this grid replaced
-/// ended on scheduler ticks and the loop turned about every 8 ms, and a
-/// 5 ms grid cost a hundred calls 39 % of a core where those turns had cost
-/// 27 % (`docs/19-numbers.md`). Ten keeps the reads about as fine as they
-/// were and costs less than either.
+/// ended on scheduler ticks and the loop turned about every 8 ms. On
+/// loopback a hundred calls cost 11.7 to 12.4 % of a core with those
+/// turns, 16.3 to 16.7 % with a 5 ms grid and 13.3 to 13.9 % with this one
+/// (`docs/19-numbers.md`): ten keeps the reads about as fine as they were
+/// for a third of the extra cost of five.
 const MEDIA_LOOK: Duration = Duration::from_millis(10);
 
 /// While standard input is open, the longest a command waits to be read
