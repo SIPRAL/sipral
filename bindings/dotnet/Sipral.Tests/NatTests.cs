@@ -558,9 +558,8 @@ public sealed class NatTests
         alice.Dispose();
     }
 
-    /// <summary>Task 8.5.5, <c>intern/rapoarte/2026-09-25-nat-layers.json</c>
-    /// (<c>natmobile.review.findings[1]</c>): <c>SipralStack.DrainFarewells</c>
-    /// must send what <c>sipral_stack_poll_farewell</c> hands out to the
+    /// <summary>A call that allocated a TURN relay gives it back when it
+    /// ends: <c>SipralStack.DrainFarewells</c> must send what <c>sipral_stack_poll_farewell</c> hands out to the
     /// destination it names -- the TURN server, for the Refresh with a
     /// lifetime of zero that gives a relay back
     /// (<c>crates/sipral/src/relay.rs</c>, "gives it back when the call

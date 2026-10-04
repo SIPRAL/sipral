@@ -1,12 +1,12 @@
 
 the harness
-  ok    taken as given: /opt/sipral-wL-final/target-linux/release/sipral-interop
+  ok    taken as given: /src/sipral/target-linux/release/sipral-interop
 
 the harness, in C
-  ok    taken as given: /opt/sipral-wL-final/target-linux/release/harness-c
+  ok    taken as given: /src/sipral/target-linux/release/harness-c
 
 the socket-framed agent
-  ok    taken as given: /opt/sipral-wL-final/target-linux/release/examples/headless-socket-agent, /opt/sipral-wL-final/target-linux/release/examples/agent
+  ok    taken as given: /src/sipral/target-linux/release/examples/headless-socket-agent, /src/sipral/target-linux/release/examples/agent
 
 the Swift binding's lab agent
   ok    built

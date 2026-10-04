@@ -538,8 +538,8 @@ final class NatTests: XCTestCase {
             && $0.from != bob.bindAddress }, "no media socket asked the STUN server")
     }
 
-    /// Task 8.5.5, `intern/rapoarte/2026-09-25-nat-layers.json`
-    /// (`natmobile.review.findings[1]`): `SipralStack.drainFarewells` must
+    /// A call that allocated a TURN relay gives it back when it ends:
+    /// `SipralStack.drainFarewells` must
     /// send what `sipral_stack_poll_farewell` hands out to the destination
     /// it names -- the TURN server, for the Refresh with a lifetime of zero
     /// that gives a relay back (`crates/sipral/src/relay.rs`, "gives it

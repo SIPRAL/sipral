@@ -15,7 +15,7 @@ import PackageDescription
 // links `bindings/c/smoke.c` and `interop/harness-c/main.c` against it: an
 // absolute path computed from this manifest's own location, so it resolves
 // the same way whether this package is opened from the main checkout or a
-// worktree under `.claude/worktrees/`.
+// git worktree.
 let repoRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()

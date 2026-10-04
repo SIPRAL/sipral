@@ -475,9 +475,9 @@ final class CallLoopbackTests: XCTestCase {
     }
 
     /// The caller cancels (CANCEL) before the callee ever takes the call:
-    /// `takeIncomingCall` must not hand back a `Call` that can never end.
-    /// Reproduces `intern/rapoarte/2026-09-25-review-day.json`'s "swift"
-    /// finding on `SipralStack.takeIncomingCall`.
+    /// `takeIncomingCall` must not hand back a `Call` that can never end:
+    /// on a handle that ended before it was taken it throws and releases
+    /// the handle.
     func testTakeIncomingCallOnAHandleThatEndedBeforeItWasTakenThrowsAndCleansUp() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)

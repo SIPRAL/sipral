@@ -563,8 +563,8 @@ class TurnAllocateRequestLeaves(unittest.IsolatedAsyncioTestCase):
 
 
 class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase):
-    """Task 8.5.5, ``intern/rapoarte/2026-09-25-nat-layers.json``
-    (``natmobile.review.findings[1]``): ``Stack._drain_farewells`` must
+    """A call that allocated a TURN relay gives it back when it ends:
+    ``Stack._drain_farewells`` must
     send what ``sipral_stack_poll_farewell`` hands out to the destination
     it names -- the TURN server, for the Refresh with a lifetime of zero
     that gives a relay back (``crates/sipral/src/relay.rs``, "gives it

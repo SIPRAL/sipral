@@ -1630,7 +1630,7 @@ static uint8_t g_run_seed[32];
 /* Thirty-two octets from the operating system, read straight off
  * `/dev/urandom` rather than through `getentropy`: that call is not POSIX,
  * glibc gates its declaration behind `_GNU_SOURCE`/`_DEFAULT_SOURCE`, and the
- * symbol itself is glibc 2.25 and newer only -- the voip-demo lab host's
+ * symbol itself is glibc 2.25 and newer only -- the live PBX lab host's
  * glibc predates both the header and the function. Every platform this file
  * targets has `/dev/urandom`, and this is the only thing it is used for.
  * Zero on success, -1 if it could not be opened or read in full, `out` left

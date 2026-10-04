@@ -527,8 +527,8 @@ private suspend fun liteAnsweringAFullAgentCarriesAudio(host: String): String {
 }
 
 /**
- * Task 8.5.5, `intern/rapoarte/2026-09-25-nat-layers.json`
- * (`natmobile.review.findings[1]`): `SipralClient.drainFarewells` must send
+ * A call that allocated a TURN relay gives it back when it ends:
+ * `SipralClient.drainFarewells` must send
  * what `stackPollFarewell` hands out to the destination it names -- the
  * TURN server, for the Refresh with a lifetime of zero that gives a relay
  * back (`crates/sipral/src/relay.rs`, "gives it back when the call ends")

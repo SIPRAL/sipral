@@ -241,9 +241,9 @@ PEER_LABELS = {
     "kamailio_members": "Kamailio, routing to three sipral stacks registered at it",
 }
 
-# Named by the owner (root CLAUDE.md, intern/TASKS.md 8.6.8): every peer worth
-# an eventual row that this lab cannot reach yet, because reaching it needs an
-# account, a licence or a partner's own access grant nobody here holds today.
+# Every peer worth an eventual row that this lab cannot reach yet, because
+# reaching it needs an account, a licence or a partner's own access grant
+# nobody here holds today.
 # Listed rather than left out, so the table says "not yet" instead of saying
 # nothing -- a peer this file forgets to mention and a peer nobody has asked
 # about read the same to somebody skimming the table, and only one of those
