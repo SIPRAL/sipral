@@ -99,7 +99,7 @@ whoever reads a scan without reading the configuration.
 ## Supported versions
 
 From 1.0.0 on, security fixes reach the current minor release and the one
-before it: at 1.0.0, that is 1.0.x alone. The supported artefacts are the C
+before it: at 1.1.0, that is 1.1.x and 1.0.x. The supported artefacts are the C
 library and the language packages a release publishes; the Rust crates are
 not part of a release (`docs/11-testing.md`, "Releasing"). A fix that reaches
 only the current minor still reaches every application: the C ABI is at 1.0,
