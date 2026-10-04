@@ -59,6 +59,8 @@ guarantee of outcome:
 | Triage | A fix, for **medium** or **low** severity | No fixed deadline; tracked to closure, not silently dropped |
 | Acknowledgement | Public disclosure, fixed or not | 90 days, unless the maintainer and reporter agree in writing to extend it |
 
+Business days are Monday to Friday, excluding public holidays in Romania; times are Romanian time (EET/EEST).
+
 A report that turns out to need more than these to fix correctly is not
 rushed past them; the reporter is told why, and given a revised estimate,
 before any deadline above passes silently.

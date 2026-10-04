@@ -31,7 +31,8 @@
     "ios/Bridge/*.swift",
     "sipral-react-native.podspec",
     "README.md",
-    "LICENSE-COMMERCIAL.md"
+    "LICENSE-COMMERCIAL.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

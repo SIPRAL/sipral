@@ -82,8 +82,8 @@ git ls-files -z bindings/react-native | while IFS= read -r -d '' f; do
     cp "$f" "$STAGE/${f#bindings/react-native/}"
 done
 [ -f "$STAGE/package.json" ] && pass "bindings/react-native's committed files" || { fail "nothing staged from bindings/react-native"; finish; }
-cp LICENSE LICENSE-COMMERCIAL.md "$STAGE/"
-pass "LICENSE and LICENSE-COMMERCIAL.md from the repository root"
+cp LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md "$STAGE/"
+pass "LICENSE, LICENSE-COMMERCIAL.md and THIRD-PARTY-NOTICES.md from the repository root"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     step "npm pack --dry-run"
@@ -104,7 +104,7 @@ for (const f of r.files) console.log(f.path);
 ' "$OUT/pack.json" >"$OUT/pack.list"
 NAME=$(head -1 "$OUT/pack.list")
 [ "$NAME" = "sipral-react-native-$VERSION.tgz" ] && pass "$NAME" || fail "npm names the tarball '$NAME', not sipral-react-native-$VERSION.tgz"
-for f in package.json README.md LICENSE LICENSE-COMMERCIAL.md src/index.ts src/NativeSipral.ts \
+for f in package.json README.md LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md src/index.ts src/NativeSipral.ts \
     sipral-react-native.podspec android/build.gradle.kts; do
     grep -qx "$f" "$OUT/pack.list" && pass "carries $f" || fail "missing $f"
 done
