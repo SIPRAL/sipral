@@ -293,6 +293,19 @@ step_nothing_internal() {
         fail "internal files tracked:"; printf '        %s\n' $leaked
     }
 
+    # A published file that names a folder or file kept out of the tree points
+    # its reader at something they can never open. Two mentions are meant: the
+    # G.729 conformance test's path to the ITU vectors, which are deliberately
+    # not committed, and docs/11-testing.md's sentence saying where the private
+    # name list lives.
+    pointers=$(others | grep -vx '\.gitignore' | tr '\n' '\0' \
+        | xargs -0 grep -IHnE '\.claude/|CLAUDE\.md|AGENTS\.md|(^|[^A-Za-z0-9_])intern/' 2>/dev/null \
+        | grep -vE '^crates/sipral-media/src/g729/[a-z_]+\.rs:[0-9]+:.*intern/itu/g729-vectors/' \
+        | grep -vE '^docs/11-testing\.md:[0-9]+:.*\(in the ignored `intern/`' || true)
+    [ -z "$pointers" ] && pass "no published file points into the untracked folders" || {
+        fail "published files point into the untracked folders:"; printf '%s\n' "$pointers" | sed 's/^/        /'
+    }
+
     captures=$(tracked | grep -E '\.pcapng?$' | grep -v '^fixtures/rfc4475/' || true)
     [ -z "$captures" ] && pass "no captures outside fixtures/rfc4475" || {
         fail "captures tracked:"; printf '        %s\n' $captures
