@@ -11,13 +11,6 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
-### Fixed
-
-- **The Linux packaging runs to the end.** The AAR's POM links the commercial licence at <https://sipral.org/terms/>, as the JVM POM does; the `--with-opus` wheel for x86_64 Linux checks `THIRD-PARTY-LICENSES.txt` against the all-target graph it lists rather than its own target's; and `bindings/c/smoke.c` compiles under gcc's `-Wextra -Werror` at ABI minor 0, which the linux-arm64 wheel's run under qemu builds it with.
-- **The NuGet package names only the runtimes it carries.** Its README listed win-arm64, which no release has built yet: Windows on ARM64 needs the MSVC ARM64 build tools, and the package carries win-x64, osx-arm64, osx-x64, linux-x64 and linux-arm64.
-- **The npm package carries THIRD-PARTY-NOTICES.md, like every other package, and SECURITY.md says whose business days and clock its deadlines count in** (Monday to Friday outside Romania's public holidays, Romanian time).
-- **Packaged natives name no path of the machine that built them.** Source paths read `/cargo/...`, `/rustc/...` and `/sipral/...` instead of the builder's home directory and checkout, the macOS dylib's install name is `@rpath/libsipral_ffi.dylib`, and every packaging script fails a native that still holds such a path.
-
 ## [1.1.0] - 2026-10-04
 
 The headless agent sends its audio on a steady 20 ms clock and waits on its socket instead of sleeping, Opus rebuilds lost frames from in-band FEC, the in-band DTMF detector costs a fraction of what it did, and the gate holds every published figure to its budget.
@@ -45,6 +38,10 @@ The fixes: a forked INVITE rings on both lines of one stack, a waiting de-regist
 - **The examples take their RTP and RTCP ports as a pair.** The examples' media socket holds the RTCP port next to its RTP port from the moment it binds, where it bound RTCP only once the call's plan named it and lost that port to another call in about one call in twenty-five at a thousand at once.
 - **The scripts read a listing to its end.** The gate, the lab and the packaging scripts read a whole listing before deciding a line is not in it: `grep -q` stopping at the first match made the writer die of SIGPIPE under `pipefail`, which read a match as none under load — the parallel gate's AAR dry run missing classes it had, a lab call's log missing the packets it counted — and could pass the check that libopus is out of a graph that has it.
 - **One INVITE forked to two lines of one stack rings on both.** RFC 3261 §8.2.2.2's merged-request check now compares the Request-URI too: a request with no `To` tag that repeats another's `From` tag, `Call-ID` and `CSeq` is answered 482 only when it reaches the same line (the same Request-URI, or one equivalent by §19.1.4), and a copy a proxy forwards to another contact the stack registered is that line's call. A parallel fork or ring group to two accounts of one stack used to ring one line and refuse the other 482, and a ring group hunting to the next line within five seconds over UDP met the same 482. A branch whose `To` names one line's address of record and whose Request-URI names another line's contact is now the second line's call, where the oldest of the two accounts took it. A STIR-signed call forked this way verifies on both lines. No C ABI change.
+- **The Linux packaging runs to the end.** The AAR's POM links the commercial licence at <https://sipral.org/terms/>, as the JVM POM does; the `--with-opus` wheel for x86_64 Linux checks `THIRD-PARTY-LICENSES.txt` against the all-target graph it lists rather than its own target's; and `bindings/c/smoke.c` compiles under gcc's `-Wextra -Werror` at ABI minor 0, which the linux-arm64 wheel's run under qemu builds it with.
+- **The NuGet package names only the runtimes it carries.** Its README listed win-arm64, which no release has built yet: Windows on ARM64 needs the MSVC ARM64 build tools, and the package carries win-x64, osx-arm64, osx-x64, linux-x64 and linux-arm64.
+- **The npm package carries THIRD-PARTY-NOTICES.md, like every other package, and SECURITY.md says whose business days and clock its deadlines count in** (Monday to Friday outside Romania's public holidays, Romanian time).
+- **Packaged natives name no path of the machine that built them.** Source paths read `/cargo/...`, `/rustc/...` and `/sipral/...` instead of the builder's home directory and checkout, the macOS dylib's install name is `@rpath/libsipral_ffi.dylib`, and every packaging script fails a native that still holds such a path.
 
 ## [1.0.0] - 2026-10-02
 
