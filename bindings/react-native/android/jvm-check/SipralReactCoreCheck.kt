@@ -335,6 +335,31 @@ private fun aCallsOwnAudioIsSetAndReadBack(): String {
     return "a call's own gain and mute set and read back"
 }
 
+/** The platform's echo cancellation switched through the core on a client in
+ * device mode whose devices stay closed, and read back from its settings; a
+ * core in application mode has no devices to switch. */
+private fun theEchoCancellationIsSwitchedAndReadBack(): String {
+    val bob = Phone("bob")
+    try {
+        refusal("notSupported") { bob.core.setSystemEchoCancellation(false) }
+    } finally {
+        bob.core.close()
+    }
+    if (Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE == 0L) {
+        return "no audio engine in this build for the echo cancellation switch"
+    }
+    val alice = Phone("alice", SipralAudioMode.Device(SipralAudioActivation.MANUAL))
+    try {
+        alice.core.setSystemEchoCancellation(false)
+        assertEquals(false, alice.core.settings()["systemEchoCancellation"])
+        alice.core.setSystemEchoCancellation(true)
+        assertEquals(true, alice.core.settings()["systemEchoCancellation"])
+    } finally {
+        alice.core.close()
+    }
+    return "the echo cancellation switched and read back"
+}
+
 /** The rate a call's frames cross at, chosen through the core on a client in
  * application mode: 24 kHz is 480 samples a frame whatever the codec, a rate
  * outside the four is refused, and 0 is the codec's own again. */
@@ -482,7 +507,7 @@ fun main() {
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
             aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +
-            theRateOfACallsFramesIsChosen()
+            theRateOfACallsFramesIsChosen() + "; " + theEchoCancellationIsSwitchedAndReadBack()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

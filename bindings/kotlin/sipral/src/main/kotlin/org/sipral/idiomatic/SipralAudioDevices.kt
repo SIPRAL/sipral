@@ -17,6 +17,7 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralNative
 import org.sipral.SipralStatus
+import org.sipral.SipralToggle
 
 /**
  * Who runs a client's audio: `sipral_stack_config_t::audio`.
@@ -230,6 +231,20 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     }
 
     fun isMuted(direction: SipralAudioDirection): Boolean = Sipral.audioMuted(stack, direction.value.toLong()) != 0L
+
+    /**
+     * Turn the platform's own echo cancellation on or off on the running
+     * client (ABI 1.1): what `systemEchoCancellation` chose at [SipralClient.open].
+     * While the devices are open they are reopened at once with or without
+     * the platform's processing -- the voice-processing unit on macOS, the
+     * communications stream on Windows, the voice-communication preset on
+     * Android -- on the devices they were on, with the gain and the mute; a
+     * call keeps its media through a gap as long as the reopen. [status]
+     * says what the platform did, and `SipralClient.settings()` what is asked.
+     */
+    fun setSystemEchoCancellation(on: Boolean) {
+        Sipral.audioSetSystemEchoCancellation(stack, (if (on) SipralToggle.ON else SipralToggle.OFF).value.toLong())
+    }
 
     /** The meter: the recent peak of a direction, 0 for silence to 1 for
      * full scale, after the gain and the mute. Cheap enough for a UI timer;

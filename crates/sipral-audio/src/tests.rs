@@ -927,6 +927,128 @@ fn the_platforms_echo_cancellation_can_be_turned_off() {
     assert!(!engine.info().system_echo_cancellation);
 }
 
+/// Switched on a running engine, the platform's echo cancellation reopens
+/// the microphone and the loudspeaker on the devices they were on, with the
+/// gain and the mute of each direction, and the call goes on through them.
+#[test]
+fn the_platforms_echo_cancellation_switches_on_a_running_engine() {
+    let fake = a_desk();
+    fake.set_system_echo_cancellation(true);
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let headset = handle_of(&engine, "headset");
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    engine
+        .select(Role::Microphone, Selection::Device(headset))
+        .unwrap();
+    engine.set_gain(Direction::Output, Gain::from_ratio(0.5));
+    engine.set_muted(Direction::Input, true);
+    engine.activate().unwrap();
+    let call = FakeCallControl::new(8_000, 8_000, destination());
+    engine.attach(1, call.call()).unwrap();
+    wait_ticks(&engine, 3);
+    assert!(engine.info().system_echo_cancellation);
+    drain(&mut engine);
+    let opens_before = fake.opens();
+
+    engine.set_system_echo_cancellation(false);
+    assert!(!engine.system_echo_cancellation());
+    assert!(!fake.echo_cancellation_asked());
+    assert_eq!(
+        fake.opens(),
+        opens_before + 2,
+        "the microphone and the loudspeaker"
+    );
+    let info = engine.info();
+    assert!(info.active && !info.system_echo_cancellation);
+    assert_eq!(engine.running_on(Role::Microphone), Some(headset));
+    assert_eq!(engine.running_on(Role::Speaker), Some(headset));
+    assert_eq!(
+        drain(&mut engine),
+        vec![
+            Change::Reopened(Role::Microphone),
+            Change::Reopened(Role::Speaker)
+        ]
+    );
+    assert_eq!(engine.attached(), &[1]);
+
+    let heard = call.captured().len();
+    wait_ticks(&engine, 3);
+    for _ in 0..5 {
+        fake.speak_into("headset", &[10_000; 960]);
+    }
+    wait_ticks(&engine, 3);
+    assert_eq!(engine.gain(Direction::Output), Gain::from_ratio(0.5));
+    assert!(engine.is_muted(Direction::Input));
+    let played = fake.played_by("headset");
+    let tail = &played[played.len() - 480..];
+    assert!(
+        tail.iter().all(|s| (*s - 4_000).abs() < 100),
+        "the call's 8000 still halved on the reopened loudspeaker: {:?}",
+        &tail[..4]
+    );
+    let captured = call.captured();
+    assert!(captured.len() > heard, "the call is still carried");
+    assert!(
+        captured[heard..].iter().flatten().all(|s| *s == 0),
+        "the reopened microphone is still muted"
+    );
+
+    engine.set_system_echo_cancellation(true);
+    assert!(engine.info().system_echo_cancellation);
+    assert_eq!(engine.running_on(Role::Microphone), Some(headset));
+}
+
+/// On a duplex platform the switch reopens the one unit whole, both halves
+/// on the devices they were on, never two units at once.
+#[test]
+fn a_duplex_platform_switches_its_echo_cancellation_with_one_unit() {
+    let fake = a_duplex_desk();
+    fake.set_system_echo_cancellation(true);
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    let webcam = handle_of(&engine, "webcam");
+    let headset = handle_of(&engine, "headset");
+    engine
+        .select(Role::Microphone, Selection::Device(webcam))
+        .unwrap();
+    engine
+        .select(Role::Speaker, Selection::Device(headset))
+        .unwrap();
+    engine.activate().unwrap();
+    assert!(engine.info().system_echo_cancellation);
+    let units = fake.units_opened();
+
+    engine.set_system_echo_cancellation(false);
+    assert!(!engine.info().system_echo_cancellation);
+    assert_eq!(fake.units_opened(), units + 1, "the unit reopened once");
+    assert_eq!(fake.units_at_most(), 1);
+    assert_eq!(engine.running_on(Role::Microphone), Some(webcam));
+    assert_eq!(engine.running_on(Role::Speaker), Some(headset));
+    engine.deactivate();
+    assert_eq!(fake.units_alive(), 0);
+}
+
+/// Switched while nothing is open, or to what it already is, the setting
+/// opens nothing; the next activation opens with it.
+#[test]
+fn the_echo_cancellation_switch_opens_nothing_on_an_idle_engine() {
+    let fake = a_desk();
+    fake.set_system_echo_cancellation(true);
+    let (mut engine, _) = engine_with(Activation::Manual, &fake);
+    engine.refresh().unwrap();
+    engine.set_system_echo_cancellation(false);
+    assert_eq!(fake.opens(), 0);
+    assert!(!engine.info().active);
+    engine.activate().unwrap();
+    assert!(!engine.info().system_echo_cancellation);
+    let opens = fake.opens();
+    engine.set_system_echo_cancellation(false);
+    assert_eq!(fake.opens(), opens, "asked for what it already is");
+}
+
 /// One call's own mute and gain, in each direction, leave the other call
 /// alone: the far end of the muted call hears silence while the other's
 /// hears the microphone, and the call turned down is quieter in the

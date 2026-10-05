@@ -281,6 +281,21 @@ class Audio:
             )
         return bool(out[0])
 
+    def set_system_echo_cancellation(self, on: bool) -> None:
+        """Turn the platform's own echo cancellation on or off on the running
+        stack (ABI 1.1): what ``system_echo_cancellation`` chose at creation.
+        While the devices are open they are reopened at once with or without
+        the platform's processing, on the devices they were on, with the gain
+        and the mute; a call keeps its media through a gap as long as the
+        reopen. :meth:`info` says what the platform did, and
+        ``stack.settings().system_echo_cancellation`` what is asked.
+        ``SIPRAL_STATUS_WRONG_STATE`` in application mode."""
+        toggle = lib.SIPRAL_TOGGLE_ON if on else lib.SIPRAL_TOGGLE_OFF
+        _call(
+            lambda: lib.sipral_audio_set_system_echo_cancellation(self._handle, toggle),
+            "sipral_audio_set_system_echo_cancellation",
+        )
+
     def level(self, direction: int, *, call: "Call | None" = None) -> int:
         """The meter: the loudest sample of the last tenth of a second in
         ``direction``, 0 to 32767, held long enough that a bar drawn from it

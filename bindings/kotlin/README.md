@@ -165,6 +165,9 @@ devices past the platform's echo cancellation -- on Android the microphone
 with the voice-recognition preset rather than the voice-communication one --
 for a headset, which has no echo to cancel, or an application that cancels
 it on each call itself; `status()` says what the platform did.
+`audio.setSystemEchoCancellation(on)` switches it on the running client
+(ABI 1.1): open devices are reopened at once, where they were and with their
+gain and mute, and a call keeps its media through the short gap.
 
 ### Who is calling, why a call ended, and where it goes
 

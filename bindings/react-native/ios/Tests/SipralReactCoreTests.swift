@@ -399,6 +399,24 @@ final class SipralReactCoreTests: XCTestCase {
         refusal("notSupported") { try bob.core.setCallGain(taken, "output", 1) }
     }
 
+    /// The platform's echo cancellation switched through the core on a stack
+    /// in device mode whose devices stay closed, and read back from its
+    /// settings; a core in application mode has no devices to switch.
+    func testTheEchoCancellationIsSwitchedAndReadBack() throws {
+        let bob = try Phone("bob")
+        refusal("notSupported") { try bob.core.setSystemEchoCancellation(false) }
+        bob.core.close()
+        guard try Sipral.capabilities().features & Sipral.featureAudioDevice != 0 else {
+            throw XCTSkip("this build has no audio engine for this platform")
+        }
+        let alice = try Phone("alice", audio: .device(activation: .manual))
+        defer { alice.core.close() }
+        try alice.core.setSystemEchoCancellation(false)
+        XCTAssertEqual(try alice.core.settings()["systemEchoCancellation"] as? Bool, false)
+        try alice.core.setSystemEchoCancellation(true)
+        XCTAssertEqual(try alice.core.settings()["systemEchoCancellation"] as? Bool, true)
+    }
+
     /// The rate a call's frames cross at, chosen through the core on a stack
     /// in application mode: 24 kHz is 480 samples a frame whatever the codec,
     /// a rate outside the four is refused, and 0 is the codec's own again.

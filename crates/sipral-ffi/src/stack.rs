@@ -924,7 +924,8 @@ record! {
         /// `sipral_stack_diagnostic_trace` since (ABI 0.35).
         pub diagnostic_trace: Number<SipralToggle>,
         /// A `SipralToggle`: whether the platform's echo cancellation is
-        /// asked for, with the default filled in (ABI 0.35).
+        /// asked for, with the default filled in (ABI 0.35), as
+        /// `sipral_audio_set_system_echo_cancellation` left it (ABI 1.1).
         pub system_echo_cancellation: Number<SipralToggle>,
     }
 }
@@ -2090,9 +2091,10 @@ entry! {
     /// Read back what a stack is running with.
     ///
     /// Every value here was either given at creation or defaulted there, and
-    /// none of it changes afterwards. It is the other half of a configuration
-    /// call that answered `SIPRAL_STATUS_OK`: the call says the value was
-    /// taken, this says what it came to.
+    /// none of it changes afterwards but the two a running stack switches,
+    /// `diagnostic_trace` and `system_echo_cancellation`. It is the other
+    /// half of a configuration call that answered `SIPRAL_STATUS_OK`: the
+    /// call says the value was taken, this says what it came to.
     ///
     /// # Safety
     ///
@@ -2142,7 +2144,15 @@ entry! {
                     .unwrap_or(u32::MAX),
                 pseudonym_salted: toggle_of(state.asked.salted),
                 diagnostic_trace: toggle_of(state.log.diagnostic()),
-                system_echo_cancellation: toggle_of(state.asked.echo_cancellation),
+                system_echo_cancellation: toggle_of(state.audio.as_ref().map_or(
+                    state.asked.echo_cancellation,
+                    |audio| {
+                        audio
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .system_echo_cancellation()
+                    },
+                )),
             })
         })?;
         unsafe { write_versioned(out_settings, settings) }?;

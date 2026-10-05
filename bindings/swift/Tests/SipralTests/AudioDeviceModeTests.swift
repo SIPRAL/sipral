@@ -214,6 +214,54 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertFalse(try audio.status().isActive)
     }
 
+    /// ABI 1.1: the platform's echo cancellation switched on a running stack.
+    /// With the devices closed nothing opens and the settings read it back; a
+    /// stack whose application pumps the frames has no engine to switch.
+    func testTheEchoCancellationSwitchIsReadBackAndRefusedWithoutAnEngine() throws {
+        let pumped = try SipralStack(audio: .application)
+        defer { pumped.close() }
+        XCTAssertThrowsError(
+            try Sipral.audioSetSystemEchoCancellation(stack: pumped.handle, on: SipralToggle.off.rawValue)
+        ) {
+            XCTAssertEqual(($0 as? SipralError)?.status, .wrongState)
+        }
+        let stack = try deviceStack()
+        defer { stack.close() }
+        let audio = try XCTUnwrap(stack.audio)
+        try audio.setSystemEchoCancellation(false)
+        XCTAssertFalse(try stack.settings().systemEchoCancellation)
+        XCTAssertFalse(try audio.status().isActive, "the switch opened the devices")
+        try audio.setSystemEchoCancellation(true)
+        XCTAssertTrue(try stack.settings().systemEchoCancellation)
+    }
+
+    /// The switch on open devices reopens them at once, where they were and
+    /// with the gain and the mute, and the status says what the platform did.
+    func testTheEchoCancellationSwitchReopensTheOpenDevices() throws {
+        let stack = try openingStack(.manual)
+        defer { stack.close() }
+        let audio = try XCTUnwrap(stack.audio)
+        try audio.setMuted(true, for: .output)
+        try audio.setGain(0.5, for: .input)
+        try audio.activate()
+        let before = try audio.status()
+
+        try audio.setSystemEchoCancellation(false)
+        let off = try audio.status()
+        XCTAssertTrue(off.isActive)
+        XCTAssertFalse(off.systemEchoCancellation, "the platform's processing is still behind the microphone")
+        XCTAssertEqual(off.speaker, before.speaker)
+        XCTAssertEqual(off.microphone, before.microphone)
+        XCTAssertTrue(try audio.isMuted(.output))
+        XCTAssertEqual(try audio.gain(for: .input), 0.5)
+
+        try audio.setSystemEchoCancellation(true)
+        #if os(macOS) || os(iOS)
+        XCTAssertTrue(try audio.status().systemEchoCancellation, "the voice-processing unit is back")
+        #endif
+        try audio.deactivate()
+    }
+
     func testARingOpensTheDevicesUnderAutomaticActivationAndItsEndClosesThem() async throws {
         let stack = try openingStack(.automatic)
         defer { stack.close() }

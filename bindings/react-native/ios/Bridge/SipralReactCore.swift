@@ -380,6 +380,12 @@ public final class SipralReactCore: @unchecked Sendable {
         try guarded { try devices().setMuted(muted, for: .input) }
     }
 
+    /// `sipral_audio_set_system_echo_cancellation`: open devices reopened at
+    /// once with or without the voice-processing unit, where they were.
+    public func setSystemEchoCancellation(_ on: Bool) throws {
+        try guarded { try devices().setSystemEchoCancellation(on) }
+    }
+
     public func setDiagnosticTrace(_ on: Bool) throws {
         try guarded { try open().setDiagnosticTrace(on) }
     }

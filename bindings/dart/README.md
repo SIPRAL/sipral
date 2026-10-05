@@ -93,7 +93,9 @@ its calls offer in order, whether a pseudonym salt was given, and whether
 the diagnostic trace is whole now. The application runs every call's audio
 here, so the library opens no device: a call's own gain and mute and the
 platform's echo cancellation are the device engine's, and the application
-scales or mutes the PCM it hands `SipralMedia.sendAudio` itself.
+scales or mutes the PCM it hands `SipralMedia.sendAudio` itself;
+`setSystemEchoCancellation`, the switch every other layer has on a running
+stack (ABI 1.1), throws `wrongState` here for that reason.
 
 A stack holds 128 calls at once unless `maxDialogs` says otherwise: past
 it an incoming call is answered 503 with `Retry-After: 2` and `placeCall`

@@ -166,6 +166,8 @@ export interface Spec extends TurboModule {
   activateAudio(): Promise<void>;
   deactivateAudio(): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
+  /** `sipral_audio_set_system_echo_cancellation`: the devices reopened at once with or without the platform's canceller. */
+  setSystemEchoCancellation(on: boolean): Promise<void>;
   setDiagnosticTrace(on: boolean): Promise<void>;
   /** One call's own gain in one direction, "input" or "output", 1 for unity. */
   setCallGain(call: string, direction: string, gain: CodegenTypes.Double): Promise<void>;

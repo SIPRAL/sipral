@@ -236,6 +236,13 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge setMuted:muted resolve:resolve reject:reject];
 }
 
+- (void)setSystemEchoCancellation:(BOOL)on
+                          resolve:(RCTPromiseResolveBlock)resolve
+                           reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setSystemEchoCancellation:on resolve:resolve reject:reject];
+}
+
 - (void)setDiagnosticTrace:(BOOL)on resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
 {
   [_bridge setDiagnosticTrace:on resolve:resolve reject:reject];

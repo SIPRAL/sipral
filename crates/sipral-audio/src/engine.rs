@@ -560,6 +560,52 @@ impl Engine {
         }
     }
 
+    // -- the platform's echo cancellation -----------------------------------
+
+    /// Ask for the platform's own echo cancellation behind the microphone,
+    /// or for the devices without it, from now on: what
+    /// [`Config::system_echo_cancellation`] said at creation.
+    ///
+    /// While the engine is active the microphone and the loudspeaker are
+    /// reopened at once on the devices they were on, with the gain and the
+    /// mute of each direction, and each says so with a `Reopened` event; a
+    /// call carried meanwhile keeps its media and hears a gap of as long as
+    /// the platform takes to open them. Asking for what is already asked
+    /// for opens nothing. [`Info::system_echo_cancellation`] says what the
+    /// platform did.
+    pub fn set_system_echo_cancellation(&mut self, on: bool) {
+        if self.config.system_echo_cancellation == on {
+            return;
+        }
+        self.config.system_echo_cancellation = on;
+        if !self.is_active() {
+            return;
+        }
+        self.finish_opening();
+        // a duplex platform reopens its one unit whole from the loudspeaker
+        if !self.duplex_only {
+            self.reopen(
+                Role::Microphone,
+                Origin::Engine,
+                Change::Reopened(Role::Microphone),
+                false,
+            );
+        }
+        self.reopen(
+            Role::Speaker,
+            Origin::Engine,
+            Change::Reopened(Role::Speaker),
+            false,
+        );
+    }
+
+    /// Whether the platform's own echo cancellation is asked for: what the
+    /// devices open with next, and what the ones open now were opened with.
+    #[must_use]
+    pub const fn system_echo_cancellation(&self) -> bool {
+        self.config.system_echo_cancellation
+    }
+
     // -- calls --------------------------------------------------------------
 
     /// Carry this call's audio: its playback to the loudspeaker, the
@@ -982,6 +1028,7 @@ impl Engine {
         let microphone = self.identity_for(Role::Microphone);
         let speaker = self.identity_for(Role::Speaker);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
+        let echo = self.config.system_echo_cancellation;
         let backend = Arc::clone(&self.backend);
         let opened = probe(self.config.probe_wait, move || {
             let mut backend = match backend.try_lock() {
@@ -989,6 +1036,8 @@ impl Engine {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return Err(BackendError::TimedOut),
             };
+            // switched on a running engine, so said again before every open
+            backend.set_system_echo_cancellation(echo);
             // both devices at once: a duplex platform opens its one unit
             // with each half on its own device and answers with the two
             Ok(backend.open_duplex(microphone.as_deref(), speaker.as_deref(), wanted))
@@ -1003,6 +1052,7 @@ impl Engine {
         self.wait_closed();
         let identity = self.identity_for(role);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
+        let echo = self.config.system_echo_cancellation;
         let backend = Arc::clone(&self.backend);
         probe(self.config.probe_wait, move || {
             let mut backend = match backend.try_lock() {
@@ -1010,6 +1060,7 @@ impl Engine {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return Err(BackendError::TimedOut),
             };
+            backend.set_system_echo_cancellation(echo);
             if role == Role::Ringer {
                 backend.open_ringer(identity.as_deref(), wanted)
             } else {
@@ -1022,6 +1073,7 @@ impl Engine {
         self.wait_closed();
         let identity = self.identity_for(role);
         let wanted = Format::twenty_ms(self.config.device_rate_hz);
+        let echo = self.config.system_echo_cancellation;
         let backend = Arc::clone(&self.backend);
         probe(self.config.probe_wait, move || {
             let mut backend = match backend.try_lock() {
@@ -1029,6 +1081,7 @@ impl Engine {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return Err(BackendError::TimedOut),
             };
+            backend.set_system_echo_cancellation(echo);
             backend.open_capture(identity.as_deref(), wanted)
         })
     }
@@ -1094,6 +1147,7 @@ impl Engine {
         let closing = self.closing.clone();
         let backend = Arc::clone(&self.backend);
         let format = Format::twenty_ms(self.config.device_rate_hz);
+        let echo = self.config.system_echo_cancellation;
         let wait = self.config.probe_wait;
         let (reply, answer) = mpsc::channel();
         let done = Arc::new(Done::default());
@@ -1108,7 +1162,7 @@ impl Engine {
                 if let Some(settled) = settled {
                     let _ = settled.recv_timeout(Duration::from_secs(1));
                 }
-                let landing = open_in_background(&backend, &asked, pair, format);
+                let landing = open_in_background(&backend, &asked, pair, format, echo);
                 // nobody is waiting for it any more: the devices are let go
                 // of here, on this thread, rather than on whoever asked
                 let _ = reply.send(landing);
@@ -1610,8 +1664,10 @@ fn open_in_background(
     asked: &[(Role, Option<String>)],
     pair: bool,
     wanted: Format,
+    echo: bool,
 ) -> Landing {
     let mut backend = backend.lock().unwrap_or_else(PoisonError::into_inner);
+    backend.set_system_echo_cancellation(echo);
     let wants = |role: Role| asked.iter().any(|(asked, _)| *asked == role);
     let identity = |role: Role| {
         asked

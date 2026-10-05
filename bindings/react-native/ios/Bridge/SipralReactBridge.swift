@@ -109,6 +109,10 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.setMuted(muted) }
     }
 
+    @objc public func setSystemEchoCancellation(_ on: Bool, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.setSystemEchoCancellation(on) }
+    }
+
     @objc public func setDiagnosticTrace(_ on: Bool, resolve: @escaping Resolve, reject: @escaping Reject) {
         settle(resolve, reject) { try self.core.setDiagnosticTrace(on) }
     }

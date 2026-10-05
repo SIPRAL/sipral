@@ -748,11 +748,20 @@ export class SipralClient {
     };
   }
 
-  /** The audio devices: the library runs them, this only says when and whether the microphone is heard. */
+  /**
+   * The audio devices: the library runs them, this only says when they are
+   * open, whether the microphone is heard, and whether the platform's own
+   * echo cancellation runs behind it. `setSystemEchoCancellation` switches
+   * that on the running client (ABI 1.1): open devices are reopened at once
+   * with or without it, where they were and with the mute, and a call keeps
+   * its media through a gap as long as the reopen; `settings()` reads it back.
+   */
   readonly audio = {
     activate: (): Promise<void> => this.run(() => undefined, (native) => native.activateAudio()),
     deactivate: (): Promise<void> => this.run(() => undefined, (native) => native.deactivateAudio()),
     setMuted: (muted: boolean): Promise<void> => this.run(() => undefined, (native) => native.setMuted(muted)),
+    setSystemEchoCancellation: (on: boolean): Promise<void> =>
+      this.run(() => undefined, (native) => native.setSystemEchoCancellation(on)),
   };
 
   /** Close the stack. Every call and account of it is gone afterwards. */

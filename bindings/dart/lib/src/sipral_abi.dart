@@ -3895,7 +3895,8 @@ final class SipralStackSettings extends ffi.Struct {
   external int diagnosticTrace;
 
   /// A `SipralToggle`: whether the platform's echo cancellation is
-  /// asked for, with the default filled in (ABI 0.35).
+  /// asked for, with the default filled in (ABI 0.35), as
+  /// `sipral_audio_set_system_echo_cancellation` left it (ABI 1.1).
   @ffi.Uint32()
   external int systemEchoCancellation;
 }
@@ -8232,9 +8233,10 @@ final class Sipral {
   /// Read back what a stack is running with.
   ///
   /// Every value here was either given at creation or defaulted there, and
-  /// none of it changes afterwards. It is the other half of a configuration
-  /// call that answered `SIPRAL_STATUS_OK`: the call says the value was
-  /// taken, this says what it came to.
+  /// none of it changes afterwards but the two a running stack switches,
+  /// `diagnostic_trace` and `system_echo_cancellation`. It is the other
+  /// half of a configuration call that answered `SIPRAL_STATUS_OK`: the
+  /// call says the value was taken, this says what it came to.
   ///
   /// Safety
   ///
@@ -11342,6 +11344,33 @@ final class Sipral {
   late final int Function(int stack, ffi.Pointer<SipralAudioInfo> outInfo) audioInfo = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralAudioInfo> outInfo),
       int Function(int stack, ffi.Pointer<SipralAudioInfo> outInfo)>('sipral_audio_info');
+
+  /// Turn the platform's own echo cancellation on or off on a running
+  /// stack: `on` is a `SipralToggle`, and zero leaves it as it is
+  /// (ABI 1.1). What `sipral_stack_config_t::system_echo_cancellation`
+  /// chose at creation, without a new stack.
+  ///
+  /// Takes effect at once. While the devices are open the microphone and
+  /// the loudspeaker are reopened with or without the platform's
+  /// processing — the voice-processing unit on macOS and iOS, the
+  /// communications stream on Windows, the voice-communication preset on
+  /// Android — on the devices they were on, with the gain and the mute of
+  /// each direction, and each says so with `SIPRAL_AUDIO_CHANGE_REOPENED`
+  /// from the engine. A call in progress keeps its media and hears a gap
+  /// of as long as the platform takes to open them; a direction the
+  /// platform refuses is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any
+  /// reopen. With the devices closed, the next open uses it.
+  /// `sipral_audio_info_t::system_echo_cancellation` says what the
+  /// platform did, and `sipral_stack_settings_t::system_echo_cancellation`
+  /// what is asked for. `SIPRAL_STATUS_WRONG_STATE` in application mode,
+  /// where the devices are the application's, whatever `on` says.
+  ///
+  /// Safety
+  ///
+  /// Reads no memory the caller owns.
+  late final int Function(int stack, int on) audioSetSystemEchoCancellation = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Uint32 on),
+      int Function(int stack, int on)>('sipral_audio_set_system_echo_cancellation');
 
   /// Send this stack's log to `callback`, at `level` and louder — or turn
   /// it off with `SIPRAL_LOG_LEVEL_OFF` or a null callback.

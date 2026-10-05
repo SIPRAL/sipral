@@ -9,6 +9,8 @@
 package org.sipral.jvm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,12 +29,15 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.sipral.Sipral;
 import org.sipral.SipralAbiVersion;
+import org.sipral.SipralAudioActivation;
 import org.sipral.SipralCallState;
 import org.sipral.SipralEventKind;
 import org.sipral.SipralException;
 import org.sipral.SipralStatus;
 import org.sipral.SipralTransport;
 import org.sipral.idiomatic.SipralAccount;
+import org.sipral.idiomatic.SipralAudioDevices;
+import org.sipral.idiomatic.SipralAudioMode;
 import org.sipral.idiomatic.SipralCall;
 import org.sipral.idiomatic.SipralClient;
 import org.sipral.idiomatic.SipralMedia;
@@ -203,6 +208,30 @@ class LoopbackCallJavaIT {
                 mediaB.setAppRate(0);
                 assertEquals(codecRate, mediaB.getSampleRate());
             }
+        }
+    }
+
+    /** The platform's echo cancellation switched on a running client from
+     * Java (ABI 1.1): a client in application mode has no engine to switch,
+     * and one in device mode, its devices closed, opens nothing and reads
+     * the switch back from its settings. */
+    @Test
+    void theEchoCancellationIsSwitchedOnARunningClient() throws Exception {
+        try (SipralClient pumped = SipralJava.open("127.0.0.1")) {
+            assertNull(pumped.getAudio());
+            assertTrue(pumped.settings().getSystemEchoCancellation());
+        }
+        if ((Sipral.INSTANCE.capabilities().getFeatures() & Sipral.FEATURE_AUDIO_DEVICE) == 0) {
+            return;
+        }
+        try (SipralClient client = SipralJava.open(
+                "127.0.0.1", 0, null, new SipralAudioMode.Device(SipralAudioActivation.MANUAL))) {
+            SipralAudioDevices audio = client.getAudio();
+            audio.setSystemEchoCancellation(false);
+            assertFalse(client.settings().getSystemEchoCancellation());
+            assertFalse(audio.status().isActive());
+            audio.setSystemEchoCancellation(true);
+            assertTrue(client.settings().getSystemEchoCancellation());
         }
     }
 

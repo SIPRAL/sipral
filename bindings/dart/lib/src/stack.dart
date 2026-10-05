@@ -584,6 +584,21 @@ final class SipralStack {
     );
   }
 
+  /// Turn the platform's own echo cancellation on or off while the stack
+  /// runs (`sipral_audio_set_system_echo_cancellation`, ABI 1.1): the devices
+  /// the library opens are reopened at once with or without it. This layer
+  /// runs every call's audio in the application, where the library opens no
+  /// device, so the library refuses it with `SipralStatus.wrongState`, as it
+  /// does every `sipral_audio_*` call on such a stack.
+  void setSystemEchoCancellation(bool on) {
+    _ensureOpen();
+    _check(
+      _sipral,
+      'sipral_audio_set_system_echo_cancellation',
+      _sipral.audioSetSystemEchoCancellation(_handle, _toggle(on)),
+    );
+  }
+
   /// What the stack runs with, every default filled in
   /// (`sipral_stack_settings`), with the SRTP suites its calls offer in
   /// order (`sipral_stack_srtp_suite_order`).

@@ -110,6 +110,9 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     override fun setMuted(muted: Boolean, promise: Promise) = settle(promise) { core.setMuted(muted) }
 
+    override fun setSystemEchoCancellation(on: Boolean, promise: Promise) =
+        settle(promise) { core.setSystemEchoCancellation(on) }
+
     override fun setDiagnosticTrace(on: Boolean, promise: Promise) = settle(promise) { core.setDiagnosticTrace(on) }
 
     override fun setCallGain(call: String, direction: String, gain: Double, promise: Promise) =

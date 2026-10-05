@@ -146,6 +146,9 @@ a hold or a local conference and back, and raise
 opens the devices past the platform's echo cancellation, for a headset,
 which has no echo to cancel, or an application that cancels it on each call
 itself; `info()` says what the platform did.
+`stack.audio.set_system_echo_cancellation(on)` switches it on the running
+stack (ABI 1.1): open devices are reopened at once, where they were and with
+their gain and mute, and a call keeps its media through the short gap.
 
 ## Who is calling, why a call ended, where it went
 

@@ -85,6 +85,13 @@ class AStackPicksWhoPumpsItsAudio(unittest.TestCase):
             self.assertNotIn("\0", str(raised.exception))
             self.assertTrue(str(raised.exception).endswith("pumps its own frames"), str(raised.exception))
 
+    def test_the_echo_cancellation_switch_is_refused_in_application_mode(self) -> None:
+        with Stack(audio=AudioMode.APPLICATION) as stack:
+            with self.assertRaises(SipralError) as raised:
+                stack.audio.set_system_echo_cancellation(False)
+            self.assertEqual(raised.exception.status, Status.WRONG_STATE)
+            self.assertTrue(stack.settings().system_echo_cancellation)
+
     @unittest.skipIf(_HAS_DEVICES, "this build has an audio backend")
     def test_device_mode_on_a_build_without_a_backend_is_refused(self) -> None:
         with self.assertRaises(SipralError) as raised:
@@ -114,6 +121,13 @@ class TheDevicesAreTheLibrarys(unittest.TestCase):
             {device.name: device.id for device in listed},
             {device.name: device.id for device in again if device.present},
         )
+
+    def test_the_echo_cancellation_switch_opens_nothing_and_is_read_back(self) -> None:
+        self.audio.set_system_echo_cancellation(False)
+        self.assertFalse(self.stack.settings().system_echo_cancellation)
+        self.assertFalse(self.audio.info().active, "the switch opened the devices")
+        self.audio.set_system_echo_cancellation(True)
+        self.assertTrue(self.stack.settings().system_echo_cancellation)
 
     def test_the_speaker_is_chosen_on_its_own_and_read_back(self) -> None:
         speaker = next(device for device in self.audio.devices() if device.is_speaker)
@@ -321,6 +335,39 @@ class ACallOnRealDevicesCarriesAudioBothWays(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(loudest, 1000, "the loudspeaker's meter")
         self.assertGreater(answered.media.frames.qsize(), 50, "frames the far end decoded")
         self.assertGreater(call.media.statistics()["packets_sent"], 50, "packets through the callback")
+
+
+
+@unittest.skipUnless(
+    _HAS_DEVICES and os.environ.get("SIPRAL_AUDIO_DEVICES") == "1",
+    "opens the machine's real devices: set SIPRAL_AUDIO_DEVICES=1 where a test may",
+)
+class TheEchoCancellationSwitchReopensTheOpenDevices(unittest.TestCase):
+    """The switch on open devices reopens them where they were, with the gain
+    and the mute, and the info says what the platform did. Opt-in."""
+
+    def test_the_devices_are_kept_and_the_state_read_back(self) -> None:
+        with Stack(audio=AudioMode.DEVICE, audio_activation=AudioActivation.MANUAL) as stack:
+            audio = stack.audio
+            devices = audio.refresh()
+            for role in (AudioRole.SPEAKER, AudioRole.MICROPHONE):
+                quiet = quiet_device(devices, role)
+                if quiet is not None:
+                    audio.select(role, quiet)
+            audio.set_muted(AudioDirection.OUTPUT, True)
+            audio.set_gain(AudioDirection.INPUT, 0.5)
+            audio.activate()
+            before = audio.info()
+            audio.set_system_echo_cancellation(False)
+            off = audio.info()
+            self.assertTrue(off.active)
+            self.assertFalse(off.system_echo_cancellation)
+            self.assertEqual((off.speaker, off.microphone), (before.speaker, before.microphone))
+            self.assertTrue(audio.muted(AudioDirection.OUTPUT))
+            self.assertEqual(audio.gain(AudioDirection.INPUT), 0.5)
+            audio.set_system_echo_cancellation(True)
+            self.assertTrue(stack.settings().system_echo_cancellation)
+            audio.deactivate()
 
 
 if __name__ == "__main__":

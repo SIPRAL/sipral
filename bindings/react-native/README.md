@@ -120,7 +120,9 @@ sends silence in place of the microphone, on every call.
 `systemEchoCancellation: false` bypasses the voice-processing unit's
 processing on iOS and opens the microphone with the voice-recognition preset
 on Android, for a headset, which has no echo to cancel, or an application
-that cancels it on each call itself. `client.settings()` reads back what the
+that cancels it on each call itself; `client.audio.setSystemEchoCancellation(on)`
+switches it on the running client, reopening open devices at once where they
+were, a call keeping its media through the short gap. `client.settings()` reads back what the
 stack runs with: the transport, the codecs' count and frame, the SRTP suites
 the calls offer in order by name, whether a pseudonym salt was given,
 whether the diagnostic trace is whole now, and the echo switch.

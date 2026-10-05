@@ -2047,7 +2047,8 @@ step_kotlin_on_a_jvm() {
 # What a Mac can run of them runs: the loader's choice of platform and its
 # ELF reading, and the Java caller's loopback call, account on a TCP
 # connection of its own, realms and raised ceilings through SipralJava, the
-# application's frame rate and the ABI check's 1.x rule, with the shim found on
+# application's frame rate, the echo cancellation switch and the ABI check's
+# 1.x rule, with the shim found on
 # java.library.path as in the kotlin area. The two tests that need Linux --
 # the running JVM loading its own pair out of the jar, and the Kotlin
 # loopback call that asserts it runs from the packaged jar -- run in
@@ -2113,14 +2114,14 @@ step_jvm() {
             skipped=$(printf '%s\n' "$ran" | sed -n 's/.*\[ *\([0-9]*\) tests aborted *\].*/\1/p' | tail -1)
             warned=$(printf '%s\n' "$ran" \
                 | grep -E 'WARNING in native method|WARNING: JNI|FATAL ERROR in native method' || true)
-            if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 11 ] || [ "${skipped:-0}" -ne 1 ]; then
-                fail "bindings/jvm's tests, the loader's five and the Java caller's six (${succeeded:-0} of 11 passed, ${skipped:-0} of 1 skipped by its assumption):"
+            if [ "$exited" -ne 0 ] || [ "${succeeded:-0}" -ne 12 ] || [ "${skipped:-0}" -ne 1 ]; then
+                fail "bindings/jvm's tests, the loader's five and the Java caller's seven (${succeeded:-0} of 12 passed, ${skipped:-0} of 1 skipped by its assumption):"
                 printf '%s\n' "$ran" | grep -vE '^[[:space:]]+at ' | tail -40 | sed 's/^/        /'
             elif [ -n "$warned" ]; then
                 fail "-Xcheck:jni found something wrong under SipralJava:"
                 printf '%s\n' "$warned" | sed 's/^/        /'
             else
-                pass "bindings/jvm: the loader's platform and ELF checks, a Java loopback call, an account on a TCP connection of its own, its realms, the raised ceilings, the application's frame rate and the ABI check's 1.x rule through the Java layer (11 tests; the staged pairs' check skipped, as no natives are staged off Linux)"
+                pass "bindings/jvm: the loader's platform and ELF checks, a Java loopback call, an account on a TCP connection of its own, its realms, the raised ceilings, the application's frame rate, the echo cancellation switch and the ABI check's 1.x rule through the Java layer (12 tests; the staged pairs' check skipped, as no natives are staged off Linux)"
             fi
         fi
         rm -rf "$jvm_classes"

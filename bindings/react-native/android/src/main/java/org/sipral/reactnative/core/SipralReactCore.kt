@@ -303,6 +303,10 @@ class SipralReactCore(
 
     fun setMuted(muted: Boolean) = guarded { devices().setMuted(SipralAudioDirection.INPUT, muted) }
 
+    /** `sipral_audio_set_system_echo_cancellation`: open devices reopened at
+     * once with or without the platform's canceller, where they were. */
+    fun setSystemEchoCancellation(on: Boolean) = guarded { devices().setSystemEchoCancellation(on) }
+
     fun setDiagnosticTrace(on: Boolean) = guarded { open().setDiagnosticTrace(on) }
 
     /** One call's own gain in one direction, "input" or "output". */

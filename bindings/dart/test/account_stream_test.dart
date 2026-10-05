@@ -372,4 +372,22 @@ void main() {
     given.setDiagnosticTrace(false);
     expect(given.settings().diagnosticTrace, isFalse);
   });
+
+  test(
+    'the echo cancellation switch is refused where the application runs the audio',
+    () async {
+      final plain = await stack();
+      expect(
+        () => plain.setSystemEchoCancellation(false),
+        throwsA(
+          isA<SipralException>().having(
+            (refused) => refused.status,
+            'status',
+            SipralStatus.wrongState,
+          ),
+        ),
+      );
+      expect(plain.settings().systemEchoCancellation, isTrue);
+    },
+  );
 }

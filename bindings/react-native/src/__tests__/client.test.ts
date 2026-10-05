@@ -594,6 +594,14 @@ describe('digits and audio', () => {
       {method: 'deactivateAudio', args: []},
     ]);
   });
+
+  it('switches the platform\'s echo cancellation through the native half, and passes a refusal on', async () => {
+    const {client, native} = await opened();
+    await client.audio.setSystemEchoCancellation(false);
+    expect(native.calls.slice(-1)).toEqual([{method: 'setSystemEchoCancellation', args: [false]}]);
+    native.failNext('setSystemEchoCancellation', 'wrongState', 'this stack runs its audio in application mode');
+    expect((await refusal(client.audio.setSystemEchoCancellation(true))).code).toBe('wrongState');
+  });
 });
 
 describe('closing', () => {

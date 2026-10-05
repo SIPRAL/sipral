@@ -48,6 +48,7 @@ use sipral_audio::{
 use crate::abi::{Number, alias, codes, record};
 use crate::error::{Fail, entry, fail};
 use crate::handle::SipralHandle;
+use crate::media::SipralToggle;
 use crate::stack::{SipralStackConfig, SipralTransport, audio_of};
 use crate::status::SipralStatus;
 use crate::versioned::{Versioned, write_versioned};
@@ -1162,6 +1163,51 @@ entry! {
 }
 
 entry! {
+    /// Turn the platform's own echo cancellation on or off on a running
+    /// stack: `on` is a `SipralToggle`, and zero leaves it as it is
+    /// (ABI 1.1). What `sipral_stack_config_t::system_echo_cancellation`
+    /// chose at creation, without a new stack.
+    ///
+    /// Takes effect at once. While the devices are open the microphone and
+    /// the loudspeaker are reopened with or without the platform's
+    /// processing — the voice-processing unit on macOS and iOS, the
+    /// communications stream on Windows, the voice-communication preset on
+    /// Android — on the devices they were on, with the gain and the mute of
+    /// each direction, and each says so with `SIPRAL_AUDIO_CHANGE_REOPENED`
+    /// from the engine. A call in progress keeps its media and hears a gap
+    /// of as long as the platform takes to open them; a direction the
+    /// platform refuses is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any
+    /// reopen. With the devices closed, the next open uses it.
+    /// `sipral_audio_info_t::system_echo_cancellation` says what the
+    /// platform did, and `sipral_stack_settings_t::system_echo_cancellation`
+    /// what is asked for. `SIPRAL_STATUS_WRONG_STATE` in application mode,
+    /// where the devices are the application's, whatever `on` says.
+    ///
+    /// # Safety
+    ///
+    /// Reads no memory the caller owns.
+    fn sipral_audio_set_system_echo_cancellation(stack: SipralHandle, on: Number<SipralToggle>) {
+        let on = match on {
+            0 => None,
+            1 => Some(true),
+            2 => Some(false),
+            other => {
+                return Err(fail(
+                    SipralStatus::InvalidArgument,
+                    format!("on is {other}, and a toggle is 0 to leave it, 1 for on or 2 for off"),
+                ));
+            }
+        };
+        with_engine(stack, |engine| {
+            if let Some(on) = on {
+                engine.set_system_echo_cancellation(on);
+            }
+            Ok(())
+        })
+    }
+}
+
+entry! {
     /// What the engine is doing: whether it is active, whether the platform
     /// cancels echo, the delay a canceller needs, and where each role runs.
     ///
@@ -1199,7 +1245,8 @@ pub(crate) mod tests {
         sipral_audio_deactivate, sipral_audio_device_at, sipral_audio_device_count,
         sipral_audio_gain, sipral_audio_info, sipral_audio_level, sipral_audio_muted,
         sipral_audio_refresh, sipral_audio_ring, sipral_audio_select, sipral_audio_selection,
-        sipral_audio_set_gain, sipral_audio_set_muted, sipral_audio_stop_ringing,
+        sipral_audio_set_gain, sipral_audio_set_muted, sipral_audio_set_system_echo_cancellation,
+        sipral_audio_stop_ringing,
     };
     use super::{
         sipral_audio_call_gain, sipral_audio_call_level, sipral_audio_call_muted,
@@ -1209,7 +1256,9 @@ pub(crate) mod tests {
     use crate::error::last_error_text;
     use crate::event::SipralEventKind;
     use crate::handle::SipralHandle;
+    use crate::media::SipralToggle;
     use crate::stack::tests::{Observed, config, create, poll, record};
+    use crate::stack::{SipralStackSettings, sipral_stack_settings};
     use crate::status::SipralStatus;
     use sipral_audio::Direction;
     use sipral_audio::fake::FakeControl;
@@ -1465,6 +1514,137 @@ pub(crate) mod tests {
         assert!(!fake.echo_cancellation_asked());
         assert_eq!(unsafe { sipral_audio_activate(stack) }, SipralStatus::Ok);
         assert_eq!(info(stack).system_echo_cancellation, 0);
+    }
+
+    fn asked_echo_cancellation(stack: SipralHandle) -> u32 {
+        let mut settings = SipralStackSettings {
+            size: size_of::<SipralStackSettings>(),
+            ..unsafe { std::mem::zeroed() }
+        };
+        let status = unsafe { sipral_stack_settings(stack, &raw mut settings) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        settings.system_echo_cancellation
+    }
+
+    /// ABI 1.1: the platform's echo cancellation switched on a running stack
+    /// reopens the devices at once, where they were and with the gain and
+    /// the mute, the call still carried; the info and the settings say so.
+    #[test]
+    fn the_echo_cancellation_switches_on_a_running_stack() {
+        let mut observed = Observed::default();
+        let fake = a_desk();
+        fake.set_system_echo_cancellation(true);
+        let (stack, call, packets) =
+            device_call(&mut observed, &fake, SipralAudioActivation::Manual);
+        let headset = id_of(stack, "USB Headset");
+        let speaker = SipralAudioRole::Speaker as u32;
+        let input = SipralAudioDirection::Input as u32;
+        let output = SipralAudioDirection::Output as u32;
+        assert_eq!(
+            unsafe { sipral_audio_select(stack, speaker, headset) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_audio_set_gain(stack, output, u32::from(GAIN_UNITY / 2)) },
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            unsafe { sipral_audio_set_muted(stack, input, 1) },
+            SipralStatus::Ok
+        );
+        assert_eq!(unsafe { sipral_audio_activate(stack) }, SipralStatus::Ok);
+        assert_eq!(info(stack).system_echo_cancellation, 1);
+        assert_eq!(asked_echo_cancellation(stack), SipralToggle::On as u32);
+        poll(stack, 2_500);
+        observed.audio.clear();
+        let opens = fake.opens();
+
+        assert_eq!(
+            unsafe { sipral_audio_set_system_echo_cancellation(stack, SipralToggle::Off as u32) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(fake.opens(), opens + 2, "both directions reopened at once");
+        assert!(!fake.echo_cancellation_asked());
+        let now = info(stack);
+        assert_eq!((now.active, now.system_echo_cancellation), (1, 0));
+        assert_eq!(now.speaker, headset, "the loudspeaker stayed on its device");
+        assert_eq!(asked_echo_cancellation(stack), SipralToggle::Off as u32);
+        let (mut gain, mut muted) = (u32::MAX, u32::MAX);
+        assert_eq!(
+            unsafe { sipral_audio_gain(stack, output, &raw mut gain) },
+            SipralStatus::Ok
+        );
+        assert_eq!(gain, u32::from(GAIN_UNITY / 2));
+        assert_eq!(
+            unsafe { sipral_audio_muted(stack, input, &raw mut muted) },
+            SipralStatus::Ok
+        );
+        assert_eq!(muted, 1);
+        poll(stack, 2_600);
+        let reopened = SipralAudioChange::Reopened as u32;
+        let engine_said = SipralAudioOrigin::Engine as u32;
+        assert!(
+            audio_events(&observed).contains(&(reopened, engine_said, speaker, headset)),
+            "{:?}",
+            audio_events(&observed)
+        );
+        let sent = packets.lock().unwrap().len();
+        for _ in 0..12 {
+            fake.speak_into("builtin-mic", &[4_000; 960]);
+        }
+        wait_until("the call to go on being carried", || {
+            packets
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(sent)
+                .any(|(on, _, _)| *on == call)
+        });
+
+        assert_eq!(
+            unsafe {
+                sipral_audio_set_system_echo_cancellation(stack, SipralToggle::Default as u32)
+            },
+            SipralStatus::Ok
+        );
+        assert_eq!(fake.opens(), opens + 2, "zero leaves it as it is");
+        assert_eq!(
+            unsafe { sipral_audio_set_system_echo_cancellation(stack, 3) },
+            SipralStatus::InvalidArgument
+        );
+        assert!(last_error_text().contains("on is 3"));
+        assert_eq!(
+            info(stack).system_echo_cancellation,
+            0,
+            "a refusal changes nothing"
+        );
+        assert_eq!(
+            unsafe { sipral_audio_set_system_echo_cancellation(stack, SipralToggle::On as u32) },
+            SipralStatus::Ok
+        );
+        assert_eq!(info(stack).system_echo_cancellation, 1);
+        hangup(stack, call, 3_000);
+    }
+
+    /// In application mode the devices are the application's, and there is
+    /// nothing to switch.
+    #[test]
+    fn the_echo_cancellation_switch_is_refused_in_application_mode() {
+        let mut observed = Observed::default();
+        let (status, stack) = create(&config(record, &mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_audio_set_system_echo_cancellation(stack, SipralToggle::Off as u32) },
+            SipralStatus::WrongState
+        );
+        assert!(last_error_text().contains("application mode"));
+        assert_eq!(
+            unsafe { sipral_audio_set_system_echo_cancellation(stack, 7) },
+            SipralStatus::InvalidArgument
+        );
+        assert_eq!(asked_echo_cancellation(stack), SipralToggle::On as u32);
     }
 
     #[test]

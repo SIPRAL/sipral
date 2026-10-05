@@ -254,6 +254,9 @@ cancellation, gain control and noise suppression -- on macOS and iOS the
 voice-processing unit with its processing bypassed -- for a headset, which
 has no echo to cancel, or an application that cancels it on each call
 itself; `status().systemEchoCancellation` says what the platform did.
+`audio.setSystemEchoCancellation(_:)` switches it on the running stack
+(ABI 1.1): open devices are reopened at once, where they were and with their
+gain and mute, and a call keeps its media through the short gap.
 
 **Ending a call never needs the main thread.** The engine opens the devices
 on a thread of its own when a call's media starts — the call is carried, on

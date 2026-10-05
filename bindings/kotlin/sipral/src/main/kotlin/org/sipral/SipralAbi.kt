@@ -4452,7 +4452,8 @@ data class SipralStackSettings(
     val diagnosticTrace: Long,
     /**
      * A `SipralToggle`: whether the platform's echo cancellation is
-     * asked for, with the default filled in (ABI 0.35).
+     * asked for, with the default filled in (ABI 0.35), as
+     * `sipral_audio_set_system_echo_cancellation` left it (ABI 1.1).
      */
     val systemEchoCancellation: Long,
 ) {
@@ -9692,6 +9693,7 @@ internal object SipralNative {
     external fun sipral_audio_ring(stack: Long, samples: ShortArray, sampleRateHz: Long, looped: Long): Int
     external fun sipral_audio_stop_ringing(stack: Long): Int
     external fun sipral_audio_info(stack: Long, info: LongArray): Int
+    external fun sipral_audio_set_system_echo_cancellation(stack: Long, on: Long): Int
     external fun sipral_stack_log(stack: Long, level: Long, callback: Long): Int
     external fun sipral_stack_state_text(stack: Long, buffer: ByteArray, needed: LongArray): Int
     external fun sipral_stack_rtp_port_reserve(stack: Long, port: LongArray): Int
@@ -10465,9 +10467,10 @@ object Sipral {
      * Read back what a stack is running with.
      *
      * Every value here was either given at creation or defaulted there, and
-     * none of it changes afterwards. It is the other half of a configuration
-     * call that answered `SIPRAL_STATUS_OK`: the call says the value was
-     * taken, this says what it came to.
+     * none of it changes afterwards but the two a running stack switches,
+     * `diagnostic_trace` and `system_echo_cancellation`. It is the other
+     * half of a configuration call that answered `SIPRAL_STATUS_OK`: the
+     * call says the value was taken, this says what it came to.
      *
      * Safety
      *
@@ -14135,6 +14138,35 @@ object Sipral {
         val infoSlots = LongArray(SipralAudioInfo.SLOTS)
         check(SipralNative.sipral_audio_info(stack, infoSlots))
         return SipralAudioInfo.of(infoSlots)
+    }
+
+    /**
+     * Turn the platform's own echo cancellation on or off on a running
+     * stack: `on` is a `SipralToggle`, and zero leaves it as it is
+     * (ABI 1.1). What `sipral_stack_config_t::system_echo_cancellation`
+     * chose at creation, without a new stack.
+     *
+     * Takes effect at once. While the devices are open the microphone and
+     * the loudspeaker are reopened with or without the platform's
+     * processing — the voice-processing unit on macOS and iOS, the
+     * communications stream on Windows, the voice-communication preset on
+     * Android — on the devices they were on, with the gain and the mute of
+     * each direction, and each says so with `SIPRAL_AUDIO_CHANGE_REOPENED`
+     * from the engine. A call in progress keeps its media and hears a gap
+     * of as long as the platform takes to open them; a direction the
+     * platform refuses is `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any
+     * reopen. With the devices closed, the next open uses it.
+     * `sipral_audio_info_t::system_echo_cancellation` says what the
+     * platform did, and `sipral_stack_settings_t::system_echo_cancellation`
+     * what is asked for. `SIPRAL_STATUS_WRONG_STATE` in application mode,
+     * where the devices are the application's, whatever `on` says.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun audioSetSystemEchoCancellation(stack: Long, on: Long) {
+        check(SipralNative.sipral_audio_set_system_echo_cancellation(stack, on))
     }
 
     /**

@@ -224,6 +224,24 @@ public sealed class SipralAudioEngine
         return muted != 0;
     }
 
+    /// <summary>Turns the platform's own echo cancellation on or off on the
+    /// running stack (ABI 1.1): what <c>systemEchoCancellation</c> chose when
+    /// the stack was made. While the devices are open they are reopened at
+    /// once with or without the platform's processing — the voice-processing
+    /// unit on Apple's platforms, the communications stream on Windows — on
+    /// the devices they were on, with the gain and the mute; a call keeps its
+    /// media through a gap as long as the reopen. <see cref="Info"/> says what
+    /// the platform did, and
+    /// <see cref="SipralSettings.SystemEchoCancellation"/> what is
+    /// asked.</summary>
+    public void SetSystemEchoCancellation(bool on)
+    {
+        var toggle = (uint)(on ? SipralToggle.On : SipralToggle.Off);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_audio_set_system_echo_cancellation(Handle, toggle),
+            "sipral_audio_set_system_echo_cancellation");
+    }
+
     /// <summary>The meter: the loudest sample of the last tenth of a second
     /// in <paramref name="direction"/>, 0 to 32767, held long enough that a
     /// bar drawn from it neither flickers nor sticks. Cheap enough for a

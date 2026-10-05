@@ -94,6 +94,68 @@ public sealed class AudioEngineTests
     private static SipralStack Manual() =>
         new(audio: SipralAudio.Device, audioActivation: SipralAudioActivation.Manual);
 
+    /// <summary>ABI 1.1: the platform's echo cancellation switched on a
+    /// running stack is refused in application mode, and in device mode, the
+    /// devices closed, opens nothing and is read back from the
+    /// settings.</summary>
+    [Fact]
+    public void TheEchoCancellationSwitchIsReadBackAndRefusedInApplicationMode()
+    {
+        using (var pumped = new SipralStack(audio: SipralAudio.Application))
+        {
+            var refused = Assert.Throws<SipralException>(() => pumped.Audio.SetSystemEchoCancellation(false));
+            Assert.Equal(SipralStatus.WrongState, refused.Status);
+            Assert.True(pumped.Settings().SystemEchoCancellation);
+        }
+        if (!HasDevices)
+        {
+            return;
+        }
+        using var stack = Manual();
+        stack.Audio.SetSystemEchoCancellation(false);
+        Assert.False(stack.Settings().SystemEchoCancellation);
+        Assert.False(stack.Audio.Info().Active);
+        stack.Audio.SetSystemEchoCancellation(true);
+        Assert.True(stack.Settings().SystemEchoCancellation);
+    }
+
+    /// <summary>The switch on open devices reopens them where they were,
+    /// with the gain and the mute, and <see cref="SipralAudioEngine.Info"/>
+    /// says what the platform did. Opt-in, as it opens the machine's devices:
+    /// <c>SIPRAL_AUDIO_DEVICES=1</c>.</summary>
+    [Fact]
+    public void TheEchoCancellationSwitchReopensTheOpenDevices()
+    {
+        if (!HasDevices || Environment.GetEnvironmentVariable("SIPRAL_AUDIO_DEVICES") != "1")
+        {
+            return;
+        }
+        using var stack = Manual();
+        var devices = stack.Audio.Refresh();
+        foreach (var role in new[] { SipralAudioRole.Speaker, SipralAudioRole.Microphone })
+        {
+            if (QuietDevice(devices, role) is { } quiet)
+            {
+                stack.Audio.Select(role, quiet);
+            }
+        }
+        stack.Audio.SetMuted(SipralAudioDirection.Output, true);
+        stack.Audio.SetGain(SipralAudioDirection.Input, 0.5);
+        stack.Audio.Activate();
+        var before = stack.Audio.Info();
+        stack.Audio.SetSystemEchoCancellation(false);
+        var off = stack.Audio.Info();
+        Assert.True(off.Active);
+        Assert.False(off.SystemEchoCancellation);
+        Assert.Equal(before.Speaker, off.Speaker);
+        Assert.Equal(before.Microphone, off.Microphone);
+        Assert.True(stack.Audio.Muted(SipralAudioDirection.Output));
+        Assert.Equal(0.5, stack.Audio.Gain(SipralAudioDirection.Input));
+        stack.Audio.SetSystemEchoCancellation(true);
+        Assert.True(stack.Settings().SystemEchoCancellation);
+        stack.Audio.Deactivate();
+    }
+
     [Fact]
     public void EveryDeviceIsListedWithAnIdThatSurvivesARefresh()
     {

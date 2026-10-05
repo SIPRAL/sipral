@@ -3340,7 +3340,8 @@ after `reserved`):
   backend and nothing to turn off. `sipral_audio_info_t::system_echo_cancellation`
   says what the platform did. For a headset, which has no echo to cancel and
   whose voice the processing only colours, and for an application that runs
-  a canceller of its own on each call.
+  a canceller of its own on each call. A running stack switches it with
+  `sipral_audio_set_system_echo_cancellation` ("What ABI 1.1 added").
 - `reserved_35`.
 
 **A call's own mute, gain and meter.** `sipral_audio_call_set_gain`,
@@ -3516,7 +3517,7 @@ at load.
 
 ## What ABI 1.1 added
 
-The first minor under the 1.x rule: one entry point, nothing else in the
+The first minor under the 1.x rule: two entry points, nothing else in the
 header moved, and `bindings/c/abi-sizes.txt` is what 1.0 left. A binding
 printed at 1.0 loads against a 1.1 library and works as it did; one printed
 at 1.1 is refused by a 1.0 library, with both versions named, rather than
@@ -3569,3 +3570,43 @@ not yet sent is dropped: Swift `Media.setAppRate(_:)`, .NET
 Python `Media.set_app_rate`, Dart `SipralMedia.setAppRate`, and React Native
 `call.audio.setAppRate(hz)`, which resolves with the rate and the frame
 length and is refused as `wrongState` on a phone's own devices.
+
+**The platform's echo cancellation is switched on a running stack.**
+`sipral_audio_set_system_echo_cancellation(stack, on)` does what
+`sipral_stack_config_t::system_echo_cancellation` does at creation, without
+a new stack: `on` is a `sipral_toggle_t`, and zero leaves the setting as it
+is, as `sipral_stack_diagnostic_trace` takes it. A headset plugged in
+mid-call, or a canceller of the application's own attached, no longer means
+tearing the stack and its registrations down.
+
+- It takes effect at once. With the devices open, the engine reopens the
+  microphone and the loudspeaker with or without the platform's processing —
+  the voice-processing unit on macOS and iOS (one unit, reopened whole), the
+  communications stream on Windows, the voice-communication input preset on
+  Android — on the devices they were on, with the gain and the mute of each
+  direction. Each role says so with `SIPRAL_AUDIO_CHANGE_REOPENED` from the
+  engine, and a direction the platform refuses is
+  `SIPRAL_AUDIO_CHANGE_UNAVAILABLE`, as after any reopen. With the devices
+  closed nothing is opened, and the next open uses it.
+- A call in progress keeps its media: it stays attached to the engine
+  throughout, and hears a gap of as long as the platform takes to open the
+  devices again, with silence sent to the far end meanwhile, as when a
+  device is chosen mid-call.
+- `sipral_audio_info_t::system_echo_cancellation` says what the platform
+  did, and `sipral_stack_settings_t::system_echo_cancellation` what is asked
+  for now.
+- `SIPRAL_STATUS_WRONG_STATE` in application mode, where the devices are the
+  application's, whatever `on` says; `SIPRAL_STATUS_INVALID_ARGUMENT` for a
+  value that is no `sipral_toggle_t`, with nothing changed.
+
+The engine carries the same as `sipral_audio::Engine::set_system_echo_cancellation`
+and `system_echo_cancellation`.
+
+**In the layers.** Each idiomatic layer switches it beside its other audio
+settings: Swift `AudioDevices.setSystemEchoCancellation(_:)`, .NET
+`SipralAudioEngine.SetSystemEchoCancellation`, Kotlin and the JVM jar
+`SipralAudioDevices.setSystemEchoCancellation`, Python
+`Audio.set_system_echo_cancellation`, React Native
+`client.audio.setSystemEchoCancellation(on)` (TypeScript, Android and iOS
+halves), and Dart `SipralStack.setSystemEchoCancellation`, which this layer's
+stacks, all in application mode, answer with `wrongState`.

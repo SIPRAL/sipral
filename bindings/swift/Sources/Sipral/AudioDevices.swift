@@ -290,6 +290,21 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         Double(try Sipral.audioLevel(stack: stack.handle, direction: direction.rawValue)) / Double(Int16.max)
     }
 
+    // MARK: - the platform's echo cancellation
+
+    /// Turn the platform's own echo cancellation on or off on the running
+    /// stack (ABI 1.1): what `systemEchoCancellation` chose when the stack
+    /// was made. While the devices are open they are reopened at once with or
+    /// without the voice-processing unit, on the devices they were on, with
+    /// the gain and the mute; a call keeps its media through a gap as long as
+    /// the reopen. `status().systemEchoCancellation` says what the platform
+    /// did, and `SipralStack.settings().systemEchoCancellation` what is asked.
+    public func setSystemEchoCancellation(_ on: Bool) throws {
+        try Sipral.audioSetSystemEchoCancellation(
+            stack: stack.handle, on: on ? SipralToggle.on.rawValue : SipralToggle.off.rawValue
+        )
+    }
+
     // MARK: - one call's own gain, mute and level
 
     /// Set one call's own gain in one direction, as a factor, on top of the

@@ -36,6 +36,7 @@ import org.sipral.SipralAudioRole
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralStatus
+import org.sipral.SipralToggle
 
 private val hasEngine: Boolean get() = Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE != 0L
 
@@ -272,6 +273,57 @@ private suspend fun aCallsOwnGainAndMuteLastFromItsMediaToItsEnd(): String {
     return "a call's own gain and mute last from its media to its end"
 }
 
+/** ABI 1.1: the platform's echo cancellation switched on a running client is
+ * refused in application mode, where the library opens no device. */
+private fun theEchoCancellationSwitchIsRefusedInApplicationMode(): String {
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { pumped ->
+        val refused = assertFailsWith<SipralException> {
+            Sipral.audioSetSystemEchoCancellation(pumped.handle, SipralToggle.OFF.value.toLong())
+        }
+        assertEquals(SipralStatus.WRONG_STATE, refused.status)
+        assertTrue(pumped.settings().systemEchoCancellation)
+    }
+    return "the echo cancellation switch refused in application mode"
+}
+
+/** The switch in device mode: with the devices closed it opens nothing and
+ * the settings read it back. */
+private fun theEchoCancellationSwitchIsReadBack(): String {
+    deviceClient().use { client ->
+        val audio = assertNotNull(client.audio)
+        audio.setSystemEchoCancellation(false)
+        assertFalse(client.settings().systemEchoCancellation)
+        assertFalse(audio.status().isActive, "the switch opened the devices")
+        audio.setSystemEchoCancellation(true)
+        assertTrue(client.settings().systemEchoCancellation)
+    }
+    return "the echo cancellation switch read back with the devices closed"
+}
+
+/** The switch on open devices reopens them where they were, with the gain
+ * and the mute, and the status says what the platform did. */
+private fun theEchoCancellationSwitchReopensTheOpenDevices(): String {
+    openingClient(SipralAudioActivation.MANUAL).use { client ->
+        val audio = assertNotNull(client.audio)
+        audio.setMuted(SipralAudioDirection.OUTPUT, true)
+        audio.setGain(SipralAudioDirection.INPUT, 0.5)
+        audio.activate()
+        val before = audio.status()
+        audio.setSystemEchoCancellation(false)
+        val off = audio.status()
+        assertTrue(off.isActive)
+        assertFalse(off.systemEchoCancellation, "the platform's processing is still behind the microphone")
+        assertEquals(before.speaker, off.speaker)
+        assertEquals(before.microphone, off.microphone)
+        assertTrue(audio.isMuted(SipralAudioDirection.OUTPUT))
+        assertEquals(0.5, audio.gain(SipralAudioDirection.INPUT))
+        audio.setSystemEchoCancellation(true)
+        assertTrue(client.settings().systemEchoCancellation)
+        audio.deactivate()
+    }
+    return "the echo cancellation switched on open devices, kept where they were"
+}
+
 /** The Android context goes to the shim, which checks it is one: on a JVM
  * that is not Android there is no `android.content.Context` at all, and an
  * object is refused rather than kept. */
@@ -288,6 +340,7 @@ internal suspend fun audioChecks(): String {
         thePlatformDefault(),
         anAndroidContextIsCheckedByTheShim(),
         theQuietDeviceIsChosenWhereTheMachineHasIt(),
+        theEchoCancellationSwitchIsRefusedInApplicationMode(),
     )
     if (!hasEngine) {
         return (said + "no audio engine in this build for this platform").joinToString(", ")
@@ -295,8 +348,10 @@ internal suspend fun audioChecks(): String {
     said += theListKeepsItsIdsAndEachRoleIsRefusedByStatus()
     said += gainAndMuteSurviveAChangeOfDevice()
     said += aCallsOwnGainAndMuteLastFromItsMediaToItsEnd()
+    said += theEchoCancellationSwitchIsReadBack()
     if (opensDevices) {
         said += activationRingAndTheEnginesOwnChoice()
+        said += theEchoCancellationSwitchReopensTheOpenDevices()
         said += aCallInDeviceModeIsPumpedByTheEngine()
     } else {
         said += "the devices left closed (SIPRAL_AUDIO_DEVICES=1 opens them)"

@@ -1546,6 +1546,10 @@ peer elsewhere (`sipral_advertised_address`).
   cancellation runs behind the microphone, on by default;
   `Info::system_echo_cancellation` says what the platform did
   (`sipral_stack_config_t::system_echo_cancellation`).
+  `set_system_echo_cancellation` switches it on a running engine, reopening
+  open devices at once where they were with their gain and mute, and
+  `system_echo_cancellation` reads what is asked
+  (`sipral_audio_set_system_echo_cancellation`, ABI 1.1).
 - `set_call_gain`, `call_gain`, `set_call_muted`, `call_muted` and
   `call_level` take a call's `CallId` and a `Direction` and do for one call
   what the stack-wide controls do for all of them, in the mix; each answers

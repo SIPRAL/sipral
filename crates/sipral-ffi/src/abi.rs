@@ -977,6 +977,7 @@ pub const SURFACE: Surface = Surface {
         crate::audio::sipral_audio_ring::ABI,
         crate::audio::sipral_audio_stop_ringing::ABI,
         crate::audio::sipral_audio_info::ABI,
+        crate::audio::sipral_audio_set_system_echo_cancellation::ABI,
         crate::log::sipral_stack_log::ABI,
         crate::log::sipral_stack_state_text::ABI,
         crate::ports::sipral_stack_rtp_port_reserve::ABI,

@@ -2100,6 +2100,14 @@ static void what_0_35_added(void)
     expect("a call's own mute was not refused in application mode",
            sipral_audio_call_muted(stack, account, SIPRAL_AUDIO_DIRECTION_INPUT, &muted) ==
                SIPRAL_STATUS_WRONG_STATE);
+
+    /* ABI 1.1: the echo switch on a running stack, refused in application
+     * mode whatever it asks, an unknown toggle refused before that. */
+    expect("the echo switch was not refused in application mode",
+           sipral_audio_set_system_echo_cancellation(stack, SIPRAL_TOGGLE_ON) ==
+               SIPRAL_STATUS_WRONG_STATE);
+    expect("an unknown toggle for the echo switch was taken",
+           sipral_audio_set_system_echo_cancellation(stack, 3) == SIPRAL_STATUS_INVALID_ARGUMENT);
     sipral_stack_destroy(stack);
 }
 

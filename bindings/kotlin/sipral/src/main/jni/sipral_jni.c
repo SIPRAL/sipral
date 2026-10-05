@@ -4811,6 +4811,15 @@ Java_org_sipral_SipralNative_sipral_1audio_1info(JNIEnv *env, jobject self, jlon
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1audio_1set_1system_1echo_1cancellation(JNIEnv *env, jobject self, jlong stack, jlong on)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_audio_set_system_echo_cancellation((sipral_handle_t)stack, (sipral_toggle_t)on);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1stack_1log(JNIEnv *env, jobject self, jlong stack, jlong level, jlong callback)
 {
     (void)env;
