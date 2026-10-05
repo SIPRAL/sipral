@@ -292,7 +292,7 @@ impl Presence {
             entity,
             tuples,
             notes: read_notes(&root)?,
-            person: root.child("person").map(read_person).transpose()?,
+            person: root.child("person").map(read_person).transpose()?.flatten(),
         })
     }
 
@@ -409,11 +409,13 @@ fn read_tuple(node: &XmlNode<'_>) -> Result<Tuple, PresenceError> {
     })
 }
 
-fn read_person(node: &XmlNode<'_>) -> Result<Person, PresenceError> {
-    let id = node
-        .attributes
-        .text("id")?
-        .ok_or(PresenceError::Malformed("a person with no id"))?;
+/// `None` for a person with no `id`: RFC 4479 requires one, but Asterisk puts
+/// an empty `<dm:person />` in every document it sends, and refusing the
+/// document over it would lose the tuples' status with it.
+fn read_person(node: &XmlNode<'_>) -> Result<Option<Person>, PresenceError> {
+    let Some(id) = node.attributes.text("id")? else {
+        return Ok(None);
+    };
     let mut activities = Vec::new();
     if let Some(list) = node.child("activities") {
         // RFC 4480: the list may carry notes of its own, which are not
@@ -425,7 +427,7 @@ fn read_person(node: &XmlNode<'_>) -> Result<Person, PresenceError> {
             activities.push(Activity::read(child)?);
         }
     }
-    Ok(Person { id, activities })
+    Ok(Some(Person { id, activities }))
 }
 
 /// RFC 3261 §25.1's qvalue: `"0" [ "." 0*3DIGIT ]` or `"1" [ "." 0*3("0") ]`,
@@ -691,6 +693,38 @@ mod tests {
         assert!(presence.person.is_none());
     }
 
+    /// What Asterisk's PJSIP sends for an extension's state: the person
+    /// element is there, empty, with no id.
+    const EMPTY_PERSON: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<presence entity="sip:203@192.0.2.14:45421" xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid">
+ <note>Ready</note>
+ <tuple id="203">
+  <status>
+   <basic>open</basic>
+  </status>
+  <contact priority="1">sip:130@pbx.example.com</contact>
+ </tuple>
+ <dm:person />
+</presence>"#;
+
+    #[test]
+    fn an_empty_person_with_no_id_leaves_the_rest_of_the_document_read() {
+        let presence = Presence::parse(EMPTY_PERSON.as_bytes()).expect("a document");
+        assert!(presence.is_open());
+        assert_eq!(presence.tuples.len(), 1);
+        assert_eq!(&*presence.tuples[0].id, "203");
+        assert_eq!(presence.notes, vec![Note::new("Ready")]);
+        assert!(presence.person.is_none());
+        assert!(presence.activities().is_empty());
+
+        let with_activities = "<presence entity=\"pres:a@example.com\"><tuple id=\"a\">\
+<status><basic>closed</basic></status></tuple><person><activities><away/></activities>\
+</person></presence>";
+        let presence = Presence::parse(with_activities.as_bytes()).expect("a document");
+        assert!(!presence.is_open());
+        assert!(presence.person.is_none(), "a person with no id is not read");
+    }
+
     #[test]
     fn rpid_activities_are_read_from_the_person_and_its_note_is_not_one() {
         let presence = Presence::parse(RPID.as_bytes()).expect("a document");
@@ -916,11 +950,6 @@ mod tests {
                 "<presence entity=\"pres:a@example.com\"><tuple id=\"a\"><status/>\
 <contact priority=\"2\">sip:a@example.com</contact></tuple></presence>",
                 PresenceError::Malformed("priority is not a qvalue"),
-            ),
-            (
-                "<presence entity=\"pres:a@example.com\"><person><activities/></person>\
-</presence>",
-                PresenceError::Malformed("a person with no id"),
             ),
             ("<dialog-info version=\"1\"/>", PresenceError::NotPresence),
             (

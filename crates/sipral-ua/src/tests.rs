@@ -15609,6 +15609,56 @@ fn a_presence_notify_is_read_into_the_presentitys_document() {
 }
 
 #[test]
+fn a_presence_notify_with_asterisks_empty_person_is_still_news() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let handle = agent
+        .subscribe(
+            id,
+            &Subscribe::new(uri("sip:203@example.com"), crate::PRESENCE_EVENT),
+            t0,
+        )
+        .expect("the SUBSCRIBE goes");
+    let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
+    deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
+    // the body Asterisk's PJSIP sends for an extension, person and all
+    let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<presence entity=\"sip:203@192.0.2.14:45421\" xmlns=\"urn:ietf:params:xml:ns:pidf\" \
+xmlns:dm=\"urn:ietf:params:xml:ns:pidf:data-model\" xmlns:rpid=\"urn:ietf:params:xml:ns:pidf:rpid\">\n \
+<note>Ready</note>\n <tuple id=\"203\">\n  <status>\n   <basic>open</basic>\n  </status>\n  \
+<contact priority=\"1\">sip:130@example.com</contact>\n </tuple>\n <dm:person />\n</presence>\n";
+    deliver(
+        &mut agent,
+        &notification_of(
+            &subscribe,
+            1,
+            "notifier",
+            "presence",
+            "active;expires=2181",
+            Some(("application/pidf+xml", body)),
+            "",
+        ),
+        t0,
+    );
+    transmits(&mut agent);
+    let told: Vec<_> = events(&mut agent)
+        .into_iter()
+        .filter_map(|event| match event {
+            UaEvent::PresenceChanged {
+                subscription,
+                presence,
+            } => Some((subscription, presence)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "the document is news, empty person and all");
+    assert_eq!(told[0].0, handle);
+    assert!(told[0].1.is_open());
+    assert_eq!(&*told[0].1.notes[0].text, "Ready");
+}
+
+#[test]
 fn a_dialog_subscription_is_never_read_as_presence() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
