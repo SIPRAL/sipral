@@ -39,6 +39,74 @@ on the SIP socket, Opus rebuilding lost frames from in-band FEC, a lighter
 in-band DTMF detector, the gate holding every published figure to its
 budget, and the fixes `CHANGELOG.md` lists.
 
+## Releases
+
+What each release brings, the same list as <https://sipral.org/roadmap/>: the site renders this section from its own roadmap and its check fails on any difference, so the two cannot drift. The phases below are the engineering underneath it, ordered by exit criterion rather than date.
+
+<!-- releases: begin -->
+### 1.0 — Complete, at C ABI 1.0
+
+October 2026, released.
+
+- SIP signalling, media, SRTP and DTLS-SRTP, ICE, STUN and TURN, STIR/SHAKEN behind one C ABI
+- Swift, Kotlin and Java, .NET, Python, Dart and React Native bindings
+- Device mode with the platform echo cancellation, or application mode for voice agents
+- Ten thousand concurrent calls in one process
+
+### 1.1 — Sharper at scale, released ahead of schedule
+
+October 2026, released.
+
+- Call set-up in the voice agent with no idle wait between reads *(done)*
+- In-band DTMF detection at a fraction of its cost per frame *(done)*
+- A call forked to two lines of one stack rings on both *(done)*
+- Outgoing audio sent on a steady 20 ms clock *(done)*
+- Opus rebuilds a lost frame from the copy the next packet carries, sized by the loss the far end reports *(done)*
+
+### 1.2 — Voice agents and the enterprise
+
+Q2 2027, planned.
+
+- A SIP bridge from a PBX line to any voice agent that answers SIP, the outcome handed back to the PBX *(done)*
+- Call audio at the rate a speech service asks for, in every language *(done)*
+- A Pipecat transport, reaching every speech service Pipecat supports *(done)*
+- How to connect more than forty voice-agent services, one by one *(done)*
+- Direct adapters to the realtime speech APIs of the main voice-agent providers
+- A ready-to-run bridge with one address per agent
+- OAuth2 sign-in to the PBX (RFC 8898)
+- LiveKit Agents example
+- A phone voice agent that runs in five minutes, speech to speech, from one command
+- Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published
+- Calls held for a day and for a week with no growth in memory or processor time, measured and published
+
+### 1.3 — More platforms
+
+Q3 2027, planned.
+
+- Node.js and TypeScript package
+- .NET MAUI package for iOS and Android
+- A network test before the call
+- Answering-machine detection on calls the agent places
+- SIP over WebSocket with the connection made by the stack (RFC 7118)
+- LiveCommunicationKit on iOS
+
+### 2.0 — Beyond audio
+
+2027, planned.
+
+- Video with VP8, VP9 and AV1, with RTCP feedback for pictures
+- ZRTP end-to-end key agreement
+
+### Ongoing — Proven, and kept proven
+
+Every release.
+
+- Every published figure measured again by the gate on each change *(in progress)*
+- An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations
+- More PBXs proven in the lab, and caller identity, diversion, redirection and failover between servers shown working
+- Interop with carriers and a commercial SBC
+<!-- releases: end -->
+
 ## Phase 0 — design
 
 **In:** design documents per crate, the RFC index, the clean-room rules, the
