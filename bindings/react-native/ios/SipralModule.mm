@@ -162,9 +162,14 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge placeCall:account target:target options:given resolve:resolve reject:reject];
 }
 
-- (void)answer:(NSString *)call resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+- (void)answer:(NSString *)call
+        options:(JS::NativeSipral::NativeAnswerOptions &)options
+        resolve:(RCTPromiseResolveBlock)resolve
+         reject:(RCTPromiseRejectBlock)reject
 {
-  [_bridge answer:call resolve:resolve reject:reject];
+  NSMutableDictionary *given = [NSMutableDictionary dictionary];
+  put(given, @"codecs", options.codecs());
+  [_bridge answer:call options:given resolve:resolve reject:reject];
 }
 
 - (void)reject:(NSString *)call

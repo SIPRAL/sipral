@@ -145,6 +145,29 @@ private suspend fun linearAudioIsOfferedWhenACallNamesIt(): String = betweenTwo(
     "L16 at 16 kHz agreed when both ends name it"
 }
 
+// Both clients offer and take PCMU alone, so PCMA is there only when a call
+// names it. An answer keeps the offer's order (RFC 3264 §6.1): placed with
+// PCMA first, the call settles on PCMA however the answer lists the two;
+// answered with PCMA,PCMU, it takes the PCMA the client alone refuses.
+private suspend fun aCallsOwnCodecsSettleOnPcma(): String {
+    val pcma = SipralCodec.PCMA.value.toLong()
+    val placed = { client: SipralClient, account: SipralAccount ->
+        client.placeCall(account, target = "sip:bob@example.invalid", codecs = "PCMA,PCMU")
+    }
+    betweenTwo(placed, answer = { client, event -> client.answerCall(event, codecs = "PCMU,PCMA") }) { callA, callB ->
+        assertEquals(pcma, assertNotNull(callA.media).info().codec)
+        assertEquals(pcma, assertNotNull(callB.media).info().codec)
+    }
+    betweenTwo(placed, answer = { client, event -> client.answerCall(event, codecs = "PCMA,PCMU") }) { callA, callB ->
+        assertEquals(pcma, assertNotNull(callB.media).info().codec)
+        assertEquals(pcma, assertNotNull(callA.media).info().codec)
+    }
+    betweenTwo(placed) { _, callB ->
+        assertEquals(SipralCodec.PCMU.value.toLong(), assertNotNull(callB.media).info().codec)
+    }
+    return "PCMA agreed by a call placed, and one answered, with PCMA,PCMU"
+}
+
 private suspend fun aFocusSaysSoAndTheCallerNamesItsConference(): String = betweenTwo(
     answer = { client, event -> client.answerCall(event, focus = true) },
 ) { callA, callB ->
@@ -613,6 +636,7 @@ suspend fun protocolsChecks(): String = listOf(
     aFarEndThatTookNoTextLeavesNoneToSend(),
     rtcpFeedbackIsAgreedOnlyWhenACallAsks(),
     linearAudioIsOfferedWhenACallNamesIt(),
+    aCallsOwnCodecsSettleOnPcma(),
     aFocusSaysSoAndTheCallerNamesItsConference(),
     aConferenceIsReadBackWholeFromItsNotifications(),
     presenceIsPublishedAndWhatTheCompositorGrantedIsTold(),

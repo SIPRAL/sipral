@@ -174,13 +174,17 @@ over `"udp"`.
 ### Calls
 
 `client.placeCall(account, target, options)` resolves with a `SipralCall`;
-one that arrives is handed over by `incomingCall`. A call has `state`,
+one that arrives is handed over by `incomingCall`. `options.codecs` on
+`placeCall` and on `answer({codecs})` gives one call its own codecs,
+`'PCMA,PCMU'`, in place of the client's; an answer keeps the offer's order
+(RFC 3264 §6.1), so answering it chooses which codecs rather than which comes
+first. A call has `state`,
 `direction`, `remote`, `heldHere`, `heldThere`, `ended` and `endReason`, and
 these:
 
 | Method | When |
 |---|---|
-| `answer()`, `reject(code = 486)` | a call that arrived, once |
+| `answer(options)`, `reject(code = 486)` | a call that arrived, once |
 | `hangup()` | until it has ended, in any state |
 | `hold()`, `resume()` | confirmed |
 | `sendDtmf(digits)` | confirmed; `0`-`9`, `A`-`D`, `*` and `#` |

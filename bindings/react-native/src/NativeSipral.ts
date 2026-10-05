@@ -102,6 +102,10 @@ export type NativeCallOptions = {
   codecs?: string;
 };
 
+export type NativeAnswerOptions = {
+  codecs?: string;
+};
+
 /** One event, flattened: the members an event's kind does not use are left out. */
 export type NativeEvent = {
   /** The kind, in lower camel case: "registrationChanged", "callEnded". */
@@ -152,7 +156,7 @@ export interface Spec extends TurboModule {
 
   /** Resolves with the call's handle. */
   placeCall(account: string, target: string, options: NativeCallOptions): Promise<string>;
-  answer(call: string): Promise<void>;
+  answer(call: string, options: NativeAnswerOptions): Promise<void>;
   reject(call: string, code: CodegenTypes.Int32): Promise<void>;
   hangup(call: string): Promise<void>;
   hold(call: string): Promise<void>;

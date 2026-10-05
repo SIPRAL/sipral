@@ -56,7 +56,10 @@ is queued. Both are at the codec's rate unless the application asks for its
 own: `media.setAppRate(24000)` (8000, 16000, 24000 or 48000; 0 is the
 codec's) has the library convert both ways, and `sampleRate` and
 `frameSamples` say the rate and the frame's length from then on
-(`docs/08-ffi.md`, "What ABI 1.1 added").
+(`docs/08-ffi.md`, "What ABI 1.1 added"). `placeCall(..., codecs: 'PCMA,PCMU')`
+and `answerCall(event, codecs: 'PCMA,PCMU')` give one call its own codecs in
+place of the stack's; an answer keeps the offer's order (RFC 3264 §6.1), so
+answering it chooses which codecs rather than which comes first.
 
 The stack signals over its UDP socket. An account can have a connection of
 its own beside it, to its own server, so that one stack holds an account on

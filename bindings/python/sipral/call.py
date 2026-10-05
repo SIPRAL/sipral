@@ -446,10 +446,13 @@ class Call:
         else:
             old.close()
 
-    def answer_with(self, *, feedback: bool = False, focus: bool = False) -> None:
+    def answer_with(
+        self, *, feedback: bool = False, focus: bool = False, codecs: str | None = None
+    ) -> None:
         """`sipral_call_answer_with`: accept as :meth:`answer` does, with the
         real-time text stream this call was built with a socket for, RTCP
-        feedback, or this end named the focus of a conference."""
+        feedback, this end named the focus of a conference, or ``codecs`` --
+        ``"PCMA,PCMU"`` -- in place of the stack's."""
         address = self._media_address.encode("utf-8")
         address_buf = ffi.new("char[]", address)
         config = ffi.new("sipral_call_config_t *")
@@ -464,6 +467,12 @@ class Call:
             config.text_address_len = len(text)
         config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
         config.focus = 1 if focus else 0
+        codecs_buf = None
+        if codecs is not None:
+            codecs_bytes = codecs.encode("utf-8")
+            codecs_buf = ffi.new("char[]", codecs_bytes)
+            config.codecs = codecs_buf
+            config.codecs_len = len(codecs_bytes)
         _call(
             lambda: lib.sipral_call_answer_with(
                 self.stack.handle, self.handle, config, self.stack.now_ms()

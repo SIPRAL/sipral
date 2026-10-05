@@ -77,7 +77,11 @@ asks the library to convert both ways for a speech service at its own rate;
 `getSampleRate()` and `getFrameSamples()` follow it. `SipralJava.addAccount`
 takes a `SipralTransport.TCP` or `TLS` (and a certificate pin) after the
 credentials, for an account on a connection of its own beside the client's
-UDP socket; `client.settings()` is a plain method.
+UDP socket; `client.settings()` is a plain method. `SipralJava.placeCall`
+and `SipralJava.answerCall` take a call's own codecs, `"PCMA,PCMU"`, after
+the media host, in place of the client's; an answer keeps the offer's order
+(RFC 3264 §6.1), so answering it chooses which codecs rather than which
+comes first.
 `SipralJava.open(host, port, userAgent, maxDialogs, maxServerTransactions)`
 raises the ceilings a server meets first: 128 calls at once, past which a
 call that arrives is answered 503 with `Retry-After: 2`, and 256 requests

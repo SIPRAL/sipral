@@ -294,11 +294,11 @@ public final class SipralReactCore: @unchecked Sendable {
         }
     }
 
-    public func answer(_ call: String) throws {
+    public func answer(_ call: String, codecs: String? = nil) throws {
         try guarded {
             let event = try take(call, from: \.arrived, "call \(call) is not waiting to be answered")
             do {
-                _ = keep(try open().answerCall(event, mediaHost: mediaHost))
+                _ = keep(try open().answerCall(event, mediaHost: mediaHost, codecs: codecs))
             } catch {
                 locked { arrived[call] = event }
                 throw error

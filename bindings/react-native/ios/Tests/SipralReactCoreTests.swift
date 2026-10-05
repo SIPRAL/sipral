@@ -60,6 +60,28 @@ private func waitFor(_ seconds: Double, _ condition: () -> Bool) async -> Bool {
     return condition()
 }
 
+/// The first of `events` that `matches`, or a refusal once `seconds` pass.
+private func first(
+    _ events: AsyncStream<SipralEvent>, within seconds: Double = 15,
+    _ matches: @escaping @Sendable (SipralEvent) -> Bool
+) async throws -> SipralEvent {
+    let found = await withTaskGroup(of: SipralEvent?.self) { group in
+        group.addTask {
+            for await event in events where matches(event) { return event }
+            return nil
+        }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            return nil
+        }
+        let winner = await group.next() ?? nil
+        group.cancelAll()
+        return winner
+    }
+    guard let found else { throw SipralRefusal("timedOut", "no matching event within \(seconds) s") }
+    return found
+}
+
 /// A registrar that takes one TCP connection on loopback and keeps the
 /// first request on it.
 private final class OneRegister: @unchecked Sendable {
@@ -454,6 +476,43 @@ final class SipralReactCoreTests: XCTestCase {
         _ = try await bob.await("the first call") { $0["kind"] as? String == "incomingCall" }
         refusal("limitReached") {
             _ = try capped.placeCall(line, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
+        }
+    }
+
+    /// A call's own codecs through the core, read on a plain stack at the
+    /// other end: placed with PCMA,PCMU it settles on PCMA where the stack's
+    /// own order would take Opus, and answered with PCMA,PCMU it leaves out
+    /// the G.722 the offer put first -- an answer keeps the offer's order.
+    func testACallsOwnCodecsReachTheLibraryPlacedAndAnswered() async throws {
+        let pcma = SipralCodec.pcma.rawValue
+        do {
+            let alice = try Phone("alice")
+            let bob = try SipralStack(audio: .application, bindHost: "127.0.0.1")
+            defer { alice.core.close(); bob.close() }
+            let line = try alice.core.addAccount(SipralAccountOptions(aor: alice.aor, registrarAddress: bob.bindAddress))
+            _ = try bob.addAccount(aor: "sip:bob@sipral.invalid", registrarAddress: alice.address)
+            let arrivals = bob.events()
+            _ = try alice.core.placeCall(line, "sip:bob@\(bob.bindAddress)", destination: nil, codecs: "PCMA,PCMU")
+            let incoming = try await first(arrivals) { $0.kind == .incomingCall }
+            let answered = try bob.answerCall(incoming)
+            defer { answered.close() }
+            let up = await waitFor(15) { answered.media != nil }
+            XCTAssertTrue(up, "the call's media never came up")
+            XCTAssertEqual(try XCTUnwrap(answered.media).info().codec, pcma)
+        }
+        do {
+            let alice = try SipralStack(audio: .application, bindHost: "127.0.0.1")
+            let bob = try Phone("bob")
+            defer { alice.close(); bob.core.close() }
+            let line = try alice.addAccount(aor: "sip:alice@sipral.invalid", registrarAddress: bob.address)
+            _ = try bob.core.addAccount(SipralAccountOptions(aor: bob.aor, registrarAddress: alice.bindAddress))
+            let placed = try alice.placeCall(account: line, target: "sip:bob@\(bob.address)", codecs: "G722,PCMA,PCMU")
+            defer { placed.close() }
+            let rang = try await bob.await("the incoming call") { $0["kind"] as? String == "incomingCall" }
+            try bob.core.answer(try XCTUnwrap(rang["call"] as? String), codecs: "PCMA,PCMU")
+            let up = await waitFor(15) { placed.media != nil }
+            XCTAssertTrue(up, "the call's media never came up")
+            XCTAssertEqual(try XCTUnwrap(placed.media).info().codec, pcma)
         }
     }
 

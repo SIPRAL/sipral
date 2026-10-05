@@ -871,12 +871,15 @@ final class SipralStack {
   /// [mediaHost] -- by default the route toward [destination] or the
   /// account's server: the socket is open, and its address offered, before
   /// the INVITE goes out. [destination] sends the INVITE somewhere other than
-  /// the account's registrar address.
+  /// the account's registrar address. [codecs] -- `'PCMA,PCMU'` -- is what
+  /// this call offers and in what order, in place of the stack's
+  /// (`sipral_call_config_t::codecs`).
   Future<SipralCall> placeCall(
     SipralAccount account,
     String target, {
     String? mediaHost,
     String? destination,
+    String? codecs,
   }) async {
     _ensureOpen();
     final media = await RawDatagramSocket.bind(
@@ -891,6 +894,7 @@ final class SipralStack {
         final targetText = _text(arena, target);
         final mediaText = _text(arena, mediaAddress);
         final destinationText = _text(arena, destination);
+        final codecsText = _text(arena, codecs);
         config.ref
           ..size = ffi.sizeOf<SipralCallConfig>()
           ..target = targetText.$1
@@ -898,7 +902,9 @@ final class SipralStack {
           ..mediaAddress = mediaText.$1
           ..mediaAddressLen = mediaText.$2
           ..destination = destinationText.$1
-          ..destinationLen = destinationText.$2;
+          ..destinationLen = destinationText.$2
+          ..codecs = codecsText.$1
+          ..codecsLen = codecsText.$2;
         final out = arena<SipralHandle>();
         _checkNow(
           _sipral,
@@ -926,10 +932,14 @@ final class SipralStack {
 
   /// Answer the `SipralEventKind.incomingCall` [incoming], with a media
   /// socket bound on [mediaHost] -- by default the route toward the server
-  /// of the account the call came to.
+  /// of the account the call came to. [codecs] -- `'PCMA,PCMU'` -- is what
+  /// this call takes, in place of the stack's, answered through
+  /// `sipral_call_answer_with`; an answer keeps the offer's order (RFC 3264
+  /// §6.1), so it chooses which codecs rather than which comes first.
   Future<SipralCall> answerCall(
     SipralStackEvent incoming, {
     String? mediaHost,
+    String? codecs,
   }) async {
     _ensureOpen();
     if (incoming.kind != SipralEventKind.incomingCall) {
@@ -955,6 +965,23 @@ final class SipralStack {
     try {
       using((arena) {
         final text = _text(arena, mediaAddress);
+        if (codecs != null) {
+          final codecsText = _text(arena, codecs);
+          final config = arena<SipralCallConfig>();
+          config.ref
+            ..size = ffi.sizeOf<SipralCallConfig>()
+            ..mediaAddress = text.$1
+            ..mediaAddressLen = text.$2
+            ..codecs = codecsText.$1
+            ..codecsLen = codecsText.$2;
+          _checkNow(
+            _sipral,
+            'sipral_call_answer_with',
+            () =>
+                _sipral.callAnswerWith(_handle, incoming.call, config, nowMs()),
+          );
+          return;
+        }
         _checkNow(
           _sipral,
           'sipral_call_answer_media',

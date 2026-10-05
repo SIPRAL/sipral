@@ -201,8 +201,8 @@ public sealed class Call : IDisposable
     }
 
     /// <summary><c>sipral_call_answer_with</c>: accept as
-    /// <see cref="Answer"/> does, with a real-time text stream, RTCP feedback
-    /// or this end named the conference's focus as
+    /// <see cref="Answer"/> does, with a real-time text stream, RTCP feedback,
+    /// this end named the conference's focus or this call's own codecs as
     /// <paramref name="options"/> say. Text needs the call to have been
     /// built with a text socket, which <see cref="SipralStack.AnswerCall"/>
     /// opens when its options ask for text.</summary>
@@ -210,13 +210,17 @@ public sealed class Call : IDisposable
     {
         var address = Encoding.UTF8.GetBytes(_mediaAddress);
         var text = TextAddress is null ? null : Encoding.UTF8.GetBytes(TextAddress);
+        var codecs = options.Codecs is null ? null : Encoding.UTF8.GetBytes(options.Codecs);
         using var addressPin = new PinnedBytes(address);
         using var textPin = new PinnedBytes(text);
+        using var codecsPin = new PinnedBytes(codecs);
         var config = SipralCallConfig.Sized();
         config.MediaAddress = addressPin.Pointer;
         config.MediaAddressLen = (nuint)address.Length;
         config.TextAddress = textPin.Pointer;
         config.TextAddressLen = (nuint)(text?.Length ?? 0);
+        config.Codecs = codecsPin.Pointer;
+        config.CodecsLen = (nuint)(codecs?.Length ?? 0);
         config.Feedback = (uint)(options.Feedback ? SipralToggle.On : SipralToggle.Default);
         config.Focus = options.Focus ? 1u : 0u;
         SipralErrors.Call(() => NativeMethods.sipral_call_answer_with(_stack.Handle, Handle, config, _stack.NowMs), "sipral_call_answer_with");
@@ -255,6 +259,60 @@ public sealed class Call : IDisposable
     public void RestartIce()
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_restart_ice(_stack.Handle, Handle, _stack.NowMs), "sipral_call_restart_ice");
+    }
+
+    /// <summary><c>sipral_call_transfer</c>: ask the far end to call
+    /// <paramref name="target"/> instead, a blind transfer (RFC 3515). This
+    /// end stays in the call until the far end reports the new call up;
+    /// <see cref="SipralEventKind.TransferProgress"/> and then
+    /// <see cref="SipralEventKind.TransferDone"/> arrive on
+    /// <see cref="Events"/> with <see cref="SipralEventArgs.Transfer"/> set,
+    /// and <see cref="WaitForTransferAsync"/> waits for the last.</summary>
+    public void Transfer(string target)
+    {
+        var bytes = ToSBytes(target);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_call_transfer(_stack.Handle, Handle, bytes, (nuint)bytes.Length, _stack.NowMs),
+            "sipral_call_transfer");
+    }
+
+    /// <summary><c>sipral_call_transfer_to</c>: hand this call to the far
+    /// end of <paramref name="other"/>, the attended half of a transfer (RFC
+    /// 3891). <paramref name="other"/> is normally a consultation call this
+    /// end placed to the target and is up; the party there replaces it with
+    /// this one rather than answering a second call. Progress arrives as
+    /// <see cref="Transfer"/>'s does. Putting this call on hold first is the
+    /// application's choice.</summary>
+    public void TransferTo(Call other) => TransferTo(other.Handle);
+
+    /// <summary><see cref="TransferTo(Call)"/> for a call named by its
+    /// handle.</summary>
+    public void TransferTo(ulong other)
+    {
+        SipralErrors.Call(
+            () => NativeMethods.sipral_call_transfer_to(_stack.Handle, Handle, other, _stack.NowMs),
+            "sipral_call_transfer_to");
+    }
+
+    /// <summary>Waits for the <see cref="SipralEventKind.TransferDone"/> a
+    /// <see cref="Transfer"/> or <see cref="TransferTo(Call)"/> ends with and
+    /// returns what it carries — a 2xx <see cref="SipralTransferEventInfo.StatusCode"/>
+    /// when the new call came up — or null when this call ends
+    /// first.</summary>
+    public async Task<SipralTransferEventInfo?> WaitForTransferAsync(CancellationToken cancellationToken = default)
+    {
+        await foreach (var args in Events.WithCancellation(cancellationToken))
+        {
+            if (args.Kind == SipralEventKind.TransferDone)
+            {
+                return args.Transfer;
+            }
+            if (args.Kind == SipralEventKind.CallEnded)
+            {
+                return null;
+            }
+        }
+        return null;
     }
 
     /// <summary>This call's media socket: where device mode's encoded packets
@@ -686,5 +744,16 @@ public sealed class Call : IDisposable
 /// only RTP/AVP refuses the profile, and an offer that asks for it is
 /// answered in kind whatever this says. <see cref="Focus"/> says this end is
 /// the focus of a conference (RFC 4579): <c>isfocus</c> on its
-/// <c>Contact</c>.</summary>
-public sealed record SipralCallOptions(bool Text = false, bool Feedback = false, bool Focus = false);
+/// <c>Contact</c>. <see cref="Codecs"/> is this call's codec order in place
+/// of the stack's (<c>sipral_call_config_t::codecs</c>).</summary>
+public sealed record SipralCallOptions(bool Text = false, bool Feedback = false, bool Focus = false)
+{
+    /// <summary>The codecs this call offers, or accepts when answering, as
+    /// <c>sipral_codec_info_t::name</c> spells them, separated by commas —
+    /// <c>"PCMA,PCMU"</c> — in place of the stack's own order; null keeps the
+    /// stack's. An answer lists what it takes in the offer's order (RFC 3264
+    /// §6.1), so answering, this chooses which codecs rather than which comes
+    /// first. A name this build has no encoder for is refused with
+    /// <see cref="SipralStatus.InvalidArgument"/>.</summary>
+    public string? Codecs { get; init; }
+}

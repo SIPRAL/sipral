@@ -294,5 +294,42 @@ class ACeilingOnCalls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, lib.SIPRAL_STATUS_LIMIT_REACHED)
 
 
+class ACallsOwnCodecs(unittest.IsolatedAsyncioTestCase):
+    """`codecs` on place_call and answer_call, in place of the stack's. An
+    answer keeps the offer's order, so each case makes the stack's own order
+    alone settle on PCMU and the call's settle on PCMA."""
+
+    async def _codec_of_a_call(self, alice_codecs, bob_codecs, place, answer):
+        loop = asyncio.get_running_loop()
+        alice = Stack(loop=loop, audio=AudioMode.APPLICATION, codecs=alice_codecs)
+        bob = Stack(loop=loop, audio=AudioMode.APPLICATION, codecs=bob_codecs)
+        self.addCleanup(bob.close)
+        self.addCleanup(alice.close)
+        account = alice.add_account("sip:alice@sipral.invalid", registrar_address=bob.bind_address)
+        bob.add_account("sip:bob@sipral.invalid", registrar_address=alice.bind_address)
+
+        alice_call = alice.place_call(account, f"sip:bob@{bob.bind_address}", codecs=place)
+        self.addCleanup(alice_call.close)
+        bob_call = None
+        while bob_call is None:
+            event = await asyncio.wait_for(bob.events.get(), timeout=10)
+            if event.kind == EventKind.INCOMING_CALL:
+                bob_call = bob.answer_call(event, codecs=answer)
+        self.addCleanup(bob_call.close)
+        while alice_call.media is None:
+            await asyncio.wait_for(alice_call.events.get(), timeout=10)
+        while bob_call.media is None:
+            await asyncio.wait_for(bob_call.events.get(), timeout=10)
+        return alice_call.media.info()["codec"], bob_call.media.info()["codec"]
+
+    async def test_a_call_placed_with_pcma_first_negotiates_pcma(self) -> None:
+        codecs = await self._codec_of_a_call("PCMU", None, "PCMA,PCMU", None)
+        self.assertEqual(codecs, (lib.SIPRAL_CODEC_PCMA, lib.SIPRAL_CODEC_PCMA))
+
+    async def test_a_call_answered_with_pcma_negotiates_it_when_offered_both(self) -> None:
+        codecs = await self._codec_of_a_call("PCMA,PCMU", "PCMU", None, "PCMA,PCMU")
+        self.assertEqual(codecs, (lib.SIPRAL_CODEC_PCMA, lib.SIPRAL_CODEC_PCMA))
+
+
 if __name__ == "__main__":
     unittest.main()

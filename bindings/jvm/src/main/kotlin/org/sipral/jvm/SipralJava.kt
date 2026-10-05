@@ -142,18 +142,26 @@ object SipralJava {
         org.sipral.idiomatic.declinedChallengeOf(event)
 
     /** [SipralClient.placeCall] to [target], its media socket bound on
-     * [mediaHost]. */
+     * [mediaHost]; [codecs] -- `"PCMA,PCMU"` -- is what this call offers and
+     * in what order, in place of the client's. */
     @JvmStatic
     @JvmOverloads
-    fun placeCall(client: SipralClient, account: SipralAccount, target: String, mediaHost: String = "127.0.0.1"): SipralCall =
-        client.placeCall(account, target, mediaHost = mediaHost)
+    fun placeCall(
+        client: SipralClient,
+        account: SipralAccount,
+        target: String,
+        mediaHost: String = "127.0.0.1",
+        codecs: String? = null,
+    ): SipralCall = client.placeCall(account, target, mediaHost = mediaHost, codecs = codecs)
 
     /** [SipralClient.answerCall] for the `INCOMING_CALL` [event], its media
-     * socket bound on [mediaHost]. */
+     * socket bound on [mediaHost]; [codecs] is what this call takes, in place
+     * of the client's -- an answer keeps the offer's order, so it chooses
+     * which codecs rather than which comes first. */
     @JvmStatic
     @JvmOverloads
-    fun answerCall(client: SipralClient, event: SipralEvent, mediaHost: String = "127.0.0.1"): SipralCall =
-        client.answerCall(event, mediaHost = mediaHost)
+    fun answerCall(client: SipralClient, event: SipralEvent, mediaHost: String = "127.0.0.1", codecs: String? = null): SipralCall =
+        client.answerCall(event, mediaHost = mediaHost, codecs = codecs)
 
     /** [SipralCall.sendDtmf] the default way: RFC 4733, 100 ms a digit. */
     @JvmStatic

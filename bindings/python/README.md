@@ -391,7 +391,11 @@ mixed or stereo with this end on the left, and `stop_recording()` /
 `recording` stop it and say how far it got. `tests/test_inband.py` proves
 each over two stacks on loopback. `Stack(codecs="L16/16000")` (or
 `L16/8000`) offers the samples themselves, and `Codec(info()["codec"])` says
-`Codec.L16_WIDEBAND` once both ends took it.
+`Codec.L16_WIDEBAND` once both ends took it. `place_call(..., codecs="PCMA,PCMU")`
+and `answer_call(event, codecs="PCMA,PCMU")` give one call its own codecs in
+place of the stack's; an answer keeps the offer's order (RFC 3264 §6.1), so
+answering it chooses which codecs rather than which comes first
+(`tests/test_call.py`).
 
 ## Real-time text, RTCP feedback, conferences, presence and recording servers
 

@@ -1030,8 +1030,8 @@ public sealed partial class SipralStack : IDisposable
     /// a media socket is opened before the INVITE goes out, and its
     /// <c>host:port</c> is offered as <c>media_address</c>.
     /// <paramref name="options"/> adds a real-time text stream on a socket of
-    /// its own, RTCP feedback, or this end as a conference's focus
-    /// (<see cref="SipralCallOptions"/>).
+    /// its own, RTCP feedback, this end as a conference's focus, or this
+    /// call's own codec order (<see cref="SipralCallOptions"/>).
     /// </summary>
     public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
     {
@@ -1045,12 +1045,14 @@ public sealed partial class SipralStack : IDisposable
         var targetBytes = Encoding.UTF8.GetBytes(target);
         var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
         var destinationBytes = destination is null ? null : Encoding.UTF8.GetBytes(destination);
+        var codecsBytes = options?.Codecs is { } codecs ? Encoding.UTF8.GetBytes(codecs) : null;
 
         ulong callHandle = 0;
         using (var targetPin = Pin(targetBytes))
         using (var mediaPin = Pin(mediaAddressBytes))
         using (var destPin = Pin(destinationBytes))
         using (var textPin = Pin(textAddressBytes))
+        using (var codecsPin = Pin(codecsBytes))
         {
             var config = SipralCallConfig.Sized();
             config.Target = targetPin.Pointer;
@@ -1068,6 +1070,8 @@ public sealed partial class SipralStack : IDisposable
             config.TextAddressLen = (nuint)(textAddressBytes?.Length ?? 0);
             config.Feedback = (uint)(options is { Feedback: true } ? SipralToggle.On : SipralToggle.Default);
             config.Focus = options is { Focus: true } ? 1u : 0u;
+            config.Codecs = codecsPin.Pointer;
+            config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
 
             try
             {
@@ -1097,7 +1101,8 @@ public sealed partial class SipralStack : IDisposable
     /// read off <see cref="Events"/>. With <paramref name="options"/> the
     /// call is answered through <c>sipral_call_answer_with</c>: a text
     /// socket opened for a real-time text stream the offer carried, RTCP
-    /// feedback, or this end named the focus of a conference.
+    /// feedback, this end named the focus of a conference, or the codecs
+    /// this call accepts.
     /// </summary>
     public Call AnswerCall(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralCallOptions? options = null)
     {
@@ -1161,11 +1166,127 @@ public sealed partial class SipralStack : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_reject(Handle, args.Call, code, NowMs), "sipral_call_reject");
     }
 
+    /// <summary>Says an incoming call nothing has answered yet is ringing:
+    /// <c>sipral_call_ring</c> with no description, a 180 Ringing. The call
+    /// is answered later with <see cref="AnswerCall"/>, or refused with
+    /// <see cref="RejectCall"/>, as before.</summary>
+    public void RingCall(SipralEventArgs args)
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_call_ring(Handle, args.Call, null!, 0, NowMs), "sipral_call_ring");
+    }
+
+    /// <summary>
+    /// Says an incoming call is ringing with this stack running its audio
+    /// before anybody answers: <c>sipral_call_ring_media</c>, a 183 Session
+    /// Progress whose answer is written against a media socket opened here.
+    /// <see cref="SipralEventKind.MediaStarted"/> follows, and what the
+    /// application sends on the returned call's <see cref="Call.Media"/> is
+    /// what the caller hears while it waits — a ringback, an announcement.
+    /// Answer it with that call's <see cref="Call.Answer"/>, which keeps the
+    /// session and description written here, never with
+    /// <see cref="AnswerCall"/>, which would open a second socket.
+    /// <paramref name="srtp"/> and <paramref name="codecs"/> are this call's
+    /// own, in place of the stack's; an INVITE that carried no offer is
+    /// <see cref="SipralStatus.WrongState"/>, with nothing sent.
+    /// </summary>
+    public Call RingCallWithMedia(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralSrtp srtp = 0, string? codecs = null)
+    {
+        mediaHost = MediaHostFor(mediaHost, AccountFor(args.Account), null);
+        var mediaSocket = OpenMediaSocket(mediaHost, mediaPort);
+        var mediaAddress = FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
+        MapMediaSocket(mediaSocket, mediaAddress);
+
+        var mediaAddressBytes = Encoding.UTF8.GetBytes(mediaAddress);
+        var codecsBytes = codecs is null ? null : Encoding.UTF8.GetBytes(codecs);
+        var call = new Call(this, args.Call, mediaSocket, mediaAddress);
+        Track(call, mediaAddress);
+        using (var mediaPin = Pin(mediaAddressBytes))
+        using (var codecsPin = Pin(codecsBytes))
+        {
+            var config = SipralCallConfig.Sized();
+            config.MediaAddress = mediaPin.Pointer;
+            config.MediaAddressLen = (nuint)mediaAddressBytes.Length;
+            config.Srtp = (uint)srtp;
+            config.Codecs = codecsPin.Pointer;
+            config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
+            try
+            {
+                SipralErrors.Call(() => NativeMethods.sipral_call_ring_media(Handle, args.Call, config, NowMs), "sipral_call_ring_media");
+            }
+            catch
+            {
+                ForgetCall(call.Handle);
+                ForgetMediaSocket(mediaAddress);
+                mediaSocket.Dispose();
+                throw;
+            }
+        }
+        return call;
+    }
+
+    /// <summary>Every screening callback handed to
+    /// <c>sipral_stack_screen</c>, kept for the stack's life: one replaced
+    /// may still be asking on a receive thread that entered before.</summary>
+    private readonly List<SipralScreenCallback> _screenCallbacks = new();
+
+    /// <summary>
+    /// Installs <paramref name="policy"/> as this stack's screening policy
+    /// (<c>sipral_stack_screen</c>), or removes it with
+    /// <see langword="null"/>. Every INVITE is handed to it before it has any
+    /// effect — before ringing, before
+    /// <see cref="SipralEventKind.IncomingCall"/>, before a call handle
+    /// exists — as a <see cref="SipralInvite"/>. It answers
+    /// <see cref="Sipral.ScreenAccept"/> (200) to let the call arrive, or the
+    /// SIP status to refuse it with, 400 to 699; what it refuses is answered
+    /// and forgotten, with nothing for the application to clean up, and
+    /// counted in <see cref="SipralCounters.ScreenedRefusedByPolicy"/>.
+    /// It runs on the thread feeding the stack bytes, with the stack's lock
+    /// held, so it must not call into this stack — that is refused with
+    /// <see cref="SipralStatus.Busy"/>. A policy that throws refuses the
+    /// call: zero is never an acceptance.
+    /// </summary>
+    public void Screen(Func<SipralInvite, uint>? policy)
+    {
+        if (policy is null)
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_stack_screen(Handle, IntPtr.Zero, IntPtr.Zero), "sipral_stack_screen");
+            return;
+        }
+        SipralScreenCallback callback = (raw, _) =>
+        {
+            try
+            {
+                var request = Marshal.PtrToStructure<SipralScreenRequest>(raw);
+                var source = request.Source == IntPtr.Zero
+                    ? null
+                    : Marshal.PtrToStringUTF8(request.Source, (int)request.SourceLen);
+                var message = new byte[(int)request.MessageLen];
+                Marshal.Copy(request.Message, message, 0, message.Length);
+                return policy(new SipralInvite(source, message));
+            }
+            catch (Exception ex)
+            {
+                // an exception must not unwind into the native frame below
+                Trace.TraceError($"Sipral: screening policy threw: {ex}");
+                return 0;
+            }
+        };
+        lock (_screenCallbacks)
+        {
+            _screenCallbacks.Add(callback);
+        }
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_screen(Handle, Marshal.GetFunctionPointerForDelegate(callback), IntPtr.Zero),
+            "sipral_stack_screen");
+    }
+
     /// <summary>
     /// Takes a REFER outside any dialog and places the call it asks for:
     /// <c>sipral_call_accept_transfer</c> on the referral's handle.
     /// <paramref name="args"/> is the <see cref="SipralEventKind.Referral"/>
-    /// event with a zero <see cref="SipralReferralEventInfo.StatusCode"/>.
+    /// event with a zero <see cref="SipralReferralEventInfo.StatusCode"/>, or
+    /// a <see cref="SipralEventKind.TransferRequested"/> — the far end of a
+    /// call asking this end to call somebody else — taken the same way.
     /// The stack answers 202, reports on the call to whoever asked, and
     /// places it from the account the event names, to the REFER's own
     /// target; a media socket is opened for it here the way
@@ -1207,7 +1328,8 @@ public sealed partial class SipralStack : IDisposable
         return call;
     }
 
-    /// <summary>Refuses a REFER outside any dialog with
+    /// <summary>Refuses a REFER outside any dialog, or a
+    /// <see cref="SipralEventKind.TransferRequested"/>, with
     /// <paramref name="code"/>, 300 to 699:
     /// <c>sipral_call_reject_transfer</c> on the referral's handle.</summary>
     public void RejectReferral(SipralEventArgs args, uint code = 603)

@@ -353,6 +353,21 @@ public sealed class Account
         }
     }
 
+    /// <summary><c>sipral_account_refresh_binding</c>: refresh this account's
+    /// registration now rather than when its timer says (RFC 8599 §5.5) — for
+    /// the wake-up a push brings, or a network the application knows has come
+    /// back. A back-off earned by an earlier failure is dropped. Nothing is
+    /// sent while a REGISTER is already in flight, or after a refusal trying
+    /// again cannot fix, such as a wrong password. An account that never
+    /// registers has no binding to refresh, and is
+    /// <see cref="SipralStatus.InvalidArgument"/>.</summary>
+    public void RefreshBinding()
+    {
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_refresh_binding(_stack.Handle, Handle, _stack.NowMs),
+            "sipral_account_refresh_binding");
+    }
+
     /// <summary><c>sipral_account_unregister</c>.</summary>
     /// <remarks>
     /// Gives the binding up: a REGISTER with Expires: 0. The registration state

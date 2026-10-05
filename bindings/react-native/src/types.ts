@@ -247,5 +247,14 @@ export interface PlaceCallOptions {
   codecs?: string;
 }
 
+export interface AnswerOptions {
+  /**
+   * The codecs this call takes, in place of the client's: "PCMA,PCMU". An
+   * answer keeps the offer's order (RFC 3264 §6.1), so this chooses which
+   * codecs rather than which comes first.
+   */
+  codecs?: string;
+}
+
 /** Whether a call was placed here or arrived here. */
 export type CallDirection = 'outgoing' | 'incoming';

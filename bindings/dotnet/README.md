@@ -395,6 +395,30 @@ refuses it. **Off by default, and then every one is refused 403**: a peer that
 can make a phone dial is a toll-fraud vector, so each one is the
 application's decision.
 
+### Transfer, ringing, screening and a refreshed registration
+
+`call.Transfer("sip:carol@example.com")` is a blind transfer (RFC 3515);
+`call.TransferTo(consultation)` hands the call to the far end of another call
+this end has up, which replaces it (RFC 3891). `TransferProgress` and
+`TransferDone` arrive on `call.Events` with `args.Transfer` set, and
+`await call.WaitForTransferAsync()` returns the last: a 2xx `StatusCode` when
+the new call came up. Asked for one by the far end, a stack raises
+`SipralEventKind.TransferRequested`, taken with `stack.AcceptReferral(args)`
+or refused with `stack.RejectReferral(args, 603)` as a referral is.
+`stack.RingCall(args)` sends 180 Ringing for an incoming call before
+`AnswerCall`; `stack.RingCallWithMedia(args)` sends 183 with this stack's
+answer and returns the `Call`, whose `Media` carries early audio both ways
+until `call.Answer()`. `stack.Screen(invite => ...)` sees every INVITE as a
+`SipralInvite` (source address, bytes, `Header(name)`) before anything else
+does and answers `Sipral.ScreenAccept` (200) or the status to refuse it with;
+it runs with the stack locked, so it must not call into it, and
+`Screen(null)` removes it. `account.RefreshBinding()` sends the REGISTER
+refresh now rather than when its timer says. A call's own codecs, in place of
+the stack's, go in `new SipralCallOptions { Codecs = "PCMA,PCMU" }` for
+`PlaceCall` and `AnswerCall`; an answer keeps the offer's order (RFC 3264
+§6.1), so answering it chooses which codecs rather than which comes first.
+`Sipral.Tests/CallControlTests.cs` proves each on loopback stacks.
+
 ### What a call carries in its audio, and recording it
 
 A digit the far end leaves in the audio arrives as

@@ -671,7 +671,9 @@ and reduced size. `media.rtcpFeedback()` says what was agreed, and
 
 `codecs:` on `placeCall` and `answer` orders one call's codecs:
 `"L16/16000"` or `"L16/8000"` offers linear audio, which no default offer
-carries.
+carries, and `"PCMA,PCMU"` settles on PCMA wherever the far end takes it. An
+answer keeps the offer's order (RFC 3264 §6.1), so answering, the list
+chooses which codecs rather than which comes first.
 
 ### Conferences and presence
 

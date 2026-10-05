@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.sipral.SipralCallState
+import org.sipral.SipralCodec
 import org.sipral.SipralEventKind
 import org.sipral.SipralHeldAudio
 import org.sipral.idiomatic.SipralAudioMode
@@ -91,6 +92,40 @@ class LoopbackCallKotlinIT {
                 }
             }
         }
+    }
+
+    /** The codec both ends of a call settle on, placed and answered through
+     * [SipralJava] with [place] and [answer] as the call's own codecs. */
+    private suspend fun codecsOf(place: String?, answer: String?): List<Long> =
+        SipralJava.open().use { alice ->
+            SipralJava.open().use { bob ->
+                val fromAlice = alice.addAccount(aor = "sip:alice@example.invalid", registrarAddress = bob.bindAddress)
+                bob.addAccount(aor = "sip:bob@example.invalid", registrarAddress = alice.bindAddress)
+                val (outgoing, incoming) = bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                    SipralJava.placeCall(alice, fromAlice, "sip:bob@example.invalid", "127.0.0.1", place)
+                }
+                val answered = SipralJava.answerCall(bob, incoming, "127.0.0.1", answer)
+                outgoing.use { callA ->
+                    answered.use { callB ->
+                        withTimeout(15_000) {
+                            while (callA.media == null || callB.media == null) {
+                                delay(20)
+                            }
+                        }
+                        listOf(checkNotNull(callA.media).info().codec, checkNotNull(callB.media).info().codec)
+                    }
+                }
+            }
+        }
+
+    /** An answer keeps the offer's order (RFC 3264 §6.1): placed with PCMA
+     * first, a call beats the client's own order, which would settle on Opus;
+     * answered with PCMA,PCMU, it leaves out the G.722 an offer put first. */
+    @Test
+    fun aCallsOwnCodecsSettleOnPcmaPlacedAndAnswered() = runBlocking {
+        val pcma = SipralCodec.PCMA.value.toLong()
+        assertEquals(listOf(pcma, pcma), codecsOf(place = "PCMA,PCMU", answer = null))
+        assertEquals(listOf(pcma, pcma), codecsOf(place = "G722,PCMA,PCMU", answer = "PCMA,PCMU"))
     }
 
     /** The loudest sample the far end hears of a tone sent on a call held

@@ -43,6 +43,7 @@ export type {
   EndReason,
   LocateFailure,
   OpenOptions,
+  AnswerOptions,
   PlaceCallOptions,
   RegistrationFailure,
   RegistrationState,

@@ -61,8 +61,10 @@ public final class SipralReactBridge: NSObject {
         }
     }
 
-    @objc public func answer(_ call: String, resolve: @escaping Resolve, reject: @escaping Reject) {
-        settle(resolve, reject) { try self.core.answer(call) }
+    @objc public func answer(
+        _ call: String, options: [String: Any], resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) { try self.core.answer(call, codecs: options["codecs"] as? String) }
     }
 
     @objc public func reject(_ call: String, code: Int, resolve: @escaping Resolve, reject: @escaping Reject) {

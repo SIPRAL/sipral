@@ -461,6 +461,16 @@ describe('a call that arrives', () => {
     expect(native.calls.at(-1)).toEqual({method: 'reject', args: ['42', 603]});
   });
 
+  it('is answered with its own codecs when asked, and with none named otherwise', async () => {
+    const {native, incoming} = await ringing();
+    await incoming.call.answer({codecs: 'PCMA,PCMU'});
+    expect(native.calls.at(-1)).toEqual({method: 'answer', args: ['42', {codecs: 'PCMA,PCMU'}]});
+
+    const second = await ringing();
+    await second.incoming.call.answer();
+    expect(second.native.calls.at(-1)).toEqual({method: 'answer', args: ['42', {}]});
+  });
+
   it('can be answered again if the answer was refused', async () => {
     const {native, incoming} = await ringing();
     native.failNext('answer', 'notSent', 'the socket would not bind');

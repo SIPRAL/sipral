@@ -237,11 +237,11 @@ class SipralReactCore(
         keep(call)
     }
 
-    fun answer(call: String) = guarded {
+    fun answer(call: String, codecs: String? = null) = guarded {
         val event = arrived.remove(call)
             ?: throw SipralRefusal("wrongState", "call $call is not waiting to be answered")
         try {
-            keep(open().answerCall(event, mediaHost = mediaHost))
+            keep(open().answerCall(event, mediaHost = mediaHost, codecs = codecs))
         } catch (refused: Exception) {
             arrived[call] = event
             throw refused

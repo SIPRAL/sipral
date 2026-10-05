@@ -1101,6 +1101,7 @@ class Stack:
         text: bool = False,
         feedback: bool = False,
         focus: bool = False,
+        codecs: str | None = None,
     ) -> Call:
         """`sipral_call_place`, with this stack running the call's audio.
 
@@ -1127,6 +1128,8 @@ class Stack:
         reduced-size RTCP (RFC 5506), off by default since a far end that
         knows only RTP/AVP refuses the profile. ``focus`` says this end is
         the focus of a conference (RFC 4579): `isfocus` on its `Contact`.
+        ``codecs`` -- ``"PCMA,PCMU"`` -- is what this call offers and in what
+        order, in place of the stack's (`sipral_call_config_t::codecs`).
 
         ``media_host`` left out binds the media socket at the address of the
         route toward ``destination``, or toward the account's server.
@@ -1162,6 +1165,12 @@ class Stack:
             config.text_address_len = len(text_address)
         config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
         config.focus = 1 if focus else 0
+        codecs_buf = None
+        if codecs is not None:
+            codecs_bytes = codecs.encode("utf-8")
+            codecs_buf = ffi.new("char[]", codecs_bytes)
+            config.codecs = codecs_buf
+            config.codecs_len = len(codecs_bytes)
 
         out_call = ffi.new("sipral_handle_t *")
         try:
@@ -1190,6 +1199,7 @@ class Stack:
         text: bool = False,
         feedback: bool = False,
         focus: bool = False,
+        codecs: str | None = None,
     ) -> Call:
         """Open a media socket for an incoming call and answer it there.
 
@@ -1205,9 +1215,12 @@ class Stack:
         thread until the socket's `SIPRAL_EVENT_KIND_NAT_MAPPING` arrives,
         the same wait :meth:`place_call` makes.
 
-        With ``text``, ``feedback`` or ``focus`` -- as :meth:`place_call`
-        takes them -- the call is answered through `sipral_call_answer_with`,
-        a text socket opened for the real-time text stream the offer carried.
+        With ``text``, ``feedback``, ``focus`` or ``codecs`` -- as
+        :meth:`place_call` takes them -- the call is answered through
+        `sipral_call_answer_with`, a text socket opened for the real-time text
+        stream the offer carried. An answer keeps the offer's order (RFC 3264
+        §6.1), so ``codecs`` chooses which codecs this call takes rather than
+        which comes first.
 
         ``media_host`` left out binds the media socket at the address of the
         route toward the server of the account the call came to.
@@ -1221,8 +1234,8 @@ class Stack:
         call = Call(self, event.call, media_socket, media_address, text_socket)
         self.register_call(call)
         try:
-            if text or feedback or focus:
-                call.answer_with(feedback=feedback, focus=focus)
+            if text or feedback or focus or codecs is not None:
+                call.answer_with(feedback=feedback, focus=focus, codecs=codecs)
             else:
                 call.answer()
         except Exception:

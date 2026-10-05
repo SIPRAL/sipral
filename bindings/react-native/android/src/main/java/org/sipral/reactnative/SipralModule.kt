@@ -85,7 +85,9 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
         core.placeCall(account, target, options.text("destination"), options.text("codecs"))
     }
 
-    override fun answer(call: String, promise: Promise) = settle(promise) { core.answer(call) }
+    override fun answer(call: String, options: ReadableMap, promise: Promise) = settle(promise) {
+        core.answer(call, options.text("codecs"))
+    }
 
     override fun reject(call: String, code: Double, promise: Promise) = settle(promise) { core.reject(call, code.toInt()) }
 

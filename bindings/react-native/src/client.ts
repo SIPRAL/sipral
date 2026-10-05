@@ -26,6 +26,7 @@ import type {
   EndReason,
   LocateFailure,
   OpenOptions,
+  AnswerOptions,
   PlaceCallOptions,
   RegistrationFailure,
   RegistrationState,
@@ -391,7 +392,7 @@ export class SipralCall {
   };
 
   /** Answer a call that arrived. The audio runs on the phone's own devices. */
-  async answer(): Promise<void> {
+  async answer(options: AnswerOptions = {}): Promise<void> {
     await this.client.run(
       () => {
         this.alive();
@@ -399,7 +400,7 @@ export class SipralCall {
           throw new SipralError('wrongState', `call ${this.id} is not waiting to be answered`);
         }
       },
-      (native) => native.answer(this.id),
+      (native) => native.answer(this.id, {...options}),
     );
     this.answered = true;
   }

@@ -21,12 +21,16 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.sipral.Sipral
 import org.sipral.SipralAudioActivation
 import org.sipral.SipralChallengeRefusal
+import org.sipral.SipralCodec
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.idiomatic.SipralAudioMode
+import org.sipral.idiomatic.SipralClient
+import org.sipral.idiomatic.awaitNext
 
 private class Phone(name: String, mode: SipralAudioMode = SipralAudioMode.Application) {
     val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
@@ -390,6 +394,48 @@ private fun theRateOfACallsFramesIsChosen(): String {
     return "the rate of a call's frames chosen and read back"
 }
 
+/** A call's own codecs through the core, read on a plain client at the other
+ * end: placed with PCMA,PCMU it settles on PCMA where the client's own order
+ * would take Opus, and answered with PCMA,PCMU it leaves out the G.722 the
+ * offer put first -- an answer keeps the offer's order. */
+private fun aCallsOwnCodecsReachTheLibrary(): String {
+    val pcma = SipralCodec.PCMA.value.toLong()
+    val alice = Phone("alice")
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
+        try {
+            val line = alice.core.addAccount(SipralAccountOptions(aor = alice.aor, registrarAddress = bob.bindAddress))
+            bob.addAccount(aor = "sip:bob@sipral.invalid", registrarAddress = alice.address)
+            val (_, incoming) = runBlocking {
+                bob.events.awaitNext(SipralEventKind.INCOMING_CALL, timeoutMs = 15_000) {
+                    alice.core.placeCall(line, "sip:bob@${bob.bindAddress}", destination = null, codecs = "PCMA,PCMU")
+                }
+            }
+            bob.answerCall(incoming).use { answered ->
+                assertTrue(waitUntil(15_000) { answered.media != null }, "the placed call's media never came up")
+                assertEquals(pcma, answered.media!!.info().codec)
+            }
+        } finally {
+            alice.core.close()
+        }
+    }
+    val bob = Phone("bob")
+    SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+        try {
+            val line = client.addAccount(aor = "sip:alice@sipral.invalid", registrarAddress = bob.address)
+            bob.core.addAccount(SipralAccountOptions(aor = bob.aor, registrarAddress = client.bindAddress))
+            client.placeCall(line, target = "sip:bob@${bob.address}", codecs = "G722,PCMA,PCMU").use { placed ->
+                val rang = bob.await("the incoming call") { it["kind"] == "incomingCall" }
+                bob.core.answer(rang["call"] as String, codecs = "PCMA,PCMU")
+                assertTrue(waitUntil(15_000) { placed.media != null }, "the answered call's media never came up")
+                assertEquals(pcma, placed.media!!.info().codec)
+            }
+        } finally {
+            bob.core.close()
+        }
+    }
+    return "a call's own codecs settled on PCMA, placed and answered"
+}
+
 /** An action after the worker was shut down is rejected as closed rather
  * than thrown at its caller; the close itself runs after what was queued. */
 /** The realms an account names and what a held party is sent reach the
@@ -507,7 +553,8 @@ fun main() {
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
             aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +
-            theRateOfACallsFramesIsChosen() + "; " + theEchoCancellationIsSwitchedAndReadBack()
+            theRateOfACallsFramesIsChosen() + "; " + theEchoCancellationIsSwitchedAndReadBack() + "; " +
+            aCallsOwnCodecsReachTheLibrary()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

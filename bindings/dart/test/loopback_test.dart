@@ -222,6 +222,61 @@ void main() {
     answered.close();
   });
 
+  // An answer keeps the offer's order (RFC 3264 §6.1). Placing, the call's
+  // own order beats the stack's, which would settle on Opus; answering, it
+  // leaves G.722 out of an offer that puts G.722 first.
+  Future<List<int>> codecsOf({String? place, String? answer}) async {
+    final codecs = <int>[];
+    void started(SipralEvent event) {
+      if (event.kind == SipralEventKind.mediaStarted) {
+        codecs.add(event.payload.media.codec);
+      }
+    }
+
+    alice.onRawEvent = started;
+    bob.onRawEvent = started;
+    final fromAlice = alice.addAccount(
+      'sip:alice@sipral.invalid',
+      registrarAddress: bob.bindAddress,
+    );
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
+    final call = await alice.placeCall(
+      fromAlice,
+      'sip:bob@${bob.bindAddress}',
+      codecs: place,
+    );
+    final answered = await bob.answerCall(
+      await ringing.timeout(const Duration(seconds: 15)),
+      codecs: answer,
+    );
+    await call.confirmed(timeout: const Duration(seconds: 15));
+    await until(() => codecs.length == 2);
+    call.close();
+    answered.close();
+    return codecs;
+  }
+
+  test('a call placed with PCMA first negotiates PCMA', () async {
+    expect(await codecsOf(place: 'PCMA,PCMU'), [
+      SipralCodec.pcma,
+      SipralCodec.pcma,
+    ]);
+  });
+
+  test('a call answered with PCMA and PCMU takes PCMA from an offer of '
+      'both', () async {
+    expect(await codecsOf(place: 'G722,PCMA,PCMU', answer: 'PCMA,PCMU'), [
+      SipralCodec.pcma,
+      SipralCodec.pcma,
+    ]);
+  });
+
   test('a call that is refused ends without being confirmed', () async {
     final fromAlice = alice.addAccount(
       'sip:alice@sipral.invalid',
