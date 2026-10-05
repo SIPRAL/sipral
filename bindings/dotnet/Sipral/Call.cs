@@ -47,7 +47,11 @@ public sealed class Call : IDisposable
 
     private int _disposed;
 
-    internal ulong Handle => _handle.Value;
+    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
+    /// <c>sipral.h</c> this class does not wrap, called through the
+    /// application's own P/Invoke declaration. Valid while the
+    /// call is.</summary>
+    public ulong Handle => _handle.Value;
 
     /// <summary>Set once <see cref="SipralEventKind.MediaStarted"/>
     /// arrives; <see langword="null"/> before that.</summary>

@@ -20,11 +20,13 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Changed
 
+- **.NET: the stack's, an account's and a call's raw handles are public** (`SipralStack.Handle`, `Account.Handle`, `Call.Handle`), for an entry point of `sipral.h` the classes do not wrap yet, as the Kotlin, Python and Swift layers already allow.
 - **Every binding's `unregister` says where an editor shows it what the state does.** It reads unregistered as soon as the call returns, and the registrar's answer is the registration-changed event after it; an application that closes the stack on the state alone cannot answer a challenge to the un-REGISTER (`docs/08-ffi.md` said so already).
 - **The .NET assembly names no build path, and the repository asks for a bug report or feature request in a form.** `Sipral.csproj` maps the project directory to `/_/`; GitHub issue forms for bugs and features, with questions sent to Discussions and vulnerabilities to private reporting.
 
 ### Fixed
 
+- **.NET: `Account.Remove` waits out a busy stack.** It released the account once and ignored the answer, so a stack busy on another thread kept the account while the layer forgot it; it now retries `SIPRAL_STATUS_BUSY` as every other call in the layer does, raises a refusal, and forgets the account only once the library has let it go.
 - **Every REGISTER after a challenge carries a higher `CSeq`.** The REGISTER that answered a registrar's 401 took the next number on the wire, and the account did not count it: its refresh and its un-REGISTER went out again with that number, which RFC 3261 §10.2 forbids. Asterisk let it pass; a stricter registrar refuses it, and an un-REGISTER refused that way leaves the binding on the PBX until it expires.
 - **Presence from Asterisk is read again.** Asterisk puts an empty `<dm:person />`, with no `id`, in every presence document it sends, and the stack refused the whole document over it: the NOTIFY was answered 200 and no `PRESENCE_CHANGED` followed, so every busy lamp watching an extension on Asterisk or FreePBX stayed blank. A person with no `id` is now left out and the tuples, their `basic` status and the notes are read as before.
 

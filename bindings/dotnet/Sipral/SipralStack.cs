@@ -628,7 +628,11 @@ public sealed partial class SipralStack : IDisposable
     /// moment).</summary>
     public ulong NowMs => (ulong)_origin.ElapsedMilliseconds;
 
-    internal ulong Handle => _handle.Value;
+    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
+    /// <c>sipral.h</c> this class does not wrap, called through the
+    /// application's own P/Invoke declaration. Valid until the
+    /// stack is disposed.</summary>
+    public ulong Handle => _handle.Value;
 
     /// <summary>The RTP port range media sockets are bound in, or
     /// <see langword="null"/> when the operating system picks.</summary>

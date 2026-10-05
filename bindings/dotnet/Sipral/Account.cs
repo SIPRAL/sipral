@@ -80,7 +80,11 @@ public sealed class Account
     /// <see cref="SipralStack.MoveTo"/> then leaves to the application.</summary>
     public bool ContactGiven { get; }
 
-    internal ulong Handle => _handle.Value;
+    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
+    /// <c>sipral.h</c> this class does not wrap, called through the
+    /// application's own P/Invoke declaration. Valid until
+    /// <see cref="Remove"/>.</summary>
+    public ulong Handle => _handle.Value;
 
     private Account(
         SipralStack stack, ulong handle, string aor, string registrarAddress, bool contactGiven, string? serverUri,
@@ -457,10 +461,17 @@ public sealed class Account
     }
 
     /// <summary><c>sipral_account_remove</c>. Every call this account
-    /// placed ends.</summary>
+    /// placed ends. Waits out <see cref="SipralStatus.Busy"/> like every
+    /// other call in this layer, and raises what is left of a refusal; the
+    /// account is forgotten only once the library has let it go.</summary>
     public void Remove()
     {
-        _handle.Dispose();
+        if (!_handle.IsClosed)
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_account_remove(_stack.Handle, Handle), "sipral_account_remove");
+            // released above: the finalizer must not release it again
+            _handle.SetHandleAsInvalid();
+        }
         _stack.ForgetAccount(this);
     }
 
