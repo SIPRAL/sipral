@@ -32,6 +32,7 @@ Copyright (c) 2026 Sytek
 - [Migrating from PJSIP](docs/21-migrating-from-pjsip.md)
 - [TLS per platform](docs/22-tls.md)
 - [Compared with PJSIP](docs/23-compared-with-pjsip.md)
+- [Voice-agent services](docs/24-voice-agents.md)
 
 # Repository
 

@@ -30,10 +30,15 @@ service that accepts a SIP call, and needs nothing from the service beyond
 its address and its rules for admitting a caller.
 
 The examples `bindings/python/examples/agent_bridge.py` and
-`crates/sipral/examples/agent-bridge.rs` do this; they are being added on
-a separate branch. Both read the service's address from the environment
-variable `SIPRAL_AGENT_URI`, for example
+`crates/sipral/examples/agent-bridge.rs` do this (`07-headless.md`,
+"Bridging a call to a voice agent that speaks SIP"). Both read the
+service's address from the environment variable `SIPRAL_AGENT_URI`, for
+example
 `SIPRAL_AGENT_URI='sip:proj_<project-id>@sip.api.openai.com;transport=tls'`.
+When the agent ends its call, the bridge ends the PBX's with a named
+outcome — human, callback, resolved, unresolved, expired — in a header on
+the BYE or as a REFER to an address set per outcome, and a transfer the
+agent asks for becomes a REFER of the caller's leg, so the PBX places it.
 
 What the bridge uses from the stack:
 
@@ -78,7 +83,9 @@ little-endian mono PCM at 8, 16, 24 or 48 kHz, on a socket or in process,
 for an application that talks to the service's WebSocket API itself. The
 application converts between Sipral's frames and the service's messages —
 base64 in JSON for most of the APIs below — and chooses the rate the
-service asks for, so that only Sipral resamples. Direct adapters for
+service asks for, so that only Sipral resamples: on the socket when the
+session opens, and in process with `sipral_media_set_app_rate`
+(`08-ffi.md`, "What ABI 1.1 added"). Direct adapters for
 OpenAI Realtime, Gemini Live, ElevenLabs, Vapi and Deepgram, in a package
 `sipral-agents`, are **planned, not available**.
 
