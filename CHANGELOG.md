@@ -24,7 +24,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Fixed
 
-- **Presence from Asterisk is read again.** Asterisk's PJSIP puts an empty `<dm:person />`, with no `id`, in every presence document it sends, and the stack refused the whole document over it: the NOTIFY was answered 200 and no `PRESENCE_CHANGED` followed, so every busy lamp watching an extension on Asterisk or FreePBX stayed blank. A person with no `id` is now left out and the tuples, their `basic` status and the notes are read as before.
+- **Presence from Asterisk is read again.** Asterisk puts an empty `<dm:person />`, with no `id`, in every presence document it sends, and the stack refused the whole document over it: the NOTIFY was answered 200 and no `PRESENCE_CHANGED` followed, so every busy lamp watching an extension on Asterisk or FreePBX stayed blank. A person with no `id` is now left out and the tuples, their `basic` status and the notes are read as before.
 
 ## [1.1.0] - 2026-10-04
 

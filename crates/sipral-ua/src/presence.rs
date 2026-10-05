@@ -693,7 +693,7 @@ mod tests {
         assert!(presence.person.is_none());
     }
 
-    /// What Asterisk's PJSIP sends for an extension's state: the person
+    /// What Asterisk sends for an extension's state: the person
     /// element is there, empty, with no id.
     const EMPTY_PERSON: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <presence entity="sip:203@192.0.2.14:45421" xmlns="urn:ietf:params:xml:ns:pidf" xmlns:dm="urn:ietf:params:xml:ns:pidf:data-model" xmlns:rpid="urn:ietf:params:xml:ns:pidf:rpid">

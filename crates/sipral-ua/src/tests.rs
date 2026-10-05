@@ -15622,7 +15622,7 @@ fn a_presence_notify_with_asterisks_empty_person_is_still_news() {
         .expect("the SUBSCRIBE goes");
     let subscribe = only(&transmits(&mut agent), "SUBSCRIBE ");
     deliver(&mut agent, &accepted(&subscribe, 3_600), t0);
-    // the body Asterisk's PJSIP sends for an extension, person and all
+    // the body Asterisk sends for an extension, person and all
     let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <presence entity=\"sip:203@192.0.2.14:45421\" xmlns=\"urn:ietf:params:xml:ns:pidf\" \
 xmlns:dm=\"urn:ietf:params:xml:ns:pidf:data-model\" xmlns:rpid=\"urn:ietf:params:xml:ns:pidf:rpid\">\n \
