@@ -5742,7 +5742,8 @@ public struct SipralMediaInfo
     /// </summary>
     public uint ClockRate;
     /// <summary>
-    /// The rate the samples crossing this ABI are at.
+    /// The rate the samples crossing this ABI are at: the codec's, or the
+    /// one sipral_media_set_app_rate chose.
     /// </summary>
     public uint SampleRate;
     /// <summary>
@@ -5751,7 +5752,7 @@ public struct SipralMediaInfo
     public uint FrameMs;
     /// <summary>
     /// Samples in one frame: exactly what sipral_media_playback fills and
-    /// what sipral_media_capture wants.
+    /// what sipral_media_capture wants, at `sample_rate`.
     /// </summary>
     public nuint FrameSamples;
     /// <summary>
@@ -9624,6 +9625,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_media_capture(ulong media, ulong nowMs, short[] samples, nuint sampleCount, ref SipralMediaPacket packet);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_media_set_app_rate(ulong media, uint hz);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_media_attach_processor(ulong media, IntPtr callback, IntPtr userData);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -10016,7 +10020,7 @@ public static partial class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 0;
+    public const uint AbiVersionMinor = 1;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -12444,6 +12448,36 @@ public static partial class Sipral
     public static void MediaCapture(ulong media, ulong nowMs, short[] samples, ref SipralMediaPacket packet)
     {
         Check(NativeMethods.sipral_media_capture(media, nowMs, samples, (nuint)samples.Length, ref packet));
+    }
+
+    /// <summary>
+    /// Choose the rate this call's frames cross the boundary at in
+    /// application mode: what `sipral_media_playback` fills and what
+    /// `sipral_media_capture` takes, whatever rate the codec runs at.
+    ///
+    /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
+    /// which is where every call starts. The frame keeps the call's
+    /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
+    /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
+    /// rate chosen as soon as it is set. The conversion is the library's
+    /// own resampler, both ways, and follows a re-negotiation onto another
+    /// codec by itself; the codec, an attached processor, a recording and the
+    /// in-band detectors keep working at the codec's rate. Asking again for
+    /// the rate already set changes nothing.
+    ///
+    /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
+    /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
+    /// where the audio engine pumps the frames at the devices' rate, and
+    /// `sipral_media_mix` refuses a pair while either call has a rate of its
+    /// own: a local conference takes calls at any rate.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    /// </summary>
+    public static void MediaSetAppRate(ulong media, uint hz)
+    {
+        Check(NativeMethods.sipral_media_set_app_rate(media, hz));
     }
 
     /// <summary>

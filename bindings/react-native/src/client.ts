@@ -17,6 +17,7 @@ import type {Subscription} from './emitter';
 import {pinDigest} from './pin';
 import type {
   AccountOptions,
+  AppRate,
   AudioDirection,
   CallAudio,
   CallDirection,
@@ -361,6 +362,24 @@ export class SipralCall {
           audioDirection(direction);
         },
         (native) => native.callAudio(this.id, direction),
+      ),
+    /**
+     * The rate the call's frames cross the native layer at, whatever rate
+     * the codec runs at: 8000, 16000, 24000 or 48000, or 0 for the codec's
+     * own. Resolves with the rate and the length of one frame there, which
+     * keeps the call's duration. It is for a call whose frames the
+     * application carries; on the phone's own devices the native half
+     * refuses it as `wrongState`.
+     */
+    setAppRate: (hz: number): Promise<AppRate> =>
+      this.client.run(
+        () => {
+          this.alive();
+          if (![0, 8000, 16000, 24000, 48000].includes(hz)) {
+            throw new SipralError('invalidArgument', 'an application rate is 8000, 16000, 24000 or 48000, or 0');
+          }
+        },
+        (native) => native.setAppRate(this.id, hz),
       ),
   };
 

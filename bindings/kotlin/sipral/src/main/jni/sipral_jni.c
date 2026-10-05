@@ -3569,6 +3569,15 @@ Java_org_sipral_SipralNative_sipral_1media_1capture(JNIEnv *env, jobject self, j
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1media_1set_1app_1rate(JNIEnv *env, jobject self, jlong media, jlong hz)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_media_set_app_rate((sipral_handle_t)media, (uint32_t)hz);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1media_1attach_1processor(JNIEnv *env, jobject self, jlong media, jlong callback)
 {
     (void)env;

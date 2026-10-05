@@ -125,6 +125,13 @@ await foreach (var frame in media.Frames)
 }
 ```
 
+The frames are at the codec's rate unless the application asks for its own:
+`media.SetAppRate(24_000)` (8000, 16000, 24000 or 48000; 0 is the codec's)
+has the library convert both ways, and `media.SampleRate` and
+`media.FrameSamples` say the rate and the frame's length from then on — a
+speech service fed at its own rate whatever the far end negotiated
+(`docs/08-ffi.md`, "What ABI 1.1 added").
+
 ### The devices
 
 `stack.Audio` (`SipralAudioEngine`) is the library's audio engine, in device

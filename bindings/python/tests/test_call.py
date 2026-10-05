@@ -150,6 +150,33 @@ class TwoStacksTalkDirectly(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(media.statistics()["packets_sent"], record["packets_sent"])
 
+    async def test_frames_cross_at_the_rate_the_application_chose(self) -> None:
+        """`Media.set_app_rate`: both ends at 24 kHz hand out and take
+        480-sample frames whatever the codec, a rate outside the four is
+        refused and changes nothing, and 0 is the codec's own again."""
+        alice_call, bob_call = await self._place_and_answer()
+        self.addAsyncCleanup(self._close_calls, alice_call, bob_call)
+        codec_rate = bob_call.media.sample_rate
+        for media in (alice_call.media, bob_call.media):
+            media.set_app_rate(24_000)
+            self.assertEqual(media.sample_rate, 24_000)
+            self.assertEqual(media.frame_samples, 480)
+            self.assertEqual(media.info()["sample_rate"], 24_000)
+
+        with self.assertRaises(SipralError) as refused:
+            bob_call.media.set_app_rate(44_100)
+        self.assertEqual(refused.exception.status, lib.SIPRAL_STATUS_INVALID_ARGUMENT)
+        self.assertEqual(bob_call.media.frame_samples, 480)
+
+        alice_call.media.send_audio(bytes([0x10, 0x00]) * 480 * 5)
+        heard = await asyncio.wait_for(bob_call.media.frames.get(), timeout=5)
+        while len(heard) != 480 * 2:
+            heard = await asyncio.wait_for(bob_call.media.frames.get(), timeout=5)
+        self.assertEqual(len(heard), 480 * 2)
+
+        bob_call.media.set_app_rate(0)
+        self.assertEqual(bob_call.media.sample_rate, codec_rate)
+
     def test_an_under_run_count_crosses_into_the_events_record(self) -> None:
         """The end-of-call record a MEDIA_STATISTICS event carries copies
         `frames_underrun` under its own name, the member beside it untouched."""

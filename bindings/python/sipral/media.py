@@ -100,6 +100,9 @@ class Media:
         self.frames: asyncio.Queue[bytes] = asyncio.Queue()
         self._to_send: queue.Queue[bytes] = queue.Queue()
         self._pending = bytearray()
+        #: Held for one frame's playback and capture, and while
+        #: :meth:`set_app_rate` moves the frame's length under them.
+        self._frame_lock = threading.Lock()
         self._active = True
         self._closed = threading.Event()
 
@@ -293,10 +296,40 @@ class Media:
             )
         return paths
 
+    def set_app_rate(self, hz: int) -> None:
+        """`sipral_media_set_app_rate`: the rate :attr:`frames` hands out
+        and :meth:`send_audio` takes, whatever rate the codec runs at.
+
+        8000, 16000, 24000 or 48000, or 0 for the codec's own, which is
+        where every call starts. The library converts both ways with its
+        own resampler; the frame keeps the call's duration, so
+        :attr:`sample_rate` and :attr:`frame_samples` say the new rate and
+        its length from here on. Audio queued with :meth:`send_audio` and
+        not yet sent was at the old rate, and is dropped. Any other rate is
+        `SipralError` with ``INVALID_ARGUMENT``, and device mode is
+        ``WRONG_STATE``.
+        """
+        with self._frame_lock:
+            _call(
+                lambda: lib.sipral_media_set_app_rate(self.handle, hz),
+                "sipral_media_set_app_rate",
+            )
+            info = self.info()
+            self.sample_rate = info["sample_rate"]
+            self.frame_samples = info["frame_samples"]
+            self._silence = bytes(self.frame_samples * 2)
+            self._pending.clear()
+            while True:
+                try:
+                    self._to_send.get_nowait()
+                except queue.Empty:
+                    break
+
     def send_audio(self, pcm: bytes | memoryview) -> None:
         """Queue 16-bit mono PCM to go out, one frame at a time.
 
-        Cut to whatever :attr:`frame_samples` this call negotiated as it is
+        Cut to whatever :attr:`frame_samples` this call negotiated, at
+        :attr:`sample_rate` (:meth:`set_app_rate` chooses it), as it is
         sent, not as it is queued: a chunk shorter or longer than one frame
         is accepted here and split across as many capture calls as it
         takes. Thread-safe -- called from whatever thread the application
@@ -571,7 +604,6 @@ class Media:
     def _run(self) -> None:
         out_written = ffi.new("size_t *")
         out_source = ffi.new("uint32_t *")
-        playback = ffi.new(f"int16_t[{self.frame_samples}]")
         due = time.monotonic()
         while not self._closed.is_set():
             self._drain_receive()
@@ -581,16 +613,18 @@ class Media:
                 # in device mode the engine plays and captures; this thread
                 # still carries what RTCP and DTMF owe, which are not frames
                 if not self.pumped:
-                    status = lib.sipral_media_playback(
-                        self.handle, playback, self.frame_samples, out_written, out_source
-                    )
-                    if status == lib.SIPRAL_STATUS_OK and out_written[0] > 0:
-                        self._put_frame(bytes(ffi.buffer(playback, out_written[0] * 2)))
+                    with self._frame_lock:
+                        playback = ffi.new(f"int16_t[{self.frame_samples}]")
+                        status = lib.sipral_media_playback(
+                            self.handle, playback, self.frame_samples, out_written, out_source
+                        )
+                        if status == lib.SIPRAL_STATUS_OK and out_written[0] > 0:
+                            self._put_frame(bytes(ffi.buffer(playback, out_written[0] * 2)))
 
-                    chunk = self._next_chunk()
-                    capture_in = ffi.new(f"int16_t[{self.frame_samples}]")
-                    ffi.buffer(capture_in)[: len(chunk)] = chunk
-                    self._capture_once(capture_in)
+                        chunk = self._next_chunk()
+                        capture_in = ffi.new(f"int16_t[{self.frame_samples}]")
+                        ffi.buffer(capture_in)[: len(chunk)] = chunk
+                        self._capture_once(capture_in)
                 self._drain_packets(
                     lambda packet: lib.sipral_media_poll_rtcp(
                         self.handle, self.stack.now_ms(), packet

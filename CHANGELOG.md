@@ -11,6 +11,10 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ## [Unreleased]
 
+### Added
+
+- **The application chooses the rate of a call's frames (C ABI 1.1).** `sipral_media_set_app_rate(media, hz)` hands out and takes a call's PCM at 8, 16, 24 or 48 kHz whatever the codec negotiated, converted both ways by the library's own resampler, with the frame keeping the call's duration and `sipral_media_info_t` reporting the rate chosen; 0 is the codec's own rate, the default. Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, and device mode `SIPRAL_STATUS_WRONG_STATE`. Every binding carries it on its media object: Swift `Media.setAppRate`, .NET `CallMedia.SetAppRate`, Kotlin and the JVM jar `SipralMedia.setAppRate`, Python `Media.set_app_rate`, Dart `SipralMedia.setAppRate`, React Native `call.audio.setAppRate`. A binding printed at ABI 1.0 still loads; one printed at 1.1 is refused by a 1.0 library (`docs/08-ffi.md`, "What ABI 1.1 added").
+
 ### Changed
 
 - **The .NET assembly names no build path, and the repository asks for a bug report or feature request in a form.** `Sipral.csproj` maps the project directory to `/_/`; GitHub issue forms for bugs and features, with questions sent to Discussions and vulnerabilities to private reporting.

@@ -96,8 +96,8 @@ final class SipralMedia {
       final info = arena<SipralMediaInfo>();
       info.ref.size = ffi.sizeOf<SipralMediaInfo>();
       _check(sipral, 'sipral_media_info', sipral.mediaInfo(handle, info));
-      sampleRate = info.ref.sampleRate;
-      frameSamples = info.ref.frameSamples;
+      _sampleRate = info.ref.sampleRate;
+      _frameSamples = info.ref.frameSamples;
       frameMs = max(info.ref.frameMs, 1);
     });
     _playback = calloc<ffi.Int16>(frameSamples);
@@ -117,19 +117,22 @@ final class SipralMedia {
   /// The media handle.
   late final int handle;
 
-  /// The rate of the PCM in [frames] and [sendAudio], in hertz.
-  late final int sampleRate;
+  /// The rate of the PCM in [frames] and [sendAudio], in hertz: the
+  /// codec's, or the one [setAppRate] chose.
+  int get sampleRate => _sampleRate;
+  late int _sampleRate;
 
-  /// How many samples one frame is.
-  late final int frameSamples;
+  /// How many samples one frame is, at [sampleRate].
+  int get frameSamples => _frameSamples;
+  late int _frameSamples;
 
   /// How long one frame is, in milliseconds.
   late final int frameMs;
 
   final RawDatagramSocket _socket;
   late final StreamSubscription<RawSocketEvent> _reading;
-  late final ffi.Pointer<ffi.Int16> _playback;
-  late final ffi.Pointer<ffi.Int16> _capture;
+  late ffi.Pointer<ffi.Int16> _playback;
+  late ffi.Pointer<ffi.Int16> _capture;
   final ffi.Pointer<ffi.Uint8> _received = calloc<ffi.Uint8>(_packetBytes);
   final ffi.Pointer<ffi.Uint8> _from = calloc<ffi.Uint8>(_addressBytes);
   final ffi.Pointer<ffi.Uint32> _arrival = calloc<ffi.Uint32>();
@@ -149,6 +152,37 @@ final class SipralMedia {
   /// Queue [pcm], 16-bit mono at [sampleRate], to go out a frame at a time.
   void sendAudio(Int16List pcm) {
     _toSend.addAll(pcm);
+  }
+
+  /// `sipral_media_set_app_rate`: the rate [frames] hands out and
+  /// [sendAudio] takes, whatever rate the codec runs at -- 8000, 16000,
+  /// 24000 or 48000, or 0 for the codec's own, which is where every call
+  /// starts. The library converts both ways with its own resampler, and the
+  /// frame keeps the call's duration, so [sampleRate] and [frameSamples] say
+  /// the new rate and its length from here on. Audio queued with [sendAudio]
+  /// and not yet sent was at the old rate, and is dropped. Any other rate
+  /// throws [SipralException] with `SipralStatus.invalidArgument`, and
+  /// device mode with `SipralStatus.wrongState`.
+  void setAppRate(int hz) {
+    final sipral = call.stack._sipral;
+    _check(
+      sipral,
+      'sipral_media_set_app_rate',
+      sipral.mediaSetAppRate(handle, hz),
+    );
+    using((arena) {
+      final info = arena<SipralMediaInfo>();
+      info.ref.size = ffi.sizeOf<SipralMediaInfo>();
+      _check(sipral, 'sipral_media_info', sipral.mediaInfo(handle, info));
+      _sampleRate = info.ref.sampleRate;
+      _frameSamples = info.ref.frameSamples;
+    });
+    calloc
+      ..free(_playback)
+      ..free(_capture);
+    _playback = calloc<ffi.Int16>(frameSamples);
+    _capture = calloc<ffi.Int16>(frameSamples);
+    _toSend.clear();
   }
 
   /// What the media has done so far. Once the call has ended the stream is

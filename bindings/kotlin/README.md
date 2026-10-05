@@ -119,7 +119,11 @@ goes out of the call's own socket or on its connection to a TURN server.
 and `frames` carry the call's PCM, for a voice agent, a recorder, a test --
 and an Android phone below API level 28, where the default is `Application`
 and the telecom helper (below) carries each call over `AudioRecord` and
-`AudioTrack`.
+`AudioTrack`. Its frames are at the codec's rate unless the application asks
+for its own: `media.setAppRate(24_000)` (8000, 16000, 24000 or 48000; 0 is
+the codec's) has the library convert both ways, and `sampleRate` and
+`frameSamples` say the rate and the frame's length from then on
+(`docs/08-ffi.md`, "What ABI 1.1 added").
 
 On Android the engine's streams are AAudio's (voice communication, the
 platform's echo canceller in the input preset, a ringtone stream for the

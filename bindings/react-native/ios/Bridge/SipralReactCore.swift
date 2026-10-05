@@ -408,6 +408,23 @@ public final class SipralReactCore: @unchecked Sendable {
         }
     }
 
+    /// `sipral_media_set_app_rate` on the call's media, and the rate and
+    /// frame length it came to, as the spec's NativeAppRate. A call with no
+    /// audio yet is `wrongState`, and so is one on the phone's own devices,
+    /// which the library refuses.
+    public func setAppRate(_ call: String, hz: Int) throws -> [String: Any] {
+        try guarded {
+            guard let media = try callOf(call).media else {
+                throw SipralRefusal("wrongState", "call \(call) has no audio yet")
+            }
+            guard let rate = UInt32(exactly: hz) else {
+                throw SipralRefusal("invalidArgument", "an application rate is 8000, 16000, 24000 or 48000, or 0")
+            }
+            try media.setAppRate(rate)
+            return ["sampleRate": media.sampleRate, "frameSamples": media.frameSamples]
+        }
+    }
+
     /// What the stack runs with, as the spec's NativeSettings.
     public func settings() throws -> [String: Any] {
         try guarded {

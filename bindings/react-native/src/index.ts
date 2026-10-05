@@ -34,6 +34,7 @@ export type {Subscription} from './emitter';
 export type {NativeEvent, Spec as NativeSipralSpec} from './NativeSipral';
 export type {
   AccountOptions,
+  AppRate,
   AudioDirection,
   CallAudio,
   CallDirection,

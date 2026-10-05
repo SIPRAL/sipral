@@ -55,6 +55,7 @@ use sipral_rtp::{
 };
 use sipral_ua::{QualityReportMetrics, RemoteQualityMetrics};
 
+use crate::app_rate::{APPLICATION_RATES, ApplicationRate, frame_at};
 use crate::capabilities::SrtpKeying;
 use crate::clock::WallClock;
 use crate::codec::{Codec, CodecCandidate};
@@ -497,6 +498,9 @@ pub struct MediaSession {
     /// What this call's audio is copied to, while a recording server is
     /// recording it: see [`crate::siprec`].
     tap: Option<crate::siprec::Tap>,
+    /// The rate the application's frames are at, when it chose one other
+    /// than the codec's: see [`crate::app_rate`].
+    application: Option<ApplicationRate>,
 }
 
 /// Which of this session's own buffers a datagram was built in.
@@ -694,6 +698,7 @@ impl MediaSession {
             text: None,
             text_out: Vec::new(),
             tap: None,
+            application: None,
         })
     }
 
@@ -1849,6 +1854,121 @@ impl MediaSession {
 // -- what goes out -----------------------------------------------------------
 
 impl MediaSession {
+    /// Hand the application its frames at `hertz`, and take its frames at
+    /// `hertz`, whatever rate the codec runs at: one of
+    /// [`APPLICATION_RATES`], or `None` for the codec's own rate, which is
+    /// where every call starts.
+    ///
+    /// Only [`MediaSession::playback_at_application_rate`] and
+    /// [`MediaSession::capture_at_application_rate`] convert; the codec,
+    /// the processor, the recording and the detectors keep the codec's rate,
+    /// and a re-negotiation onto another codec is followed by itself. The
+    /// frame keeps the call's duration, so 20 ms of G.711 handed out at
+    /// 24 kHz is 480 samples. Asking again for the rate already set changes
+    /// nothing, so the filters keep what they hold.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::ApplicationRate`] for a rate not among
+    /// [`APPLICATION_RATES`], with the setting left as it was.
+    pub fn set_application_rate(&mut self, hertz: Option<u32>) -> Result<(), MediaError> {
+        match hertz {
+            None => self.application = None,
+            Some(hertz) if !APPLICATION_RATES.contains(&hertz) => {
+                return Err(MediaError::ApplicationRate { hertz });
+            }
+            Some(hertz) => {
+                if self.application.as_ref().map(ApplicationRate::hertz) != Some(hertz) {
+                    self.application = Some(ApplicationRate::new(hertz));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The rate the application's frames are at: the one
+    /// [`MediaSession::set_application_rate`] chose, or the codec's.
+    #[must_use]
+    pub fn application_rate(&self) -> u32 {
+        self.application
+            .as_ref()
+            .map_or_else(|| self.sample_rate(), ApplicationRate::hertz)
+    }
+
+    /// Samples in one frame at [`MediaSession::application_rate`]: the
+    /// call's frame duration, counted at the application's rate.
+    #[must_use]
+    pub fn application_frame_samples(&self) -> usize {
+        frame_at(
+            self.frame_samples(),
+            self.sample_rate(),
+            self.application_rate(),
+        )
+    }
+
+    /// [`MediaSession::playback`], at [`MediaSession::application_rate`]:
+    /// `out` is filled to [`MediaSession::application_frame_samples`].
+    pub fn playback_at_application_rate(&mut self, out: &mut [i16]) -> Playback {
+        let Some(bridge) = self.bridge_now() else {
+            return self.playback(out);
+        };
+        // lifted out for the frame, for the reason `capture` lifts its own
+        let mut codec = core::mem::take(&mut bridge.codec);
+        let wanted = bridge.application_frame().min(out.len());
+        let played = self.playback(&mut codec);
+        if let Some(bridge) = self.bridge_now() {
+            bridge
+                .heard
+                .run(&codec, out.get_mut(..wanted).unwrap_or_default());
+            bridge.codec = codec;
+        }
+        played
+    }
+
+    /// [`MediaSession::capture`], at [`MediaSession::application_rate`]:
+    /// `samples` is one frame of [`MediaSession::application_frame_samples`].
+    ///
+    /// # Errors
+    ///
+    /// What [`MediaSession::capture`] answers.
+    pub fn capture_at_application_rate(
+        &mut self,
+        samples: &[i16],
+        now: Instant,
+    ) -> Result<Option<Datagram<'_>>, MediaError> {
+        if self.bridge_now().is_none() {
+            return self.capture(samples, now);
+        }
+        #[cfg(feature = "ice")]
+        if !self.has_path() {
+            return Ok(None);
+        }
+        let Some(bridge) = self.bridge_now() else {
+            return Ok(None);
+        };
+        let mut codec = core::mem::take(&mut bridge.codec);
+        bridge.said.run(samples, &mut codec);
+        let sent = self.encode_captured(&codec, now);
+        if let Some(bridge) = self.bridge_now() {
+            bridge.codec = codec;
+        }
+        let Some(length) = sent? else {
+            return Ok(None);
+        };
+        Ok(self.captured_datagram(length, now))
+    }
+
+    /// The filters between the codec's rate and the application's, as the
+    /// codec stands now, or `None` when there is nothing to convert.
+    fn bridge_now(&mut self) -> Option<&mut crate::app_rate::Bridge> {
+        let (rate, frame) = (self.sample_rate(), self.frame_samples());
+        self.application
+            .as_mut()
+            .and_then(|application| application.bridge(rate, frame))
+    }
+}
+
+impl MediaSession {
     /// Put one frame from the microphone on the wire.
     ///
     /// `Ok(None)` for a frame that was deliberately not sent: the call is
@@ -1883,6 +2003,20 @@ impl MediaSession {
         if !self.has_path() {
             return Ok(None);
         }
+        let Some(length) = self.encode_captured(samples, now)? else {
+            return Ok(None);
+        };
+        Ok(self.captured_datagram(length, now))
+    }
+
+    /// One captured frame as far as the octets in `rtp_out`: everything
+    /// [`MediaSession::capture`] does but hand the datagram back, so that a
+    /// frame borrowed from the session's own buffers can be put back first.
+    fn encode_captured(
+        &mut self,
+        samples: &[i16],
+        now: Instant,
+    ) -> Result<Option<usize>, MediaError> {
         // the processor is lifted out for the length of the frame so that the
         // audio it produces can be borrowed from it while the rest of the
         // session is still being written to
@@ -1901,21 +2035,26 @@ impl MediaSession {
         self.hush = hush;
         self.shaped = shaped;
         self.echo = echo;
-        let Some(length) = sent? else {
-            return Ok(None);
-        };
+        sent
+    }
+
+    /// The packet `encode_captured` left `length` octets of in `rtp_out`,
+    /// addressed to wherever the call's audio goes now: always, without
+    /// ICE, and only on a path it chose with it.
+    #[cfg_attr(not(feature = "ice"), allow(clippy::unnecessary_wraps))]
+    fn captured_datagram(&mut self, length: usize, now: Instant) -> Option<Datagram<'_>> {
         let signalled = self.rtp.destination();
         #[cfg(feature = "ice")]
         {
-            Ok(self.on_path(Built::Rtp, length, signalled, now))
+            self.on_path(Built::Rtp, length, signalled, now)
         }
         #[cfg(not(feature = "ice"))]
         {
             let _ = now;
-            Ok(Some(Datagram {
+            Some(Datagram {
                 destination: signalled,
                 payload: self.rtp_out.get(..length).unwrap_or_default(),
-            }))
+            })
         }
     }
 

@@ -335,6 +335,36 @@ private fun aCallsOwnAudioIsSetAndReadBack(): String {
     return "a call's own gain and mute set and read back"
 }
 
+/** The rate a call's frames cross at, chosen through the core on a client in
+ * application mode: 24 kHz is 480 samples a frame whatever the codec, a rate
+ * outside the four is refused, and 0 is the codec's own again. */
+private fun theRateOfACallsFramesIsChosen(): String {
+    val alice = Phone("alice")
+    val bob = Phone("bob")
+    try {
+        val line = alice.core.addAccount(SipralAccountOptions(aor = alice.aor, registrarAddress = bob.address))
+        bob.core.addAccount(SipralAccountOptions(aor = bob.aor, registrarAddress = alice.address))
+        val call = alice.core.placeCall(line, "sip:bob@${bob.address}", destination = null, codecs = null)
+        val rang = bob.await("the incoming call") { it["kind"] == "incomingCall" }
+        bob.core.answer(rang["call"] as String)
+        alice.await("the media") { it["kind"] == "mediaStarted" && it["call"] == call }
+        assertTrue(
+            waitUntil { runCatching { alice.core.setAppRate(call, 24_000) }.isSuccess },
+            "the call's media never came up",
+        )
+        val chosen = alice.core.setAppRate(call, 24_000)
+        assertEquals(24_000, chosen["sampleRate"])
+        assertEquals(480, chosen["frameSamples"])
+        refusal("invalidArgument") { alice.core.setAppRate(call, 44_100) }
+        val codec = alice.core.setAppRate(call, 0)
+        assertEquals((codec["sampleRate"] as Int) / 50, codec["frameSamples"])
+    } finally {
+        alice.core.close()
+        bob.core.close()
+    }
+    return "the rate of a call's frames chosen and read back"
+}
+
 /** An action after the worker was shut down is rejected as closed rather
  * than thrown at its caller; the close itself runs after what was queued. */
 /** The realms an account names and what a held party is sent reach the
@@ -451,7 +481,8 @@ fun main() {
         everything() + "; " + reachability() + "; " + aCallThatEndedBeforeItWasKeptIsClosed() + "; " +
             aSettleAfterShutdownIsRejectedNotThrown() + "; " + anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() +
             "; " + aCallsOwnAudioIsSetAndReadBack() + "; " + theRealmsAndTheHeldAudioReachTheLibrary() + "; " +
-            aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule()
+            aCallPlacedPastMaxDialogsIsRefused() + "; " + theAbiCheckKeepsTheOneXRule() + "; " +
+            theRateOfACallsFramesIsChosen()
     } catch (failure: Throwable) {
         failure.printStackTrace()
         exitProcess(1)

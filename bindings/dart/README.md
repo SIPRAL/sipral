@@ -52,7 +52,11 @@ the event callback is a `NativeCallable.isolateLocal`, which the library calls
 from inside `sipral_stack_poll` on that same thread. The application carries
 each call's audio: `SipralMedia.frames` is the far end's PCM,
 `SipralMedia.sendAudio` queues this end's, and silence goes out when nothing
-is queued.
+is queued. Both are at the codec's rate unless the application asks for its
+own: `media.setAppRate(24000)` (8000, 16000, 24000 or 48000; 0 is the
+codec's) has the library convert both ways, and `sampleRate` and
+`frameSamples` say the rate and the frame's length from then on
+(`docs/08-ffi.md`, "What ABI 1.1 added").
 
 The stack signals over its UDP socket. An account can have a connection of
 its own beside it, to its own server, so that one stack holds an account on

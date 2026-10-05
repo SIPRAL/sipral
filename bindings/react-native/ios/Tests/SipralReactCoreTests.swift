@@ -399,6 +399,29 @@ final class SipralReactCoreTests: XCTestCase {
         refusal("notSupported") { try bob.core.setCallGain(taken, "output", 1) }
     }
 
+    /// The rate a call's frames cross at, chosen through the core on a stack
+    /// in application mode: 24 kHz is 480 samples a frame whatever the codec,
+    /// a rate outside the four is refused, and 0 is the codec's own again.
+    func testTheRateOfACallsFramesIsChosen() async throws {
+        let alice = try Phone("alice")
+        let bob = try Phone("bob")
+        defer { alice.core.close(); bob.core.close() }
+        let line = try alice.core.addAccount(SipralAccountOptions(aor: alice.aor, registrarAddress: bob.address))
+        _ = try bob.core.addAccount(SipralAccountOptions(aor: bob.aor, registrarAddress: alice.address))
+        let call = try alice.core.placeCall(line, "sip:bob@\(bob.address)", destination: nil, codecs: nil)
+        let rang = try await bob.await("the incoming call") { $0["kind"] as? String == "incomingCall" }
+        try bob.core.answer(try XCTUnwrap(rang["call"] as? String))
+        _ = try await alice.await("the media") { $0["kind"] as? String == "mediaStarted" && $0["call"] as? String == call }
+        let carried = await waitFor(5) { (try? alice.core.setAppRate(call, hz: 24_000)) != nil }
+        XCTAssertTrue(carried, "the call's media never came up")
+        let chosen = try alice.core.setAppRate(call, hz: 24_000)
+        XCTAssertEqual(chosen["sampleRate"] as? Int, 24_000)
+        XCTAssertEqual(chosen["frameSamples"] as? Int, 480)
+        refusal("invalidArgument") { _ = try alice.core.setAppRate(call, hz: 44_100) }
+        let codec = try alice.core.setAppRate(call, hz: 0)
+        XCTAssertEqual((codec["sampleRate"] as? Int).map { $0 / 50 }, codec["frameSamples"] as? Int)
+    }
+
     /// maxDialogs reaches the library through the core: at a ceiling of one
     /// call, a second placed while the first still rings is refused as
     /// limitReached.

@@ -122,6 +122,68 @@ void main() {
     expect(callA.media, isNull);
   });
 
+  test('frames cross at the rate the application chose', () async {
+    final fromAlice = alice.addAccount(
+      'sip:alice@sipral.invalid',
+      registrarAddress: bob.bindAddress,
+    );
+    bob.addAccount(
+      'sip:bob@sipral.invalid',
+      registrarAddress: alice.bindAddress,
+    );
+    final ringing = bob.events.firstWhere(
+      (event) => event.kind == SipralEventKind.incomingCall,
+    );
+    final callA = await alice.placeCall(
+      fromAlice,
+      'sip:bob@${bob.bindAddress}',
+    );
+    final callB = await bob.answerCall(
+      await ringing.timeout(const Duration(seconds: 15)),
+    );
+    await Future.wait([
+      callA.confirmed(timeout: const Duration(seconds: 15)),
+      callB.confirmed(timeout: const Duration(seconds: 15)),
+    ]);
+    await until(() => callA.media != null && callB.media != null);
+    final mediaA = callA.media!;
+    final mediaB = callB.media!;
+    final codecRate = mediaB.sampleRate;
+
+    // both ends at 24 kHz: 20 ms is 480 samples whatever the codec
+    for (final media in [mediaA, mediaB]) {
+      media.setAppRate(24000);
+      expect(media.sampleRate, 24000);
+      expect(media.frameSamples, 480);
+    }
+    // a rate outside the four is refused and changes nothing
+    expect(
+      () => mediaB.setAppRate(44100),
+      throwsA(
+        isA<SipralException>().having(
+          (refused) => refused.status,
+          'status',
+          SipralStatus.invalidArgument,
+        ),
+      ),
+    );
+    expect(mediaB.frameSamples, 480);
+
+    final heard = mediaB.frames
+        .firstWhere((frame) => frame.length == 480)
+        .timeout(const Duration(seconds: 15));
+    mediaA.sendAudio(Int16List.fromList(List.filled(480 * 5, 1000)));
+    expect((await heard).length, 480);
+
+    mediaB.setAppRate(0);
+    expect(mediaB.sampleRate, codecRate);
+
+    callA.hangup();
+    await callA.whenEnded(timeout: const Duration(seconds: 15));
+    callA.close();
+    callB.close();
+  });
+
   test('an event\'s whole payload is read through the raw event', () async {
     // the codec a call's media started on is in no field SipralStackEvent
     // copies out; the raw event carries every arm the ABI declares

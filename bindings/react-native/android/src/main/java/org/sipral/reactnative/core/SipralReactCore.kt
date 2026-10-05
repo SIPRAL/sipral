@@ -327,6 +327,17 @@ class SipralReactCore(
         )
     }
 
+    /** `sipral_media_set_app_rate` on the call's media, and the rate and
+     * frame length it came to, as the spec's NativeAppRate. A call with no
+     * audio yet is `wrongState`, and so is one on the phone's own devices,
+     * which the library refuses. */
+    fun setAppRate(call: String, hz: Int): Map<String, Any> = guarded {
+        val media = callOf(call).media
+            ?: throw SipralRefusal("wrongState", "call $call has no audio yet")
+        media.setAppRate(hz)
+        mapOf("sampleRate" to media.sampleRate, "frameSamples" to media.frameSamples)
+    }
+
     /** What the stack runs with, as the spec's NativeSettings. */
     fun settings(): Map<String, Any> = guarded {
         val read = open().settings()

@@ -329,6 +329,12 @@ pub enum MediaError {
         /// What was asked for.
         hertz: u32,
     },
+    /// An application rate that is not one of
+    /// [`APPLICATION_RATES`](crate::APPLICATION_RATES).
+    ApplicationRate {
+        /// What was asked for.
+        hertz: u32,
+    },
     /// An Ogg Opus recording was asked for at a bitrate Opus is not defined
     /// at.
     RecordingBitrate {
@@ -488,11 +494,16 @@ impl From<std::io::Error> for MediaError {
 
 impl MediaError {
     /// The sentence for a refusal about mixing calls — a pair or a local
-    /// conference — which `Display` hands here for the reason it hands the
-    /// path's to `about_the_path`.
+    /// conference — or about the rate a call's frames are converted to,
+    /// which `Display` hands here for the reason it hands the path's to
+    /// `about_the_path`.
     fn about_mixing(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::SameCall => f.write_str("a call cannot be joined to itself"),
+            Self::ApplicationRate { hertz } => write!(
+                f,
+                "an application rate of {hertz} Hz; it is 8000, 16000, 24000 or 48000"
+            ),
             Self::AlreadyJoined => f.write_str("this call is already joined to another"),
             Self::NotJoined => f.write_str("this call is not currently joined to another"),
             Self::JoinIncompatible => f.write_str(
@@ -685,6 +696,7 @@ impl fmt::Display for MediaError {
             Self::ConsentTone(what) => write!(f, "consent tone: {what}"),
             Self::Signalling(error) => write!(f, "user agent: {error}"),
             Self::SameCall
+            | Self::ApplicationRate { .. }
             | Self::AlreadyJoined
             | Self::NotJoined
             | Self::JoinIncompatible
@@ -736,6 +748,7 @@ mod tests {
             MediaError::NotRecording,
             MediaError::AlreadyRecording,
             MediaError::RecordingRate { hertz: 44_100 },
+            MediaError::ApplicationRate { hertz: 44_100 },
             MediaError::RecordingBitrate { bits_per_second: 1 },
             MediaError::ConsentTone("frequency_hz is outside 300 to 3400"),
             MediaError::SameCall,

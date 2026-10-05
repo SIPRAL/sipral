@@ -85,6 +85,13 @@ application's, which is what a voice agent, a recorder or a server wants:
         frame = await call.media.frames.get()  # the far end's own audio back
 ```
 
+The frames are at the codec's rate unless the application asks for its own:
+`call.media.set_app_rate(24000)` (8000, 16000, 24000 or 48000; 0 is the
+codec's) has the library convert both ways, and `sample_rate` and
+`frame_samples` say the rate and the frame's length from then on — a speech
+service fed at its own rate whatever the far end negotiated
+(`docs/08-ffi.md`, "What ABI 1.1 added").
+
 An incoming call has no `Call` until the application decides what to do
 with it: read `SIPRAL_EVENT_KIND_INCOMING_CALL` off `stack.events` and
 call `stack.answer_call(event)`, `stack.reject_call(event)` or

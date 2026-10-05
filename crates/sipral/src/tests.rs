@@ -4312,6 +4312,111 @@ fn a_lost_packet_is_played_as_concealment_rather_than_as_a_gap() {
     );
 }
 
+/// An application rate is a property of the call, not of the codec it is
+/// on: a re-negotiation from G.711 to G.722 keeps the application's frames
+/// at its own rate and length, with the filters built again underneath, and
+/// a rate outside the four is refused with the setting left alone.
+#[test]
+fn an_application_rate_survives_a_change_of_codec_and_refuses_what_it_is_not() {
+    let now = Instant::now();
+    let narrow = plan_pair(
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+        "v=0\r\no=- 1 1 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n",
+    );
+    let wide = plan_pair(
+        "v=0\r\no=- 1 2 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
+         m=audio 40000 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n",
+        "v=0\r\no=- 1 2 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
+         m=audio 40002 RTP/AVP 9\r\na=rtpmap:9 G722/8000\r\n",
+    );
+    let mut sender = session(&narrow.1, &narrow.0, now);
+    let mut receiver = session(&narrow.0, &narrow.1, now);
+    assert_eq!(
+        receiver.application_rate(),
+        8_000,
+        "the codec's, until asked"
+    );
+    for end in [&mut sender, &mut receiver] {
+        end.set_application_rate(Some(24_000))
+            .expect("one of the four");
+        assert_eq!(
+            end.set_application_rate(Some(22_050)),
+            Err(MediaError::ApplicationRate { hertz: 22_050 })
+        );
+        assert_eq!(end.application_rate(), 24_000, "the refusal moved it");
+        assert_eq!(end.application_frame_samples(), 480);
+    }
+
+    let from = "192.0.2.2:40002".parse().expect("an address");
+    let mut samples = vec![0_i16; 480];
+    let mut played = vec![0_i16; 480];
+    let mut phase = 0_u32;
+    let mut at = now;
+    let mut exchange = |sender: &mut MediaSession, receiver: &mut MediaSession| {
+        let mut loudest = 0;
+        for _ in 0..15 {
+            tone(&mut samples, 24_000, &mut phase);
+            let datagram = sender
+                .capture_at_application_rate(&samples, at)
+                .expect("it encodes")
+                .map(|out| out.payload.to_vec());
+            if let Some(mut datagram) = datagram {
+                receiver.receive(&mut datagram, from, at);
+            }
+            receiver.playback_at_application_rate(&mut played);
+            loudest = loudest.max(loudness(&played));
+            at += TICK;
+        }
+        loudest
+    };
+    assert!(
+        exchange(&mut sender, &mut receiver) > 1_000,
+        "nothing crossed on G.711"
+    );
+
+    sender
+        .reformat(
+            &plan_of(&wide.1, &wide.0),
+            20,
+            &MediaConfig::default(),
+            Vec::new(),
+            false,
+            now,
+        )
+        .expect("onto G.722");
+    receiver
+        .reformat(
+            &plan_of(&wide.0, &wide.1),
+            20,
+            &MediaConfig::default(),
+            Vec::new(),
+            false,
+            now,
+        )
+        .expect("onto G.722");
+    assert_eq!(receiver.sample_rate(), 16_000, "the codec moved");
+    for end in [&sender, &receiver] {
+        assert_eq!(end.application_rate(), 24_000, "the application's did not");
+        assert_eq!(end.application_frame_samples(), 480);
+    }
+    assert!(
+        exchange(&mut sender, &mut receiver) > 1_000,
+        "nothing crossed on G.722"
+    );
+
+    // and back to the codec's own
+    receiver.set_application_rate(None).expect("always");
+    assert_eq!(
+        (
+            receiver.application_rate(),
+            receiver.application_frame_samples()
+        ),
+        (16_000, 320)
+    );
+}
+
 /// A voiced-sounding signal for Opus to code as speech: a triangle at about
 /// 200 Hz under an envelope that opens and closes five times a second.
 #[cfg(feature = "opus")]

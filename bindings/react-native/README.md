@@ -194,7 +194,11 @@ crosses to native code, with the `wrongState` the library would answer.
 what the microphone sends this call alone, or `'output'`, how loud it is in
 the speaker beside the other calls. They hold from the moment the call's
 audio starts to its end, and the native half answers `wrongState` outside
-that.
+that. `setAppRate(hz)` chooses the rate the call's frames cross the native
+layer at (8000, 16000, 24000 or 48000; 0 is the codec's) and resolves with
+the rate and the frame's length; it is for a call whose frames the
+application carries, and on the phone's own devices the native half refuses
+it as `wrongState` (`docs/08-ffi.md`, "What ABI 1.1 added").
 
 ### Events
 

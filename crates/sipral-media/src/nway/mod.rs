@@ -98,6 +98,7 @@ mod mixer;
 mod ring;
 pub mod talker;
 
+pub use convert::Converter;
 pub use limiter::Limiter;
 pub use mixer::{
     Controls, MixError, Mixer, MixerConfig, ParticipantConfig, ParticipantId, ParticipantStats,

@@ -62,6 +62,8 @@ pub mod abi;
 pub mod account;
 pub mod advertise;
 pub mod announce;
+#[cfg(test)]
+mod app_rate_tests;
 pub mod audio;
 pub mod call;
 pub mod capabilities;

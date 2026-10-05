@@ -2931,7 +2931,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 0
+    public static let abiVersionMinor: UInt32 = 1
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -5304,6 +5304,35 @@ public enum Sipral {
             samples.withUnsafeBufferPointer { p2 in
                 sipral_media_capture(media, nowMs, p2.baseAddress, p2.count, &packet)
             }
+        try check(status)
+    }
+
+    /// Choose the rate this call's frames cross the boundary at in
+    /// application mode: what `sipral_media_playback` fills and what
+    /// `sipral_media_capture` takes, whatever rate the codec runs at.
+    ///
+    /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
+    /// which is where every call starts. The frame keeps the call's
+    /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
+    /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
+    /// rate chosen as soon as it is set. The conversion is the library's
+    /// own resampler, both ways, and follows a re-negotiation onto another
+    /// codec by itself; the codec, an attached processor, a recording and the
+    /// in-band detectors keep working at the codec's rate. Asking again for
+    /// the rate already set changes nothing.
+    ///
+    /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
+    /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
+    /// where the audio engine pumps the frames at the devices' rate, and
+    /// `sipral_media_mix` refuses a pair while either call has a rate of its
+    /// own: a local conference takes calls at any rate.
+    ///
+    /// Safety
+    ///
+    /// Reads no memory the caller owns.
+    public static func mediaSetAppRate(media: SipralHandle, hz: UInt32) throws {
+        try ensureAbi()
+        let status = sipral_media_set_app_rate(media, hz)
         try check(status)
     }
 

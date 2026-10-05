@@ -752,12 +752,13 @@ record! {
         pub payload_type: u32,
         /// The RTP timestamp clock, in hertz.
         pub clock_rate: u32,
-        /// The rate the samples crossing this ABI are at.
+        /// The rate the samples crossing this ABI are at: the codec's, or the
+        /// one [`sipral_media_set_app_rate`] chose.
         pub sample_rate: u32,
         /// How long a frame is, in milliseconds.
         pub frame_ms: u32,
         /// Samples in one frame: exactly what [`sipral_media_playback`] fills and
-        /// what [`sipral_media_capture`] wants.
+        /// what [`sipral_media_capture`] wants, at `sample_rate`.
         pub frame_samples: usize,
         /// A [`SipralDirection`].
         pub direction: Number<SipralDirection>,
@@ -1141,6 +1142,7 @@ pub(crate) fn media_failed(error: &MediaError) -> Fail {
         | MediaError::Description(_)
         | MediaError::RecordingRate { .. }
         | MediaError::RecordingBitrate { .. }
+        | MediaError::ApplicationRate { .. }
         | MediaError::ConsentTone(_)
         | MediaError::DigitTooShort { .. }
         | MediaError::DigitTooLong { .. }
@@ -1452,6 +1454,9 @@ pub(crate) struct MediaEntry {
     /// here because that stack is exactly what a media entry point does not
     /// touch.
     origin: Instant,
+    /// Whether that stack runs its audio in device mode, where the engine and
+    /// not the application pumps the frames.
+    device: bool,
 }
 
 impl MediaEntry {
@@ -1661,6 +1666,7 @@ entry! {
                 share,
                 stack,
                 origin: state.origin(),
+                device: state.audio.is_some(),
             };
             Ok((entry, state.tag.tag()))
         })?;
@@ -2085,9 +2091,9 @@ fn media_info(session: &MediaSession) -> SipralMediaInfo {
         codec: named_codec(session.codec()) as u32,
         payload_type: u32::from(plan.codec.payload()),
         clock_rate: plan.codec.clock_rate(),
-        sample_rate: session.sample_rate(),
+        sample_rate: session.application_rate(),
         frame_ms: session.frame_length(),
-        frame_samples: session.frame_samples(),
+        frame_samples: session.application_frame_samples(),
         direction: direction_of(session.direction()) as u32,
         sending: u32::from(session.is_sending()),
         receiving: u32::from(session.is_receiving()),
@@ -2260,7 +2266,7 @@ entry! {
             return Err(fail(SipralStatus::InvalidArgument, "samples is null"));
         }
         let played = with_media(media, |session, _| {
-            let frame = session.frame_samples();
+            let frame = session.application_frame_samples();
             if !out_written.is_null() {
                 unsafe { out_written.write(frame) };
             }
@@ -2272,7 +2278,7 @@ entry! {
             }
             // the capacity reaches the frame, so the buffer is not null
             let out = unsafe { slice::from_raw_parts_mut(samples, frame) };
-            Ok(session.playback(out))
+            Ok(session.playback_at_application_rate(out))
         })?;
         if !out_source.is_null() {
             unsafe { out_source.write(playback_of(played) as u32) };
@@ -2333,7 +2339,7 @@ entry! {
         }
         with_media(media, |session, entry| {
             let now = entry.instant(now_ms)?;
-            let frame = session.frame_samples();
+            let frame = session.application_frame_samples();
             if sample_count != frame {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
@@ -2342,7 +2348,7 @@ entry! {
             }
             let taken = unsafe { slice::from_raw_parts(samples, frame) };
             let sent = session
-                .capture(taken, now)
+                .capture_at_application_rate(taken, now)
                 .map_err(|error| media_failed(&error))?;
             match sent {
                 Some(datagram) => unsafe { put_datagram(&mut out, &datagram) },
@@ -2350,6 +2356,47 @@ entry! {
             }
         })?;
         unsafe { write_versioned(packet, out) }
+    }
+}
+
+entry! {
+    /// Choose the rate this call's frames cross the boundary at in
+    /// application mode: what `sipral_media_playback` fills and what
+    /// `sipral_media_capture` takes, whatever rate the codec runs at.
+    ///
+    /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
+    /// which is where every call starts. The frame keeps the call's
+    /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
+    /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
+    /// rate chosen as soon as it is set. The conversion is the library's
+    /// own resampler, both ways, and follows a re-negotiation onto another
+    /// codec by itself; the codec, an attached processor, a recording and the
+    /// in-band detectors keep working at the codec's rate. Asking again for
+    /// the rate already set changes nothing.
+    ///
+    /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
+    /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
+    /// where the audio engine pumps the frames at the devices' rate, and
+    /// `sipral_media_mix` refuses a pair while either call has a rate of its
+    /// own: a local conference takes calls at any rate.
+    ///
+    /// # Safety
+    ///
+    /// Reads no memory the caller owns.
+    fn sipral_media_set_app_rate(media: SipralHandle, hz: u32) {
+        with_media(media, |session, entry| {
+            if entry.device {
+                return Err(fail(
+                    SipralStatus::WrongState,
+                    "this stack runs its audio in device mode, where the audio engine and not \
+                     the application takes the call's frames",
+                ));
+            }
+            let hertz = (hz != 0).then_some(hz);
+            session
+                .set_application_rate(hertz)
+                .map_err(|error| media_failed(&error))
+        })
     }
 }
 
@@ -2666,6 +2713,17 @@ entry! {
             unsafe { slice::from_raw_parts_mut(local, local_count) }
         };
         let outcome = with_media_pair(media_a, media_b, |session_a, session_b| {
+            if [&*session_a, &*session_b]
+                .iter()
+                .any(|session| session.application_rate() != session.sample_rate())
+            {
+                return Err(fail(
+                    SipralStatus::WrongState,
+                    "a pair is mixed at its codec's rate, and one of these calls has an \
+                     application rate of its own: set it back to 0, or mix the calls in a local \
+                     conference, which takes any rate",
+                ));
+            }
             let frame = session_a.frame_samples();
             if session_b.frame_samples() != frame || mic_count != frame || local_count != frame {
                 return Err(fail(
@@ -3094,7 +3152,7 @@ pub(crate) mod tests {
     /// What the far end answers an offer of Opus alone with: the dynamic
     /// payload type this build's offer put it on, and the channel count RFC
     /// 7587 §7 makes every Opus line carry whatever is really being sent.
-    const OPUS_ANSWER: &[u8] = b"v=0\r\n\
+    pub(crate) const OPUS_ANSWER: &[u8] = b"v=0\r\n\
 o=bob 1 1 IN IP4 203.0.113.5\r\n\
 s=-\r\n\
 c=IN IP4 203.0.113.5\r\n\

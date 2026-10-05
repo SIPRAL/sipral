@@ -129,6 +129,10 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.callAudio(call, direction) }
     }
 
+    @objc public func setAppRate(_ call: String, hz: Int, resolve: @escaping Resolve, reject: @escaping Reject) {
+        settle(resolve, reject) { try self.core.setAppRate(call, hz: hz) }
+    }
+
     @objc public func settings(resolve: @escaping Resolve, reject: @escaping Reject) {
         settle(resolve, reject) { try self.core.settings() }
     }

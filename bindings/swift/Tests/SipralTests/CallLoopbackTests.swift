@@ -90,6 +90,40 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(heardBack?.count, bobMedia.frameSamples)
     }
 
+    /// `Media.setAppRate(_:)`: both ends at 24 kHz hand out and take
+    /// 480-sample frames whatever the codec, a rate outside the four is
+    /// refused and changes nothing, and 0 is the codec's own again.
+    func testFramesCrossAtTheRateTheApplicationChose() async throws {
+        let alice = try SipralStack(audio: .application)
+        let bob = try SipralStack(audio: .application)
+        defer { alice.close(); bob.close() }
+
+        let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
+        defer { aliceCall.close(); bobCall.close() }
+        let aliceMedia = try XCTUnwrap(aliceCall.media)
+        let bobMedia = try XCTUnwrap(bobCall.media)
+        let codecRate = bobMedia.sampleRate
+
+        for media in [aliceMedia, bobMedia] {
+            try media.setAppRate(24_000)
+            XCTAssertEqual(media.sampleRate, 24_000)
+            XCTAssertEqual(media.frameSamples, 480)
+            XCTAssertEqual(try media.info().sample_rate, 24_000)
+        }
+        XCTAssertThrowsError(try bobMedia.setAppRate(44_100)) {
+            XCTAssertEqual(($0 as? SipralError)?.status, .invalidArgument)
+        }
+        XCTAssertEqual(bobMedia.frameSamples, 480)
+
+        let bobFrames = bobMedia.frames()
+        aliceMedia.sendAudio([Int16](repeating: 4096, count: 480 * 5))
+        let heard = await firstOne(of: bobFrames)
+        XCTAssertEqual(heard?.count, 480)
+
+        try bobMedia.setAppRate(0)
+        XCTAssertEqual(bobMedia.sampleRate, codecRate)
+    }
+
     /// The loudest sample of what `bob` hears of `alice` sending a tone on a
     /// call `alice` holds, on stacks whose `heldAudio` is `heldAudio`.
     private func loudestHeardOnHold(_ heldAudio: SipralHeldAudio) async throws -> Int {

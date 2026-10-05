@@ -121,6 +121,9 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
     override fun callAudio(call: String, direction: String, promise: Promise) =
         settle(promise) { written(core.callAudio(call, direction)) }
 
+    override fun setAppRate(call: String, hz: Double, promise: Promise) =
+        settle(promise) { written(core.setAppRate(call, hz.toInt())) }
+
     override fun settings(promise: Promise) = settle(promise) { written(core.settings()) }
 
     override fun invalidate() {

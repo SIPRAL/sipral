@@ -177,6 +177,10 @@ has no way to supply on its own —
   rate, and the socket session's own state and queues, are untouched by it.
   A `Changed` that keeps the rate — a hold, a resume, a moved address —
   changes nothing at all, so an application can hand every one of them over.
+  An agent driven through the C ABI or one of its bindings, with no socket
+  of this protocol in between, asks for the same per call with
+  `sipral_media_set_app_rate` (`08-ffi.md`, "What ABI 1.1 added"), from the
+  same resampler.
 - **Voice activity.** `HeadlessSession` runs its own
   `sipral_media::vad::Vad` over the caller's decoded audio — the same signal
   [`MediaSession::playback`](../crates/sipral/src/session.rs) already

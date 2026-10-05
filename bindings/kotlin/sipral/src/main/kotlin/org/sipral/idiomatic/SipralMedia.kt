@@ -113,13 +113,23 @@ class SipralMedia internal constructor(
 
     private val negotiated: SipralMediaInfo = Sipral.mediaInfo(handle)
 
-    /** `sipral_media_info_t::sample_rate`. */
-    val sampleRate: Int = negotiated.sampleRate.toInt()
+    /** Held for one frame's playback and capture, and while [setAppRate]
+     * moves the frame's length under them. */
+    private val frameLock = Any()
 
-    /** `sipral_media_info_t::frame_samples`: exactly what one frame holds. */
-    val frameSamples: Int = negotiated.frameSamples.toInt()
+    /** `sipral_media_info_t::sample_rate`: the codec's, or the one
+     * [setAppRate] chose. */
+    @Volatile
+    var sampleRate: Int = negotiated.sampleRate.toInt()
+        private set
+
+    /** `sipral_media_info_t::frame_samples`: exactly what one frame holds,
+     * at [sampleRate]. */
+    @Volatile
+    var frameSamples: Int = negotiated.frameSamples.toInt()
+        private set
     private val frameMillis: Long = maxOf(negotiated.frameMs, 1L)
-    private val silence = ShortArray(frameSamples)
+    private var silence = ShortArray(frameSamples)
 
     /**
      * Where the last datagram this call's media received came from. Null
@@ -338,6 +348,29 @@ class SipralMedia internal constructor(
         outgoing.put(pcm)
     }
 
+    /**
+     * `sipral_media_set_app_rate`: the rate [frames] hands out and
+     * [sendAudio] takes, whatever rate the codec runs at -- 8000, 16000,
+     * 24000 or 48000, or 0 for the codec's own, which is where every call
+     * starts. The library converts both ways with its own resampler, and the
+     * frame keeps the call's duration, so [sampleRate] and [frameSamples]
+     * say the new rate and its length from here on. Audio queued with
+     * [sendAudio] and not yet sent was at the old rate, and is dropped. Any
+     * other rate throws [SipralException] with `INVALID_ARGUMENT`, and
+     * device mode with `WRONG_STATE`.
+     */
+    fun setAppRate(hz: Int) {
+        synchronized(frameLock) {
+            retryBusy { Sipral.mediaSetAppRate(handle, hz.toLong()) }
+            val now = Sipral.mediaInfo(handle)
+            sampleRate = now.sampleRate.toInt()
+            frameSamples = now.frameSamples.toInt()
+            silence = ShortArray(frameSamples)
+            pending = ShortArray(0)
+            outgoing.clear()
+        }
+    }
+
     /** Write a datagram straight to this call's own RTP socket: how
      * [SipralClient] sends the RTCP goodbye a call that just ended still
      * owes the far end, and the packets the engine encodes in device mode. */
@@ -540,12 +573,14 @@ class SipralMedia internal constructor(
                 try {
                     drainReceive()
                     if (pumpsFrames && !carriedByConference) {
-                        val playback = ShortArray(frameSamples)
-                        val (written, _) = Sipral.mediaPlayback(handle, playback)
-                        if (written > 0) {
-                            frameChannel.trySend(playback.copyOfRange(0, written.toInt()))
+                        synchronized(frameLock) {
+                            val playback = ShortArray(frameSamples)
+                            val (written, _) = Sipral.mediaPlayback(handle, playback)
+                            if (written > 0) {
+                                frameChannel.trySend(playback.copyOfRange(0, written.toInt()))
+                            }
+                            captureOnce(nextChunk())
                         }
-                        captureOnce(nextChunk())
                     } else {
                         // the engine plays and captures; asking after the
                         // media is what notices it gone

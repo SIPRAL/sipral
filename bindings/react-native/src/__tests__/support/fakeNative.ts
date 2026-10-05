@@ -133,6 +133,9 @@ export class FakeNative implements Spec {
   callAudio(...args: Parameters<Spec['callAudio']>) {
     return this.settle('callAudio', args, {gain: 0.5, muted: true, level: 0});
   }
+  setAppRate(...args: Parameters<Spec['setAppRate']>) {
+    return this.settle('setAppRate', args, {sampleRate: 24000, frameSamples: 480});
+  }
   settings() {
     return this.settle('settings', [], {
       transport: 'udp',

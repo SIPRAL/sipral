@@ -267,6 +267,14 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge callAudio:call direction:direction resolve:resolve reject:reject];
 }
 
+- (void)setAppRate:(NSString *)call
+                hz:(NSInteger)hz
+           resolve:(RCTPromiseResolveBlock)resolve
+            reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setAppRate:call hz:hz resolve:resolve reject:reject];
+}
+
 - (void)settings:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
 {
   [_bridge settingsWithResolve:resolve reject:reject];

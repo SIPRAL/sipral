@@ -198,6 +198,13 @@ for await frame in frames {
 }
 ```
 
+The frames are at the codec's rate unless the application asks for its own:
+`try media.setAppRate(24_000)` (8000, 16000, 24000 or 48000; 0 is the
+codec's) has the library convert both ways, and `media.sampleRate` and
+`media.frameSamples` say the rate and the frame's length from then on — a
+speech service fed at its own rate whatever the far end negotiated
+(`docs/08-ffi.md`, "What ABI 1.1 added").
+
 ### The library runs the audio
 
 `SipralStack(audio:)` takes an `AudioMode`. `.device(activation: .automatic)`

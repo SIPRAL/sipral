@@ -71,8 +71,16 @@ public struct PathCandidate: Sendable, Equatable {
 /// socket are the same in both modes.
 public final class Media: @unchecked Sendable {
     public let handle: SipralHandle
-    public let sampleRate: Int
-    public let frameSamples: Int
+    /// The rate `frames()` hands out and `sendAudio` takes: the codec's,
+    /// or the one `setAppRate(_:)` chose.
+    public var sampleRate: Int { frameQueue.sync { _sampleRate } }
+    /// Samples in one frame at `sampleRate`.
+    public var frameSamples: Int { frameQueue.sync { _frameSamples } }
+    private var _sampleRate: Int
+    private var _frameSamples: Int
+    /// Held for one frame's playback and capture, and while `setAppRate(_:)`
+    /// moves the frame's length under them.
+    private let frameQueue = DispatchQueue(label: "org.sipral.media.frame")
     private let frameSeconds: Double
 
     /// Whether this media carries the call's frames through `frames()` and
@@ -147,8 +155,8 @@ public final class Media: @unchecked Sendable {
         self.handle = try retryingBusy { try Sipral.callMedia(stack: stack.handle, call: callHandle) }
 
         let info = try Sipral.mediaInfo(media: handle)
-        self.sampleRate = Int(info.sample_rate)
-        self.frameSamples = info.frame_samples
+        self._sampleRate = Int(info.sample_rate)
+        self._frameSamples = info.frame_samples
         self.frameSeconds = Double(max(info.frame_ms, 1)) / 1000.0
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.run() }
@@ -333,7 +341,30 @@ public final class Media: @unchecked Sendable {
         outgoing.sync { toSend.append(samples) }
     }
 
-    private func nextChunk() -> [Int16] {
+    /// The rate `frames()` hands out and `sendAudio` takes, whatever rate
+    /// the codec runs at (`sipral_media_set_app_rate`): 8000, 16000, 24000
+    /// or 48000, or 0 for the codec's own, which is where every call starts.
+    ///
+    /// The library converts both ways with its own resampler, and the frame
+    /// keeps the call's duration, so `sampleRate` and `frameSamples` say the
+    /// new rate and its length from here on. Audio queued with `sendAudio`
+    /// and not yet sent was at the old rate, and is dropped. Any other rate
+    /// throws `.invalidArgument`, and a stack in `AudioMode.device`
+    /// `.wrongState`.
+    public func setAppRate(_ hz: UInt32) throws {
+        try frameQueue.sync {
+            try retryingBusy { try Sipral.mediaSetAppRate(media: handle, hz: hz) }
+            let info = try Sipral.mediaInfo(media: handle)
+            _sampleRate = Int(info.sample_rate)
+            _frameSamples = info.frame_samples
+            outgoing.sync {
+                pending.removeAll()
+                toSend.removeAll()
+            }
+        }
+    }
+
+    private func nextChunk(_ frameSamples: Int) -> [Int16] {
         outgoing.sync {
             while pending.count < frameSamples {
                 guard !toSend.isEmpty else {
@@ -526,27 +557,30 @@ public final class Media: @unchecked Sendable {
                 pumpText()
                 pumpRecording()
             } else if active {
-                var samples = [Int16](repeating: 0, count: frameSamples)
-                do {
-                    let (written, _) = try Sipral.mediaPlayback(media: handle, samples: &samples)
-                    if written > 0 {
-                        frameBroadcast.send(Array(samples.prefix(written)))
+                frameQueue.sync {
+                    var samples = [Int16](repeating: 0, count: _frameSamples)
+                    do {
+                        let (written, _) = try Sipral.mediaPlayback(media: handle, samples: &samples)
+                        if written > 0 {
+                            frameBroadcast.send(Array(samples.prefix(written)))
+                        }
+                    } catch let error as SipralError where error.status != .busy {
+                        // The media (or its call, or its stack) is gone
+                        // (`docs/08-ffi.md`, "A media handle outlives its
+                        // call, and says so"): stop driving it, and tell
+                        // every reader no frame is coming, but let the loop
+                        // keep running so `close()` still finds it
+                        // responsive.
+                        active = false
+                        frameBroadcast.finish()
+                    } catch {
+                        // BUSY here means re-entry from inside a frame this
+                        // thread is already running -- not expected on this
+                        // path, but not fatal either.
                     }
-                } catch let error as SipralError where error.status != .busy {
-                    // The media (or its call, or its stack) is gone
-                    // (`docs/08-ffi.md`, "A media handle outlives its call,
-                    // and says so"): stop driving it, and tell every reader
-                    // no frame is coming, but let the loop keep running so
-                    // `close()` still finds it responsive.
-                    active = false
-                    frameBroadcast.finish()
-                } catch {
-                    // BUSY here means re-entry from inside a frame this
-                    // thread is already running -- not expected on this
-                    // path, but not fatal either.
-                }
 
-                captureOnce(nextChunk())
+                    captureOnce(nextChunk(_frameSamples))
+                }
                 drainPacket { packet in
                     try Sipral.mediaPollRtcp(media: self.handle, nowMs: self.stack.nowMs(), packet: &packet)
                 }

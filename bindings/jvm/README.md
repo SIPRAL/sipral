@@ -71,8 +71,11 @@ try (SipralClient client = SipralJava.open("192.0.2.10")) {
 ```
 
 A client opened here runs in application mode: a server has no sound card,
-and `SipralMedia` carries each call's PCM. `SipralJava.addAccount` takes a
-`SipralTransport.TCP` or `TLS` (and a certificate pin) after the
+and `SipralMedia` carries each call's PCM, at the codec's rate unless
+`media.setAppRate(24000)` (8000, 16000, 24000 or 48000; 0 is the codec's)
+asks the library to convert both ways for a speech service at its own rate;
+`getSampleRate()` and `getFrameSamples()` follow it. `SipralJava.addAccount`
+takes a `SipralTransport.TCP` or `TLS` (and a certificate pin) after the
 credentials, for an account on a connection of its own beside the client's
 UDP socket; `client.settings()` is a plain method.
 `SipralJava.open(host, port, userAgent, maxDialogs, maxServerTransactions)`

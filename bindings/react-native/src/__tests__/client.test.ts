@@ -556,6 +556,17 @@ describe('digits and audio', () => {
     expect((await refusal(call.audio.setMuted('input', false))).code).toBe('wrongState');
   });
 
+  it('chooses the rate of a call\'s frames, refusing one outside the four before crossing', async () => {
+    const {native, call} = await confirmedCall();
+    expect(await call.audio.setAppRate(24000)).toEqual({sampleRate: 24000, frameSamples: 480});
+    expect(native.calls.slice(-1)).toEqual([{method: 'setAppRate', args: [call.id, 24000]}]);
+    const before = native.calls.length;
+    expect((await refusal(call.audio.setAppRate(44100))).code).toBe('invalidArgument');
+    expect(native.calls).toHaveLength(before);
+    native.failNext('setAppRate', 'wrongState', 'the library runs this call\'s audio on the devices');
+    expect((await refusal(call.audio.setAppRate(0))).code).toBe('wrongState');
+  });
+
   it('passes the echo switch through, and reads the settings back with the suites named', async () => {
     const native = new FakeNative();
     const client = await Sipral.open({bindHost: '192.0.2.10', systemEchoCancellation: false}, native);

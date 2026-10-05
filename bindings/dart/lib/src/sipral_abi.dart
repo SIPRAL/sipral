@@ -4700,7 +4700,8 @@ final class SipralMediaInfo extends ffi.Struct {
   @ffi.Uint32()
   external int clockRate;
 
-  /// The rate the samples crossing this ABI are at.
+  /// The rate the samples crossing this ABI are at: the codec's, or the
+  /// one sipral_media_set_app_rate chose.
   @ffi.Uint32()
   external int sampleRate;
 
@@ -4709,7 +4710,7 @@ final class SipralMediaInfo extends ffi.Struct {
   external int frameMs;
 
   /// Samples in one frame: exactly what sipral_media_playback fills and
-  /// what sipral_media_capture wants.
+  /// what sipral_media_capture wants, at `sample_rate`.
   @ffi.Size()
   external int frameSamples;
 
@@ -7664,7 +7665,7 @@ final class Sipral {
   /// does not ask about. The
   /// rule for all three numbers is the Versioning section of
   /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-  static const int abiVersionMinor = 0;
+  static const int abiVersionMinor = 1;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -9646,6 +9647,33 @@ final class Sipral {
   late final int Function(int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount, ffi.Pointer<SipralMediaPacket> packet) mediaCapture = library.lookupFunction<
       ffi.Int32 Function(SipralHandle media, ffi.Uint64 nowMs, ffi.Pointer<ffi.Int16> samples, ffi.Size sampleCount, ffi.Pointer<SipralMediaPacket> packet),
       int Function(int media, int nowMs, ffi.Pointer<ffi.Int16> samples, int sampleCount, ffi.Pointer<SipralMediaPacket> packet)>('sipral_media_capture');
+
+  /// Choose the rate this call's frames cross the boundary at in
+  /// application mode: what `sipral_media_playback` fills and what
+  /// `sipral_media_capture` takes, whatever rate the codec runs at.
+  ///
+  /// `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
+  /// which is where every call starts. The frame keeps the call's
+  /// duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
+  /// `sipral_media_info_t::sample_rate` and `frame_samples` report the
+  /// rate chosen as soon as it is set. The conversion is the library's
+  /// own resampler, both ways, and follows a re-negotiation onto another
+  /// codec by itself; the codec, an attached processor, a recording and the
+  /// in-band detectors keep working at the codec's rate. Asking again for
+  /// the rate already set changes nothing.
+  ///
+  /// Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
+  /// left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
+  /// where the audio engine pumps the frames at the devices' rate, and
+  /// `sipral_media_mix` refuses a pair while either call has a rate of its
+  /// own: a local conference takes calls at any rate.
+  ///
+  /// Safety
+  ///
+  /// Reads no memory the caller owns.
+  late final int Function(int media, int hz) mediaSetAppRate = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle media, ffi.Uint32 hz),
+      int Function(int media, int hz)>('sipral_media_set_app_rate');
 
   /// Run `callback` over every frame captured on this call, against the
   /// far-end audio this call played a render delay earlier — echo

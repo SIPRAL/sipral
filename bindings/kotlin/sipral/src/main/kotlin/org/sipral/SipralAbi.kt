@@ -4633,7 +4633,8 @@ data class SipralMediaInfo(
      */
     val clockRate: Long,
     /**
-     * The rate the samples crossing this ABI are at.
+     * The rate the samples crossing this ABI are at: the codec's, or the
+     * one sipral_media_set_app_rate chose.
      */
     val sampleRate: Long,
     /**
@@ -4642,7 +4643,7 @@ data class SipralMediaInfo(
     val frameMs: Long,
     /**
      * Samples in one frame: exactly what sipral_media_playback fills and
-     * what sipral_media_capture wants.
+     * what sipral_media_capture wants, at `sample_rate`.
      */
     val frameSamples: Long,
     /**
@@ -9520,7 +9521,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 0)
+        agree(1, 1)
     }
 
     /**
@@ -9613,6 +9614,7 @@ internal object SipralNative {
     external fun sipral_media_receive(media: Long, data: ByteArray, from: ByteArray, nowMs: Long, arrival: LongArray): Int
     external fun sipral_media_playback(media: Long, samples: ShortArray, written: LongArray, source: LongArray): Int
     external fun sipral_media_capture(media: Long, nowMs: Long, samples: ShortArray, packet: Long): Int
+    external fun sipral_media_set_app_rate(media: Long, hz: Long): Int
     external fun sipral_media_attach_processor(media: Long, callback: Long): Int
     external fun sipral_media_detach_processor(media: Long, wasAttached: LongArray): Int
     external fun sipral_media_reset_processor(media: Long, wasAttached: LongArray): Int
@@ -9749,7 +9751,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 0
+    const val ABI_VERSION_MINOR: Long = 1
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -12165,6 +12167,35 @@ object Sipral {
      */
     fun mediaCapture(media: Long, nowMs: Long, samples: ShortArray, packet: Long) {
         check(SipralNative.sipral_media_capture(media, nowMs, samples, packet))
+    }
+
+    /**
+     * Choose the rate this call's frames cross the boundary at in
+     * application mode: what `sipral_media_playback` fills and what
+     * `sipral_media_capture` takes, whatever rate the codec runs at.
+     *
+     * `hz` is 8000, 16000, 24000 or 48000, and 0 is the codec's own rate,
+     * which is where every call starts. The frame keeps the call's
+     * duration, so 20 ms of G.711 at 24 kHz is 480 samples, and
+     * `sipral_media_info_t::sample_rate` and `frame_samples` report the
+     * rate chosen as soon as it is set. The conversion is the library's
+     * own resampler, both ways, and follows a re-negotiation onto another
+     * codec by itself; the codec, an attached processor, a recording and the
+     * in-band detectors keep working at the codec's rate. Asking again for
+     * the rate already set changes nothing.
+     *
+     * Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the setting
+     * left as it was. `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode,
+     * where the audio engine pumps the frames at the devices' rate, and
+     * `sipral_media_mix` refuses a pair while either call has a rate of its
+     * own: a local conference takes calls at any rate.
+     *
+     * Safety
+     *
+     * Reads no memory the caller owns.
+     */
+    fun mediaSetAppRate(media: Long, hz: Long) {
+        check(SipralNative.sipral_media_set_app_rate(media, hz))
     }
 
     /**

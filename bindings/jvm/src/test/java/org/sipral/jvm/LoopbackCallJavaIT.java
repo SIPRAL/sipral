@@ -163,6 +163,49 @@ class LoopbackCallJavaIT {
         }
     }
 
+    /** The rate a call's frames cross at, chosen from Java: at 24 kHz a
+     * 20 ms frame is 480 samples whatever the codec and the call still
+     * carries RTP both ways, a rate outside the four is refused and changes
+     * nothing, and 0 is the codec's own again. */
+    @Test
+    void theApplicationChoosesTheRateOfItsFrames() throws Exception {
+        try (SipralClient alice = SipralJava.open("127.0.0.1");
+             SipralClient bob = SipralJava.open("127.0.0.1")) {
+            SipralAccount fromAlice = SipralJava.addAccount(alice, "sip:alice@example.invalid", bob.getBindAddress());
+            SipralJava.addAccount(bob, "sip:bob@example.invalid", alice.getBindAddress());
+            SipralAwaited<SipralCall> placed = SipralJava.awaitNext(
+                bob.getEvents(), EnumSet.of(SipralEventKind.INCOMING_CALL), WAIT_MS,
+                () -> SipralJava.placeCall(alice, fromAlice, "sip:bob@example.invalid"));
+            try (SipralCall callA = placed.getResult();
+                 SipralCall callB = SipralJava.answerCall(bob, placed.getEvent())) {
+                SipralJava.waitConfirmed(callA, WAIT_MS);
+                SipralJava.waitConfirmed(callB, WAIT_MS);
+                SipralMedia mediaA = until(() -> callA.getMedia());
+                SipralMedia mediaB = until(() -> callB.getMedia());
+                int codecRate = mediaB.getSampleRate();
+
+                for (SipralMedia media : List.of(mediaA, mediaB)) {
+                    media.setAppRate(24_000);
+                    assertEquals(24_000, media.getSampleRate());
+                    assertEquals(480, media.getFrameSamples());
+                    assertEquals(24_000L, media.info().getSampleRate());
+                }
+                SipralException refused = assertThrows(SipralException.class, () -> mediaB.setAppRate(44_100));
+                assertSame(SipralStatus.INVALID_ARGUMENT, refused.getStatus());
+                assertEquals(480, mediaB.getFrameSamples());
+
+                long before = mediaB.statistics().getPacketsReceived();
+                short[] tone = new short[480 * 5];
+                java.util.Arrays.fill(tone, (short) 4_096);
+                mediaA.sendAudio(tone);
+                until(() -> mediaB.statistics().getPacketsReceived() > before + 5 ? Boolean.TRUE : null);
+
+                mediaB.setAppRate(0);
+                assertEquals(codecRate, mediaB.getSampleRate());
+            }
+        }
+    }
+
     /** The check the binding makes at load, asked from Java about other
      * versions than its own: within this major every minor up to the
      * library's own is served -- a binding the library is newer than --

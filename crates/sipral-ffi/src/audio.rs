@@ -1252,7 +1252,7 @@ pub(crate) mod tests {
     }
 
     /// A stack in device mode over `fake`, with a managed call up on it.
-    fn device_call(
+    pub(crate) fn device_call(
         observed: &mut Observed,
         fake: &FakeControl,
         activation: SipralAudioActivation,

@@ -69,11 +69,15 @@ public sealed class CallMedia : IDisposable
 
     internal ulong Handle => _handle.Value;
 
-    /// <summary>The rate the samples crossing this call's media are at.</summary>
-    public uint SampleRate { get; }
+    /// <summary>The rate the samples crossing this call's media are at:
+    /// the codec's, or the one <see cref="SetAppRate"/> chose.</summary>
+    public uint SampleRate { get; private set; }
     /// <summary>Samples in one frame — what <see cref="Playback"/> fills
-    /// and what <see cref="Capture"/> wants.</summary>
-    public int FrameSamples { get; }
+    /// and what <see cref="Capture"/> wants, at <see cref="SampleRate"/>.</summary>
+    public int FrameSamples { get; private set; }
+    /// <summary>Held for one frame's playback and capture, and while
+    /// <see cref="SetAppRate"/> moves the frame's length under them.</summary>
+    private readonly object _frameLock = new();
     private readonly double _frameSeconds;
 
     /// <summary>Where the last datagram this call's media received came
@@ -494,6 +498,32 @@ public sealed class CallMedia : IDisposable
         SendPacket(packet);
     }
 
+    /// <summary><c>sipral_media_set_app_rate</c>: the rate
+    /// <see cref="Frames"/> hands out and <see cref="SendAudio"/> takes,
+    /// whatever rate the codec runs at — 8000, 16000, 24000 or 48000, or 0
+    /// for the codec's own, which is where every call starts. The library
+    /// converts both ways with its own resampler, and the frame keeps the
+    /// call's duration, so <see cref="SampleRate"/> and
+    /// <see cref="FrameSamples"/> say the new rate and its length from here
+    /// on. Audio queued with <see cref="SendAudio"/> and not yet sent was at
+    /// the old rate, and is dropped. Any other rate throws with
+    /// <see cref="SipralStatus.InvalidArgument"/>, and device mode with
+    /// <see cref="SipralStatus.WrongState"/>.</summary>
+    public void SetAppRate(uint hz)
+    {
+        lock (_frameLock)
+        {
+            SipralErrors.Call(() => NativeMethods.sipral_media_set_app_rate(Handle, hz), "sipral_media_set_app_rate");
+            var info = Info();
+            SampleRate = info.SampleRate;
+            FrameSamples = info.FrameSamples;
+            _pending = Array.Empty<short>();
+            while (_toSend.TryDequeue(out _))
+            {
+            }
+        }
+    }
+
     /// <summary>Queues 16-bit mono PCM to go out, one frame at a time, cut
     /// to whatever <see cref="FrameSamples"/> this call negotiated as it
     /// is sent rather than as it is queued. Thread-safe. Throws
@@ -574,28 +604,11 @@ public sealed class CallMedia : IDisposable
             }
             else if (_active)
             {
-                var status = PlaybackOnce(out var scratch, out var written, out _);
-                if (status == SipralStatus.Ok && written > 0)
+                SipralStatus status;
+                lock (_frameLock)
                 {
-                    var frame = scratch.AsSpan(0, written).ToArray();
-                    // Same guard as `SipralStack.EventReceived`: an
-                    // unhandled exception on any .NET thread, background
-                    // or not, ends the whole process, and this is this
-                    // call's own frame-rate thread — one bad handler must
-                    // not take every other call and stack down with it.
-                    try
-                    {
-                        FrameDecoded?.Invoke(frame);
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Trace.TraceError($"Sipral: CallMedia.FrameDecoded handler threw: {ex}");
-                    }
-                    _frames.Writer.TryWrite(frame);
+                    status = PlayAndCapture();
                 }
-
-                var chunk = NextChunk();
-                Capture(chunk);
                 DrainPackets(NativeMethods.sipral_media_poll_rtcp);
                 DrainPackets(NativeMethods.sipral_media_poll_transmit);
                 CarryText();
@@ -613,6 +626,34 @@ public sealed class CallMedia : IDisposable
                 _closed.Wait(wait);
             }
         }
+    }
+
+    /// <summary>One frame each way: the far end's handed to every reader,
+    /// and the next one queued sent.</summary>
+    private SipralStatus PlayAndCapture()
+    {
+        var status = PlaybackOnce(out var scratch, out var written, out _);
+        if (status == SipralStatus.Ok && written > 0)
+        {
+            var frame = scratch.AsSpan(0, written).ToArray();
+            // Same guard as `SipralStack.EventReceived`: an unhandled
+            // exception on any .NET thread, background or not, ends the
+            // whole process, and this is this call's own frame-rate thread —
+            // one bad handler must not take every other call and stack down
+            // with it.
+            try
+            {
+                FrameDecoded?.Invoke(frame);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceError($"Sipral: CallMedia.FrameDecoded handler threw: {ex}");
+            }
+            _frames.Writer.TryWrite(frame);
+        }
+
+        Capture(NextChunk());
+        return status;
     }
 
     private void DrainReceive()

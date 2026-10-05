@@ -1810,6 +1810,27 @@ static void a_processor_runs_the_frames_of_a_call(void)
     expect("a detached processor still saw a frame",
            seen.calls == 1 && other.calls == 1);
 
+    /* ABI 1.1: the frames at a rate of the application's own, whatever the
+     * codec's, the frame keeping its duration; a rate outside the four is
+     * refused. */
+    expect("a rate outside the four was taken",
+           sipral_media_set_app_rate(media, 44100) == SIPRAL_STATUS_INVALID_ARGUMENT);
+    expect("24 kHz frames were refused",
+           sipral_media_set_app_rate(media, 24000) == SIPRAL_STATUS_OK);
+    expect("the media info does not say the rate chosen",
+           sipral_media_info(media, &info) == SIPRAL_STATUS_OK && info.sample_rate == 24000 &&
+               info.frame_samples == (size_t)info.frame_ms * 24 &&
+               info.frame_samples <= sizeof playback_frame / sizeof playback_frame[0]);
+    expect("a frame at 24 kHz was not played",
+           sipral_media_playback(media, playback_frame, info.frame_samples, &written, NULL) ==
+                   SIPRAL_STATUS_OK &&
+               written == info.frame_samples);
+    expect("a frame at 24 kHz was not captured",
+           sipral_media_capture(media, 60, capture_frame, info.frame_samples, &packet) ==
+               SIPRAL_STATUS_OK);
+    expect("the codec's own rate could not be asked for again",
+           sipral_media_set_app_rate(media, 0) == SIPRAL_STATUS_OK);
+
     sipral_media_release(media);
     sipral_stack_destroy(callee);
     sipral_stack_destroy(caller);

@@ -103,6 +103,44 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
+    /// <summary><see cref="CallMedia.SetAppRate"/>: both ends at 24 kHz
+    /// hand out and take 480-sample frames whatever the codec, a rate
+    /// outside the four is refused and changes nothing, and 0 is the
+    /// codec's own again.</summary>
+    [Fact]
+    public async Task FramesCrossAtTheRateTheApplicationChose()
+    {
+        var (aliceCall, bobCall) = await PlaceAndAnswerAsync();
+        try
+        {
+            var codecRate = bobCall.Media!.SampleRate;
+            foreach (var media in new[] { aliceCall.Media!, bobCall.Media! })
+            {
+                media.SetAppRate(24_000);
+                Assert.Equal(24_000u, media.SampleRate);
+                Assert.Equal(480, media.FrameSamples);
+                Assert.Equal(24_000u, media.Info().SampleRate);
+            }
+            var refused = Assert.Throws<SipralException>(() => bobCall.Media.SetAppRate(44_100));
+            Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
+            Assert.Equal(480, bobCall.Media.FrameSamples);
+
+            var tone = new short[480 * 5];
+            Array.Fill(tone, (short)4096);
+            aliceCall.Media!.SendAudio(tone);
+            var heard = await FirstMatchingAsync(bobCall.Media.Frames, frame => frame.Length == 480, Timeout);
+            Assert.Equal(480, heard.Length);
+
+            bobCall.Media.SetAppRate(0);
+            Assert.Equal(codecRate, bobCall.Media.SampleRate);
+        }
+        finally
+        {
+            aliceCall.Close();
+            bobCall.Close();
+        }
+    }
+
     [Fact]
     public async Task DtmfAndStatistics()
     {

@@ -170,6 +170,12 @@ export interface CallAudio {
   level: number;
 }
 
+/** The rate a call's frames cross at, and how many samples one frame is there. */
+export interface AppRate {
+  sampleRate: number;
+  frameSamples: number;
+}
+
 /** What the stack runs with, every default filled in. */
 export interface Settings {
   transport: Signalling;

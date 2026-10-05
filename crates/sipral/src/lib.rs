@@ -147,6 +147,7 @@
     )
 )]
 
+mod app_rate;
 mod capabilities;
 mod clock;
 mod codec;
@@ -208,6 +209,7 @@ mod stir_tests;
 mod tests;
 mod text;
 
+pub use app_rate::APPLICATION_RATES;
 pub use capabilities::{Capabilities, SrtpKeying};
 pub use clock::WallClock;
 pub use codec::{Codec, CodecCandidate, CodecCatalog, CodecOutcome, DEFAULT_FRAME_MS};

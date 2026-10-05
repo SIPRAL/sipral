@@ -7,13 +7,14 @@ use crate::resample::{RateError, Resampler};
 
 /// A [`Resampler`] that produces exactly one tick per tick.
 ///
-/// Between any two of 8, 16, 32 and 48 kHz a tick of 20 ms is a whole number
-/// of samples at both rates, so once the filter is full every tick in
-/// produces exactly one tick out. The first tick after a reset produces less,
-/// because half the filter is still waiting for input; that tick is completed
-/// with silence in front of what there is, and from then on the stream
-/// carries the filter's delay and no more.
-pub(crate) struct Converter {
+/// Between any two of 8, 16, 24, 32 and 48 kHz a tick of a whole number of
+/// milliseconds is a whole number of samples at both rates, so once the
+/// filter is full every tick in produces exactly one tick out. The first tick
+/// after a reset produces less, because half the filter is still waiting for
+/// input; that tick is completed with silence in front of what there is, and
+/// from then on the stream carries the filter's delay and no more.
+#[derive(Debug)]
+pub struct Converter {
     resampler: Resampler,
     /// Where the resampler writes, as long as it can write for one tick.
     scratch: Vec<i16>,
@@ -22,18 +23,18 @@ pub(crate) struct Converter {
 impl Converter {
     /// A converter for ticks of `input_tick` samples at `input_rate` into
     /// ticks at `output_rate`.
-    pub(crate) fn new(
-        input_rate: u32,
-        output_rate: u32,
-        input_tick: usize,
-    ) -> Result<Self, RateError> {
+    ///
+    /// # Errors
+    ///
+    /// [`RateError`] for a pair of rates [`Resampler::new`] refuses.
+    pub fn new(input_rate: u32, output_rate: u32, input_tick: usize) -> Result<Self, RateError> {
         let resampler = Resampler::new(input_rate, output_rate)?;
         let scratch = vec![0; resampler.output_capacity(input_tick)];
         Ok(Self { resampler, scratch })
     }
 
     /// Converts one tick, filling the whole of `output`.
-    pub(crate) fn run(&mut self, input: &[i16], output: &mut [i16]) {
+    pub fn run(&mut self, input: &[i16], output: &mut [i16]) {
         let produced = self
             .resampler
             .process(input, &mut self.scratch)
@@ -49,7 +50,7 @@ impl Converter {
     }
 
     /// Forgets the stream, so the next tick starts from silence.
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.resampler.reset();
     }
 }
@@ -67,6 +68,11 @@ mod tests {
             (48_000, 16_000),
             (32_000, 48_000),
             (48_000, 32_000),
+            (8_000, 24_000),
+            (24_000, 8_000),
+            (16_000, 24_000),
+            (24_000, 16_000),
+            (48_000, 24_000),
             (48_000, 48_000),
         ] {
             let input_tick = usize::try_from(input_rate / 50).unwrap();

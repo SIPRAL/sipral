@@ -78,6 +78,12 @@ export type NativeCallAudio = {
   level: CodegenTypes.Double;
 };
 
+/** The rate a call's frames cross at, and how long one frame is there. */
+export type NativeAppRate = {
+  sampleRate: CodegenTypes.Int32;
+  frameSamples: CodegenTypes.Int32;
+};
+
 /** What the stack runs with, every default filled in. */
 export type NativeSettings = {
   /** "udp", "tcp" or "tls". */
@@ -165,6 +171,8 @@ export interface Spec extends TurboModule {
   setCallGain(call: string, direction: string, gain: CodegenTypes.Double): Promise<void>;
   setCallMuted(call: string, direction: string, muted: boolean): Promise<void>;
   callAudio(call: string, direction: string): Promise<NativeCallAudio>;
+  /** `sipral_media_set_app_rate` on the call's media: 8000, 16000, 24000 or 48000, 0 for the codec's own. */
+  setAppRate(call: string, hz: CodegenTypes.Int32): Promise<NativeAppRate>;
   settings(): Promise<NativeSettings>;
 
   readonly onEvent: CodegenTypes.EventEmitter<NativeEvent>;

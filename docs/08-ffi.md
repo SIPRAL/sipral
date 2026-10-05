@@ -1813,8 +1813,9 @@ named. The
 last asks one call rather than the stack, so the thread that sends a call's
 audio sends its reports too: it is called after every captured frame, and
 whenever `sipral_stack_poll` reports a deadline for a call that is not
-capturing. Samples are 16-bit mono at `sipral_media_info_t::sample_rate`, a
-frame is exactly `frame_samples` of them, and outgoing packets are written into
+capturing. Samples are 16-bit mono at `sipral_media_info_t::sample_rate` —
+the codec's, or the rate `sipral_media_set_app_rate` chose ("What ABI 1.1
+added") — a frame is exactly `frame_samples` of them, and outgoing packets are written into
 buffers the caller brings — checked before anything is built, so a frame is
 never encoded and then dropped for want of somewhere to put it.
 
@@ -3512,3 +3513,59 @@ binding regenerated and every pin and offset free to move once; the gate
 holds pins and offsets to the last commit and lets them move only with the
 major. A fix that changes no declaration is a patch, and is not asked about
 at load.
+
+## What ABI 1.1 added
+
+The first minor under the 1.x rule: one entry point, nothing else in the
+header moved, and `bindings/c/abi-sizes.txt` is what 1.0 left. A binding
+printed at 1.0 loads against a 1.1 library and works as it did; one printed
+at 1.1 is refused by a 1.0 library, with both versions named, rather than
+reaching for a symbol that library lacks.
+
+**The rate of a call's frames is the application's to choose.**
+`sipral_media_set_app_rate(media, hz)` sets the rate `sipral_media_playback`
+fills and `sipral_media_capture` takes in application mode, whatever rate the
+codec runs at: 8000, 16000, 24000 or 48000, or 0 for the codec's own, which
+is where every call starts. A speech service wants its own rate whatever the
+far end negotiated — 24 kHz for one, 16 kHz in and 24 kHz out for another —
+and a call settles on 8 kHz for G.711 or 48 kHz for Opus; without this every
+application carried a resampler of its own, in every language.
+
+- The frame keeps the call's duration: 20 ms of G.711 at 24 kHz is 480
+  samples, of Opus at 16 kHz 320. `sipral_media_info_t::sample_rate` and
+  `frame_samples` report the rate chosen as soon as it is set; `clock_rate`,
+  `frame_ms` and the codec are the wire's, unchanged.
+- Both directions go through the library's own resampler, the polyphase
+  filter the local conference and the recorder already use
+  (`sipral_media::resample`, built from integer arithmetic and no dependency),
+  one filter each way per call, built on the first frame and again when a
+  re-negotiation lands the call on a codec at another rate or frame length;
+  the application's frames keep their rate and length through it. The
+  filter adds about 4 ms at 8 kHz each way, and less at the higher rates.
+- Only what crosses the boundary moves. The codec, an attached processor
+  (`sipral_processor_frame_t` carries its own lengths), a recording, the
+  in-band detectors and the voice-activity detector all keep the codec's
+  rate.
+- Any other rate is `SIPRAL_STATUS_INVALID_ARGUMENT`, with the last error
+  naming it and the setting left as it was; asking again for the rate already
+  set changes nothing, and the filters keep what they hold.
+- `SIPRAL_STATUS_WRONG_STATE` on a stack in device mode, where the audio
+  engine takes the frames at the devices' rate, and from
+  `sipral_media_mix` while either call of the pair has a rate of its own: a
+  pair is mixed at its codec's rate. A local conference takes calls at any
+  rate and is the way to mix them; a member's frames belong to the
+  conference while it is in it, at the conference's own rate.
+
+The facade carries the same as `MediaSession::set_application_rate`,
+`application_rate`, `application_frame_samples`,
+`playback_at_application_rate` and `capture_at_application_rate`, with the
+four rates in `sipral::APPLICATION_RATES`.
+
+**In the layers.** Each idiomatic layer sets it on the call's media object,
+and re-reads its own sample rate and frame length when it does, so the frames
+it hands out and the audio it takes follow; audio queued at the old rate and
+not yet sent is dropped: Swift `Media.setAppRate(_:)`, .NET
+`CallMedia.SetAppRate`, Kotlin and the JVM jar `SipralMedia.setAppRate`,
+Python `Media.set_app_rate`, Dart `SipralMedia.setAppRate`, and React Native
+`call.audio.setAppRate(hz)`, which resolves with the rate and the frame
+length and is refused as `wrongState` on a phone's own devices.
