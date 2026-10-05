@@ -25,6 +25,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Fixed
 
+- **Every REGISTER after a challenge carries a higher `CSeq`.** The REGISTER that answered a registrar's 401 took the next number on the wire, and the account did not count it: its refresh and its un-REGISTER went out again with that number, which RFC 3261 §10.2 forbids. Asterisk let it pass; a stricter registrar refuses it, and an un-REGISTER refused that way leaves the binding on the PBX until it expires.
 - **Presence from Asterisk is read again.** Asterisk puts an empty `<dm:person />`, with no `id`, in every presence document it sends, and the stack refused the whole document over it: the NOTIFY was answered 200 and no `PRESENCE_CHANGED` followed, so every busy lamp watching an extension on Asterisk or FreePBX stayed blank. A person with no `id` is now left out and the tuples, their `basic` status and the notes are read as before.
 
 ## [1.1.0] - 2026-10-04

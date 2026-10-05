@@ -1829,6 +1829,39 @@ fn challenged_and_granted(agent: &mut UserAgent, id: AccountId, now: Instant) ->
     retry
 }
 
+#[test]
+fn every_register_after_a_challenge_carries_a_higher_cseq() {
+    // §10.2: a UA "MUST increment the CSeq value by one for each REGISTER
+    // request with the same Call-ID". The retry that answers a challenge took
+    // the next number on the wire, and the refresh and the un-REGISTER after
+    // it went out with that same number again
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account().credentials(Credentials::new("alice", "open sesame")));
+    let retry = challenged_and_granted(&mut agent, id, t0);
+    assert_eq!(
+        cseq_of(&retry),
+        2,
+        "the answer to the challenge is the second"
+    );
+
+    agent.handle_timeout(t0 + Duration::from_secs(3_060));
+    let refresh = sent(&mut agent);
+    assert_eq!(cseq_of(&refresh), 3, "the refresh is the third");
+    deliver(
+        &mut agent,
+        &granted(&refresh, 3_600),
+        t0 + Duration::from_secs(3_060),
+    );
+    events(&mut agent);
+
+    agent
+        .unregister(id, t0 + Duration::from_secs(3_100))
+        .expect("the un-REGISTER goes");
+    let goodbye = sent(&mut agent);
+    assert_eq!(cseq_of(&goodbye), 4, "and the un-REGISTER the fourth");
+}
+
 /// The one the registrar in these tests makes.
 const REGISTRAR_CHALLENGE: &str =
     "WWW-Authenticate: Digest realm=\"example.com\", nonce=\"abc123\", qop=\"auth\"\r\n";
@@ -1851,7 +1884,8 @@ fn a_refresh_carries_the_credentials_instead_of_paying_for_a_second_refusal() {
     assert!(carried.starts_with("Digest "), "{carried}");
     assert!(carried.contains("nonce=\"abc123\""), "{carried}");
     assert!(carried.contains("nc=00000002"), "{carried}");
-    assert_eq!(header(&refresh, HeaderName::CSeq), b"2 REGISTER");
+    // the answer to the challenge was the second REGISTER on this Call-ID
+    assert_eq!(header(&refresh, HeaderName::CSeq), b"3 REGISTER");
 
     // and the registrar believes it the first time, so there is no second
     // round trip to pay for

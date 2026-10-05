@@ -1489,6 +1489,9 @@ impl UserAgent {
                     reg.transaction = Some(id);
                     reg.unanswered = None;
                     reg.waiting_for_stream = None;
+                    // §22.2 gave the retry the next number on the Call-ID, and
+                    // §10.2 wants every later REGISTER above it
+                    reg.cseq = reg.cseq.saturating_add(1);
                 }
             }
             // §18.1.1: the credentials made it too big for a datagram and the
@@ -1539,6 +1542,7 @@ impl UserAgent {
                         reg.transaction = Some(id);
                         reg.unanswered = None;
                         reg.waiting_for_stream = None;
+                        reg.cseq = reg.cseq.saturating_add(1);
                     }
                 }
                 // the connection that was opened is not one this can go over;
