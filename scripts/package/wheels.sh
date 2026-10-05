@@ -14,10 +14,11 @@
 #       linux-x64, manylinux_2_28: needs Docker, re-execs this script inside
 #       quay.io/pypa/manylinux_2_28_x86_64
 #   scripts/package/wheels.sh --out DIR --linux-arm64 [--dry-run] [--publish]
-#       linux-arm64, manylinux_2_28: needs Docker, no arm64 hardware --
-#       cross-compiles in scripts/package/aarch64-cross.sh's container, and
-#       proves the result runs with scripts/package/qemu-verify.sh (qemu-user,
-#       unprivileged, no binfmt)
+#       linux-arm64, manylinux_2_28: needs Docker. On an arm64 Docker host it
+#       builds natively in quay.io/pypa/manylinux_2_28_aarch64; on an x86_64
+#       one it cross-compiles in scripts/package/aarch64-cross.sh's container
+#       and proves the result runs with scripts/package/qemu-verify.sh
+#       (qemu-user, unprivileged, no binfmt)
 #   scripts/package/wheels.sh --out DIR --windows-arm64 [--dry-run] [--publish]
 #       win_arm64 from an x64 Windows host under Git Bash: cross-compiles with
 #       the MSVC ARM64 build tools; the import check needs an arm64 Python and
@@ -79,6 +80,7 @@ PUBLISH=0
 MANYLINUX=0
 LINUX_ARM64=0
 INSIDE_LINUX_ARM64=0
+ML_ARCH=x86_64
 WINDOWS_ARM64=0
 WITH_OPUS=0
 while [ $# -gt 0 ]; do
@@ -88,6 +90,7 @@ while [ $# -gt 0 ]; do
         --publish) PUBLISH=1; shift ;;
         --manylinux) MANYLINUX=1; shift ;;
         --inside-manylinux) MANYLINUX=2; shift ;; # internal: this run is already inside the container
+        --inside-manylinux-aarch64) MANYLINUX=2; ML_ARCH=aarch64; shift ;; # internal: the same, natively on arm64
         --linux-arm64) LINUX_ARM64=1; shift ;;
         --inside-linux-arm64) INSIDE_LINUX_ARM64=1; shift ;; # internal: already inside the cross image
         --windows-arm64) WINDOWS_ARM64=1; shift ;;
@@ -125,13 +128,27 @@ dry_run_without_docker() {
     printf 'wheels.sh: failed\n'; exit 1
 }
 
+# A docker client whose daemon is not running proves nothing more than no
+# client at all, so a dry run treats the two alike.
+have_docker() { command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; }
+
+# An arm64 Docker host (Apple silicon, an arm64 server) builds linux-arm64
+# natively in the aarch64 manylinux image, as --manylinux does on x86_64: the
+# cross image and qemu are an x86_64 host's way, and on an arm64 host the
+# cross toolchain would link the build's own host tools against its sysroot.
+if [ "$LINUX_ARM64" -eq 1 ] && have_docker \
+    && case "$(docker info --format '{{.Architecture}}' 2>/dev/null)" in aarch64|arm64) true ;; *) false ;; esac; then
+    LINUX_ARM64=0; MANYLINUX=1; ML_ARCH=aarch64
+fi
+
 if [ "$MANYLINUX" -eq 1 ]; then
-    command -v docker >/dev/null 2>&1 || [ "$DRY_RUN" -eq 0 ] \
-        || dry_run_without_docker x86_64-unknown-linux-gnu manylinux_2_28_x86_64 \
-            "the build in quay.io/pypa/manylinux_2_28_x86_64 and the wheel made there"
-    step "manylinux_2_28_x86_64, via Docker"
+    have_docker || [ "$DRY_RUN" -eq 0 ] \
+        || dry_run_without_docker "$ML_ARCH-unknown-linux-gnu" "manylinux_2_28_$ML_ARCH" \
+            "the build in quay.io/pypa/manylinux_2_28_$ML_ARCH and the wheel made there"
+    step "manylinux_2_28_$ML_ARCH, via Docker"
     command -v docker >/dev/null 2>&1 || { fail "docker not found"; printf '\nwheels.sh: failed\n'; exit 1; }
     args=(--out /out --inside-manylinux)
+    [ "$ML_ARCH" = aarch64 ] && args=(--out /out --inside-manylinux-aarch64)
     [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
     [ "$PUBLISH" -eq 1 ] && args+=(--publish)
     [ "$WITH_OPUS" -eq 1 ] && args+=(--with-opus)
@@ -141,7 +158,7 @@ if [ "$MANYLINUX" -eq 1 ]; then
     RUSTC_VERSION=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT/rust-toolchain.toml")
     if docker run --rm -v "$ROOT:/work:ro" -v "$OUT:/out" -w /work \
         -e CARGO_TARGET_DIR=/tmp/target \
-        quay.io/pypa/manylinux_2_28_x86_64 \
+        "quay.io/pypa/manylinux_2_28_$ML_ARCH" \
         sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain $RUSTC_VERSION >/tmp/rustup.log 2>&1 && . \"\$HOME/.cargo/env\" && cd /work && bash scripts/package/wheels.sh ${args[*]}"; then
         pass "container run"
     else
@@ -153,7 +170,7 @@ if [ "$MANYLINUX" -eq 1 ]; then
 fi
 
 if [ "$LINUX_ARM64" -eq 1 ]; then
-    command -v docker >/dev/null 2>&1 || [ "$DRY_RUN" -eq 0 ] \
+    have_docker || [ "$DRY_RUN" -eq 0 ] \
         || dry_run_without_docker aarch64-unknown-linux-gnu manylinux_2_28_aarch64 \
             "the cross build in the aarch64 cross image, its glibc 2.28 check, and the wheel imported and tested under qemu (qemu-verify.sh)"
     step "manylinux_2_28_aarch64, cross-compiled (no arm64 hardware), via Docker"
@@ -215,11 +232,11 @@ if [ "$INSIDE_LINUX_ARM64" -eq 1 ]; then
     CROSS_AARCH64=1
     pass "inside the aarch64 cross image: tag $TAG"
 elif [ "$MANYLINUX" -eq 2 ]; then
-    TAG="manylinux_2_28_x86_64"
-    RUST_TRIPLE="x86_64-unknown-linux-gnu"
+    TAG="manylinux_2_28_$ML_ARCH"
+    RUST_TRIPLE="$ML_ARCH-unknown-linux-gnu"
     NATIVE="libsipral_ffi.so"
     PY=python3
-    pass "inside manylinux_2_28_x86_64: tag $TAG"
+    pass "inside manylinux_2_28_$ML_ARCH: tag $TAG"
 elif [ "$UNAME_S" = "Darwin" ]; then
     # The wheel's platform tag is a promise pip checks before it installs,
     # so it is the oldest macOS the native is built for (apple.sh), read back

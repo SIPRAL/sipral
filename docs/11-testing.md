@@ -1412,11 +1412,15 @@ that machine into `[yardstick]` with it: run the test above with
 `--nocapture` on that machine and read `cpu.yardstick.us`.
 
 The linux-arm64 native cross-compiles in an unprivileged Docker container
-(`scripts/package/aarch64-cross.sh`), so what the gate proves of it depends
-on the machine. On a host with Docker, `package --dry-run` runs
+(`scripts/package/aarch64-cross.sh`) on an x86_64 Docker host; on an arm64
+one (Apple silicon with a Linux VM such as colima, an arm64 server) the wheel
+is built natively in `quay.io/pypa/manylinux_2_28_aarch64` instead, and its
+tests can run on that same hardware with no qemu. What the gate proves of it
+depends on the machine. On a host with Docker, `package --dry-run` runs
 `scripts/package/wheels.sh --linux-arm64 --dry-run` and
 `scripts/package/nuget.sh collect --rid linux-arm64` for real. On a host
-without it, the step neither skips nor pretends: it lints `sipral-ffi` for
+without it — or with a Docker client whose daemon is not running — the step
+neither skips nor pretends: it lints `sipral-ffi` for
 `aarch64-unknown-linux-gnu` with the default package's features, and checks
 that every file the cross path names is there and every script on it
 parses. The container build, its manylinux_2_28 glibc check and the run
