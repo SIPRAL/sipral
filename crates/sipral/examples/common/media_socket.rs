@@ -154,6 +154,36 @@ impl MediaSocket {
         }
     }
 
+    /// Hand the session whatever arrived on this call's sockets, and nothing
+    /// more: what [`MediaSocket::turn`] does besides capturing and playing.
+    /// A call in a local conference is read this way, since the conference's
+    /// own tick is what captures and plays its frames.
+    pub(crate) fn receive(&mut self, session: &mut MediaSession, now: Instant) {
+        self.follow_rtcp_plan(session);
+        loop {
+            match self.socket.recv_from(&mut self.inbox) {
+                Ok((length, from)) => {
+                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
+                    // `Arrival::Dropped` and every non-media control datagram
+                    // are for the session to act on, not this loop: nothing
+                    // here has to know a report from a goodbye
+                    let _ = session.receive(datagram, from, now);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+        while let Some(rtcp) = &self.rtcp {
+            match rtcp.recv_from(&mut self.inbox) {
+                Ok((length, from)) => {
+                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
+                    let _ = session.receive(datagram, from, now);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
     /// Drive this call's session for one tick: capture a frame from `source`
     /// and send it, read whatever arrived and hand every decoded frame to
     /// `sink`.
@@ -198,28 +228,7 @@ impl MediaSocket {
             self.next += PACE;
         }
 
-        loop {
-            match self.socket.recv_from(&mut self.inbox) {
-                Ok((length, from)) => {
-                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
-                    // `Arrival::Dropped` and every non-media control datagram
-                    // are for the session to act on, not this loop: nothing
-                    // here has to know a report from a goodbye
-                    let _ = session.receive(datagram, from, now);
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
-        while let Some(rtcp) = &self.rtcp {
-            match rtcp.recv_from(&mut self.inbox) {
-                Ok((length, from)) => {
-                    let datagram = self.inbox.get_mut(..length).unwrap_or_default();
-                    let _ = session.receive(datagram, from, now);
-                }
-                Err(_) => break,
-            }
-        }
+        self.receive(session, now);
 
         let mut played = [0_i16; MAX_SAMPLES];
         while now >= self.next_play {

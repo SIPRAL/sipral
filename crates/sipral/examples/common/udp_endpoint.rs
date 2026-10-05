@@ -30,7 +30,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use sipral::{
-    AccountId, CallHandle, Event, Input, MediaEngine, TransportId, TransportProtocol, UserAgent,
+    AccountId, CallHandle, Event, Input, MediaEngine, Transmit, TransportId, TransportProtocol,
+    UserAgent,
 };
 
 use crate::media_socket::MediaSocket;
@@ -49,6 +50,13 @@ pub(crate) struct Endpoint {
     /// The thread reading the SIP socket, once [`Endpoint::read_in_background`]
     /// started one; until then the socket is read where the loop turns.
     reader: Option<Reader>,
+    /// What the agent wrote for a transport other than this socket — a
+    /// connection the example opened and bound itself — oldest first, for
+    /// that example to send. Empty in every example with one transport.
+    pub(crate) elsewhere: VecDeque<Transmit>,
+    /// Every SIP datagram read, kept whole once set to `Some`: what a test
+    /// reads a header field off when no event carries the message.
+    pub(crate) tap: Option<Vec<Vec<u8>>>,
 }
 
 /// One SIP datagram as the reader thread took it off the socket.
@@ -219,6 +227,8 @@ impl Endpoint {
             media: HashMap::new(),
             sip_inbox: vec![0_u8; 65_535],
             reader: None,
+            elsewhere: VecDeque::new(),
+            tap: None,
         })
     }
 
@@ -337,7 +347,11 @@ impl Endpoint {
 
     fn flush(&mut self) {
         while let Some(transmit) = self.agent.poll_transmit() {
-            let _ = self.sip.send_to(&transmit.payload, transmit.destination);
+            if transmit.transport == self.transport {
+                let _ = self.sip.send_to(&transmit.payload, transmit.destination);
+            } else {
+                self.elsewhere.push_back(transmit);
+            }
         }
     }
 
@@ -422,6 +436,9 @@ impl Endpoint {
     /// Hand one datagram to the user agent, and say on standard error when
     /// it refused it.
     fn deliver(&mut self, data: &[u8], from: SocketAddr, now: Instant) {
+        if let Some(kept) = self.tap.as_mut() {
+            kept.push(data.to_vec());
+        }
         let received = self.agent.receive(
             Input::Datagram {
                 transport: self.transport,

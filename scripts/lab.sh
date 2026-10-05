@@ -222,6 +222,19 @@
 #                               headless-agent`); SIPRAL_COMPARE_CLIENTS,
 #                               _CALLS, _PROFILES, _HOLD_S and _WINDOW_S
 #                               narrow it
+#   scripts/lab.sh bridge       only the bridge to a voice agent
+#                               (crates/sipral/examples/agent-bridge.rs),
+#                               registered at Asterisk as labuser-bridge: one
+#                               call with the Python layer's agent.py as the
+#                               voice agent -- audio both ways, the dialplan's
+#                               "12#" forwarded, and the agent's hangup ending
+#                               Asterisk's call with an outcome (part of the
+#                               Asterisk run too); then SIPRAL_BRIDGE_CALLS
+#                               (thirty) calls at once to the headless agent's
+#                               echo, every one bridged both ways and ended,
+#                               with the bridge's own CPU time printed.
+#                               SIPRAL_AGENT_BRIDGE and SIPRAL_HEADLESS_AGENT
+#                               name the two binaries when built elsewhere
 #   scripts/lab.sh wasapi up    bring the lab up reachable from the LAN, for
 #                               a call carried on a Windows machine's real
 #                               WASAPI devices (interop/harness/src/wasapi.rs,
@@ -508,6 +521,9 @@ if [ "$WANT" = pipewire ]; then
 elif [ "$WANT" = compare ]; then
     HARNESS=""
     printf '  note  not used by the comparison, which runs the headless agent\n'
+elif [ "$WANT" = bridge ]; then
+    HARNESS=""
+    printf '  note  not used by the bridge step, which runs its own example\n'
 elif [ -n "${SIPRAL_HARNESS:-}" ]; then
     [ -x "$SIPRAL_HARNESS" ] || { fail "SIPRAL_HARNESS is not an executable file"; exit 1; }
     HARNESS="$SIPRAL_HARNESS"
@@ -565,10 +581,10 @@ fi
 # Skipped rather than fatal, on the same reasoning as the C harness above: a
 # machine that cannot build one still runs the rest of the lab.
 step "the socket-framed agent"
-if [ "$WANT" = compare ] || [ "$WANT" = security ]; then
+if [ "$WANT" = compare ] || [ "$WANT" = security ] || [ "$WANT" = bridge ]; then
     HEADLESS_APP=""
     HEADLESS_CLIENT=""
-    printf '  note  not used by the comparison\n'
+    printf '  note  not used by the %s step\n' "$WANT"
 elif [ -n "${SIPRAL_HEADLESS_APP:-}" ] && [ -n "${SIPRAL_HEADLESS_CLIENT:-}" ]; then
     HEADLESS_APP="$SIPRAL_HEADLESS_APP"
     HEADLESS_CLIENT="$SIPRAL_HEADLESS_CLIENT"
@@ -602,9 +618,9 @@ if [ -n "${SIPRAL_SWIFT_AGENT:-}" ]; then
 elif [ -z "$HARNESS_C" ]; then
     SWIFT_AGENT=""
     printf '  note  no libsipral_ffi to link against; that step is skipped\n'
-elif [ "$WANT" = security ]; then
+elif [ "$WANT" = security ] || [ "$WANT" = bridge ]; then
     SWIFT_AGENT=""
-    printf '  note  not used by the security step\n'
+    printf '  note  not used by the %s step\n' "$WANT"
 elif ! command -v docker >/dev/null 2>&1; then
     SWIFT_AGENT=""
 else
@@ -641,6 +657,36 @@ if [ "$WANT" = compare ]; then
     else
         fail "cargo build -p sipral --example headless-agent; set SIPRAL_HEADLESS_AGENT"
         exit 1
+    fi
+fi
+
+# The bridge to a voice agent, and -- for the step of its own -- the headless
+# agent's echo as the voice agent of many calls at once. Skipped rather than
+# fatal in a run that names nothing, on the socket-framed agent's reasoning.
+AGENT_BRIDGE=""
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = bridge ]; then
+    step "the agent bridge"
+    if [ -n "${SIPRAL_AGENT_BRIDGE:-}" ]; then
+        AGENT_BRIDGE="$SIPRAL_AGENT_BRIDGE"
+        pass "taken as given: $AGENT_BRIDGE"
+    elif cargo build --release -p sipral --example agent-bridge >/dev/null 2>&1; then
+        AGENT_BRIDGE="$ROOT/target/release/examples/agent-bridge"
+        pass "built"
+    else
+        printf '  note  could not build the agent bridge; its steps are skipped\n'
+    fi
+fi
+if [ "$WANT" = bridge ]; then
+    step "the headless agent, as the voice agent of many calls"
+    if [ -n "${SIPRAL_HEADLESS_AGENT:-}" ]; then
+        HEADLESS_AGENT="$SIPRAL_HEADLESS_AGENT"
+        pass "taken as given: $HEADLESS_AGENT"
+    elif cargo build --release -p sipral --example headless-agent >/dev/null 2>&1; then
+        HEADLESS_AGENT="$ROOT/target/release/examples/headless-agent"
+        pass "built"
+    else
+        HEADLESS_AGENT=""
+        printf '  note  could not build the headless agent\n'
     fi
 fi
 
@@ -892,6 +938,171 @@ python_agent() {
     printf '%s\n' "$log" \
         | grep '^ended ' | found -E "'packets_sent': [1-9]" \
         || { printf '  it sent no audio back\n'; return 1; }
+}
+
+# The bridge to a voice agent (crates/sipral/examples/agent-bridge.rs),
+# registered at Asterisk as labuser-bridge (interop/asterisk/pjsip.conf) and
+# calling a voice agent of the step's choosing: an extension forwarding to an
+# agent's SIP address, as on a real PBX.
+BRIDGE_NAME=sipral-lab-bridge
+BRIDGE_AGENT_NAME=sipral-lab-bridge-agent
+
+# bridge_start AGENT_URI [FLAG...]: the bridge, calling AGENT_URI, once
+# Asterisk has its registration.
+bridge_start() {
+    local agent_uri="$1" beside tries
+    shift
+    beside=$(cd "$(dirname "$AGENT_BRIDGE")" && pwd)
+    docker rm -f "$BRIDGE_NAME" >/dev/null 2>&1
+    docker run -d --name "$BRIDGE_NAME" --network "$LAB_NETWORK" \
+        -v "$beside:/sipral:ro" \
+        debian:trixie-slim sh -c '
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            exec /sipral/'"$(basename "$AGENT_BRIDGE")"' --pbx "$address:5060" \
+                --register labuser-bridge@asterisk --pass labpass --agent "$0" "$@"' \
+        "$agent_uri" "$@" >/dev/null \
+        || { printf '  could not start the bridge container\n'; return 1; }
+    tries=0
+    until ( cd interop && docker compose exec -T asterisk \
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-bridge; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$BRIDGE_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 60 ]; then
+            printf '  the bridge never registered\n'
+            docker logs "$BRIDGE_NAME" 2>&1 | tail -20
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+bridge_stop() {
+    docker rm -f "$BRIDGE_NAME" "$BRIDGE_AGENT_NAME" >/dev/null 2>&1
+}
+
+# One call through the bridge, with the Python layer's agent.py as the voice
+# agent, listening and never registering. [agent-call] plays a tone and
+# dials "12#"; the agent echoes, hears the "#" through the bridge and hangs
+# up, and the bridge ends Asterisk's call saying how it ended.
+agent_bridge_flow() {
+    local beside log agent_log agent_at tries
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    bridge_stop
+    docker run -d --name "$BRIDGE_AGENT_NAME" --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral \
+        -e PYTHONPATH=/python \
+        -e SIPRAL_AOR=sip:agent@lab.invalid \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_REGISTRAR_ADDRESS="$address:5060" \
+                exec python3 -u /python/examples/agent.py' >/dev/null \
+        || { printf '  could not start the voice agent container\n'; return 1; }
+    tries=0
+    until docker logs "$BRIDGE_AGENT_NAME" 2>&1 | found '^listening on '; do
+        tries=$((tries + 1))
+        if [ "$(docker inspect -f '{{.State.Running}}' "$BRIDGE_AGENT_NAME" 2>/dev/null)" != true ] \
+            || [ "$tries" -ge 60 ]; then
+            printf '  the voice agent never started\n'
+            docker logs "$BRIDGE_AGENT_NAME" 2>&1 | tail -20
+            bridge_stop
+            return 1
+        fi
+        sleep 2
+    done
+    agent_at=$(docker logs "$BRIDGE_AGENT_NAME" 2>&1 | sed -n 's/^listening on //p' | head -1)
+    bridge_start "sip:agent@$agent_at" || { bridge_stop; return 1; }
+
+    ( cd interop && docker compose exec -T asterisk asterisk -rx \
+        "channel originate PJSIP/labuser-bridge extension s@agent-call" ) >/dev/null 2>&1
+
+    tries=0
+    until docker logs "$BRIDGE_NAME" 2>&1 | found "^ended .*the caller's call is over"; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 40 ] && break
+        sleep 1
+    done
+    sleep 1
+    log=$(docker logs "$BRIDGE_NAME" 2>&1)
+    agent_log=$(docker logs "$BRIDGE_AGENT_NAME" 2>&1)
+    bridge_stop
+    printf '%s\n' "$agent_log" | sed 's/^/    agent   /'
+    printf '%s\n' "$log" | sed 's/^/    bridge  /'
+
+    printf '%s\n' "$log" | found '^bridged ' \
+        || { printf '  the two calls were never bridged\n'; return 1; }
+    printf '%s\n' "$log" | found '^dtmf # from' \
+        || { printf '  the bridge never forwarded the "#"\n'; return 1; }
+    printf '%s\n' "$agent_log" | found '^dtmf #' \
+        || { printf '  the agent never heard the "#"\n'; return 1; }
+    printf '%s\n' "$log" | found 'X-Sipral-Outcome: resolved' \
+        || { printf '  the PBX was not told the call was resolved\n'; return 1; }
+    [ "$(printf '%s\n' "$log" | grep '^stats ' | grep -c -E 'sent=[1-9][0-9]* received=[1-9]')" -ge 2 ] \
+        || { printf '  a leg carried no audio one way\n'; return 1; }
+    printf '%s\n' "$agent_log" \
+        | grep '^ended ' | found -E "'packets_received': [1-9]" \
+        || { printf '  the agent heard no audio\n'; return 1; }
+}
+
+# SIPRAL_BRIDGE_CALLS (thirty) calls placed by Asterisk at once, through one
+# bridge, to the headless agent's echo: every one bridged, carrying audio
+# both ways and ended when [agent-call] hangs up. The bridge's own CPU time
+# over the run is read from its /proc entry and printed, with Asterisk's own
+# channel count halfway through.
+agent_bridge_volume() {
+    local calls="${SIPRAL_BRIDGE_CALLS:-30}" beside agent_ip log tries before after
+    local started finished bridged over legs silent channels
+    beside=$(cd "$(dirname "$HEADLESS_AGENT")" && pwd)
+    bridge_stop
+    docker run -d --name "$BRIDGE_AGENT_NAME" --network "$LAB_NETWORK" \
+        -v "$beside:/sipral:ro" \
+        debian:trixie-slim sh -c 'exec /sipral/'"$(basename "$HEADLESS_AGENT")"' \
+            --host "$(hostname -i)" --port 5060 --invite-burst 200' >/dev/null \
+        || { printf '  could not start the echo agent container\n'; return 1; }
+    sleep 2
+    agent_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+        "$BRIDGE_AGENT_NAME")
+    bridge_start "sip:agent@$agent_ip:5060" --invite-burst 200 || { bridge_stop; return 1; }
+
+    before=$(docker exec "$BRIDGE_NAME" cat /proc/1/stat | awk '{print $14 + $15}')
+    started=$(date +%s)
+    ( cd interop && docker compose exec -T asterisk sh -c '
+        i=0
+        while [ "$i" -lt '"$calls"' ]; do
+            asterisk -rx "channel originate PJSIP/labuser-bridge extension s@agent-call" \
+                >/dev/null 2>&1 &
+            i=$((i + 1))
+        done
+        wait' ) >/dev/null 2>&1
+    sleep 6
+    channels=$(cd interop && docker compose exec -T asterisk asterisk -rx \
+        "core show channels count" 2>/dev/null | sed -n 's/^\([0-9][0-9]*\) active channel.*/\1/p')
+    tries=0
+    over=0
+    while [ "$over" -lt "$calls" ] && [ "$tries" -lt 90 ]; do
+        sleep 1
+        tries=$((tries + 1))
+        over=$(docker logs "$BRIDGE_NAME" 2>&1 | grep -c "the caller's call is over")
+    done
+    sleep 2
+    after=$(docker exec "$BRIDGE_NAME" cat /proc/1/stat | awk '{print $14 + $15}')
+    finished=$(date +%s)
+    log=$(docker logs "$BRIDGE_NAME" 2>&1)
+    bridge_stop
+    bridged=$(printf '%s\n' "$log" | grep -c '^bridged ')
+    legs=$(printf '%s\n' "$log" | grep -c '^stats ')
+    silent=$(printf '%s\n' "$log" | grep '^stats ' | grep -c -E 'sent=0 |received=0 ')
+    printf '  note  %s calls placed: %s bridged, %s ended, %s legs reported, %s without audio one way\n' \
+        "$calls" "$bridged" "$over" "$legs" "$silent"
+    printf '  note  Asterisk had %s channels up six seconds in\n' "${channels:-an unknown number of}"
+    printf '  note  the bridge used %s ticks of CPU (1/100 s each) over %s s of wall clock\n' \
+        "$((after - before))" "$((finished - started))"
+    [ "$bridged" -ge "$calls" ] && [ "$over" -ge "$calls" ] \
+        && [ "$legs" -ge $((2 * calls)) ] && [ "$silent" -eq 0 ]
 }
 
 # org.sipral.idiomatic's own headless agent, bindings/kotlin/examples/Agent.kt,
@@ -2997,6 +3208,28 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ]; then
             || fail "Sipral.Sample.Agent"
     else
         printf '  note  no libsipral_ffi to load; that step is skipped\n'
+    fi
+fi
+
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = bridge ]; then
+    step "the bridge to a voice agent, called by Asterisk"
+    if [ -n "$AGENT_BRIDGE" ] && [ -n "$HARNESS_C" ]; then
+        agent_bridge_flow \
+            && pass "agent-bridge bridged the call to agent.py, forwarded its digits and passed its hangup on" \
+            || fail "agent-bridge"
+    elif [ "$WANT" = bridge ]; then
+        fail "agent-bridge: no bridge, or no libsipral_ffi for the Python agent"
+    else
+        printf '  note  no bridge, or no libsipral_ffi for its voice agent; that step is skipped\n'
+    fi
+fi
+if [ "$WANT" = bridge ]; then
+    step "${SIPRAL_BRIDGE_CALLS:-30} calls at once through the bridge, to the headless agent's echo"
+    if [ -n "$AGENT_BRIDGE" ] && [ -n "$HEADLESS_AGENT" ]; then
+        agent_bridge_volume && pass "every call bridged both ways and ended" \
+            || fail "agent-bridge with ${SIPRAL_BRIDGE_CALLS:-30} calls at once"
+    else
+        fail "agent-bridge with many calls: no bridge or no headless agent"
     fi
 fi
 
