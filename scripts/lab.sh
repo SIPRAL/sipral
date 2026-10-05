@@ -950,7 +950,7 @@ BRIDGE_AGENT_NAME=sipral-lab-bridge-agent
 # bridge_start AGENT_URI [FLAG...]: the bridge, calling AGENT_URI, once
 # Asterisk has its registration.
 bridge_start() {
-    local agent_uri="$1" beside tries
+    local agent_uri="$1" beside tries at
     shift
     beside=$(cd "$(dirname "$AGENT_BRIDGE")" && pwd)
     docker rm -f "$BRIDGE_NAME" >/dev/null 2>&1
@@ -962,9 +962,12 @@ bridge_start() {
                 --register labuser-bridge@asterisk --pass labpass --agent "$0" "$@"' \
         "$agent_uri" "$@" >/dev/null \
         || { printf '  could not start the bridge container\n'; return 1; }
+    # this bridge's own binding, not one an earlier bridge left behind
+    at=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+        "$BRIDGE_NAME")
     tries=0
     until ( cd interop && docker compose exec -T asterisk \
-            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found labuser-bridge; do
+            asterisk -rx "pjsip show contacts" 2>/dev/null ) | found "labuser-bridge@$at:"; do
         tries=$((tries + 1))
         if [ "$(docker inspect -f '{{.State.Running}}' "$BRIDGE_NAME" 2>/dev/null)" != true ] \
             || [ "$tries" -ge 60 ]; then
@@ -1054,7 +1057,7 @@ agent_bridge_flow() {
 # over the run is read from its /proc entry and printed, with Asterisk's own
 # channel count halfway through.
 agent_bridge_volume() {
-    local calls="${SIPRAL_BRIDGE_CALLS:-30}" beside agent_ip log tries before after
+    local calls="${SIPRAL_BRIDGE_CALLS:-30}" beside agent_ip log agent_log tries before after
     local started finished bridged over legs silent channels
     beside=$(cd "$(dirname "$HEADLESS_AGENT")" && pwd)
     bridge_stop
@@ -1092,7 +1095,10 @@ agent_bridge_volume() {
     after=$(docker exec "$BRIDGE_NAME" cat /proc/1/stat | awk '{print $14 + $15}')
     finished=$(date +%s)
     log=$(docker logs "$BRIDGE_NAME" 2>&1)
+    agent_log=$(docker logs "$BRIDGE_AGENT_NAME" 2>&1)
     bridge_stop
+    printf '%s\n' "$log" | grep -v -E '^(codec|dtmf|stats) ' | head -12 | sed 's/^/    bridge  /'
+    printf '%s\n' "$agent_log" | head -4 | sed 's/^/    agent   /'
     bridged=$(printf '%s\n' "$log" | grep -c '^bridged ')
     legs=$(printf '%s\n' "$log" | grep -c '^stats ')
     silent=$(printf '%s\n' "$log" | grep '^stats ' | grep -c -E 'sent=0 |received=0 ')

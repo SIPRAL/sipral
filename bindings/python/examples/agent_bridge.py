@@ -27,9 +27,10 @@ caller's call, so the PBX places the new call and owns it
     SIPRAL_AGENT_URI='sip:agent@203.0.113.7:5060' \\
     python3 agent_bridge.py
 
-An agent address that asks for TLS (``sips:`` or ``;transport=tls``) is
-called over a connection of its own, checked against ``SIPRAL_TLS_CA`` when
-set and the platform's authorities otherwise, under the address's host name.
+An agent address that asks for TLS (``sips:`` or ``;transport=tls``) or
+TCP (``;transport=tcp``) is called over a connection of its own; over TLS
+it is checked against ``SIPRAL_TLS_CA`` when set and the platform's
+authorities otherwise, under the address's host name.
 ``SIPRAL_AGENT_ADDRESS`` (``host:port``) names where the agent's server is
 when the address's host is not it. ``SIPRAL_OUTCOMES=refer`` with
 ``SIPRAL_OUTCOME_URIS=callback=sip:800@pbx.example,expired=sip:801@pbx.example``
@@ -179,17 +180,23 @@ def resolve(address: str) -> str:
     return f"{found[0][4][0]}:{port}"
 
 
-def agent_server(uri: str) -> tuple[str, bool, str]:
-    """Where the agent's address says to go, whether over TLS, and the
-    name its certificate is checked against."""
+def agent_server(uri: str) -> tuple[str, int, str]:
+    """Where the agent's address says to go, over what -- ``0`` for UDP, or
+    a :class:`sipral.enums.Transport` -- and the name its certificate is
+    checked against."""
     scheme, _, rest = uri.partition(":")
     hostport = rest.split("@")[-1].split(";")[0]
     params = [p.lower() for p in rest.split(";")[1:]]
-    tls = scheme.lower() == "sips" or "transport=tls" in params
+    if scheme.lower() == "sips" or "transport=tls" in params:
+        over = Transport.TLS
+    elif "transport=tcp" in params:
+        over = Transport.TCP
+    else:
+        over = 0
     host, colon, port = hostport.partition(":")
-    port = port if colon else ("5061" if tls else "5060")
+    port = port if colon else ("5061" if over == Transport.TLS else "5060")
     given = os.environ.get("SIPRAL_AGENT_ADDRESS")
-    return resolve(given or f"{host}:{port}"), tls, host
+    return resolve(given or f"{host}:{port}"), over, host
 
 
 @dataclass
@@ -452,7 +459,8 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
     agent_uri = os.environ["SIPRAL_AGENT_URI"]
-    agent_address, tls, agent_host = agent_server(agent_uri)
+    agent_address, over, agent_host = agent_server(agent_uri)
+    tls = over == Transport.TLS
     trusted = os.environ.get("SIPRAL_TLS_CA")
     stack = Stack(
         loop=loop,
@@ -476,7 +484,7 @@ async def main() -> None:
     agent_account = stack.add_account(
         aor,
         registrar_address=agent_address,
-        stream_protocol=Transport.TLS if tls else 0,
+        stream_protocol=over,
     )
     uris = os.environ.get("SIPRAL_OUTCOME_URIS", "")
     max_seconds = os.environ.get("SIPRAL_AGENT_MAX_SECONDS")

@@ -288,6 +288,100 @@ placed straight at the agent by the interop harness acting as the full peer,
 with the reference agent's echo coming back on the chosen pair; and Asterisk's
 own ICE calling the agent registered to it.
 
+## Bridging a call to a voice agent that speaks SIP
+
+Some voice agents are SIP endpoints themselves: a hosted realtime model or
+an agent platform answers an INVITE at an address of its own and runs the
+whole conversation. For those nothing on this page is needed, and no vendor
+protocol either. The agent is a SIP address, and what sits between it and a
+PBX is a phone line that forwards its calls there:
+
+1. Register on the PBX as an extension, or take what a trunk sends.
+2. On an incoming call, ring it (a plain 180, so the PBX plays its own
+   ringback) and place a second call, to the agent's address.
+3. When the agent answers, answer the caller, and join the two calls in a
+   local conference made without this end (`LocalConferenceConfig::local`
+   `None`, `sipral_local_conference_config_t::local` off): two members, each
+   on its own codec and rate, one audio stream each.
+4. Forward digits from the events. The conference mixes audio, and a
+   telephone event is not audio: a `DigitReceived` from one leg (RTP or
+   INFO, not one heard in the audio, which the mix already carries) is a
+   `send_dtmf` on the other.
+5. Either leg ending ends the other. The PBX's leg ends saying how the
+   agent's part went — `human`, `callback`, `resolved`, `unresolved` or
+   `expired` — in an `X-Sipral-Outcome` field on the BYE, or, for a PBX that
+   reads no field off a BYE, as a REFER of the caller's call to an address
+   set for that outcome.
+6. A REFER from the agent is the agent asking for a person. One function
+   decides what it means: by default a user part that names an outcome other
+   than `human` ends the call with it, and any other target is the same user
+   at the PBX's domain, reached by REFERring the caller's call to the PBX, so
+   the PBX places the new call and owns all of it. Placing that call from the
+   bridge and joining it in the agent's place is the other choice. The
+   agent's REFER is not taken with `accept_transfer`, which would place the
+   call from the agent's account, on the agent's transport: it stays open
+   while the PBX works, is refused with the PBX's own failure, and ends with
+   the agent's call when the transfer succeeds. A REFER the PBX refuses
+   outright raises no event, only the NOTIFYs of one it took do, so ten
+   seconds without a word from the PBX is read as a refusal.
+
+The caller's number and display name, and the PBX INVITE's own `X-` fields,
+go on the INVITE to the agent (`X-Sipral-Caller-Number`,
+`X-Sipral-Caller-Name`, `X-Sipral-Called`), for an agent platform that hands
+an INVITE's fields to the application. The agent's call can be given a
+longest duration, after which it is hung up and the call ends as `expired`.
+
+**Try it.** `crates/sipral/examples/agent-bridge.rs`, whose logic is
+`examples/common/agent_bridge.rs` and is what `tests/agent_bridge.rs` runs
+between three stacks on loopback:
+
+```text
+cargo run -p sipral --example agent-bridge [--features example-tls] -- \
+    --pbx 192.0.2.10:5060 --register bridge@pbx.example --pass secret \
+    --agent 'sip:agent@203.0.113.7:5060'
+```
+
+| Flag | What it does |
+|---|---|
+| `--pbx host:port` | the PBX; calls to a transfer's or an outcome's address go there |
+| `--register user@domain`, `--pass` | register as that extension; without them, take what a trunk sends to `--port` |
+| `--agent uri` | the agent's address; `sips:` or `;transport=tls` is called over TLS (built with `example-tls`) |
+| `--agent-address host:port` | where the agent's server is, when its address's host is not |
+| `--pin sha-256` | trust the agent's TLS certificate by its fingerprint instead of the platform's roots |
+| `--transfer refer\|bridge` | how a transfer reaches the person: a REFER to the PBX (default), or a call bridged here |
+| `--outcomes header\|refer`, `--outcome-uri name=uri` | how the PBX hears the outcome |
+| `--max-agent-seconds n` | the agent's longest call |
+| `--copy-headers list` | the INVITE fields passed on, `*` ending a prefix (default `X-*`) |
+| `--invite-burst n` | calls the PBX may offer at once (the stack's guard lets ten) |
+| `--host ip`, `--port n` | the address advertised to both, the route to the PBX by default |
+
+`bindings/python/examples/agent_bridge.py` is the same bridge over the C
+ABI, configured from the environment as `agent.py` is: `SIPRAL_AOR`,
+`SIPRAL_REGISTRAR`, `SIPRAL_REGISTRAR_ADDRESS`, `SIPRAL_AUTH_USER` and
+`SIPRAL_AUTH_PASSWORD` for the line; `SIPRAL_AGENT_URI` and
+`SIPRAL_AGENT_ADDRESS` for the agent (TLS and TCP both), `SIPRAL_TLS_CA` to
+trust; `SIPRAL_TRANSFER`, `SIPRAL_OUTCOMES`, `SIPRAL_OUTCOME_URIS`
+(`callback=sip:800@pbx.example,...`), `SIPRAL_AGENT_MAX_SECONDS`,
+`SIPRAL_COPY_HEADERS` and `SIPRAL_INVITE_LIMIT=voice-agent`. The Python
+layer has no `ring`, `transfer` or `set_headers` on a call and no fields on
+`place_call`, though the C ABI has all four: that example answers at once
+and plays its own ringback, reaches `sipral_call_transfer` and
+`sipral_call_set_headers` through the layer's own C bindings, and prints the
+caller's context instead of sending it.
+
+The lab runs the Rust bridge registered on its Asterisk, with the Python
+layer's `agent.py` as the agent, and then with many calls at once to the
+headless agent's echo (`scripts/lab.sh bridge`).
+
+Agents of this kind publish addresses of these forms (from their own
+documentation; not tested here):
+
+- OpenAI Realtime: `sip:<project id>@sip.api.openai.com;transport=tls`,
+  on port 5061, the call accepted by the application through a webhook.
+- ElevenLabs Agents: `sip.rtc.elevenlabs.io`, over UDP or TCP on 5060 or TLS
+  on 5061, G.711 or G.722.
+- Vapi: `sip:<id>@sip.vapi.ai`, or `sip.eu.vapi.ai`.
+
 ## What it does not do
 
 No speech recognition, no synthesis, no turn detection, no agent logic. Those
