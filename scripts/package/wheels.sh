@@ -18,6 +18,10 @@
 #       cross-compiles in scripts/package/aarch64-cross.sh's container, and
 #       proves the result runs with scripts/package/qemu-verify.sh (qemu-user,
 #       unprivileged, no binfmt)
+#   scripts/package/wheels.sh --out DIR --windows-arm64 [--dry-run] [--publish]
+#       win_arm64 from an x64 Windows host under Git Bash: cross-compiles with
+#       the MSVC ARM64 build tools; the import check needs an arm64 Python and
+#       is left to a Windows on Arm machine
 #   ... --with-opus
 #       any of the above, as the variant that carries libopus
 #
@@ -75,6 +79,7 @@ PUBLISH=0
 MANYLINUX=0
 LINUX_ARM64=0
 INSIDE_LINUX_ARM64=0
+WINDOWS_ARM64=0
 WITH_OPUS=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -85,11 +90,12 @@ while [ $# -gt 0 ]; do
         --inside-manylinux) MANYLINUX=2; shift ;; # internal: this run is already inside the container
         --linux-arm64) LINUX_ARM64=1; shift ;;
         --inside-linux-arm64) INSIDE_LINUX_ARM64=1; shift ;; # internal: already inside the cross image
+        --windows-arm64) WINDOWS_ARM64=1; shift ;;
         --with-opus) WITH_OPUS=1; shift ;;
         *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
-[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux] [--linux-arm64] [--with-opus]\n' >&2; exit 2; }
+[ -z "$OUT" ] && { printf 'usage: wheels.sh --out DIR [--dry-run] [--publish] [--manylinux] [--linux-arm64] [--windows-arm64] [--with-opus]\n' >&2; exit 2; }
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 . "$ROOT/scripts/package/features.sh"
@@ -242,7 +248,9 @@ elif case "$UNAME_S" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
     # Git Bash on Windows, with Rust's MSVC toolchain: the wheel's tag is
     # the architecture's alone, since a DLL names no minimum Windows release
     # the way a Mach-O names a macOS one.
-    case "$UNAME_M" in
+    WIN_ARCH="$UNAME_M"
+    [ "$WINDOWS_ARM64" -eq 1 ] && WIN_ARCH=arm64
+    case "$WIN_ARCH" in
         x86_64) RUST_TRIPLE="x86_64-pc-windows-msvc"; TAG="win_amd64" ;;
         aarch64|arm64) RUST_TRIPLE="aarch64-pc-windows-msvc"; TAG="win_arm64" ;;
         *) fail "unrecognised Windows arch: $UNAME_M"; printf '\nwheels.sh: failed\n'; exit 1 ;;
@@ -494,6 +502,10 @@ if [ "$CROSS_AARCH64" -eq 1 ]; then
     # .so: the outer `--linux-arm64` run (scripts/package/wheels.sh itself,
     # one recursion up) does that with qemu-verify.sh once this inner run
     # returns the wheel and the native it bundled.
+    :
+elif [ "$WINDOWS_ARM64" -eq 1 ] && [ "$UNAME_M" = "x86_64" ]; then
+    # An x64 Python cannot install a win_arm64 wheel; it is imported and
+    # its tests run on a Windows on Arm machine (docs/11-testing.md).
     :
 elif [ "$DRY_RUN" -eq 0 ] && [ -n "$FINAL" ]; then
     step "importing it for real"
