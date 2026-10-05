@@ -123,6 +123,7 @@ has the exit criteria.
 | [`docs/01-architecture.md`](docs/01-architecture.md) | the crates, the sans-I/O boundary, who owns sockets, resolver and TLS |
 | [`docs/08-ffi.md`](docs/08-ffi.md) | the C ABI, its rules, versioning and the freeze, and every binding |
 | [`docs/21-migrating-from-pjsip.md`](docs/21-migrating-from-pjsip.md) | each pjsua concept and its equivalent here |
+| [`docs/24-voice-agents.md`](docs/24-voice-agents.md) | reaching AI voice-agent services: by a SIP call, through Pipecat, or with the call's PCM |
 | [`docs/11-testing.md`](docs/11-testing.md) | fuzzing, the audio quality gate, the interoperability matrix |
 | [`docs/09-rfc-index.md`](docs/09-rfc-index.md) | every specification implemented, and by which crate |
 | [`docs/README.md`](docs/README.md) | all design documents, also built as a site by `scripts/site.sh` |

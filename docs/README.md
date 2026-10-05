@@ -43,6 +43,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [21-migrating-from-pjsip.md](21-migrating-from-pjsip.md) | moving a pjsua or pjsua2 application onto Sipral: each concept's equivalent, in C and in Python, and what works differently |
 | [22-tls.md](22-tls.md) | TLS per platform: who checks the certificate, what RFC 5922 adds, the default trust anchors, a private CA, pinning one authority or a PBX's own certificate, and the failures an application sees |
 | [23-compared-with-pjsip.md](23-compared-with-pjsip.md) | the same scenarios run for Sipral's headless agent and for pjsua against one Asterisk: registration, call set-up, memory, CPU, bad links, a moved address, the INVITE with ICE |
+| [24-voice-agents.md](24-voice-agents.md) | connecting Sipral to AI voice-agent services: the SIP bridge, Pipecat and headless PCM paths, and for each service its address, transports, codecs, admission and audio format |
 
 ## Conventions
 
