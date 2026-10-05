@@ -1282,7 +1282,9 @@ them: `hygiene` (the tree checks, the ABI's declarations against `abi.rs`,
 the interop matrix, the third-party licences and `gitleaks`, with no build
 of the workspace), `rust`, `abi`, `numbers` (the published figures, below),
 one area per layer -- `swift`, `dotnet`, `kotlin`, `jvm`, `python`, `dart`,
-`rn` -- and `site`. An area is a list of
+`rn` -- `pipecat` (the Pipecat integration over the Python layer, in a
+virtual environment of its own under `target/check` that holds `pipecat-ai`)
+and `site`. An area is a list of
 the gate's own step functions, so `scripts/check.sh --only kotlin,jvm` runs
 exactly what the complete gate runs for those two and nothing else, and
 `--hygiene-only` is `--only hygiene`. `--only rust --crates
@@ -1310,6 +1312,8 @@ The mapping errs towards running more:
 | `bindings/swift`, `bindings/Package.swift`, the root `Package.swift` | swift and rn |
 | `bindings/kotlin` | kotlin, jvm and rn |
 | `bindings/react-native`'s Android core and its JVM check | rn and kotlin |
+| `bindings/python` | python and pipecat |
+| `integrations/pipecat` | pipecat |
 | any other layer's directory | that layer |
 | `scripts/package/` | the layers whose packages the script makes |
 | `docs/`, `site/`, `scripts/site.sh`, any Markdown | site |

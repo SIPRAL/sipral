@@ -29,9 +29,9 @@ ROOT="$PWD"
 export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
 
 # In the order the complete gate reports them.
-AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python dart rn site"
+AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat dart rn site"
 # The layers: every area that loads the C library built from sipral-ffi.
-LAYERS="swift dotnet kotlin jvm python dart rn"
+LAYERS="swift dotnet kotlin jvm python pipecat dart rn"
 
 usage() {
     cat <<'EOF'
@@ -66,6 +66,8 @@ areas:
   jvm      bindings/jvm's loader and Java layer and their tests, jvm.sh.
   python   bindings/python imported and tested, wheels.sh --dry-run, the
            linux-arm64 cross path.
+  pipecat  integrations/pipecat tested over bindings/python, in a virtual
+           environment with pipecat-ai.
   dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
@@ -2221,6 +2223,48 @@ step_python() {
     fi
 }
 
+# integrations/pipecat over bindings/python and $DYLIB: a Pipecat pipeline
+# on a call between two stacks on loopback. pipecat-ai and what it brings are
+# the integration's and not the binding's, so they go into a virtual
+# environment under target/check made from the python3 the python area runs,
+# whose cffi it still sees, and never into that python3 itself. The version
+# installed is the lowest the integration accepts; the first run fetches it
+# from PyPI and later runs reuse it.
+step_pipecat() {
+    step "the pipecat integration"
+    local venv="$CHECK_DIR/venv-pipecat" pipecat work
+    pipecat=$(sed -n 's/.*"pipecat-ai>=\([0-9.]*\)".*/\1/p' "$ROOT/integrations/pipecat/pyproject.toml")
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python3 is not installed"
+    elif ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+        fail "python3 is $(python3 -c 'import platform; print(platform.python_version())'), and pipecat-ai needs 3.11 or later"
+    elif ! python3 -c 'import cffi' >/dev/null 2>&1; then
+        fail "python3 has no cffi (pip install cffi)"
+    elif [ -z "$pipecat" ]; then
+        fail "integrations/pipecat/pyproject.toml names no pipecat-ai>= version"
+    elif [ ! -s "$DYLIB" ]; then
+        fail "the pipecat integration: $DYLIB is not there to load (the build of the library, above, says why)"
+    else
+        work=$(mktemp -d)
+        if [ ! -x "$venv/bin/python" ] && ! python3 -m venv --system-site-packages "$venv" >"$work/venv" 2>&1; then
+            fail "python3 -m venv $venv:"
+            sed 's/^/        /' "$work/venv"
+        elif ! "$venv/bin/python" -m pip show pipecat-ai 2>/dev/null | found -x "Version: $pipecat" \
+            && ! "$venv/bin/python" -m pip install -q "pipecat-ai==$pipecat" >"$work/pip" 2>&1; then
+            fail "pip install pipecat-ai==$pipecat, into $venv:"
+            tail -20 "$work/pip" | sed 's/^/        /'
+        elif SIPRAL_LIBRARY="$ROOT/$DYLIB" PYTHONPATH="$ROOT/integrations/pipecat:$ROOT/bindings/python" \
+            "$venv/bin/python" -m unittest discover -s "$ROOT/integrations/pipecat/tests" \
+            -t "$ROOT/integrations/pipecat" >"$work/out" 2>&1; then
+            pass "python3 -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat)"
+        else
+            fail "python3 -m unittest discover, integrations/pipecat/tests (pipecat-ai $pipecat):"
+            sed 's/^/        /' "$work/out"
+        fi
+        rm -rf "$work"
+    fi
+}
+
 # Like the Python one, bindings/dart/lib/src/sipral_abi.dart is printed by
 # "the header and the bindings", so a machine without dart has not
 # checked that step's own output: a missing SDK fails. `dart analyze` is the
@@ -2747,6 +2791,7 @@ area_dotnet() { need_library; step_dotnet_compiles; step_dotnet_tests; step_nuge
 area_kotlin() { need_library; step_kotlin_compiles; step_kotlin_on_a_jvm; step_aar; }
 area_jvm() { need_library; step_jvm; step_jvm_package; }
 area_python() { need_library; step_python; step_wheels; step_linux_arm64; }
+area_pipecat() { need_library; step_pipecat; }
 area_dart() { need_library; step_dart; step_pub; }
 area_rn() { need_library; step_react_native; step_npm; }
 area_site() { step_site; }
@@ -2826,7 +2871,9 @@ route() {
         bindings/jvm/*)
             route_to jvm "the server jar's own code" ;;
         bindings/python/*)
-            route_to python "the Python layer" ;;
+            route_to "python pipecat" "the Python layer, which the Pipecat integration runs on" ;;
+        integrations/pipecat/*)
+            route_to pipecat "the Pipecat integration" ;;
         bindings/dart/*)
             route_to dart "the Dart layer" ;;
         bindings/react-native/android/src/main/java/org/sipral/reactnative/core/*|bindings/react-native/android/jvm-check/*)
@@ -2926,7 +2973,7 @@ run_area() {
 # done; the others start at once.
 waits_for() {
     case "$1" in
-        numbers|swift|dotnet|kotlin|jvm|python|dart|rn) printf 'abi\n' ;;
+        numbers|swift|dotnet|kotlin|jvm|python|pipecat|dart|rn) printf 'abi\n' ;;
     esac
 }
 

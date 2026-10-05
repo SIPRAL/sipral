@@ -7,8 +7,9 @@
 # the crates' own dependencies on each other, sipral-aec-webrtc's own
 # version (it is outside the workspace), the three lockfiles, the .NET
 # project and the constant the layer reports, the Python project and its
-# `__version__`, the Dart package, the React Native package and its
-# lockfile, the JVM POM -- is written from it here and held to it here.
+# `__version__`, the Pipecat integration's project and its `__version__`,
+# the Dart package, the React Native package and its lockfile, the JVM POM
+# -- is written from it here and held to it here.
 # What reads the version at build time instead (the podspec and the React
 # Native Gradle build read package.json, every other crate inherits the
 # workspace's, each script under scripts/package/ reads Cargo.toml) has no
@@ -24,7 +25,7 @@
 # X.Y.Z is three numbers and nothing else: a pre-release suffix is spelled
 # differently by each registry (1.0.0-rc.1 on crates.io, NuGet and npm,
 # 1.0.0rc1 on PyPI), so one string cannot be all of them. The Python
-# project's Development Status classifier follows the major: Pre-Alpha
+# projects' Development Status classifier follows the major: Pre-Alpha
 # below 1, Production/Stable from 1 on.
 set -uo pipefail
 
@@ -121,20 +122,27 @@ SIMPLE_CARRIERS=(
     'bindings/dotnet/Sipral/SipralInfo.cs||    public const string Version = "|";'
     'bindings/python/pyproject.toml|[project]|version = "|"'
     'bindings/python/sipral/__init__.py||__version__ = "|"'
+    'integrations/pipecat/pyproject.toml|[project]|version = "|"'
+    'integrations/pipecat/sipral_pipecat/__init__.py||__version__ = "|"'
     'bindings/dart/pubspec.yaml||version: |'
     'bindings/react-native/package.json||  "version": "|",'
     'bindings/react-native/package-lock.json||  "version": "|",'
     'bindings/react-native/package-lock.json|    "": {|      "version": "|",'
     'bindings/jvm/pom.xml||        <revision>|</revision>'
 )
-CLASSIFIER=('bindings/python/pyproject.toml||    "Development Status :: |",')
+CLASSIFIER=(
+    'bindings/python/pyproject.toml||    "Development Status :: |",'
+    'integrations/pipecat/pyproject.toml||    "Development Status :: |",'
+)
 
 carriers() {
-    local mode="$1" entry file after prefix suffix any found value tmp
+    local mode="$1" entry file after prefix suffix any classifier found value tmp
     for entry in "${SIMPLE_CARRIERS[@]}" "${CLASSIFIER[@]}"; do
         IFS='|' read -r file after prefix suffix <<<"$entry"
         any=0
-        [ "$entry" = "${CLASSIFIER[0]}" ] && any=1
+        for classifier in "${CLASSIFIER[@]}"; do
+            [ "$entry" = "$classifier" ] && any=1
+        done
         if [ "$mode" = "read" ]; then
             found=$(simple read "$file" "$after" "$prefix" "$suffix" "$any")
             printf '%s|%s|%s\n' "$file" "$([ "$any" -eq 1 ] && printf classifier || printf version)" "$found"

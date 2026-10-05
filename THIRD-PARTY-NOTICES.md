@@ -510,6 +510,38 @@ for a reason: React Native's Gradle plugin is compiled by Kotlin 2.2, which
 cannot read the Kotlin 2.4 metadata of the standard library Gradle 9.7 and
 later embed, and the Android Gradle Plugin 9.4 needs Gradle 9.6 or later.
 
+### The Pipecat integration
+
+`integrations/pipecat`, published as `sipral-pipecat`, is a Python package
+of its own beside the binding. It depends on two packages, and neither is in
+`libsipral_ffi` or in the `sipral` wheel: an application that installs the
+integration installs them, under their own terms.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `sipral` 1.1.0 or later | this repository's Python binding | AGPL-3.0-only OR LicenseRef-Sipral-Commercial |
+| `pipecat-ai` 1.12.0 or later | the voice-agent framework the transport is written against, through its public transport API; none of its code is copied here | BSD-2-Clause |
+
+`pipecat-ai`'s licence is its own `License-Expression` on PyPI and its
+`LICENSE` file. What it requires in turn comes with it, and is listed here as
+1.12.0 resolves it, licences read from each package's own metadata: most of
+it MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0 or ISC (`aiohttp`, `numpy`,
+`numba` and `llvmlite`, `onnxruntime`, `openai`, `pydantic`, `protobuf`,
+`resampy`, `websockets` and the rest), with `typing_extensions` and
+`aiohappyeyeballs` under PSF-2.0 and Pillow under MIT-CMU. **Two are LGPL:
+`soxr` 1.0.0 (python-soxr, Pipecat's resampler, LGPL-2.1-or-later) and
+`num2words` 0.5.14 (LGPL-2.1).** `soundfile` is BSD-3-Clause, and its wheels
+carry libsndfile, which is LGPL-2.1. This package imports none of the three
+and resamples nothing itself; they are Pipecat's, and installing Pipecat
+installs them. So the rule below holds for what this repository ships, and an
+application that deploys Pipecat takes on Pipecat's dependencies as they are,
+these three included: that is the deployer's decision, and it is written here
+so that it is made rather than discovered.
+
+`scripts/check.sh --only pipecat` installs `pipecat-ai` 1.12.0 and what it
+requires into a virtual environment under `target/check` to run the
+integration's tests; nothing of it is committed or shipped.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

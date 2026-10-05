@@ -39,3 +39,4 @@ Copyright (c) 2026 Sytek
 - [Clean-room audit](CLEANROOM_AUDIT.md)
 - [Security policy](SECURITY.md)
 - [Third-party notices](THIRD-PARTY-NOTICES.md)
+- [Sipral for Pipecat](integrations/pipecat/README.md)

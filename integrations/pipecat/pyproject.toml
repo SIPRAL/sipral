@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sipral-pipecat"
+version = "1.1.0"
+description = "Sipral for Pipecat: a SIP phone call as a Pipecat transport, for AI voice agents."
+readme = "README.md"
+# Pipecat itself needs 3.11
+requires-python = ">=3.11"
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+authors = [{ name = "Sytek" }]
+keywords = ["sip", "voip", "telephony", "pipecat", "voice-agent"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Telecommunications Industry",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = ["sipral>=1.1.0", "pipecat-ai>=1.12.0"]
+
+[project.urls]
+Homepage = "https://sipral.org"
+Repository = "https://github.com/SIPRAL/sipral"
+Changelog = "https://github.com/SIPRAL/sipral/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sipral_pipecat"]

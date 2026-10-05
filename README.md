@@ -61,6 +61,8 @@ and `call.media.send_audio(pcm)` is what the far end hears, which is all a voice
 needs. The Swift, Kotlin, .NET, Dart and React Native layers have the same
 shape ([`bindings/README.md`](bindings/README.md)).
 
+A [Pipecat](https://github.com/pipecat-ai/pipecat) voice agent answers calls through `sipral-pipecat`, one pipeline per call ([`integrations/pipecat`](integrations/pipecat/README.md)).
+
 No server at hand? `cargo run --example call` dials a public test IVR, presses
 a digit and plays back what it reads (CMake is needed once, for libopus).
 

@@ -382,6 +382,20 @@ documentation; not tested here):
   on 5061, G.711 or G.722.
 - Vapi: `sip:<id>@sip.vapi.ai`, or `sip.eu.vapi.ai`.
 
+## Pipecat
+
+An agent written in Python needs no socket between it and the call: the
+Python binding's application audio mode hands each call's decoded frames to
+the process that answered it, and `sipral-pipecat`
+([`integrations/pipecat`](../integrations/pipecat/)) carries them
+into a [Pipecat](https://github.com/pipecat-ai/pipecat) pipeline.
+`SipralTransport` is one call as a Pipecat transport -- the caller's frames
+in at the call's own rate for Pipecat to resample, the pipeline's audio out a
+codec frame at a time in real time so that an interruption silences it within
+100 ms, DTMF both ways, the call's end ending the pipeline and the pipeline's
+end hanging up -- and `serve` answers every call to an account with a
+pipeline of its own, many calls to one process.
+
 ## What it does not do
 
 No speech recognition, no synthesis, no turn detection, no agent logic. Those
