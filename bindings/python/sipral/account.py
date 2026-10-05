@@ -358,7 +358,14 @@ class Account:
                 raise
 
     def unregister(self) -> None:
-        """`sipral_account_unregister`."""
+        """`sipral_account_unregister`.
+
+        Gives the binding up: a REGISTER with Expires: 0. The registration state
+        reads unregistered as soon as this returns, before the registrar answers;
+        the answer is the registration-changed event that follows. Wait for that
+        event before closing the stack, which otherwise cannot answer a challenge
+        to the un-REGISTER.
+        """
         self.wants_registration = False
         _call(
             lambda: lib.sipral_account_unregister(

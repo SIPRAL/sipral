@@ -20,6 +20,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Changed
 
+- **Every binding's `unregister` says where an editor shows it what the state does.** It reads unregistered as soon as the call returns, and the registrar's answer is the registration-changed event after it; an application that closes the stack on the state alone cannot answer a challenge to the un-REGISTER (`docs/08-ffi.md` said so already).
 - **The .NET assembly names no build path, and the repository asks for a bug report or feature request in a form.** `Sipral.csproj` maps the project directory to `/_/`; GitHub issue forms for bugs and features, with questions sent to Discussions and vulnerabilities to private reporting.
 
 ### Fixed

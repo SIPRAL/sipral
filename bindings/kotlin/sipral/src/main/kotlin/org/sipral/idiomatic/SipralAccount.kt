@@ -223,7 +223,15 @@ class SipralAccount internal constructor(
         }
     }
 
-    /** `sipral_account_unregister`. */
+    /**
+     * `sipral_account_unregister`.
+     *
+     * Gives the binding up: a REGISTER with Expires: 0. The registration state
+     * reads unregistered as soon as this returns, before the registrar answers;
+     * the answer is the registration-changed event that follows. Wait for that
+     * event before closing the stack, which otherwise cannot answer a challenge
+     * to the un-REGISTER.
+     */
     fun unregister() {
         wantsRegistration = false
         retryBusy { Sipral.accountUnregister(client.handle, handle, client.nowMs()) }

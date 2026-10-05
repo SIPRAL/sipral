@@ -350,6 +350,13 @@ public sealed class Account
     }
 
     /// <summary><c>sipral_account_unregister</c>.</summary>
+    /// <remarks>
+    /// Gives the binding up: a REGISTER with Expires: 0. The registration state
+    /// reads unregistered as soon as this returns, before the registrar answers;
+    /// the answer is the registration-changed event that follows. Wait for that
+    /// event before closing the stack, which otherwise cannot answer a challenge
+    /// to the un-REGISTER.
+    /// </remarks>
     public void Unregister()
     {
         WantsRegistration = false;
