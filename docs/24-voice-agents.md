@@ -69,7 +69,8 @@ What the bridge uses from the stack:
 
 **2. Pipecat.** Pipecat is an open-source Python framework that runs a
 pipeline of speech, language and speech-to-speech services. A Sipral
-transport for Pipecat, the package `sipral-pipecat`, is in progress; with it
+transport for Pipecat, the package `sipral-pipecat` (`integrations/pipecat/`,
+and `07-headless.md`, "Pipecat"); with it
 a call answered by Sipral becomes a Pipecat pipeline's input and output, and
 every service Pipecat has an integration for is reachable without a
 per-vendor adapter. Pipecat's pipelines default to 16 kHz in and 24 kHz out;
@@ -704,7 +705,7 @@ Source: https://support.telnyx.com/en/articles/14805261-how-to-configure-sip-att
 An open-source Python framework that orchestrates speech, language and
 speech-to-speech services into real-time pipelines.
 
-**Path: Pipecat** (`sipral-pipecat`, in progress). Pipecat has no SIP
+**Path: Pipecat** (`sipral-pipecat`). Pipecat has no SIP
 transport of its own; its telephony goes through Daily (WebRTC, with SIP
 dial-in), LiveKit, or WebSocket serializers for Twilio, Telnyx, Plivo,
 Exotel, Genesys and Vonage. A Sipral transport puts a SIP call straight into
