@@ -27,6 +27,9 @@ classifiers = [
 ]
 dependencies = ["sipral>=1.1.0", "websockets>=17.2"]
 
+[project.scripts]
+sipral-agents = "sipral_agents.__main__:main"
+
 [project.urls]
 Homepage = "https://sipral.org"
 Repository = "https://github.com/SIPRAL/sipral"

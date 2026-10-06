@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+#
+# python -m sipral_agents examples/bridge.toml
+#
+# Two extensions on one PBX: calls to "sales" go to OpenAI Realtime, calls
+# to "support" to a vendor's agent at its SIP address. No secret is written
+# here: each *_env key names the environment variable that holds it.
+
+[sip]
+bind_port = 5060
+# media_host = "203.0.113.5"      # the address RTP is advertised on
+# invite_limit = "voice-agent"    # a trunk's rush of calls, not ten at once
+# tls_ca = "/etc/sipral/ca.pem"   # authorities for SIP agents over TLS
+
+[[accounts]]
+aor = "sip:sales@pbx.example.com"
+registrar = "sip:pbx.example.com"
+registrar_address = "192.0.2.10:5060"
+auth_user = "sales"
+auth_password_env = "SALES_SIP_PASSWORD"
+agent = "sales"
+
+[[accounts]]
+aor = "sip:support@pbx.example.com"
+registrar = "sip:pbx.example.com"
+registrar_address = "192.0.2.10:5060"
+auth_user = "support"
+auth_password_env = "SUPPORT_SIP_PASSWORD"
+agent = "support"
+
+[agents.sales]
+service = "openai-realtime"
+model = "gpt-realtime"
+api_key_env = "OPENAI_API_KEY"
+voice = "marin"
+instructions = "You answer the sales line. Be brief and friendly."
+
+[agents.support]
+service = "sip"
+uri = "sip:support-agent@sip.vendor.example;transport=tls"
+transfer = "refer"                 # a transfer the agent asks for: REFER the caller to the PBX
+outcomes = "header"                # how the agent's call ended: X-Sipral-Outcome on the BYE
+max_seconds = 900
+copy_headers = ["X-*"]
+
+# The other services take the same shape:
+#
+# [agents.helpdesk]
+# service = "gemini-live"
+# model = "<a Live model>"
+# api_key_env = "GEMINI_API_KEY"
+#
+# [agents.concierge]
+# service = "elevenlabs"
+# agent_id = "<the agent's id>"
+# api_key_env = "ELEVENLABS_API_KEY"
+#
+# [agents.booking]
+# service = "vapi"
+# assistant_id = "<the assistant's id>"
+# api_key_env = "VAPI_API_KEY"
+#
+# [agents.orders]
+# service = "deepgram"
+# api_key_env = "DEEPGRAM_API_KEY"
+# [agents.orders.agent.listen.provider]
+# type = "deepgram"
+# model = "<a listen model>"
+# [agents.orders.agent.think.provider]
+# type = "open_ai"
+# model = "<a language model>"
+# [agents.orders.agent.speak.provider]
+# type = "deepgram"
+# model = "<a voice>"

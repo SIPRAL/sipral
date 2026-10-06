@@ -120,6 +120,38 @@ asyncio.run(main())
 [`examples/phone_agent.py`](examples/phone_agent.py) is the same agent with
 either service, the registration optional and the transcript printed.
 
+## Ready to run: a configuration file
+
+```sh
+SALES_SIP_PASSWORD=... SUPPORT_SIP_PASSWORD=... OPENAI_API_KEY=... \
+    python -m sipral_agents examples/bridge.toml
+```
+
+(`sipral-agents examples/bridge.toml` once the package is installed.) One
+stack registers every account the file lists and hands each call to the
+agent named for the account it came in on: a WebSocket service through
+`AgentCall`, or another SIP address through the SIP bridge
+(`sipral_agents.sip_bridge`, which calls the agent, joins the two calls,
+forwards digits, passes a transfer the agent asks for on to the PBX and
+tells the PBX how the agent's call ended). `--check` reads the file and the
+environment, prints each account's route and exits; `--quiet` logs only
+warnings. [`examples/bridge.toml`](examples/bridge.toml) is a complete file.
+
+| Table | Keys |
+|---|---|
+| `[sip]` | `bind_host`, `bind_port`, `media_host` (the address RTP is advertised on), `user_agent`, `codecs`, `invite_limit` (`"voice-agent"` for a trunk's rush of calls), `tls_ca` (authorities for SIP agents over TLS), and `[sip.backoff]` with `first`, `longest`, `jitter`, `attempts` |
+| `[[accounts]]` | `aor`, `registrar_address` and `agent` (required); `registrar` (unset, the account does not register), `auth_user`, `auth_password_env`, `display_name` |
+| `[agents.NAME]`, `service = "sip"` | `uri` (required), `address` (`host:port`, when the URI's host is not the server), `auth_user` and `auth_password_env` (a digest challenge from the agent), `transfer` (`"refer"` or `"bridge"`), `outcomes` (`"header"` or `"refer"`), `outcome_uris` (a table: outcome = URI), `max_seconds`, `copy_headers` |
+| `[agents.NAME]`, any other `service` | `"openai-realtime"`, `"gemini-live"`, `"elevenlabs"`, `"vapi"` or `"deepgram"`, and that class's own arguments, `api_key_env` in place of `api_key`; tables (`session`, `setup`, `overrides`, `agent`, `call`, `settings`) are TOML tables |
+
+No secret goes in the file: every key ending in `_env` names an environment
+variable whose value takes the key's place (`api_key_env = "OPENAI_API_KEY"`
+becomes `api_key`), a missing variable stops the start with its name, and
+an `api_key`, `password` or `auth_password` written in the file is refused.
+A call to a SIP account with no agent is answered 404. One stack checks TLS
+certificates against one name, so SIP agents over TLS on different hosts
+need a bridge each.
+
 ## Environment variables of the example
 
 | Variable | What it is |
@@ -153,7 +185,11 @@ agent, that OpenAI's turn is truncated to what was heard, that ElevenLabs'
 pings are answered and its stale audio dropped, that a dropped connection
 and a `goAway` are recovered (Gemini's resumed, Vapi's back on the same
 call), that a session the service refuses ends the call without retries,
-and that either side ending ends the other. They have not been
+and that either side ending ends the other. `test_runner.py` reads the
+example configuration and malformed ones, and starts a bridge from a file
+with two accounts -- one to the OpenAI stand-in, one to a SIP agent on a
+third stack that echoes -- and checks each caller hears its own agent.
+They have not been
 run against the vendors' own services. `scripts/check.sh --only agents`
 runs them in a virtual environment of its own.
 

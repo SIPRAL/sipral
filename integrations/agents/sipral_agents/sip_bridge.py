@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 # Copyright (c) 2026 Sytek
 
@@ -25,7 +24,11 @@ caller's call, so the PBX places the new call and owns it
     SIPRAL_REGISTRAR_ADDRESS=192.0.2.10:5060 \\
     SIPRAL_AUTH_USER=bridge SIPRAL_AUTH_PASSWORD=secret \\
     SIPRAL_AGENT_URI='sip:agent@203.0.113.7:5060' \\
-    python3 agent_bridge.py
+    python3 -m sipral_agents.sip_bridge
+
+:class:`BridgedCall` is one caller's bridge, for an application that
+answers its calls itself; ``python -m sipral_agents`` runs it for every
+account of a configuration file whose agent is a SIP address.
 
 An agent address that asks for TLS (``sips:`` or ``;transport=tls``) or
 TCP (``;transport=tcp``) is called over a connection of its own; over TLS
@@ -54,6 +57,7 @@ outcome field go through the two C entry points directly (:func:`refer`,
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import socket
@@ -64,6 +68,8 @@ from sipral._sipral_cffi import ffi, lib
 from sipral.enums import AudioMode, Codec, EventKind, Transport
 from sipral.errors import SipralError
 from sipral.errors import call as abi_call
+
+_log = logging.getLogger("sipral_agents.sip_bridge")
 
 OUTCOMES = ("human", "callback", "resolved", "unresolved", "expired")
 OUTCOME_HEADER = "X-Sipral-Outcome"
@@ -180,10 +186,11 @@ def resolve(address: str) -> str:
     return f"{found[0][4][0]}:{port}"
 
 
-def agent_server(uri: str) -> tuple[str, int, str]:
-    """Where the agent's address says to go, over what -- ``0`` for UDP, or
-    a :class:`sipral.enums.Transport` -- and the name its certificate is
-    checked against."""
+def agent_target(uri: str, address: str | None = None) -> tuple[str, int, str]:
+    """Where the agent's address says to go, as ``host:port`` -- or
+    ``address`` when the address's host is not where its server is --, over
+    what (``0`` for UDP, or a :class:`sipral.enums.Transport`), and the name
+    its certificate is checked against. Nothing is looked up."""
     scheme, _, rest = uri.partition(":")
     hostport = rest.split("@")[-1].split(";")[0]
     params = [p.lower() for p in rest.split(";")[1:]]
@@ -195,12 +202,23 @@ def agent_server(uri: str) -> tuple[str, int, str]:
         over = 0
     host, colon, port = hostport.partition(":")
     port = port if colon else ("5061" if over == Transport.TLS else "5060")
-    given = os.environ.get("SIPRAL_AGENT_ADDRESS")
-    return resolve(given or f"{host}:{port}"), over, host
+    return address or f"{host}:{port}", over, host
+
+
+def agent_server(uri: str, address: str | None = None) -> tuple[str, int, str]:
+    """:func:`agent_target` with the host looked up to an address."""
+    target, over, host = agent_target(uri, address)
+    return resolve(target), over, host
 
 
 @dataclass
-class Config:
+class BridgeConfig:
+    """How one line's callers reach one agent: the PBX's domain (where
+    transfers go), the agent's SIP address and the account its calls go out
+    on, the line's own account, and what to do with a transfer
+    (``"refer"`` or ``"bridge"``) and with an outcome (``"header"`` or
+    ``"refer"``, to ``outcome_uris``)."""
+
     pbx_domain: str
     agent_uri: str
     agent_account: object
@@ -231,10 +249,11 @@ async def ringback(call: Call) -> None:
         await asyncio.sleep(frame / rate)
 
 
-class Pair:
-    """One caller and whoever it is bridged to."""
+class BridgedCall:
+    """One caller and whoever it is bridged to: ``await run()`` until the
+    caller's call ends."""
 
-    def __init__(self, stack: Stack, cfg: Config, caller: Call, invite: bytes | None) -> None:
+    def __init__(self, stack: Stack, cfg: BridgeConfig, caller: Call, invite: bytes | None) -> None:
         self.stack = stack
         self.cfg = cfg
         self.caller = caller
@@ -285,9 +304,9 @@ class Pair:
         self.conference.add(self.caller)
         self.conference.add(far)
         self.bridged_with = far.handle
-        print(f"bridged {self.caller.handle:x} with {far.handle:x}")
+        _log.info(f"bridged {self.caller.handle:x} with {far.handle:x}")
         if self.person_up and self.agent is not None and not self.agent.ended:
-            print(f"transferred {self.caller.handle:x}: hanging the agent up")
+            _log.info(f"transferred {self.caller.handle:x}: hanging the agent up")
             self.agent.hangup()
 
     def refer_caller(self, target: str, outcome: str) -> None:
@@ -305,7 +324,7 @@ class Pair:
     def refused(self, status: int) -> None:
         """The PBX did not take the REFER: the caller stays with the agent,
         which hears its own REFER failed, or -- the agent gone -- ends."""
-        print(f"the PBX did not take the REFER of {self.caller.handle:x}: {status}")
+        _log.info(f"the PBX did not take the REFER of {self.caller.handle:x}: {status}")
         self.referred = False
         if self.agent is not None and not self.agent.ended:
             self.outcome = None
@@ -320,11 +339,11 @@ class Pair:
         if by_refer and self.cfg.outcomes == "refer" and uri:
             try:
                 self.refer_caller(uri, outcome)
-                print(f"returning {self.caller.handle:x} to the PBX at {uri}: {outcome}")
+                _log.info(f"returning {self.caller.handle:x} to the PBX at {uri}: {outcome}")
                 return True
             except SipralError as error:
-                print(f"cannot refer {self.caller.handle:x} to {uri}: {error!r}")
-        print(f"ending {self.caller.handle:x} with {OUTCOME_HEADER}: {outcome}")
+                _log.info(f"cannot refer {self.caller.handle:x} to {uri}: {error!r}")
+        _log.info(f"ending {self.caller.handle:x} with {OUTCOME_HEADER}: {outcome}")
         try:
             set_headers(self.caller, [(OUTCOME_HEADER, outcome)])
             self.caller.hangup()
@@ -338,7 +357,7 @@ class Pair:
             self.stack.reject_referral(event, 491)
             return
         action = decide(target, self.cfg.pbx_domain)
-        print(f"agent asked for {target}: {action}")
+        _log.info(f"agent asked for {target}: {action}")
         if action is None:
             self.stack.reject_referral(event, 603)
         elif isinstance(action, End):
@@ -347,12 +366,12 @@ class Pair:
         elif self.cfg.transfer == "refer":
             self.refer_event = event
             self.refer_caller(action.target, "human")
-            print(f"referred {self.caller.handle:x} to {action.target}")
+            _log.info(f"referred {self.caller.handle:x} to {action.target}")
         else:
             self.person = self.stack.place_call(self.cfg.line, action.target)
             self.watch(self.person, "person")
             self.outcome, self.refer_event = "human", event
-            print(f"calling {action.target} as {self.person.handle:x}")
+            _log.info(f"calling {action.target} as {self.person.handle:x}")
 
     async def expire(self) -> None:
         await asyncio.sleep(self.cfg.max_seconds)
@@ -361,11 +380,11 @@ class Pair:
     async def run(self) -> None:
         self.watch(self.caller, "caller")
         context = caller_context(self.invite, self.cfg.copy)
-        print(f"incoming {self.caller.handle:x}: context {context}")
+        _log.info(f"incoming {self.caller.handle:x}: context {context}")
         try:
             self.agent = self.stack.place_call(self.cfg.agent_account, self.cfg.agent_uri)
         except SipralError as error:
-            print(f"cannot call the agent: {error!r}")
+            _log.info(f"cannot call the agent: {error!r}")
             self.end_caller("unresolved")
             return
         self.watch(self.agent, "agent")
@@ -378,7 +397,7 @@ class Pair:
                 else:
                     if role == "agent" and event.kind == EventKind.CALL_CONFIRMED:
                         self.agent_up = True
-                        print(f"agent answered {call.handle:x}")
+                        _log.info(f"agent answered {call.handle:x}")
                         if self.cfg.max_seconds:
                             self.tasks.append(asyncio.create_task(self.expire()))
                     self.on_event(role, call, event)
@@ -402,12 +421,12 @@ class Pair:
             to = self.far() if role == "caller" else self.caller
             if to is not None and to.media is not None:
                 to.send_dtmf(value)
-                print(f"dtmf {value} from {role}")
+                _log.info(f"dtmf {value} from {role}")
         elif kind == "refer-silent" and self.referred and not self.refer_heard:
             self.refused(480)
         elif kind == "expired" and self.agent is not None and not self.agent.ended:
             if not self.referred and self.person is None:
-                print(f"the agent's call {self.agent.handle:x} ran its time: hanging it up")
+                _log.info(f"the agent's call {self.agent.handle:x} ran its time: hanging it up")
                 self.outcome = "expired"
                 self.agent.hangup()
 
@@ -415,17 +434,17 @@ class Pair:
         if event.kind == EventKind.MEDIA_STARTED and call.media is not None:
             codec = Codec(call.media.info()["codec"]).name
             self.codecs[role] = f"{codec}/{call.media.sample_rate}"
-            print(f"codec {call.handle:x} {role} {self.codecs[role]}")
+            _log.info(f"codec {call.handle:x} {role} {self.codecs[role]}")
         elif event.kind == EventKind.TRANSFER_REQUESTED and role == "agent":
             self.transfer_asked(event)
         elif event.kind == EventKind.TRANSFER_PROGRESS and role == "caller":
             self.refer_heard = True
-            print(f"the PBX is transferring {call.handle:x}: {event.fields.get('status_code')}")
+            _log.info(f"the PBX is transferring {call.handle:x}: {event.fields.get('status_code')}")
         elif event.kind == EventKind.TRANSFER_DONE and role == "caller":
             status = int(event.fields.get("status_code", 0))
             if 200 <= status < 300:
                 self.referred = False
-                print(f"the PBX took {call.handle:x}: {status}")
+                _log.info(f"the PBX took {call.handle:x}: {status}")
             else:
                 self.refused(status)
         elif event.kind == EventKind.CALL_CONFIRMED and role == "person":
@@ -437,29 +456,31 @@ class Pair:
         call.close()
         if role == "agent":
             if self.person is not None or self.referred:
-                print(f"ended {call.handle:x}: the agent left during its transfer")
+                _log.info(f"ended {call.handle:x}: the agent left during its transfer")
                 return
             outcome = self.outcome or ("resolved" if self.agent_up else "unresolved")
-            print(f"ended {call.handle:x}: the agent hung up, outcome {outcome}")
+            _log.info(f"ended {call.handle:x}: the agent hung up, outcome {outcome}")
             self.end_caller(outcome)
         elif role == "person":
             if self.person_up:
                 self.caller.hangup()
             elif self.agent is not None and not self.agent.ended:
-                print("the transfer failed: the caller stays with the agent")
+                _log.info("the transfer failed: the caller stays with the agent")
                 self.person, self.outcome = None, None
                 self.stack.reject_referral(self.refer_event, 480)
             else:
                 self.end_caller("unresolved")
         else:
-            print(f"ended {call.handle:x}: the caller's call is over")
+            _log.info(f"ended {call.handle:x}: the caller's call is over")
 
 
 async def main() -> None:
     loop = asyncio.get_running_loop()
     registrar_address = os.environ["SIPRAL_REGISTRAR_ADDRESS"]
     agent_uri = os.environ["SIPRAL_AGENT_URI"]
-    agent_address, over, agent_host = agent_server(agent_uri)
+    agent_address, over, agent_host = agent_server(
+        agent_uri, os.environ.get("SIPRAL_AGENT_ADDRESS")
+    )
     tls = over == Transport.TLS
     trusted = os.environ.get("SIPRAL_TLS_CA")
     stack = Stack(
@@ -488,7 +509,7 @@ async def main() -> None:
     )
     uris = os.environ.get("SIPRAL_OUTCOME_URIS", "")
     max_seconds = os.environ.get("SIPRAL_AGENT_MAX_SECONDS")
-    cfg = Config(
+    cfg = BridgeConfig(
         pbx_domain=domain_of(os.environ.get("SIPRAL_REGISTRAR") or aor),
         agent_uri=agent_uri,
         agent_account=agent_account,
@@ -499,16 +520,16 @@ async def main() -> None:
         max_seconds=float(max_seconds) if max_seconds else None,
         copy=[p.strip() for p in os.environ.get("SIPRAL_COPY_HEADERS", "X-*").split(",") if p.strip()],
     )
-    print(f"listening on {stack.bind_address}; calls go to {agent_uri} at {agent_address}")
+    _log.info(f"listening on {stack.bind_address}; calls go to {agent_uri} at {agent_address}")
     pairs: set[asyncio.Task] = set()
     try:
         while True:
             event = await stack.events.get()
             if event.kind == EventKind.REGISTRATION_CHANGED:
-                print(f"registration {event.fields.get('state')}")
+                _log.info(f"registration {event.fields.get('state')}")
             if event.kind == EventKind.INCOMING_CALL:
                 caller = stack.answer_call(event)
-                pair = Pair(stack, cfg, caller, event.message)
+                pair = BridgedCall(stack, cfg, caller, event.message)
                 task = asyncio.create_task(pair.run())
                 pairs.add(task)
                 task.add_done_callback(pairs.discard)
@@ -519,4 +540,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     asyncio.run(main())

@@ -355,8 +355,9 @@ cargo run -p sipral --example agent-bridge [--features example-tls] -- \
 | `--invite-burst n` | calls the PBX may offer at once (the stack's guard lets ten) |
 | `--host ip`, `--port n` | the address advertised to both, the route to the PBX by default |
 
-`bindings/python/examples/agent_bridge.py` is the same bridge over the C
-ABI, configured from the environment as `agent.py` is: `SIPRAL_AOR`,
+`integrations/agents/sipral_agents/sip_bridge.py` (`python -m
+sipral_agents.sip_bridge`, in the `sipral-agents` package) is the same
+bridge over the C ABI, configured from the environment as `agent.py` is: `SIPRAL_AOR`,
 `SIPRAL_REGISTRAR`, `SIPRAL_REGISTRAR_ADDRESS`, `SIPRAL_AUTH_USER` and
 `SIPRAL_AUTH_PASSWORD` for the line; `SIPRAL_AGENT_URI` and
 `SIPRAL_AGENT_ADDRESS` for the agent (TLS and TCP both), `SIPRAL_TLS_CA` to

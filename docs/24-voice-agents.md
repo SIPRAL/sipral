@@ -29,7 +29,7 @@ service's agent and the agent hears the caller. This works with any
 service that accepts a SIP call, and needs nothing from the service beyond
 its address and its rules for admitting a caller.
 
-The examples `bindings/python/examples/agent_bridge.py` and
+`sipral_agents.sip_bridge` in the `sipral-agents` package and the example
 `crates/sipral/examples/agent-bridge.rs` do this (`07-headless.md`,
 "Bridging a call to a voice agent that speaks SIP"). Both read the
 service's address from the environment variable `SIPRAL_AGENT_URI`, for
@@ -100,7 +100,22 @@ end ending the other. It is tested against local stand-ins written from
 each vendor's public protocol documentation, not against the vendors'
 services. ElevenLabs runs at the agent's own PCM rate (16 kHz by default),
 Vapi at 16 kHz in binary frames, Deepgram `linear16` at 24 kHz in binary
-frames. Their WebSocket protocols were read again on 7 October 2026 from
+frames.
+
+**A bridge from a configuration file.** `python -m sipral_agents
+bridge.toml` (or the `sipral-agents` command the package installs) runs
+both paths at once from one stack: it registers every account the file
+lists on its PBX and hands each call to the agent named for that account —
+one of the five WebSocket services, or `service = "sip"` and an agent's SIP
+address, bridged as in path 1. API keys and passwords are named by the
+environment variable that holds them (`api_key_env`,
+`auth_password_env`), never written in the file, and `--check` reads the
+file and the environment and prints the routes without starting anything.
+The format is in [`integrations/agents/README.md`](../integrations/agents/README.md)
+and [`examples/bridge.toml`](../integrations/agents/examples/bridge.toml)
+is a complete one.
+
+The adapters' WebSocket protocols were read again on 7 October 2026 from
 the pages under each section and ElevenLabs' Agents WebSocket reference
 (https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket),
 Vapi's WebSocket transport guide (https://docs.vapi.ai/calls/websocket-transport)
