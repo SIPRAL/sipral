@@ -102,6 +102,13 @@ services. ElevenLabs runs at the agent's own PCM rate (16 kHz by default),
 Vapi at 16 kHz in binary frames, Deepgram `linear16` at 24 kHz in binary
 frames.
 
+**A demo in one command.** `python -m sipral_agents.demo` answers calls
+from a softphone, or on a PBX extension, and joins each to OpenAI Realtime
+when `OPENAI_API_KEY` is set, or with no key to a local echo agent that
+speaks the same protocol and plays the caller back; the steps are in
+[`integrations/agents/README.md`](../integrations/agents/README.md), "A
+voice agent in five minutes".
+
 **A bridge from a configuration file.** `python -m sipral_agents
 bridge.toml` (or the `sipral-agents` command the package installs) runs
 both paths at once from one stack: it registers every account the file

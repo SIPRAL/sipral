@@ -95,6 +95,39 @@ Python 3.11 or later. The `sipral` wheel carries the native library; a
 library built from this repository instead (`cargo build --release -p
 sipral-ffi`) is found through `SIPRAL_LIBRARY=target/release`.
 
+## A voice agent in five minutes
+
+From a checkout of this repository (the package is not on PyPI yet):
+
+```sh
+cargo build --release -p sipral-ffi
+python3 -m pip install websockets cffi
+export SIPRAL_LIBRARY=target/release PYTHONPATH=integrations/agents:bindings/python
+python3 -m sipral_agents.demo
+```
+
+It prints the address to call; dial it from any softphone on the same
+network. With no key the call is answered by a local echo agent, a
+WebSocket server in the same process that speaks the OpenAI Realtime
+protocol and plays your voice back, so you hear the whole path work --
+SIP, RTP, the codec, the rate conversion, the WebSocket session -- without
+an account anywhere. With `OPENAI_API_KEY` set, the same command answers
+with OpenAI Realtime (`AGENT_MODEL`, `gpt-realtime` by default;
+`AGENT_PROMPT` for the instructions).
+
+To take the calls of an extension on your PBX instead of direct ones:
+
+```sh
+SIPRAL_AOR=sip:agent@pbx.example.com SIPRAL_REGISTRAR=sip:pbx.example.com \
+SIPRAL_REGISTRAR_ADDRESS=203.0.113.10:5060 \
+SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=... \
+    python -m sipral_agents.demo --port 5070
+```
+
+and dial the extension from any phone on the PBX. `--host` picks the
+address to listen on. `tests/test_demo.py` places a call to the demo and
+checks the caller hears its own tone back.
+
 ## Example
 
 ```python
