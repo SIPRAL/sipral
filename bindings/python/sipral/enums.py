@@ -430,6 +430,11 @@ PublishFailure = _enum("PublishFailure", "SIPRAL_PUBLISH_FAILURE_")
 #: a challenge, ``fields["refusal"]`` on `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`.
 ChallengeRefusal = _enum("ChallengeRefusal", "SIPRAL_CHALLENGE_REFUSAL_")
 
+#: A `sipral_token_error_t`: what an account's server said was wrong with the
+#: access token it was given, ``fields["error"]`` on
+#: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` (RFC 6750 section 3.1).
+TokenError = _enum("TokenError", "SIPRAL_TOKEN_ERROR_")
+
 #: A `sipral_held_audio_t`: what a party this end holds is sent,
 #: ``Stack(held_audio=...)``.
 HeldAudio = _enum("HeldAudio", "SIPRAL_HELD_AUDIO_")

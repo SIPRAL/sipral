@@ -1665,6 +1665,23 @@ public enum SipralEventKind : uint
     /// the account.
     /// </summary>
     ChallengeDeclined = 58,
+    /// <summary>
+    /// An account's own server takes an OAuth 2.0 access token (RFC
+    /// 8898) and the account has none it would accept: none was
+    /// supplied, or the one supplied was refused — expired or revoked,
+    /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+    ///
+    /// `payload.token` says where a token comes from: `authz_server`, an
+    /// `https` URI RFC 8898 §2.1.1 says to check against the
+    /// authorization servers the application trusts before going near
+    /// it, and `scope`, what the token has to cover. Fetching it is the
+    /// application's; hand it over with `sipral_account_set_access_token`.
+    /// The refusal settles meanwhile the way an unanswered challenge does
+    /// — a registration failing with `BAD_CREDENTIALS`, a call ending
+    /// with the 401 or 407 — and `sipral_account_register` registers
+    /// again at once with the new token. `account` is the account.
+    /// </summary>
+    TokenRequired = 59,
 }
 
 /// <summary>
@@ -3620,6 +3637,41 @@ public enum SipralChallengeRefusal : uint
     /// challenges calls under a realm of its own.
     /// </summary>
     NotTheAccountsRealm = 2,
+}
+
+/// <summary>
+/// What an account's server said was wrong with the access token it
+/// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+/// `sipral_token_event_t::error`.
+/// </summary>
+public enum SipralTokenError : uint
+{
+    /// <summary>
+    /// The server named no error: no token was offered yet.
+    /// </summary>
+    None = 0,
+    /// <summary>
+    /// `invalid_request`: the request was malformed.
+    /// </summary>
+    InvalidRequest = 1,
+    /// <summary>
+    /// `invalid_token`: the token is expired, revoked, malformed or
+    /// otherwise invalid. A new one is needed.
+    /// </summary>
+    InvalidToken = 2,
+    /// <summary>
+    /// `insufficient_scope`: the token does not cover what was asked;
+    /// `scope` says what would.
+    /// </summary>
+    InsufficientScope = 3,
+    /// <summary>
+    /// `invalid_scope`.
+    /// </summary>
+    InvalidScope = 4,
+    /// <summary>
+    /// Another code, as written in `error_code`.
+    /// </summary>
+    Other = 5,
 }
 
 /// <summary>
@@ -7775,6 +7827,70 @@ public struct SipralChallengeEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.TokenRequired carries: the `Bearer`
+/// challenge of an account's server (RFC 8898 §4), and where it came
+/// from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
+/// server left out is empty.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralTokenEvent
+{
+    /// <summary>
+    /// A SipralTokenError.
+    /// </summary>
+    public uint Error;
+    /// <summary>
+    /// A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
+    /// answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
+    /// registrar or the far end did (401).
+    /// </summary>
+    public uint Proxy;
+    /// <summary>
+    /// Where the challenged request went, and the challenge came from,
+    /// as `host:port`.
+    /// </summary>
+    public IntPtr Server;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ServerLen;
+    /// <summary>
+    /// The protection domain, empty when the challenge named none.
+    /// </summary>
+    public IntPtr Realm;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint RealmLen;
+    /// <summary>
+    /// The scope the token has to carry: space-separated strings the
+    /// authorization server defines (RFC 6749 §3.3).
+    /// </summary>
+    public IntPtr Scope;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ScopeLen;
+    /// <summary>
+    /// The authorization server: an `https` URI. A value that was not
+    /// one is left out.
+    /// </summary>
+    public IntPtr AuthzServer;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint AuthzServerLen;
+    /// <summary>
+    /// The `error` code as the server wrote it, for `Other`.
+    /// </summary>
+    public IntPtr ErrorCode;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ErrorCodeLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -7919,6 +8035,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralChallengeEvent Challenge;
+    /// <summary>
+    /// For SipralEventKind.TokenRequired.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralTokenEvent Token;
 }
 
 /// <summary>
@@ -9491,6 +9612,9 @@ internal static class NativeMethods
     internal static extern SipralStatus sipral_account_registration_state(ulong stack, ulong account, out uint state);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_account_set_access_token(ulong stack, ulong account, sbyte[] token, nuint tokenLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_place(ulong stack, ulong account, in SipralCallConfig config, out ulong call, ulong nowMs);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
@@ -10024,7 +10148,7 @@ public static partial class Sipral
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
     /// </summary>
-    public const uint AbiVersionMinor = 1;
+    public const uint AbiVersionMinor = 2;
 
     /// <summary>
     /// The ABI's patch version, raised by a fix that changes no declaration.
@@ -10518,6 +10642,7 @@ public static partial class Sipral
         ("sipral_local_conference_event_t", Marshal.SizeOf<SipralLocalConferenceEvent>(), 40, 40, 40),
         ("sipral_locate_event_t", Marshal.SizeOf<SipralLocateEvent>(), 48, 32, 32),
         ("sipral_challenge_event_t", Marshal.SizeOf<SipralChallengeEvent>(), 40, 20, 20),
+        ("sipral_token_event_t", Marshal.SizeOf<SipralTokenEvent>(), 88, 48, 48),
         ("sipral_event_payload_t", Marshal.SizeOf<SipralEventPayload>(), 328, 208, 216),
         ("sipral_event_t", Marshal.SizeOf<SipralEvent>(), 384, 248, 264),
         ("sipral_suspending_t", Marshal.SizeOf<SipralSuspending>(), 32, 16, 16),
@@ -11310,6 +11435,44 @@ public static partial class Sipral
     {
         Check(NativeMethods.sipral_account_registration_state(stack, account, out var state));
         return state;
+    }
+
+    /// <summary>
+    /// Give an account the OAuth 2.0 access token its server asked for
+    /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+    /// takes the token away. The password, if the account has one, stays.
+    ///
+    /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+    /// renewed ahead of its expiry goes in: from the next request on, a
+    /// `Bearer` challenge from the account's own server is answered with
+    /// `Authorization: Bearer &lt;token&gt;` (RFC 6750 §2.1), and so is every
+    /// request its cached challenge covers. Offered a `Digest` and a
+    /// `Bearer` challenge for one realm, the token answers. A token the
+    /// server refused is never sent to it again. The token answers the
+    /// account's own server and nobody else, the rule the password is held
+    /// to. Nothing is sent by this call; a registration that failed for
+    /// want of a token starts again with `sipral_account_register`.
+    ///
+    /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+    /// names the authorization server and the scope, and the exchange with
+    /// it is the application's. The token is copied, kept out of every log
+    /// and diagnostic, and wiped when replaced.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+    /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+    /// nothing changed and the error not describing it.
+    ///
+    /// Safety
+    ///
+    /// `token` must be readable for `token_len` bytes, or be null with a
+    /// length of zero.
+    /// </summary>
+    public static void AccountSetAccessToken(ulong stack, ulong account, string token)
+    {
+        var tokenBytes = Encoding.UTF8.GetBytes(token);
+        var tokenSigned = new sbyte[tokenBytes.Length];
+        Buffer.BlockCopy(tokenBytes, 0, tokenSigned, 0, tokenBytes.Length);
+        Check(NativeMethods.sipral_account_set_access_token(stack, account, tokenSigned, (nuint)tokenSigned.Length));
     }
 
     /// <summary>

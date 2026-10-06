@@ -64,7 +64,7 @@ typedef uint64_t sipral_handle_t;
  * rule for all three numbers is the Versioning section of
  * `docs/08-ffi.md`, which is where the ABI contract is written down.
  */
-#define SIPRAL_ABI_VERSION_MINOR 1
+#define SIPRAL_ABI_VERSION_MINOR 2
 
 /**
  * The ABI's patch version, raised by a fix that changes no declaration.
@@ -549,6 +549,7 @@ typedef struct sipral_transport_failed_event sipral_transport_failed_event_t;
 typedef struct sipral_local_conference_event sipral_local_conference_event_t;
 typedef struct sipral_locate_event sipral_locate_event_t;
 typedef struct sipral_challenge_event sipral_challenge_event_t;
+typedef struct sipral_token_event sipral_token_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -2229,6 +2230,23 @@ enum {
      * the account.
      */
     SIPRAL_EVENT_KIND_CHALLENGE_DECLINED = 58,
+    /**
+     * An account's own server takes an OAuth 2.0 access token (RFC
+     * 8898) and the account has none it would accept: none was
+     * supplied, or the one supplied was refused — expired or revoked,
+     * which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+     *
+     * `payload.token` says where a token comes from: `authz_server`, an
+     * `https` URI RFC 8898 §2.1.1 says to check against the
+     * authorization servers the application trusts before going near
+     * it, and `scope`, what the token has to cover. Fetching it is the
+     * application's; hand it over with `sipral_account_set_access_token`.
+     * The refusal settles meanwhile the way an unanswered challenge does
+     * — a registration failing with `BAD_CREDENTIALS`, a call ending
+     * with the 401 or 407 — and `sipral_account_register` registers
+     * again at once with the new token. `account` is the account.
+     */
+    SIPRAL_EVENT_KIND_TOKEN_REQUIRED = 59,
 };
 
 /**
@@ -4184,6 +4202,41 @@ enum {
      * challenges calls under a realm of its own.
      */
     SIPRAL_CHALLENGE_REFUSAL_NOT_THE_ACCOUNTS_REALM = 2,
+};
+
+/**
+ * What an account's server said was wrong with the access token it
+ * was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+ * `sipral_token_event_t::error`.
+ */
+typedef uint32_t sipral_token_error_t;
+enum {
+    /**
+     * The server named no error: no token was offered yet.
+     */
+    SIPRAL_TOKEN_ERROR_NONE = 0,
+    /**
+     * `invalid_request`: the request was malformed.
+     */
+    SIPRAL_TOKEN_ERROR_INVALID_REQUEST = 1,
+    /**
+     * `invalid_token`: the token is expired, revoked, malformed or
+     * otherwise invalid. A new one is needed.
+     */
+    SIPRAL_TOKEN_ERROR_INVALID_TOKEN = 2,
+    /**
+     * `insufficient_scope`: the token does not cover what was asked;
+     * `scope` says what would.
+     */
+    SIPRAL_TOKEN_ERROR_INSUFFICIENT_SCOPE = 3,
+    /**
+     * `invalid_scope`.
+     */
+    SIPRAL_TOKEN_ERROR_INVALID_SCOPE = 4,
+    /**
+     * Another code, as written in `error_code`.
+     */
+    SIPRAL_TOKEN_ERROR_OTHER = 5,
 };
 
 /**
@@ -8080,6 +8133,68 @@ struct sipral_challenge_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_TOKEN_REQUIRED carries: the `Bearer`
+ * challenge of an account's server (RFC 8898 §4), and where it came
+ * from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
+ * server left out is empty.
+ */
+struct sipral_token_event {
+    /**
+     * A sipral_token_error_t.
+     */
+    sipral_token_error_t error;
+    /**
+     * A `sipral_toggle_t`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
+     * answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
+     * registrar or the far end did (401).
+     */
+    sipral_toggle_t proxy;
+    /**
+     * Where the challenged request went, and the challenge came from,
+     * as `host:port`.
+     */
+    const char *server;
+    /**
+     * How many bytes of it.
+     */
+    size_t server_len;
+    /**
+     * The protection domain, empty when the challenge named none.
+     */
+    const char *realm;
+    /**
+     * How many bytes of it.
+     */
+    size_t realm_len;
+    /**
+     * The scope the token has to carry: space-separated strings the
+     * authorization server defines (RFC 6749 §3.3).
+     */
+    const char *scope;
+    /**
+     * How many bytes of it.
+     */
+    size_t scope_len;
+    /**
+     * The authorization server: an `https` URI. A value that was not
+     * one is left out.
+     */
+    const char *authz_server;
+    /**
+     * How many bytes of it.
+     */
+    size_t authz_server_len;
+    /**
+     * The `error` code as the server wrote it, for `Other`.
+     */
+    const char *error_code;
+    /**
+     * How many bytes of it.
+     */
+    size_t error_code_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * The whole union is zeroed before that one arm is written, so every
@@ -8197,6 +8312,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_CHALLENGE_DECLINED.
      */
     sipral_challenge_event_t challenge;
+    /**
+     * For SIPRAL_EVENT_KIND_TOKEN_REQUIRED.
+     */
+    sipral_token_event_t token;
 };
 
 /**
@@ -9926,6 +10045,38 @@ sipral_status_t sipral_account_unregister(sipral_handle_t stack, sipral_handle_t
  * `out_state` must point at one `uint32_t`.
  */
 sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_handle_t account, sipral_registration_state_t *out_state);
+
+/**
+ * Give an account the OAuth 2.0 access token its server asked for
+ * (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+ * takes the token away. The password, if the account has one, stays.
+ *
+ * The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+ * renewed ahead of its expiry goes in: from the next request on, a
+ * `Bearer` challenge from the account's own server is answered with
+ * `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
+ * request its cached challenge covers. Offered a `Digest` and a
+ * `Bearer` challenge for one realm, the token answers. A token the
+ * server refused is never sent to it again. The token answers the
+ * account's own server and nobody else, the rule the password is held
+ * to. Nothing is sent by this call; a registration that failed for
+ * want of a token starts again with `sipral_account_register`.
+ *
+ * The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+ * names the authorization server and the scope, and the exchange with
+ * it is the application's. The token is copied, kept out of every log
+ * and diagnostic, and wiped when replaced.
+ *
+ * `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+ * §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+ * nothing changed and the error not describing it.
+ *
+ * Safety
+ *
+ * `token` must be readable for `token_len` bytes, or be null with a
+ * length of zero.
+ */
+sipral_status_t sipral_account_set_access_token(sipral_handle_t stack, sipral_handle_t account, const char *token, size_t token_len);
 
 /**
  * Place a call, and write its handle to `out_call`.
@@ -13309,6 +13460,7 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_local_conference_event_t": (40, 40, 40),
     "sipral_locate_event_t": (48, 32, 32),
     "sipral_challenge_event_t": (40, 20, 20),
+    "sipral_token_event_t": (88, 48, 48),
     "sipral_event_payload_t": (328, 208, 216),
     "sipral_event_t": (384, 248, 264),
     "sipral_suspending_t": (32, 16, 16),

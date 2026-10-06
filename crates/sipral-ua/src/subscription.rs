@@ -1100,7 +1100,7 @@ impl UserAgent {
                 self.on_subscribe_failed(subscription, reason, now);
                 None
             }
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 let Some(subscription) = self.by_subscribe.get(&transaction).copied() else {
                     return Some(event);
                 };

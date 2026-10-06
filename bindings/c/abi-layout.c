@@ -722,6 +722,20 @@ _Static_assert(offsetof(sipral_challenge_event_t, server_len) == SIPRAL_LAYOUT(1
 _Static_assert(offsetof(sipral_challenge_event_t, realms) == SIPRAL_LAYOUT(24, 12, 12), "sipral_challenge_event_t::realms");
 _Static_assert(offsetof(sipral_challenge_event_t, realms_len) == SIPRAL_LAYOUT(32, 16, 16), "sipral_challenge_event_t::realms_len");
 
+_Static_assert(sizeof(sipral_token_event_t) == SIPRAL_LAYOUT(88, 48, 48), "sipral_token_event_t");
+_Static_assert(offsetof(sipral_token_event_t, error) == SIPRAL_LAYOUT(0, 0, 0), "sipral_token_event_t::error");
+_Static_assert(offsetof(sipral_token_event_t, proxy) == SIPRAL_LAYOUT(4, 4, 4), "sipral_token_event_t::proxy");
+_Static_assert(offsetof(sipral_token_event_t, server) == SIPRAL_LAYOUT(8, 8, 8), "sipral_token_event_t::server");
+_Static_assert(offsetof(sipral_token_event_t, server_len) == SIPRAL_LAYOUT(16, 12, 12), "sipral_token_event_t::server_len");
+_Static_assert(offsetof(sipral_token_event_t, realm) == SIPRAL_LAYOUT(24, 16, 16), "sipral_token_event_t::realm");
+_Static_assert(offsetof(sipral_token_event_t, realm_len) == SIPRAL_LAYOUT(32, 20, 20), "sipral_token_event_t::realm_len");
+_Static_assert(offsetof(sipral_token_event_t, scope) == SIPRAL_LAYOUT(40, 24, 24), "sipral_token_event_t::scope");
+_Static_assert(offsetof(sipral_token_event_t, scope_len) == SIPRAL_LAYOUT(48, 28, 28), "sipral_token_event_t::scope_len");
+_Static_assert(offsetof(sipral_token_event_t, authz_server) == SIPRAL_LAYOUT(56, 32, 32), "sipral_token_event_t::authz_server");
+_Static_assert(offsetof(sipral_token_event_t, authz_server_len) == SIPRAL_LAYOUT(64, 36, 36), "sipral_token_event_t::authz_server_len");
+_Static_assert(offsetof(sipral_token_event_t, error_code) == SIPRAL_LAYOUT(72, 40, 40), "sipral_token_event_t::error_code");
+_Static_assert(offsetof(sipral_token_event_t, error_code_len) == SIPRAL_LAYOUT(80, 44, 44), "sipral_token_event_t::error_code_len");
+
 _Static_assert(sizeof(sipral_event_payload_t) == SIPRAL_LAYOUT(328, 208, 216), "sipral_event_payload_t");
 _Static_assert(offsetof(sipral_event_payload_t, registration) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::registration");
 _Static_assert(offsetof(sipral_event_payload_t, call) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::call");
@@ -748,6 +762,7 @@ _Static_assert(offsetof(sipral_event_payload_t, transport_failed) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_event_payload_t, local_conference) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::local_conference");
 _Static_assert(offsetof(sipral_event_payload_t, locate) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::locate");
 _Static_assert(offsetof(sipral_event_payload_t, challenge) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::challenge");
+_Static_assert(offsetof(sipral_event_payload_t, token) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::token");
 
 _Static_assert(sizeof(sipral_event_t) == SIPRAL_LAYOUT(384, 248, 264), "sipral_event_t");
 _Static_assert(offsetof(sipral_event_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_t::size");

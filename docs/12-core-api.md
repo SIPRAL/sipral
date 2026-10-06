@@ -1281,14 +1281,24 @@ pub enum DigestAlgorithm { Md5, Md5Sess, Sha256, Sha256Sess, Sha512_256, Sha512_
 /// The password. No `Debug`, no `Display`, no way out of the module, and the
 /// bytes are overwritten on drop.
 pub struct Secret(/* private */);
-pub struct Credentials { pub username: Arc<str>, /* Secret */ }
+pub struct Credentials { pub username: Arc<str>, /* password: Option<Secret>, token: Option<Secret> */ }
+impl Credentials {
+    pub fn new(username: &str, password: &str) -> Self;
+    pub fn bearer(token: &str) -> Result<Self, NotAToken>;              // RFC 8898, a token alone
+    pub fn with_access_token(self, token: &str) -> Result<Self, NotAToken>;
+    pub fn renewed(&self, token: Option<&str>) -> Result<Self, NotAToken>;
+}
 
 pub struct Challenge { pub realm: Arc<str>, pub nonce: Arc<str>, pub opaque: Option<Arc<str>>, pub algorithm: DigestAlgorithm, pub qop_auth: bool, pub stale: bool, pub proxy: bool }
 impl Challenge {
     pub fn read(challenge: &ChallengeRef<'_>, proxy: bool) -> Option<Self>;
-    pub fn respond(&self, credentials: &Credentials, method: Method<'_>, uri: &[u8], count: u32, cnonce: &str) -> String;
+    pub fn respond(&self, credentials: &Credentials, method: Method<'_>, uri: &[u8], count: u32, cnonce: &str) -> Option<String>; // None without a password
     pub fn header(&self) -> HeaderName<'static>;   // Authorization or Proxy-Authorization
 }
+
+/// RFC 8898 §4: `Bearer realm=, scope=, authz_server=, error=`.
+pub struct BearerChallenge { pub realm: Arc<str>, pub scope: Option<Arc<str>>, pub authz_server: Option<Arc<str>>, pub error: Option<BearerError>, pub proxy: bool }
+pub enum BearerError { InvalidRequest, InvalidToken, InsufficientScope, InvalidScope, Other(Arc<str>) }
 
 pub enum Learned { Retry, Refused, Unusable }
 
@@ -1325,6 +1335,19 @@ caller. It answers the topmost challenge it understands per realm (RFC 8760
 refuses to answer the same nonce twice after a refusal — §22.1 forbids
 re-attempting credentials that were just rejected, and `Learned::Refused` is
 how the endpoint hears that the password is wrong rather than missing.
+
+A `Bearer` challenge (RFC 8898) is kept in the same cache, per protection
+domain, and answered with `Authorization: Bearer <token>` when the
+credentials carry an access token. It is always worth answering once there
+is a token, so `learn` says `Retry`; what stops a refused token being sent
+twice is the cache remembering it — by its SHA-256, never its value — when a
+request that carried it is challenged again, and `authorize` leaving that
+domain out until the token is a different one. `AuthCache::token_wanted`
+names the domain the credentials cannot answer, which the endpoint reports as
+`Event::TokenChallenged` and `Endpoint::token_wanted`. Offered both schemes
+for one realm, `authorize` answers with the token when there is one. The
+token is fetched by the application; the stack never contacts the
+authorization server.
 
 SDP is a value type in `sipral_core::sdp`: `SessionDescription`,
 `MediaDescription`, `parse`, `to_bytes` (deterministic), and

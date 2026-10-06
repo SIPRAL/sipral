@@ -70,6 +70,13 @@ final class SipralStackEvent {
     this.challengeRefusal,
     this.challengeServer,
     this.challengeRealms,
+    this.tokenError,
+    this.tokenErrorCode,
+    this.tokenProxy,
+    this.tokenServer,
+    this.tokenRealm,
+    this.tokenScope,
+    this.tokenAuthzServer,
   });
 
   factory SipralStackEvent._read(SipralEvent event) {
@@ -87,6 +94,8 @@ final class SipralStackEvent {
         kind == SipralEventKind.challengeDeclined
             ? event.payload.challenge
             : null;
+    final token =
+        kind == SipralEventKind.tokenRequired ? event.payload.token : null;
     final record =
         kind == SipralEventKind.mediaStatistics
             ? event.payload.media.statistics
@@ -130,6 +139,21 @@ final class SipralStackEvent {
                   .split('\n')
                   .where((realm) => realm.isNotEmpty)
                   .toList(),
+      tokenError: token?.error,
+      tokenErrorCode:
+          token == null
+              ? null
+              : _nonEmpty(text(token.errorCode, token.errorCodeLen)),
+      tokenProxy: token == null ? null : token.proxy == SipralToggle.on,
+      tokenServer: token == null ? null : text(token.server, token.serverLen),
+      tokenRealm:
+          token == null ? null : (text(token.realm, token.realmLen) ?? ''),
+      tokenScope:
+          token == null ? null : _nonEmpty(text(token.scope, token.scopeLen)),
+      tokenAuthzServer:
+          token == null
+              ? null
+              : _nonEmpty(text(token.authzServer, token.authzServerLen)),
       statistics:
           record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
     );
@@ -161,6 +185,36 @@ final class SipralStackEvent {
   /// The realms it was challenged for, for
   /// `SipralEventKind.challengeDeclined`.
   final List<String>? challengeRealms;
+
+  /// What the account's server said was wrong with the last access token,
+  /// a `SipralTokenError` value -- `invalidToken` for one expired or
+  /// revoked -- for `SipralEventKind.tokenRequired` (RFC 8898).
+  final int? tokenError;
+
+  /// The `error` code as the server wrote it, for
+  /// `SipralEventKind.tokenRequired`.
+  final String? tokenErrorCode;
+
+  /// Whether a proxy asked (407) rather than the registrar (401), for
+  /// `SipralEventKind.tokenRequired`.
+  final bool? tokenProxy;
+
+  /// Where the challenged request went, `host:port`, for
+  /// `SipralEventKind.tokenRequired`.
+  final String? tokenServer;
+
+  /// The protection domain, empty when the challenge named none, for
+  /// `SipralEventKind.tokenRequired`.
+  final String? tokenRealm;
+
+  /// The scope a token has to carry, for `SipralEventKind.tokenRequired`.
+  final String? tokenScope;
+
+  /// The authorization server a token comes from, an `https` URI, for
+  /// `SipralEventKind.tokenRequired`: check it against the ones the
+  /// application trusts, then hand the token to
+  /// [SipralAccount.setAccessToken].
+  final String? tokenAuthzServer;
 
   /// The account's `SipralRegistrationState` value, for
   /// `SipralEventKind.registrationChanged`.
@@ -217,3 +271,6 @@ final class SipralStackEvent {
   String toString() =>
       'SipralStackEvent(kind: $kind, account: $account, call: $call)';
 }
+
+/// [text], or null when it is empty.
+String? _nonEmpty(String? text) => text == null || text.isEmpty ? null : text;

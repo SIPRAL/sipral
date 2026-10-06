@@ -278,6 +278,12 @@ public final class SipralReactCore: @unchecked Sendable {
         try guarded { try accountOf(account).unregister() }
     }
 
+    /// The OAuth 2.0 access token the account's server asked for (RFC
+    /// 8898); an empty one takes it away.
+    public func setAccessToken(_ account: String, token: String) throws {
+        try guarded { try accountOf(account).setAccessToken(token.isEmpty ? nil : token) }
+    }
+
     public func removeAccount(_ account: String) throws {
         try guarded {
             try accountOf(account).remove()
@@ -615,6 +621,14 @@ public final class SipralReactCore: @unchecked Sendable {
             transfer.target.map { flat["target"] = $0 }
         } else if event.kind == .digitReceived || event.kind == .inBandDigit, let digit = event.mediaData?.digit {
             flat["digit"] = String(digit)
+        } else if let token = event.tokenData {
+            token.error.map { flat["tokenError"] = String(describing: $0) }
+            token.errorCode.map { flat["tokenErrorCode"] = $0 }
+            flat["tokenProxy"] = token.proxy
+            token.server.map { flat["tokenServer"] = $0 }
+            flat["tokenRealm"] = token.realm
+            token.scope.map { flat["tokenScope"] = $0 }
+            token.authzServer.map { flat["tokenAuthzServer"] = $0 }
         } else if let challenge = event.challengeData {
             challenge.refusal.map { flat["challengeRefusal"] = String(describing: $0) }
             challenge.server.map { flat["challengeServer"] = $0 }

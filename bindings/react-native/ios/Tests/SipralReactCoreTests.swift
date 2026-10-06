@@ -390,6 +390,30 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(flat["challengeRefusal"] as? String, "notTheAccountsRealm")
         XCTAssertEqual(flat["challengeServer"] as? String, server)
         XCTAssertEqual(flat["challengeRealms"] as? String, realms)
+
+        let authz = "https://as.example.com"
+        let scope = "sip register"
+        let token = authz.withCString { authzText in
+            scope.withCString { scopeText in
+                var raw = sipral_event_t()
+                raw.size = MemoryLayout<sipral_event_t>.size
+                raw.kind = SipralEventKind.tokenRequired.rawValue
+                raw.account = 7
+                raw.payload.token.error = SipralTokenError.invalidToken.rawValue
+                raw.payload.token.proxy = SipralToggle.on.rawValue
+                raw.payload.token.authz_server = authzText
+                raw.payload.token.authz_server_len = authz.utf8.count
+                raw.payload.token.scope = scopeText
+                raw.payload.token.scope_len = scope.utf8.count
+                return SipralReactCore.flatten(SipralEventDecoder.decode(raw))
+            }
+        }
+        XCTAssertEqual(token["kind"] as? String, "tokenRequired")
+        XCTAssertEqual(token["tokenError"] as? String, "invalidToken")
+        XCTAssertEqual(token["tokenProxy"] as? Bool, true)
+        XCTAssertEqual(token["tokenAuthzServer"] as? String, authz)
+        XCTAssertEqual(token["tokenScope"] as? String, scope)
+        XCTAssertEqual(token["tokenRealm"] as? String, "")
     }
 
     /// A call's own gain and mute through the core, on a stack in device mode

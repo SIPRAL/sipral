@@ -26,9 +26,10 @@
 
 use std::sync::Arc;
 
+use super::bearer::{self, BearerChallenge};
 use super::digest::Challenge;
 use super::secret::Credentials;
-use crate::msg::{ChallengeRef, HeaderError, HeaderName, Method, RawMessage};
+use crate::msg::{HeaderName, Method, RawMessage};
 
 /// What a challenge response was worth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +40,7 @@ pub enum Learned {
     /// refused rather than missing. §22.1 says not to try them again.
     Refused,
     /// Nothing here can be answered: no Digest challenge with an algorithm
-    /// this stack has. "The client MUST ignore any challenge it does not
+    /// this stack has, and no `Bearer` one. "The client MUST ignore any challenge it does not
     /// understand" (RFC 8760 §2.4).
     Unusable,
 }
@@ -48,6 +49,7 @@ pub enum Learned {
 #[derive(Debug, Default)]
 pub struct AuthCache {
     entries: Vec<Entry>,
+    bearer: Vec<BearerEntry>,
 }
 
 /// An answer to the challenges a destination has made, and which of them it
@@ -78,6 +80,20 @@ impl Answered {
     }
 }
 
+/// A `Bearer` challenge (RFC 8898), and the token it last refused.
+#[derive(Debug)]
+struct BearerEntry {
+    challenge: BearerChallenge,
+    /// The SHA-256 of the last token this domain refused: a request that
+    /// carried one and was challenged again is the token turned down,
+    /// whatever `error` says, and it is not offered here again. The value
+    /// itself is never kept.
+    rejected: Option<[u8; 32]>,
+    refused: bool,
+    /// As [`Entry::call_id`]: how far a proxy's challenge may travel.
+    call_id: Arc<[u8]>,
+}
+
 #[derive(Debug)]
 struct Entry {
     challenge: Challenge,
@@ -96,6 +112,7 @@ impl AuthCache {
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
+            bearer: Vec::new(),
         }
     }
 
@@ -110,6 +127,12 @@ impl AuthCache {
     /// §2.3 has the server list them "in the order in which it would prefer
     /// to see them used", and §2.4 has the client "use the topmost header
     /// field that it supports".
+    ///
+    /// A `Bearer` challenge (RFC 8898) is kept beside the Digest ones, one
+    /// per protection domain, and is always worth answering once the
+    /// application has a token: a token refused — the request carried one
+    /// and was challenged again — is remembered and not offered to that
+    /// domain again, so the answer has to be a different token.
     pub fn learn(
         &mut self,
         response: &RawMessage<'_>,
@@ -124,7 +147,15 @@ impl AuthCache {
         let mut seen: Vec<(bool, Arc<str>)> = Vec::new();
         let call_id: Arc<[u8]> = Arc::from(request.call_id().unwrap_or_default());
         for (challenge, is_proxy) in www.chain(proxy) {
-            let Some(challenge) = readable(challenge, is_proxy) else {
+            let Ok(challenge) = challenge else {
+                continue;
+            };
+            if let Some(challenge) = BearerChallenge::read(&challenge, is_proxy) {
+                let carried = carried_token(request, is_proxy);
+                outcome = worst(outcome, self.take_bearer(challenge, &call_id, carried));
+                continue;
+            }
+            let Some(challenge) = Challenge::read(&challenge, is_proxy) else {
                 continue;
             };
             let realm = (is_proxy, Arc::clone(&challenge.realm));
@@ -169,17 +200,42 @@ impl AuthCache {
         call_id: &[u8],
     ) -> Answered {
         let mut answered = Answered::default();
+        // RFC 8898 §2.1.1: offered both schemes for one realm, the client
+        // "provides credentials for one of the schemes that it supports,
+        // based on local policy". The policy here is the token: an
+        // application that supplied one did so for this server.
+        let mut by_token: Vec<(bool, &str)> = Vec::new();
+        let token = bearer::fingerprint_of(credentials);
+        for entry in &self.bearer {
+            if entry.refused
+                || (entry.challenge.proxy && *entry.call_id != *call_id)
+                || token.is_none()
+                || token == entry.rejected
+            {
+                continue;
+            }
+            let Some(value) = BearerChallenge::respond(credentials) else {
+                continue;
+            };
+            answered.fields.push((entry.challenge.header(), value));
+            by_token.push((entry.challenge.proxy, &entry.challenge.realm));
+        }
         for entry in &self.entries {
-            if entry.refused || (entry.challenge.proxy && *entry.call_id != *call_id) {
+            if entry.refused
+                || (entry.challenge.proxy && *entry.call_id != *call_id)
+                || by_token.contains(&(entry.challenge.proxy, &*entry.challenge.realm))
+            {
                 continue;
             }
             let count = entry.count.saturating_add(1);
-            answered.fields.push((
-                entry.challenge.header(),
+            let Some(value) =
                 entry
                     .challenge
-                    .respond(credentials, method, uri, count, &entry.cnonce),
-            ));
+                    .respond(credentials, method, uri, count, &entry.cnonce)
+            else {
+                continue;
+            };
+            answered.fields.push((entry.challenge.header(), value));
             answered.answered.push((
                 entry.challenge.proxy,
                 Arc::clone(&entry.challenge.realm),
@@ -217,15 +273,37 @@ impl AuthCache {
             .map(|entry| &entry.challenge)
     }
 
+    /// The `Bearer` challenges being answered, in the order they were
+    /// learned.
+    pub fn bearer_challenges(&self) -> impl Iterator<Item = &BearerChallenge> {
+        self.bearer
+            .iter()
+            .filter(|entry| !entry.refused)
+            .map(|entry| &entry.challenge)
+    }
+
+    /// The first `Bearer` challenge still open that `credentials` cannot
+    /// answer: there are none, they hold no token, or only the one that
+    /// domain refused. What the application needs a new token for.
+    #[must_use]
+    pub fn token_wanted(&self, credentials: Option<&Credentials>) -> Option<&BearerChallenge> {
+        let token = credentials.and_then(bearer::fingerprint_of);
+        self.bearer
+            .iter()
+            .find(|entry| !entry.refused && (token.is_none() || token == entry.rejected))
+            .map(|entry| &entry.challenge)
+    }
+
     /// Whether there is anything to send.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.challenges().next().is_none()
+        self.challenges().next().is_none() && self.bearer_challenges().next().is_none()
     }
 
     /// Forget everything, for a change of account.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.bearer.clear();
     }
 
     /// Stop answering these challenges, and stop offering the credentials
@@ -252,7 +330,14 @@ impl AuthCache {
         let www = response.www_authenticate().map(|c| (c, false));
         let proxy = response.proxy_authenticate().map(|c| (c, true));
         for (challenge, is_proxy) in www.chain(proxy) {
-            let Some(challenge) = readable(challenge, is_proxy) else {
+            let Ok(challenge) = challenge else {
+                continue;
+            };
+            if let Some(challenge) = BearerChallenge::read(&challenge, is_proxy) {
+                self.refuse_realm(challenge.proxy, &challenge.realm);
+                continue;
+            }
+            let Some(challenge) = Challenge::read(&challenge, is_proxy) else {
                 continue;
             };
             for entry in &mut self.entries {
@@ -280,6 +365,42 @@ impl AuthCache {
                 entry.refused = true;
             }
         }
+        for entry in &mut self.bearer {
+            if entry.challenge.proxy == proxy && *entry.challenge.realm == *realm {
+                entry.refused = true;
+            }
+        }
+    }
+
+    /// Keep a `Bearer` challenge. `carried` is the fingerprint of the token
+    /// the refused request carried in that space, if it carried one: being
+    /// challenged again is that token turned down.
+    fn take_bearer(
+        &mut self,
+        challenge: BearerChallenge,
+        call_id: &Arc<[u8]>,
+        carried: Option<[u8; 32]>,
+    ) -> Learned {
+        let existing = self.bearer.iter_mut().find(|entry| {
+            entry.challenge.proxy == challenge.proxy && entry.challenge.realm == challenge.realm
+        });
+        match existing {
+            Some(entry) => {
+                entry.challenge = challenge;
+                entry.refused = false;
+                entry.call_id = Arc::clone(call_id);
+                if carried.is_some() {
+                    entry.rejected = carried;
+                }
+            }
+            None => self.bearer.push(BearerEntry {
+                challenge,
+                rejected: carried,
+                refused: false,
+                call_id: Arc::clone(call_id),
+            }),
+        }
+        Learned::Retry
     }
 
     /// `answered` is whether the refused request carried an answer to this
@@ -361,8 +482,18 @@ fn carried(request: &RawMessage<'_>) -> Vec<(bool, Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-fn readable(challenge: Result<ChallengeRef<'_>, HeaderError>, proxy: bool) -> Option<Challenge> {
-    Challenge::read(&challenge.ok()?, proxy)
+/// The fingerprint of the token `request` carried in a `Bearer` field of the
+/// space a 401 (`Authorization`) or a 407 (`Proxy-Authorization`) answers.
+fn carried_token(request: &RawMessage<'_>, proxy: bool) -> Option<[u8; 32]> {
+    let field = if proxy {
+        HeaderName::ProxyAuthorization
+    } else {
+        HeaderName::Authorization
+    };
+    request
+        .header_values(field)
+        .find_map(bearer::carried_token)
+        .map(bearer::fingerprint)
 }
 
 /// One answerable challenge makes the whole response answerable; a refusal

@@ -893,7 +893,7 @@ impl UserAgent {
             }
             // §22.2: an offer refused with a challenge is asked again with the
             // credentials, whether it went as a re-INVITE or as an UPDATE
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 if !self.by_offer.contains_key(&transaction) {
                     return Some(event);
                 }

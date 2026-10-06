@@ -14,6 +14,7 @@ import org.sipral.SipralPresence
 import org.sipral.SipralRegistrationState
 import org.sipral.SipralStatus
 import org.sipral.SipralSubscribeConfig
+import org.sipral.SipralTokenError
 import org.sipral.SipralToggle
 import org.sipral.SipralTransport
 
@@ -204,6 +205,20 @@ class SipralAccount internal constructor(
     @Volatile
     var wantsRegistration: Boolean = false
         private set
+
+    /**
+     * `sipral_account_set_access_token`: the OAuth 2.0 access token the
+     * account's server asked for (RFC 8898), in place of any it had; null
+     * takes it away. The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+     * ([tokenRequiredOf]), and the way a renewed token goes in: from the next
+     * request on, the server's `Bearer` challenge is answered with it. A
+     * registration that failed for want of one starts again with [register].
+     * `SipralStatus.INVALID_ARGUMENT` for a token that is not RFC 6750's
+     * `b64token`, with nothing changed.
+     */
+    fun setAccessToken(token: String?) {
+        retryBusy { Sipral.accountSetAccessToken(client.handle, handle, token ?: "") }
+    }
 
     /**
      * `sipral_account_register`. A no-op account refuses this. On a client
@@ -422,5 +437,44 @@ fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? {
         SipralChallengeRefusal.of(told.refusal.toInt()),
         told.server,
         told.realms?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
+    )
+}
+
+/**
+ * An account's server asking for an OAuth 2.0 access token
+ * (`SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, RFC 8898): what was wrong with the
+ * last one ([error], `INVALID_TOKEN` for one expired or revoked, and
+ * [errorCode] as the server wrote it), whether a proxy asked ([proxy]),
+ * where the challenged request went ([server], `host:port`), the [realm],
+ * the [scope] a token has to carry and the [authzServer] it comes from.
+ * Check [authzServer] against the authorization servers the application
+ * trusts before going near it, then hand the token to
+ * [SipralAccount.setAccessToken].
+ */
+class SipralTokenRequired(
+    val error: SipralTokenError?,
+    val errorCode: String?,
+    val proxy: Boolean,
+    val server: String?,
+    val realm: String,
+    val scope: String?,
+    val authzServer: String?,
+)
+
+/** The `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` payload, or null for an event of
+ * any other kind. */
+fun tokenRequiredOf(event: SipralEvent): SipralTokenRequired? {
+    if (event.kind != SipralEventKind.TOKEN_REQUIRED.value.toLong()) {
+        return null
+    }
+    val told = event.payload.token
+    return SipralTokenRequired(
+        SipralTokenError.of(told.error.toInt()),
+        told.errorCode?.takeIf { it.isNotEmpty() },
+        told.proxy == SipralToggle.ON.value.toLong(),
+        told.server,
+        told.realm ?: "",
+        told.scope?.takeIf { it.isNotEmpty() },
+        told.authzServer?.takeIf { it.isNotEmpty() },
     )
 }

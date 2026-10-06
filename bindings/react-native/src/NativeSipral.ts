@@ -141,6 +141,20 @@ export type NativeEvent = {
   challengeServer?: string;
   /** The realms it was challenged for, one per line. */
   challengeRealms?: string;
+  /** What was wrong with the last access token, in lower camel case: "none", "invalidToken". */
+  tokenError?: string;
+  /** The `error` code as the server wrote it. */
+  tokenErrorCode?: string;
+  /** Whether a proxy asked for the token (407) rather than the registrar (401). */
+  tokenProxy?: boolean;
+  /** Where the request asking for a token went, host:port. */
+  tokenServer?: string;
+  /** The realm the token is asked for, empty for none. */
+  tokenRealm?: string;
+  /** The scope the token has to carry. */
+  tokenScope?: string;
+  /** The authorization server a token comes from, an https URI. */
+  tokenAuthzServer?: string;
 };
 
 export interface Spec extends TurboModule {
@@ -152,6 +166,8 @@ export interface Spec extends TurboModule {
   addAccount(options: NativeAccountOptions): Promise<string>;
   register(account: string): Promise<void>;
   unregister(account: string): Promise<void>;
+  /** The OAuth 2.0 access token the account's server asked for; "" takes it away. */
+  setAccessToken(account: string, token: string): Promise<void>;
   removeAccount(account: string): Promise<void>;
 
   /** Resolves with the call's handle. */

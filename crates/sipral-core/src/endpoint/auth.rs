@@ -409,6 +409,30 @@ impl Endpoint {
         })
     }
 
+    /// The `Bearer` challenge (RFC 8898) behind the request held under
+    /// `failed` that `credentials` cannot answer — they hold no access
+    /// token, or only the one that protection domain has already refused —
+    /// so that the application can be asked for a new one. `None` when no
+    /// challenge is held there, or every `Bearer` one in it is answerable.
+    #[must_use]
+    pub fn token_wanted(
+        &self,
+        failed: AnyTransactionId,
+        credentials: Option<&Credentials>,
+    ) -> Option<crate::auth::BearerChallenge> {
+        let held = self.challenges.get(failed)?;
+        let to = held.request.as_raw().header(HeaderName::To).and_then(destination)?;
+        self.known
+            .peek(&to)?
+            .token_wanted(credentials)
+            .filter(|challenge| {
+                held.realms
+                    .iter()
+                    .any(|(proxy, realm)| *proxy == challenge.proxy && *realm == challenge.realm)
+            })
+            .cloned()
+    }
+
     /// Answer the challenge held under `failed` with nothing, ever: the
     /// caller decided its password is not for whoever asked.
     ///
@@ -710,6 +734,7 @@ impl Endpoint {
                 )
             })
             .collect();
+        let tokens: Vec<_> = cache.bearer_challenges().cloned().collect();
 
         self.note_wire(
             response,
@@ -720,7 +745,18 @@ impl Endpoint {
         let realms = answering
             .iter()
             .map(|(realm, proxy, _, _)| (*proxy, Arc::clone(realm)))
+            .chain(
+                tokens
+                    .iter()
+                    .map(|challenge| (challenge.proxy, Arc::clone(&challenge.realm))),
+            )
             .collect();
+        for challenge in tokens {
+            self.events.push_back(Event::TokenChallenged {
+                transaction: id,
+                challenge,
+            });
+        }
         for (realm, proxy, algorithm, stale) in answering {
             self.events.push_back(Event::Challenged {
                 transaction: id,

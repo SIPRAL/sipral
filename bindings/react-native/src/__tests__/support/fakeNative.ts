@@ -79,6 +79,10 @@ export class FakeNative implements Spec {
   unregister(...args: Parameters<Spec['unregister']>) {
     return this.settle('unregister', args, undefined);
   }
+
+  setAccessToken(...args: Parameters<Spec['setAccessToken']>) {
+    return this.settle('setAccessToken', args, undefined);
+  }
   removeAccount(...args: Parameters<Spec['removeAccount']>) {
     return this.settle('removeAccount', args, undefined);
   }

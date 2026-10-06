@@ -326,6 +326,20 @@ public final class Account: @unchecked Sendable {
         }
     }
 
+    /// `sipral_account_set_access_token`: the OAuth 2.0 access token the
+    /// account's server asked for (RFC 8898), in place of any it had; `nil`
+    /// takes it away. The answer to `SipralEventKind.tokenRequired`
+    /// (`SipralEvent.tokenData`), and the way a renewed token goes in: from
+    /// the next request on, the server's `Bearer` challenge is answered with
+    /// it. A registration that failed for want of one starts again with
+    /// `register()`. Throws `.invalidArgument` for a token that is not RFC
+    /// 6750's `b64token`, with nothing changed.
+    public func setAccessToken(_ token: String?) throws {
+        try retryingBusy {
+            try Sipral.accountSetAccessToken(stack: stack.handle, account: handle, token: token ?? "")
+        }
+    }
+
     /// Gives the binding up: a REGISTER with Expires: 0. The registration state
     /// reads unregistered as soon as this returns, before the registrar answers;
     /// the answer is the registration-changed event that follows. Wait for that

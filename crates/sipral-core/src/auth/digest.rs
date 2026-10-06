@@ -213,7 +213,8 @@ impl Challenge {
     /// `count` is the number of times this client nonce has been used with
     /// this challenge, starting at one, and `cnonce` is the caller's client
     /// nonce — unused, and omitted from the message, when the server offered
-    /// no `qop`.
+    /// no `qop`. `None` for credentials with no password — an access token
+    /// alone, which answers `Bearer` and not this.
     #[must_use]
     pub fn respond(
         &self,
@@ -222,7 +223,8 @@ impl Challenge {
         uri: &[u8],
         count: u32,
         cnonce: &str,
-    ) -> String {
+    ) -> Option<String> {
+        let password = credentials.password()?;
         let algorithm = self.algorithm;
         let nc = format!("{count:08x}");
 
@@ -235,7 +237,7 @@ impl Challenge {
         let a1 = Secret::joined(&[
             credentials.username.as_bytes(),
             self.realm.as_bytes(),
-            credentials.password(),
+            password,
         ]);
         // HA1 answers any challenge in this realm as well as the password
         // does, and so does the H(A1) a -sess HA1 is made from: each is hexed
@@ -304,7 +306,7 @@ impl Challenge {
             out.push_str(", ");
             quoted(&mut out, "opaque", opaque.as_bytes());
         }
-        out
+        Some(out)
     }
 }
 
@@ -443,7 +445,8 @@ opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"",
             b"/dir/index.html",
             1,
             "0a4f113b",
-        );
+        )
+        .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("9af0a23c6a2ee2c252998f4fa7a1b84b")
@@ -481,7 +484,8 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm={name}"
                 b"sip:example.com",
                 1,
                 "0a4f113b",
-            );
+            )
+            .expect("a password");
             assert_eq!(
                 field(&value, "response").as_deref(),
                 Some(expected),
@@ -506,7 +510,8 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             b"sip:example.com",
             1,
             "0a4f113b",
-        );
+        )
+        .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("f017e479dbee9ec264fe1118766c910d")
@@ -580,7 +585,8 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             b"sip:example.com",
             1,
             "0a4f113b",
-        );
+        )
+        .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("b75dc11e0cde1fc2f921ce28378036bb")
@@ -604,7 +610,8 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             b"sip:example.com",
             0x2a,
             "0a4f113b",
-        );
+        )
+        .expect("a password");
         // "For SIP, the 'uri' MUST be enclosed in quotation marks."
         assert!(value.contains("uri=\"sip:example.com\""), "{value}");
         assert!(value.contains("nc=0000002a"), "{value}");
@@ -624,7 +631,8 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             b"sip:example.com",
             1,
             "0a4f113b",
-        );
+        )
+        .expect("a password");
         assert!(value.contains("username=\"ali\\\"ce\""), "{value}");
         assert_eq!(field(&value, "username").as_deref(), Some("ali\"ce"));
     }

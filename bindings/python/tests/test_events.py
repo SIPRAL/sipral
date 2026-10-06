@@ -67,6 +67,32 @@ class EveryArmIsRead(unittest.TestCase):
         self.assertEqual(fields["server"], "203.0.113.9:5060")
         self.assertEqual(fields["realms"], ["sbc.example", "callee, inc."])
 
+    def test_a_token_required_carries_where_a_token_comes_from(self) -> None:
+        raw = _raw(lib.SIPRAL_EVENT_KIND_TOKEN_REQUIRED)
+        texts = {
+            "server": b"203.0.113.9:5060",
+            "realm": b"example.com",
+            "scope": b"sip register",
+            "authz_server": b"https://as.example.com",
+            "error_code": b"invalid_token",
+        }
+        kept = []
+        for name, value in texts.items():
+            buffer = ffi.new("char[]", value)
+            kept.append(buffer)
+            setattr(raw.payload.token, name, buffer)
+            setattr(raw.payload.token, f"{name}_len", len(value))
+        raw.payload.token.error = lib.SIPRAL_TOKEN_ERROR_INVALID_TOKEN
+        raw.payload.token.proxy = lib.SIPRAL_TOGGLE_OFF
+        fields = events.decode(raw).fields
+        self.assertEqual(fields["error"], lib.SIPRAL_TOKEN_ERROR_INVALID_TOKEN)
+        self.assertEqual(fields["error_code"], "invalid_token")
+        self.assertFalse(fields["proxy"])
+        self.assertEqual(fields["server"], "203.0.113.9:5060")
+        self.assertEqual(fields["realm"], "example.com")
+        self.assertEqual(fields["scope"], "sip register")
+        self.assertEqual(fields["authz_server"], "https://as.example.com")
+
     def test_a_subscription_notice_carries_its_state(self) -> None:
         raw = _raw(lib.SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED)
         raw.payload.subscription.subscription = 7

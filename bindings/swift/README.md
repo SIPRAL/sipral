@@ -184,6 +184,14 @@ try call.hangup(reason: .normalClearing)   // or hangup(), with no Reason
 call.close()
 ```
 
+A server that signs its users in with OAuth 2.0 (RFC 8898) challenges with
+`Bearer`; the stack raises `SipralEventKind.tokenRequired`, whose
+`SipralEvent.tokenData` names the `authzServer` and the `scope`. Check the
+server against the ones the application trusts, fetch the token, and hand it
+over with `try account.setAccessToken(token)`; `register()` again registers at
+once, and a token the server called `.invalidToken` raises the event again
+(`docs/08-ffi.md`, "What ABI 1.2 added").
+
 An application that runs its own audio -- a voice agent, a recorder -- makes
 the stack in application mode, and pumps each call's frames:
 

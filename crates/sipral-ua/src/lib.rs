@@ -51,6 +51,8 @@ mod answering;
 mod audit_tests;
 #[cfg(test)]
 mod auth_scope_tests;
+#[cfg(test)]
+mod oauth_tests;
 mod call;
 mod calls;
 /// The conference event package (RFC 4575): the document a focus notifies,
@@ -174,6 +176,9 @@ pub use verification::{
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.
 pub use sipral_core::auth::Credentials;
+/// What [`UaEvent::TokenRequired`] carries: a server's `Bearer` challenge
+/// (RFC 8898) and the error it named.
+pub use sipral_core::auth::{BearerChallenge, BearerError};
 /// RFC 3263's lookups, as [`UaEvent::LookupWanted`] asks for them and
 /// [`UserAgent::looked_up`] takes their answers, and the procedure itself for
 /// an application that locates something of its own.

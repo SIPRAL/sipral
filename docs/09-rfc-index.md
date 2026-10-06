@@ -30,6 +30,8 @@ whether it is met; *in part* is followed by what is missing.
 | 3311 | The UPDATE method | sipral-ua | phase 1 |
 | 4028 | Session timers | sipral-ua | phase 1 |
 | 8760 | Digest with SHA-256 and SHA-512/256 | sipral-core | phase 1 |
+| 8898 | OAuth 2.0 in SIP: the `Bearer` challenge read (`realm`, `scope`, `authz_server`, `error`) and answered with the application's access token; the token itself is fetched by the application | sipral-core, sipral-ua | 1.2; built |
+| 6750 | Bearer tokens: `Authorization: Bearer <b64token>` (§2.1), the `invalid_token` error (§3.1) | sipral-core | 1.2; built |
 | 3515 | The REFER method: inside a call, and outside any dialog (§4.1) where the application turns it on (`allow_referrals`, `sipral_stack_config_t::referrals`), off and refused 403 by default | sipral-ua | phase 1 |
 | 4488 | REFER without an implicit subscription: `Refer-Sub: false` granted, `norefersub` understood | sipral-ua | phase 1 |
 | 3891 | The Replaces header | sipral-ua | phase 1 |

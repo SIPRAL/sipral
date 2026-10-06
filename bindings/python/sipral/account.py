@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, NamedTuple, Sequence
+from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
 
 from ._sipral_cffi import ffi, lib
 from .enums import Activity, RegistrationState
@@ -356,6 +356,26 @@ class Account:
         except SipralError as refused:
             if refused.status != lib.SIPRAL_STATUS_TRANSPORT_DOWN:
                 raise
+
+    def set_access_token(self, token: Optional[str]) -> None:
+        """`sipral_account_set_access_token`: the OAuth 2.0 access token the
+        account's server asked for (RFC 8898), in place of any it had;
+        ``None`` takes it away.
+
+        The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, whose fields name
+        the ``authz_server`` to fetch one from and the ``scope`` it has to
+        carry; check the server against the ones the application trusts
+        first. From the next request on, the server's ``Bearer`` challenge is
+        answered with it; a registration that failed for want of one starts
+        again with `register`. ``SIPRAL_STATUS_INVALID_ARGUMENT`` for a token
+        that is not RFC 6750's ``b64token``, with nothing changed."""
+        raw = (token or "").encode("utf-8")
+        _call(
+            lambda: lib.sipral_account_set_access_token(
+                self.stack.handle, self.handle, raw, len(raw)
+            ),
+            "sipral_account_set_access_token",
+        )
 
     def unregister(self) -> None:
         """`sipral_account_unregister`.

@@ -3610,3 +3610,63 @@ settings: Swift `AudioDevices.setSystemEchoCancellation(_:)`, .NET
 `client.audio.setSystemEchoCancellation(on)` (TypeScript, Android and iOS
 halves), and Dart `SipralStack.setSystemEchoCancellation`, which this layer's
 stacks, all in application mode, answer with `wrongState`.
+
+## What ABI 1.2 added
+
+Grown as 1.1 was: one entry point, one event kind with its union arm, one
+enumeration, and nothing else in the header moved. The union keeps its size,
+since the new arm is smaller than the largest. A binding printed at 1.1 loads
+against a 1.2 library and works as it did; one printed at 1.2 is refused by
+a 1.1 library, with both versions named.
+
+**OAuth 2.0 at the account's server (RFC 8898).** A server that signs its
+users in with OAuth challenges with `Bearer` (`WWW-Authenticate: Bearer
+realm=..., scope=..., authz_server="https://..."`) and takes the access token
+as `Authorization: Bearer <token>` (RFC 6750 §2.1). The library does not
+fetch tokens: the exchange with the authorization server is the
+application's, which RFC 8898 §2.1.1 also gives the list of servers it
+trusts.
+
+- `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` (59, with
+  `sipral_event_payload_t::token`, a `sipral_token_event_t`): the account's
+  own server asked for a token and the account has none it would accept —
+  none was supplied, or the server refused the one it had. `error` is a
+  `sipral_token_error_t` (`SIPRAL_TOKEN_ERROR_INVALID_TOKEN` for a token
+  expired or revoked, `NONE` when the server named no error, `OTHER` with
+  `error_code` as written); `proxy` a `sipral_toggle_t`, `ON` for a 407;
+  `server`, where the request went, `host:port`; `realm`; `scope`, what the
+  token has to cover; and `authz_server`, an `https` URI (any other value is
+  left out). `account` is the account. The refusal then settles as an
+  unanswered challenge does: a registration fails with `BAD_CREDENTIALS`, a
+  call ends with the 401 or 407. A `Bearer` challenge from anybody but the
+  account's server is `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`, as a Digest one
+  is.
+- `sipral_account_set_access_token(stack, account, token, token_len)`: the
+  token, in place of any before it, the password left as it was; a length
+  of zero takes it away. From the next request on the server's `Bearer`
+  challenge is answered with it, and every later request to that
+  destination carries it ahead of being asked (RFC 3261 §22.2).
+  `sipral_account_register` registers again at once. A token that is not
+  RFC 6750 §2.1's `b64token` is `SIPRAL_STATUS_INVALID_ARGUMENT`, with
+  nothing changed and the error text not describing it. The token is copied,
+  kept out of every log and diagnostic, and wiped when replaced.
+- A token the server refused is never sent to that protection domain again
+  (RFC 3261 §22.1's rule for a rejected password): the next one has to be a
+  different token. Offered Digest and `Bearer` for one realm, the token
+  answers when the account has one, and the password otherwise.
+
+The facade carries the same as `UserAgent::set_access_token`,
+`UaEvent::TokenRequired`, `BearerChallenge` and `BearerError`, and
+`Credentials::bearer` and `with_access_token` for an account given its token
+from the start (`docs/04-ua.md`, "OAuth 2.0 access tokens").
+
+**In the layers.** Each idiomatic layer reads the event and hands the token
+to the account: Swift `SipralEvent.tokenData` and
+`Account.setAccessToken(_:)`, .NET `SipralEventArgs.Token` and
+`Account.SetAccessToken`, Kotlin and the JVM jar `tokenRequiredOf` and
+`SipralAccount.setAccessToken`, Python `fields["authz_server"]` and the rest
+of the event's fields and `Account.set_access_token`, Dart
+`SipralStackEvent.tokenAuthzServer` and its siblings and
+`SipralAccount.setAccessToken`, React Native the `tokenRequired` event on the
+client and the account and `account.setAccessToken(token)` (TypeScript,
+Android and iOS halves).

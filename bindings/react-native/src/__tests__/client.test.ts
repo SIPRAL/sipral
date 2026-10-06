@@ -7,6 +7,7 @@ import type {
   ChallengeDeclinedEvent,
   IncomingCallEvent,
   RegistrationChangedEvent,
+  TokenRequiredEvent,
 } from '../index';
 import {FakeNative} from './support/fakeNative';
 import {asked} from './support/reactNative';
@@ -311,6 +312,48 @@ describe('accounts', () => {
       {account, refusal: 'notTheAccountsRealm', server: '203.0.113.5:5060', realms: ['sbc.example', 'callee, inc.']},
     ]);
     expect(onClient).toEqual(onAccount);
+  });
+
+  it('reports a token asked for on the account and on the client, and hands one over', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({aor: 'sip:alice@example.com', registrarAddress: '203.0.113.5:5060'});
+    const onAccount: TokenRequiredEvent[] = [];
+    const onClient: TokenRequiredEvent[] = [];
+    account.on('tokenRequired', (event) => onAccount.push(event));
+    client.on('tokenRequired', (event) => onClient.push(event));
+    native.emit({
+      kind: 'tokenRequired',
+      account: account.id,
+      tokenError: 'invalidToken',
+      tokenErrorCode: 'invalid_token',
+      tokenProxy: false,
+      tokenServer: '203.0.113.5:5060',
+      tokenRealm: 'example.com',
+      tokenScope: 'sip register',
+      tokenAuthzServer: 'https://as.example.com',
+    });
+    native.emit({kind: 'tokenRequired', account: '99'});
+    expect(onAccount).toEqual([
+      {
+        account,
+        error: 'invalidToken',
+        errorCode: 'invalid_token',
+        proxy: false,
+        server: '203.0.113.5:5060',
+        realm: 'example.com',
+        scope: 'sip register',
+        authzServer: 'https://as.example.com',
+      },
+    ]);
+    expect(onClient).toEqual(onAccount);
+
+    await account.setAccessToken('eyJ0.eyJ1.c2ln');
+    await account.setAccessToken(null);
+    const handed = native.calls.filter((call) => call.method === 'setAccessToken').map((call) => call.args);
+    expect(handed).toEqual([
+      [account.id, 'eyJ0.eyJ1.c2ln'],
+      [account.id, ''],
+    ]);
   });
 
   it('refuses an account with no address before crossing', async () => {

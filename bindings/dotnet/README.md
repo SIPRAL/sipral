@@ -105,6 +105,14 @@ call.SendDtmf("123#");
 call.Hangup();
 ```
 
+A server that signs its users in with OAuth 2.0 (RFC 8898) challenges with
+`Bearer`; the stack raises `SipralEventKind.TokenRequired`, whose
+`SipralEventArgs.Token` names the `AuthzServer` and the `Scope`. Check the
+server against the ones the application trusts, fetch the token, and hand it
+over with `account.SetAccessToken(token)`; `Register()` again registers at
+once, and a token the server called `InvalidToken` raises the event again
+(`docs/08-ffi.md`, "What ABI 1.2 added").
+
 That is a whole softphone on Windows and macOS: the stack is in **device
 mode** there by default, so the library opens the machine's own microphone
 and loudspeaker and pumps the call through them, and the code above has no

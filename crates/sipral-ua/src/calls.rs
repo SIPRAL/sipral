@@ -1549,7 +1549,7 @@ impl UserAgent {
                 self.forget_parked_in(dialog);
                 self.on_dialog_over(dialog, reason, now)
             }
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 if self.on_challenge_in_call(transaction, now) {
                     None
                 } else {

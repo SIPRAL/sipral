@@ -1737,6 +1737,23 @@ enum class SipralEventKind(val value: Int) {
      * the account.
      */
     CHALLENGE_DECLINED(58),
+    /**
+     * An account's own server takes an OAuth 2.0 access token (RFC
+     * 8898) and the account has none it would accept: none was
+     * supplied, or the one supplied was refused — expired or revoked,
+     * which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+     *
+     * `payload.token` says where a token comes from: `authz_server`, an
+     * `https` URI RFC 8898 §2.1.1 says to check against the
+     * authorization servers the application trusts before going near
+     * it, and `scope`, what the token has to cover. Fetching it is the
+     * application's; hand it over with `sipral_account_set_access_token`.
+     * The refusal settles meanwhile the way an unanswered challenge does
+     * — a registration failing with `BAD_CREDENTIALS`, a call ending
+     * with the 401 or 407 — and `sipral_account_register` registers
+     * again at once with the new token. `account` is the account.
+     */
+    TOKEN_REQUIRED(59),
     ;
 
     companion object {
@@ -3944,6 +3961,45 @@ enum class SipralChallengeRefusal(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralChallengeRefusal? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What an account's server said was wrong with the access token it
+ * was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+ * `sipral_token_event_t::error`.
+ */
+enum class SipralTokenError(val value: Int) {
+    /**
+     * The server named no error: no token was offered yet.
+     */
+    NONE(0),
+    /**
+     * `invalid_request`: the request was malformed.
+     */
+    INVALID_REQUEST(1),
+    /**
+     * `invalid_token`: the token is expired, revoked, malformed or
+     * otherwise invalid. A new one is needed.
+     */
+    INVALID_TOKEN(2),
+    /**
+     * `insufficient_scope`: the token does not cover what was asked;
+     * `scope` says what would.
+     */
+    INSUFFICIENT_SCOPE(3),
+    /**
+     * `invalid_scope`.
+     */
+    INVALID_SCOPE(4),
+    /**
+     * Another code, as written in `error_code`.
+     */
+    OTHER(5),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralTokenError? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -8389,6 +8445,48 @@ data class SipralChallengeEvent(
 )
 
 /**
+ * What a SipralEventKind.TOKEN_REQUIRED carries: the `Bearer`
+ * challenge of an account's server (RFC 8898 §4), and where it came
+ * from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
+ * server left out is empty.
+ */
+data class SipralTokenEvent(
+    /**
+     * A SipralTokenError.
+     */
+    val error: Long,
+    /**
+     * A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
+     * answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
+     * registrar or the far end did (401).
+     */
+    val proxy: Long,
+    /**
+     * Where the challenged request went, and the challenge came from,
+     * as `host:port`.
+     */
+    val server: String?,
+    /**
+     * The protection domain, empty when the challenge named none.
+     */
+    val realm: String?,
+    /**
+     * The scope the token has to carry: space-separated strings the
+     * authorization server defines (RFC 6749 §3.3).
+     */
+    val scope: String?,
+    /**
+     * The authorization server: an `https` URI. A value that was not
+     * one is left out.
+     */
+    val authzServer: String?,
+    /**
+     * The `error` code as the server wrote it, for `Other`.
+     */
+    val errorCode: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -8502,6 +8600,10 @@ class SipralEventPayload(
      * For SipralEventKind.CHALLENGE_DECLINED.
      */
     val challenge: SipralChallengeEvent,
+    /**
+     * For SipralEventKind.TOKEN_REQUIRED.
+     */
+    val token: SipralTokenEvent,
 )
 
 class SipralEvent(
@@ -8868,6 +8970,33 @@ class SipralEvent(
      * For SipralEventKind.CHALLENGE_DECLINED.
      */
     private val payloadChallengeNumbers: LongArray? = null,
+    /**
+     * Where the challenged request went, and the challenge came from,
+     * as `host:port`.
+     */
+    private val payloadTokenServer: String? = null,
+    /**
+     * The protection domain, empty when the challenge named none.
+     */
+    private val payloadTokenRealm: String? = null,
+    /**
+     * The scope the token has to carry: space-separated strings the
+     * authorization server defines (RFC 6749 §3.3).
+     */
+    private val payloadTokenScope: String? = null,
+    /**
+     * The authorization server: an `https` URI. A value that was not
+     * one is left out.
+     */
+    private val payloadTokenAuthzServer: String? = null,
+    /**
+     * The `error` code as the server wrote it, for `Other`.
+     */
+    private val payloadTokenErrorCode: String? = null,
+    /**
+     * For SipralEventKind.TOKEN_REQUIRED.
+     */
+    private val payloadTokenNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -8897,6 +9026,7 @@ class SipralEvent(
             SipralLocalConferenceEvent((payloadLocalConferenceNumbers?.get(0) ?: 0L), (payloadLocalConferenceNumbers?.get(1) ?: 0L), (payloadLocalConferenceNumbers?.get(2) ?: 0L), (payloadLocalConferenceNumbers?.get(3) ?: 0L), (payloadLocalConferenceNumbers?.get(4) ?: 0L), (payloadLocalConferenceNumbers?.get(5) ?: 0L), (payloadLocalConferenceNumbers?.get(6) ?: 0L)),
             SipralLocateEvent((payloadLocateNumbers?.get(0) ?: 0L), (payloadLocateNumbers?.get(1) ?: 0L), payloadLocateName, payloadLocateTargets, (payloadLocateNumbers?.get(2) ?: 0L)),
             SipralChallengeEvent((payloadChallengeNumbers?.get(0) ?: 0L), payloadChallengeServer, payloadChallengeRealms),
+            SipralTokenEvent((payloadTokenNumbers?.get(0) ?: 0L), (payloadTokenNumbers?.get(1) ?: 0L), payloadTokenServer, payloadTokenRealm, payloadTokenScope, payloadTokenAuthzServer, payloadTokenErrorCode),
         )
 }
 
@@ -8968,10 +9098,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?, payloadTokenServer: ByteArray?, payloadTokenRealm: ByteArray?, payloadTokenScope: ByteArray?, payloadTokenAuthzServer: ByteArray?, payloadTokenErrorCode: ByteArray?, payloadTokenNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers, payloadTokenServer?.let { String(it, Charsets.UTF_8) }, payloadTokenRealm?.let { String(it, Charsets.UTF_8) }, payloadTokenScope?.let { String(it, Charsets.UTF_8) }, payloadTokenAuthzServer?.let { String(it, Charsets.UTF_8) }, payloadTokenErrorCode?.let { String(it, Charsets.UTF_8) }, payloadTokenNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -9522,7 +9652,7 @@ class SipralException(val status: SipralStatus?, message: String) :
 internal object SipralNative {
     init {
         System.loadLibrary("sipral_jni")
-        agree(1, 1)
+        agree(1, 2)
     }
 
     /**
@@ -9570,6 +9700,7 @@ internal object SipralNative {
     external fun sipral_account_register(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
+    external fun sipral_account_set_access_token(stack: Long, account: Long, token: ByteArray): Int
     external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, nowMs: Long): Int
@@ -9753,7 +9884,7 @@ object Sipral {
      * rule for all three numbers is the Versioning section of
      * `docs/08-ffi.md`, which is where the ABI contract is written down.
      */
-    const val ABI_VERSION_MINOR: Long = 1
+    const val ABI_VERSION_MINOR: Long = 2
 
     /**
      * The ABI's patch version, raised by a fix that changes no declaration.
@@ -10249,6 +10380,7 @@ object Sipral {
         "sipral_local_conference_event_t" to intArrayOf(40, 40, 40),
         "sipral_locate_event_t" to intArrayOf(48, 32, 32),
         "sipral_challenge_event_t" to intArrayOf(40, 20, 20),
+        "sipral_token_event_t" to intArrayOf(88, 48, 48),
         "sipral_event_payload_t" to intArrayOf(328, 208, 216),
         "sipral_event_t" to intArrayOf(384, 248, 264),
         "sipral_suspending_t" to intArrayOf(32, 16, 16),
@@ -11063,6 +11195,41 @@ object Sipral {
         val stateSlot = LongArray(1)
         check(SipralNative.sipral_account_registration_state(stack, account, stateSlot))
         return stateSlot[0]
+    }
+
+    /**
+     * Give an account the OAuth 2.0 access token its server asked for
+     * (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+     * takes the token away. The password, if the account has one, stays.
+     *
+     * The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+     * renewed ahead of its expiry goes in: from the next request on, a
+     * `Bearer` challenge from the account's own server is answered with
+     * `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
+     * request its cached challenge covers. Offered a `Digest` and a
+     * `Bearer` challenge for one realm, the token answers. A token the
+     * server refused is never sent to it again. The token answers the
+     * account's own server and nobody else, the rule the password is held
+     * to. Nothing is sent by this call; a registration that failed for
+     * want of a token starts again with `sipral_account_register`.
+     *
+     * The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+     * names the authorization server and the scope, and the exchange with
+     * it is the application's. The token is copied, kept out of every log
+     * and diagnostic, and wiped when replaced.
+     *
+     * `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+     * §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+     * nothing changed and the error not describing it.
+     *
+     * Safety
+     *
+     * `token` must be readable for `token_len` bytes, or be null with a
+     * length of zero.
+     */
+    fun accountSetAccessToken(stack: Long, account: Long, token: String) {
+        val tokenBytes = token.toByteArray(Charsets.UTF_8)
+        check(SipralNative.sipral_account_set_access_token(stack, account, tokenBytes))
     }
 
     /**

@@ -143,6 +143,14 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge unregister:account resolve:resolve reject:reject];
 }
 
+- (void)setAccessToken:(NSString *)account
+                 token:(NSString *)token
+               resolve:(RCTPromiseResolveBlock)resolve
+                reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge setAccessToken:account token:token resolve:resolve reject:reject];
+}
+
 - (void)removeAccount:(NSString *)account
               resolve:(RCTPromiseResolveBlock)resolve
                reject:(RCTPromiseRejectBlock)reject

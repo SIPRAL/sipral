@@ -351,6 +351,30 @@ pub enum UaEvent {
         /// Why the password is not for it.
         why: ChallengeRefusal,
     },
+    /// The account's server takes an OAuth 2.0 access token (RFC 8898) and
+    /// the account has none it would accept: none was supplied, or the one
+    /// supplied was refused — expired or revoked, as
+    /// `challenge.error`'s `invalid_token` says (RFC 6750 §3.1).
+    ///
+    /// Fetching the token is the application's: from
+    /// `challenge.authz_server`, which RFC 8898 §2.1.1 says the client
+    /// "MUST check ... against a list of trusted ASs", for
+    /// `challenge.scope`. Hand it over with
+    /// [`UserAgent::set_access_token`](crate::UserAgent::set_access_token).
+    /// The refusal settles meanwhile the way an unanswered challenge does —
+    /// a registration failing with [`RegistrationFailure::BadCredentials`],
+    /// a call ending with the 401 or 407 — and the token is used from the
+    /// next request on; [`UserAgent::register`](crate::UserAgent::register)
+    /// registers again at once. Only for a challenge from the account's own
+    /// server: anybody else's is [`UaEvent::ChallengeDeclined`].
+    TokenRequired {
+        /// Whose token is wanted.
+        account: AccountId,
+        /// Where the challenged request went, and the challenge came from.
+        from: std::net::SocketAddr,
+        /// The challenge: realm, scope, authorization server and error.
+        challenge: sipral_core::auth::BearerChallenge,
+    },
     /// This end's verification service reached its verdict on who is
     /// calling (RFC 8224 §6.2).
     ///

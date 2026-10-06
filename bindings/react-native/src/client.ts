@@ -32,6 +32,7 @@ import type {
   RegistrationState,
   Settings,
   Signalling,
+  TokenError,
 } from './types';
 
 export interface RegistrationChangedEvent {
@@ -66,6 +67,30 @@ export interface ChallengeDeclinedEvent {
   server: string;
   /** The realms it was challenged for. */
   realms: string[];
+}
+
+/**
+ * An account's server asking for an OAuth 2.0 access token (RFC 8898):
+ * check `authzServer` against the authorization servers the application
+ * trusts, fetch a token for `scope`, and hand it to
+ * `account.setAccessToken`.
+ */
+export interface TokenRequiredEvent {
+  account: SipralAccount;
+  /** What was wrong with the last token: 'invalidToken' for one expired or revoked. */
+  error: TokenError;
+  /** The `error` code as the server wrote it, '' for none. */
+  errorCode: string;
+  /** Whether a proxy asked (407) rather than the registrar (401). */
+  proxy: boolean;
+  /** Where the challenged request went, host:port. */
+  server: string;
+  /** The realm, '' when the challenge named none. */
+  realm: string;
+  /** The scope the token has to carry, '' for none named. */
+  scope: string;
+  /** The authorization server, an https URI, '' for none named. */
+  authzServer: string;
 }
 
 export interface IncomingCallEvent {
@@ -130,6 +155,7 @@ export interface ClientEvents {
   located: LocatedEvent;
   locateFailed: LocateFailedEvent;
   challengeDeclined: ChallengeDeclinedEvent;
+  tokenRequired: TokenRequiredEvent;
   /** Every event, typed or not, as the native half handed it over. */
   event: NativeEvent;
 }
@@ -152,6 +178,7 @@ export interface AccountEvents {
   located: LocatedEvent;
   locateFailed: LocateFailedEvent;
   challengeDeclined: ChallengeDeclinedEvent;
+  tokenRequired: TokenRequiredEvent;
 }
 
 const DTMF = /^[0-9A-Da-d*#]+$/;
@@ -224,6 +251,22 @@ export class SipralAccount {
   }
 
   /**
+   * The OAuth 2.0 access token this account's server asked for (RFC 8898),
+   * in place of any it had; null takes it away. The answer to
+   * 'tokenRequired', and the way a renewed token goes in: from the next
+   * request on, the server's Bearer challenge is answered with it. A
+   * registration that failed for want of one starts again with
+   * `register()`. Rejected with 'invalidArgument' for a token that is not
+   * RFC 6750's b64token.
+   */
+  setAccessToken(token: string | null): Promise<void> {
+    return this.client.run(
+      () => this.usable(),
+      (native) => native.setAccessToken(this.id, token ?? ''),
+    );
+  }
+
+  /**
    * Resolve once the account is registered, reject with the event that
    * said it will not be. Registering is asked for here too.
    */
@@ -278,6 +321,11 @@ export class SipralAccount {
   /** @internal */
   challengeDeclined(event: ChallengeDeclinedEvent): void {
     this.emitter.emit('challengeDeclined', event);
+  }
+
+  /** @internal */
+  tokenRequired(event: TokenRequiredEvent): void {
+    this.emitter.emit('tokenRequired', event);
   }
 
   private usable(): void {
@@ -863,6 +911,25 @@ export class SipralClient {
       };
       account.challengeDeclined(payload);
       this.emitter.emit('challengeDeclined', payload);
+      return;
+    }
+    if (event.kind === 'tokenRequired') {
+      const account = this.accounts.get(event.account);
+      if (account === undefined) {
+        return;
+      }
+      const payload: TokenRequiredEvent = {
+        account,
+        error: (event.tokenError as TokenError | undefined) ?? 'none',
+        errorCode: event.tokenErrorCode ?? '',
+        proxy: event.tokenProxy ?? false,
+        server: event.tokenServer ?? '',
+        realm: event.tokenRealm ?? '',
+        scope: event.tokenScope ?? '',
+        authzServer: event.tokenAuthzServer ?? '',
+      };
+      account.tokenRequired(payload);
+      this.emitter.emit('tokenRequired', payload);
       return;
     }
     if (event.call === '') {

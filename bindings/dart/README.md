@@ -46,6 +46,14 @@ await call.whenEnded();
 await stack.close();
 ```
 
+A server that signs its users in with OAuth 2.0 (RFC 8898) challenges with
+`Bearer`; the stack raises `SipralEventKind.tokenRequired`, whose
+`tokenAuthzServer` and `tokenScope` say where a token comes from. Check the
+server against the ones the application trusts, fetch the token, and hand it
+over with `account.setAccessToken(token)`; `register()` again registers at
+once, and a token the server called `SipralTokenError.invalidToken` raises
+the event again (`docs/08-ffi.md`, "What ABI 1.2 added").
+
 Everything runs on the isolate that opened the stack: the sockets are
 `RawDatagramSocket`s, the poll and each call's frame clock are timers, and
 the event callback is a `NativeCallable.isolateLocal`, which the library calls

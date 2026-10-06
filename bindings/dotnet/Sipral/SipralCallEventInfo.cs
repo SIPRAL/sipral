@@ -471,3 +471,20 @@ public sealed record SipralChallengeEventInfo(
     SipralChallengeRefusal Refusal,
     string? Server,
     IReadOnlyList<string> Realms);
+
+/// <summary>What <see cref="SipralEventKind.TokenRequired"/> carries: an
+/// account's server asking for an OAuth 2.0 access token (RFC 8898). Check
+/// <c>AuthzServer</c> against the authorization servers the application
+/// trusts before going near it, fetch a token for <c>Scope</c>, and hand it
+/// to <see cref="Account.SetAccessToken"/>. <c>Error</c> is
+/// <see cref="SipralTokenError.InvalidToken"/> for a token expired or
+/// revoked; <c>Proxy</c> is whether a proxy asked (407); <c>Server</c> is
+/// where the challenged request went (<c>host:port</c>).</summary>
+public sealed record SipralTokenEventInfo(
+    SipralTokenError Error,
+    string? ErrorCode,
+    bool Proxy,
+    string? Server,
+    string Realm,
+    string? Scope,
+    string? AuthzServer);

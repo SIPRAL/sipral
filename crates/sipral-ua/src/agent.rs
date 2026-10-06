@@ -664,6 +664,40 @@ impl UserAgent {
         held
     }
 
+    /// Give an account the OAuth 2.0 access token its server asked for
+    /// (RFC 8898), in place of any it had; `None` takes it away. The
+    /// password, if the account has one, stays.
+    ///
+    /// The answer to [`UaEvent::TokenRequired`], and what a token renewed
+    /// ahead of its expiry goes through: from the next request on, a
+    /// `Bearer` challenge from the account's server is answered with it,
+    /// and so is every request its cached challenge covers. Nothing is sent
+    /// by this call; a registration that failed for want of a token starts
+    /// again with [`UserAgent::register`].
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchAccount`], or [`UaError::InvalidAccessToken`] for a
+    /// token that is not RFC 6750 §2.1's `b64token`, with nothing changed.
+    pub fn set_access_token(
+        &mut self,
+        account: AccountId,
+        token: Option<&str>,
+    ) -> Result<(), UaError> {
+        let config = self
+            .accounts
+            .get_mut(&account)
+            .ok_or(UaError::NoSuchAccount)?;
+        let renewed = match (config.credentials.as_deref(), token) {
+            (Some(credentials), token) => credentials.renewed(token),
+            (None, Some(token)) => Credentials::bearer(token),
+            (None, None) => return Ok(()),
+        }
+        .map_err(|_| UaError::InvalidAccessToken)?;
+        config.credentials = (renewed.has_password() || renewed.has_access_token())
+            .then(|| Arc::new(renewed));
+        Ok(())
+    }
+
     /// Where an account's registration is.
     #[must_use]
     pub fn registration_state(&self, account: AccountId) -> Option<RegistrationState> {
@@ -1127,7 +1161,7 @@ impl UserAgent {
                 self.on_request_failed(account, reason, now);
                 None
             }
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 let Some(account) = self.owners.get(&transaction).copied() else {
                     return Some(event);
                 };
@@ -1408,10 +1442,15 @@ impl UserAgent {
     ) -> Option<Arc<Credentials>> {
         let account = account?;
         let config = self.accounts.get(&account)?;
-        let credentials = config.credentials.clone()?;
+        let credentials = config.credentials.clone();
         let Some(origin) = self.endpoint.challenge_origin(transaction) else {
-            return Some(credentials);
+            return credentials;
         };
+        // an account with nothing to answer with stops here as it always
+        // has, unless its server asked for a token the application can fetch
+        if credentials.is_none() && self.endpoint.token_wanted(transaction, None).is_none() {
+            return None;
+        }
         // the account's own REGISTER, challenged by its registrar: whatever
         // realm that names is the account's, since nobody passes a REGISTER
         // on to a far end of their choosing
@@ -1453,7 +1492,19 @@ impl UserAgent {
                     }
                 }
             }
-            return Some(credentials);
+            // RFC 8898: the account's own server wants an access token the
+            // account does not have, or has had refused
+            if let Some(challenge) = self
+                .endpoint
+                .token_wanted(transaction, credentials.as_deref())
+            {
+                self.events.push_back(UaEvent::TokenRequired {
+                    account,
+                    from: origin.destination,
+                    challenge,
+                });
+            }
+            return credentials;
         };
         self.endpoint.decline_challenge(transaction);
         self.events.push_back(UaEvent::ChallengeDeclined {

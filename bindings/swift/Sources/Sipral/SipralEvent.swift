@@ -77,6 +77,31 @@ public struct SipralEvent: Sendable {
     public internal(set) var messageData: MessageEventData? = nil
     /// `payload.challenge`, for `SipralEventKind.challengeDeclined` only.
     public internal(set) var challengeData: ChallengeEventData? = nil
+    /// `payload.token`, for `SipralEventKind.tokenRequired` only.
+    public internal(set) var tokenData: TokenEventData? = nil
+}
+
+/// What `SipralEventKind.tokenRequired` carries (`sipral_token_event_t`): an
+/// account's server asking for an OAuth 2.0 access token (RFC 8898), where a
+/// token comes from and what it has to cover. Check `authzServer` against
+/// the authorization servers the application trusts before going near it,
+/// then hand the token to `Account.setAccessToken(_:)`.
+public struct TokenEventData: Sendable {
+    /// What the server said was wrong; `.invalidToken` for one expired or
+    /// revoked.
+    public let error: SipralTokenError?
+    /// The `error` code as the server wrote it.
+    public let errorCode: String?
+    /// Whether a proxy asked (407) rather than the registrar (401).
+    public let proxy: Bool
+    /// Where the challenged request went, `host:port`.
+    public let server: String?
+    /// The protection domain, empty when the challenge named none.
+    public let realm: String
+    /// The scope the token has to carry.
+    public let scope: String?
+    /// The authorization server, an `https` URI.
+    public let authzServer: String?
 }
 
 /// What `SipralEventKind.challengeDeclined` carries
@@ -844,6 +869,22 @@ enum SipralEventDecoder {
                 refusal: SipralChallengeRefusal(rawValue: told.refusal),
                 server: textC(told.server, told.server_len),
                 realms: realms.split(separator: "\n").map(String.init)
+            )
+        }
+        if kindRaw == SipralEventKind.tokenRequired.rawValue {
+            let told = raw.payload.token
+            let nonEmpty = { (text: String?) -> String? in
+                guard let text, !text.isEmpty else { return nil }
+                return text
+            }
+            event.tokenData = TokenEventData(
+                error: SipralTokenError(rawValue: told.error),
+                errorCode: nonEmpty(textC(told.error_code, told.error_code_len)),
+                proxy: told.proxy == SipralToggle.on.rawValue,
+                server: textC(told.server, told.server_len),
+                realm: textC(told.realm, told.realm_len) ?? "",
+                scope: nonEmpty(textC(told.scope, told.scope_len)),
+                authzServer: nonEmpty(textC(told.authz_server, told.authz_server_len))
             )
         }
         if kindRaw == SipralEventKind.messageReceived.rawValue

@@ -34,6 +34,7 @@ import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralDeclinedChallenge
+import org.sipral.idiomatic.SipralTokenRequired
 import org.sipral.idiomatic.awaitNext
 
 /** What [SipralJava.awaitNext] hands back: what the action returned, and
@@ -140,6 +141,20 @@ object SipralJava {
     @JvmStatic
     fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? =
         org.sipral.idiomatic.declinedChallengeOf(event)
+
+    /** What a `TOKEN_REQUIRED` [event] says -- an account's server asking
+     * for an OAuth 2.0 access token (RFC 8898), with the authorization
+     * server and the scope -- or null for any other event
+     * ([org.sipral.idiomatic.tokenRequiredOf]). The token goes in with
+     * [setAccessToken]. */
+    @JvmStatic
+    fun tokenRequiredOf(event: SipralEvent): SipralTokenRequired? =
+        org.sipral.idiomatic.tokenRequiredOf(event)
+
+    /** [SipralAccount.setAccessToken]: the access token [account]'s server
+     * asked for, or null to take it away. */
+    @JvmStatic
+    fun setAccessToken(account: SipralAccount, token: String?) = account.setAccessToken(token)
 
     /** [SipralClient.placeCall] to [target], its media socket bound on
      * [mediaHost]; [codecs] -- `"PCMA,PCMU"` -- is what this call offers and

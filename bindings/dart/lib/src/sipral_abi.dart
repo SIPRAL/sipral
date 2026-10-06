@@ -1512,6 +1512,22 @@ abstract final class SipralEventKind {
   /// is what `sipral_account_config_t::realms` is for. `account` is
   /// the account.
   static const int challengeDeclined = 58;
+
+  /// An account's own server takes an OAuth 2.0 access token (RFC
+  /// 8898) and the account has none it would accept: none was
+  /// supplied, or the one supplied was refused — expired or revoked,
+  /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+  ///
+  /// `payload.token` says where a token comes from: `authz_server`, an
+  /// `https` URI RFC 8898 §2.1.1 says to check against the
+  /// authorization servers the application trusts before going near
+  /// it, and `scope`, what the token has to cover. Fetching it is the
+  /// application's; hand it over with `sipral_account_set_access_token`.
+  /// The refusal settles meanwhile the way an unanswered challenge does
+  /// — a registration failing with `BAD_CREDENTIALS`, a call ending
+  /// with the 401 or 407 — and `sipral_account_register` registers
+  /// again at once with the new token. `account` is the account.
+  static const int tokenRequired = 59;
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2908,6 +2924,31 @@ abstract final class SipralChallengeRefusal {
   /// end's own challenge looks like this, and so does an SBC that
   /// challenges calls under a realm of its own.
   static const int notTheAccountsRealm = 2;
+}
+
+/// What an account's server said was wrong with the access token it
+/// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+/// `sipral_token_event_t::error`.
+abstract final class SipralTokenError {
+  /// The server named no error: no token was offered yet.
+  static const int none = 0;
+
+  /// `invalid_request`: the request was malformed.
+  static const int invalidRequest = 1;
+
+  /// `invalid_token`: the token is expired, revoked, malformed or
+  /// otherwise invalid. A new one is needed.
+  static const int invalidToken = 2;
+
+  /// `insufficient_scope`: the token does not cover what was asked;
+  /// `scope` says what would.
+  static const int insufficientScope = 3;
+
+  /// `invalid_scope`.
+  static const int invalidScope = 4;
+
+  /// Another code, as written in `error_code`.
+  static const int other = 5;
 }
 
 /// What a party this end holds is sent:
@@ -6474,6 +6515,60 @@ final class SipralChallengeEvent extends ffi.Struct {
   external int realmsLen;
 }
 
+/// What a SipralEventKind.tokenRequired carries: the `Bearer`
+/// challenge of an account's server (RFC 8898 §4), and where it came
+/// from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
+/// server left out is empty.
+final class SipralTokenEvent extends ffi.Struct {
+  /// A SipralTokenError.
+  @ffi.Uint32()
+  external int error;
+
+  /// A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
+  /// answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
+  /// registrar or the far end did (401).
+  @ffi.Uint32()
+  external int proxy;
+
+  /// Where the challenged request went, and the challenge came from,
+  /// as `host:port`.
+  external ffi.Pointer<ffi.Char> server;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int serverLen;
+
+  /// The protection domain, empty when the challenge named none.
+  external ffi.Pointer<ffi.Char> realm;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int realmLen;
+
+  /// The scope the token has to carry: space-separated strings the
+  /// authorization server defines (RFC 6749 §3.3).
+  external ffi.Pointer<ffi.Char> scope;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int scopeLen;
+
+  /// The authorization server: an `https` URI. A value that was not
+  /// one is left out.
+  external ffi.Pointer<ffi.Char> authzServer;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int authzServerLen;
+
+  /// The `error` code as the server wrote it, for `Other`.
+  external ffi.Pointer<ffi.Char> errorCode;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int errorCodeLen;
+}
+
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -6564,6 +6659,9 @@ final class SipralEventPayload extends ffi.Union {
 
   /// For SipralEventKind.challengeDeclined.
   external SipralChallengeEvent challenge;
+
+  /// For SipralEventKind.tokenRequired.
+  external SipralTokenEvent token;
 }
 
 /// Something the library has to tell the application.
@@ -7666,7 +7764,7 @@ final class Sipral {
   /// does not ask about. The
   /// rule for all three numbers is the Versioning section of
   /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-  static const int abiVersionMinor = 1;
+  static const int abiVersionMinor = 2;
 
   /// The ABI's patch version, raised by a fix that changes no declaration.
   static const int abiVersionPatch = 0;
@@ -8061,6 +8159,7 @@ final class Sipral {
         'sipral_local_conference_event_t': [ffi.sizeOf<SipralLocalConferenceEvent>(), 40, 40, 40],
         'sipral_locate_event_t': [ffi.sizeOf<SipralLocateEvent>(), 48, 32, 32],
         'sipral_challenge_event_t': [ffi.sizeOf<SipralChallengeEvent>(), 40, 20, 20],
+        'sipral_token_event_t': [ffi.sizeOf<SipralTokenEvent>(), 88, 48, 48],
         'sipral_event_payload_t': [ffi.sizeOf<SipralEventPayload>(), 328, 208, 216],
         'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 384, 248, 264],
         'sipral_suspending_t': [ffi.sizeOf<SipralSuspending>(), 32, 16, 16],
@@ -8712,6 +8811,38 @@ final class Sipral {
   late final int Function(int stack, int account, ffi.Pointer<ffi.Uint32> outState) accountRegistrationState = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Uint32> outState),
       int Function(int stack, int account, ffi.Pointer<ffi.Uint32> outState)>('sipral_account_registration_state');
+
+  /// Give an account the OAuth 2.0 access token its server asked for
+  /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+  /// takes the token away. The password, if the account has one, stays.
+  ///
+  /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+  /// renewed ahead of its expiry goes in: from the next request on, a
+  /// `Bearer` challenge from the account's own server is answered with
+  /// `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
+  /// request its cached challenge covers. Offered a `Digest` and a
+  /// `Bearer` challenge for one realm, the token answers. A token the
+  /// server refused is never sent to it again. The token answers the
+  /// account's own server and nobody else, the rule the password is held
+  /// to. Nothing is sent by this call; a registration that failed for
+  /// want of a token starts again with `sipral_account_register`.
+  ///
+  /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+  /// names the authorization server and the scope, and the exchange with
+  /// it is the application's. The token is copied, kept out of every log
+  /// and diagnostic, and wiped when replaced.
+  ///
+  /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+  /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+  /// nothing changed and the error not describing it.
+  ///
+  /// Safety
+  ///
+  /// `token` must be readable for `token_len` bytes, or be null with a
+  /// length of zero.
+  late final int Function(int stack, int account, ffi.Pointer<ffi.Char> token, int tokenLen) accountSetAccessToken = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> token, ffi.Size tokenLen),
+      int Function(int stack, int account, ffi.Pointer<ffi.Char> token, int tokenLen)>('sipral_account_set_access_token');
 
   /// Place a call, and write its handle to `out_call`.
   ///

@@ -101,6 +101,9 @@ public sealed class SipralEventArgs : EventArgs
     /// <summary>Set for <see cref="SipralEventKind.ChallengeDeclined"/>.</summary>
     public SipralChallengeEventInfo? Challenge { get; private init; }
 
+    /// <summary>Set for <see cref="SipralEventKind.TokenRequired"/>.</summary>
+    public SipralTokenEventInfo? Token { get; private init; }
+
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
@@ -343,7 +346,18 @@ public sealed class SipralEventArgs : EventArgs
         SipralMessageEventInfo? messageInfo = null;
         SipralLocateEventInfo? locate = null;
         SipralChallengeEventInfo? challenge = null;
-        if (kind == SipralEventKind.ChallengeDeclined)
+        SipralTokenEventInfo? token = null;
+        if (kind == SipralEventKind.TokenRequired)
+        {
+            var t = evt.Payload.Token;
+            static string? NonEmpty(string? text) => string.IsNullOrEmpty(text) ? null : text;
+            token = new SipralTokenEventInfo(
+                (SipralTokenError)t.Error, NonEmpty(ReadUtf8(t.ErrorCode, t.ErrorCodeLen)),
+                t.Proxy == (uint)SipralToggle.On, ReadUtf8(t.Server, t.ServerLen),
+                ReadUtf8(t.Realm, t.RealmLen) ?? "", NonEmpty(ReadUtf8(t.Scope, t.ScopeLen)),
+                NonEmpty(ReadUtf8(t.AuthzServer, t.AuthzServerLen)));
+        }
+        else if (kind == SipralEventKind.ChallengeDeclined)
         {
             var c = evt.Payload.Challenge;
             var realms = ReadUtf8(c.Realms, c.RealmsLen);
@@ -403,6 +417,7 @@ public sealed class SipralEventArgs : EventArgs
             MessageInfo = messageInfo,
             Locate = locate,
             Challenge = challenge,
+            Token = token,
         };
     }
 

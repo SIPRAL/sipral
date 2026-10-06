@@ -23,6 +23,7 @@ export type {
   LocatedEvent,
   LocateFailedEvent,
   RegistrationChangedEvent,
+  TokenRequiredEvent,
   TransferReportEvent,
   TransferRequestedEvent,
 } from './client';
@@ -41,6 +42,7 @@ export type {
   CallState,
   ChallengeRefusal,
   EndReason,
+  TokenError,
   LocateFailure,
   OpenOptions,
   AnswerOptions,

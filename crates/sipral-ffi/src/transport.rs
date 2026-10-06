@@ -3755,4 +3755,145 @@ pub(crate) mod tests {
         );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
+
+    /// What `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` carried, copied out while the
+    /// callback ran: the account, the error, whether a proxy asked, the
+    /// server, the realm, the scope and the authorization server.
+    #[derive(Default)]
+    struct TokenWanted {
+        seen: Vec<(SipralHandle, u32, u32, String, String, String, String)>,
+    }
+
+    unsafe extern "C" fn keep_token_wanted(
+        event: *const crate::event::SipralEvent,
+        user_data: *mut std::ffi::c_void,
+    ) {
+        let wanted = unsafe { &mut *user_data.cast::<TokenWanted>() };
+        let event = unsafe { &*event };
+        if event.kind != SipralEventKind::TokenRequired {
+            return;
+        }
+        let payload = unsafe { event.payload.token };
+        let text = |pointer: *const c_char, len: usize| {
+            String::from_utf8_lossy(unsafe {
+                std::slice::from_raw_parts(pointer.cast::<u8>(), len)
+            })
+            .into_owned()
+        };
+        wanted.seen.push((
+            event.account,
+            payload.error,
+            payload.proxy,
+            text(payload.server, payload.server_len),
+            text(payload.realm, payload.realm_len),
+            text(payload.scope, payload.scope_len),
+            text(payload.authz_server, payload.authz_server_len),
+        ));
+    }
+
+    fn bearer(error: &str) -> String {
+        format!(
+            "WWW-Authenticate: Bearer realm=\"example.com\", scope=\"sip\", \
+             authz_server=\"https://as.example.com\"{error}\r\n"
+        )
+    }
+
+    fn set_token(handle: SipralHandle, account: SipralHandle, token: &str) -> SipralStatus {
+        unsafe {
+            crate::account::sipral_account_set_access_token(
+                handle,
+                account,
+                token.as_ptr().cast::<c_char>(),
+                token.len(),
+            )
+        }
+    }
+
+    /// RFC 8898 through the C ABI: a `Bearer` challenge raises
+    /// `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` with where a token comes from, the
+    /// token handed to `sipral_account_set_access_token` answers it, and a
+    /// token the server calls `invalid_token` is reported and not sent again.
+    #[test]
+    fn a_bearer_challenge_asks_for_a_token_and_the_token_answers_it() {
+        let mut wanted = TokenWanted::default();
+        let mut observed = Observed::default();
+        let mut settings = config(keep_token_wanted, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut wanted).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account_config = account_config();
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&account_config), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok
+        );
+        let (register, _, _) = take_one(handle);
+        let refused = reply(&register, 401, "Unauthorized", &bearer(""));
+        assert_eq!(feed(handle, REGISTRAR, &refused, 1_010), SipralStatus::Ok);
+        poll(handle, 1_010);
+        assert!(drain(handle).is_empty(), "a password does not answer Bearer");
+        assert_eq!(wanted.seen.len(), 1);
+        let (whose, error, proxy, server, realm, scope, authz_server) = &wanted.seen[0];
+        assert_eq!(*whose, account);
+        assert_eq!(*error, crate::event::SipralTokenError::None as u32);
+        assert_eq!(*proxy, crate::media::SipralToggle::Off as u32);
+        assert_eq!(server, REGISTRAR);
+        assert_eq!(realm, "example.com");
+        assert_eq!(scope, "sip");
+        assert_eq!(authz_server, "https://as.example.com");
+
+        assert_eq!(set_token(handle, account, "not a token"), SipralStatus::InvalidArgument);
+        assert!(
+            !last_error_text().contains("not a token"),
+            "the refusal does not repeat the token"
+        );
+        assert_eq!(set_token(handle, account, "first.token"), SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 2_000) },
+            SipralStatus::Ok
+        );
+        let (register, _, _) = take_one(handle);
+        assert_eq!(
+            header(&register, HeaderName::Authorization),
+            b"Bearer first.token"
+        );
+
+        let expired = reply(
+            &register,
+            401,
+            "Unauthorized",
+            &bearer(", error=\"invalid_token\""),
+        );
+        assert_eq!(feed(handle, REGISTRAR, &expired, 2_010), SipralStatus::Ok);
+        poll(handle, 2_010);
+        assert!(drain(handle).is_empty(), "the refused token is not sent again");
+        assert_eq!(wanted.seen.len(), 2);
+        assert_eq!(
+            wanted.seen[1].1,
+            crate::event::SipralTokenError::InvalidToken as u32
+        );
+
+        assert_eq!(set_token(handle, account, "second.token"), SipralStatus::Ok);
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 3_000) },
+            SipralStatus::Ok
+        );
+        let (register, _, _) = take_one(handle);
+        assert_eq!(
+            header(&register, HeaderName::Authorization),
+            b"Bearer second.token"
+        );
+        // a length of zero takes the token away
+        assert_eq!(
+            unsafe {
+                crate::account::sipral_account_set_access_token(handle, account, ptr::null(), 0)
+            },
+            SipralStatus::Ok
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
 }

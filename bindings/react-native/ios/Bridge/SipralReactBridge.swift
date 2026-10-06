@@ -45,6 +45,12 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.unregister(account) }
     }
 
+    @objc public func setAccessToken(
+        _ account: String, token: String, resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) { try self.core.setAccessToken(account, token: token) }
+    }
+
     @objc public func removeAccount(_ account: String, resolve: @escaping Resolve, reject: @escaping Reject) {
         settle(resolve, reject) { try self.core.removeAccount(account) }
     }

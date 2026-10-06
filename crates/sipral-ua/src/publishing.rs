@@ -468,7 +468,7 @@ impl UserAgent {
                 self.pump_publication(publication, now);
                 None
             }
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 let Some(publication) = self.publications.by_transaction.get(&transaction).copied()
                 else {
                     return Some(event);

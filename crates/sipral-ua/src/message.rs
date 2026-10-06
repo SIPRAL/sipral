@@ -521,7 +521,7 @@ impl UserAgent {
                 self.on_message_failed(message, reason);
                 None
             }
-            Event::Challenged { transaction, .. } => {
+            Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 let Some(message) = self.by_message.get(&transaction).copied() else {
                     return Some(event);
                 };

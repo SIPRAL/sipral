@@ -17,7 +17,12 @@
 //! The hashes are written out in full because the crate has no dependencies,
 //! and every one of them is checked against published digests before it is
 //! used for anything.
+//!
+//! Beside Digest sits the `Bearer` scheme of RFC 8898, OAuth 2.0 access
+//! tokens: the same challenge, cached the same way, answered with a token
+//! the application obtained rather than a hash of a password.
 
+mod bearer;
 mod cache;
 pub(crate) mod digest;
 mod keysource;
@@ -25,7 +30,8 @@ mod md5;
 mod secret;
 pub(crate) mod sha2;
 
+pub use bearer::{BearerChallenge, BearerError};
 pub use cache::{Answered, AuthCache, Learned};
 pub use digest::{Challenge, DigestAlgorithm};
 pub use keysource::KeySource;
-pub use secret::{Credentials, Secret};
+pub use secret::{Credentials, NotAToken, Secret, is_access_token};

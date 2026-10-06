@@ -25,10 +25,14 @@ import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeldAudio
 import org.sipral.SipralStatus
+import org.sipral.SipralToggle
+import org.sipral.SipralTokenError
 
 internal suspend fun challengeChecks(): String =
     listOf(
         aDeclinedChallengeIsReadWithItsRealms(),
+        aTokenRequiredIsReadWithWhereATokenComesFrom(),
+        anAccessTokenThatIsNotOneIsRefused(),
         theRealmsReachTheLibraryOnePerLine(),
         aHeldPartyHearsSilenceUnlessTheClientSaysTheApplication(),
     ).joinToString("; ")
@@ -59,6 +63,58 @@ private fun aDeclinedChallengeIsReadWithItsRealms(): String {
     )
     assertNull(declinedChallengeOf(other))
     return "a declined challenge read with its realms"
+}
+
+private fun aTokenRequiredIsReadWithWhereATokenComesFrom(): String {
+    val event = SipralEvent(
+        size = 0,
+        stack = 0,
+        kind = SipralEventKind.TOKEN_REQUIRED.value.toLong(),
+        account = 7,
+        call = 0,
+        message = null,
+        payloadTokenServer = "203.0.113.9:5060",
+        payloadTokenRealm = "example.com",
+        payloadTokenScope = "sip register",
+        payloadTokenAuthzServer = "https://as.example.com",
+        payloadTokenErrorCode = "invalid_token",
+        payloadTokenNumbers = longArrayOf(
+            SipralTokenError.INVALID_TOKEN.value.toLong(),
+            SipralToggle.OFF.value.toLong(),
+        ),
+    )
+    val wanted = assertNotNull(tokenRequiredOf(event))
+    assertEquals(SipralTokenError.INVALID_TOKEN, wanted.error)
+    assertEquals("invalid_token", wanted.errorCode)
+    assertEquals(false, wanted.proxy)
+    assertEquals("203.0.113.9:5060", wanted.server)
+    assertEquals("example.com", wanted.realm)
+    assertEquals("sip register", wanted.scope)
+    assertEquals("https://as.example.com", wanted.authzServer)
+    val other = SipralEvent(
+        size = 0,
+        stack = 0,
+        kind = SipralEventKind.CHALLENGE_DECLINED.value.toLong(),
+        account = 7,
+        call = 0,
+        message = null,
+    )
+    assertNull(tokenRequiredOf(other))
+    return "a token required read with where a token comes from"
+}
+
+private fun anAccessTokenThatIsNotOneIsRefused(): String {
+    val client = SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1")
+    try {
+        val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = "127.0.0.1:5060")
+        account.setAccessToken("eyJhbGciOiJub25lIn0.e30.")
+        val refused = assertFailsWith<SipralException> { account.setAccessToken("two words") }
+        assertEquals(SipralStatus.INVALID_ARGUMENT, refused.status)
+        account.setAccessToken(null)
+    } finally {
+        client.close()
+    }
+    return "an access token set, refused when it is not one, and taken away"
 }
 
 private fun theRealmsReachTheLibraryOnePerLine(): String {

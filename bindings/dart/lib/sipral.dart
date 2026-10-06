@@ -41,4 +41,6 @@ export 'src/sipral_abi.dart'
         SipralSrtp,
         SipralSrtpSuite,
         SipralStatus,
+        SipralToggle,
+        SipralTokenError,
         SipralTransport;

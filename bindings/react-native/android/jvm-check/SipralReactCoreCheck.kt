@@ -28,6 +28,8 @@ import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralCodec
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralToggle
+import org.sipral.SipralTokenError
 import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.awaitNext
@@ -484,7 +486,30 @@ private fun theRealmsAndTheHeldAudioReachTheLibrary(): String {
     assertEquals("notTheAccountsRealm", flat["challengeRefusal"])
     assertEquals("203.0.113.9:5060", flat["challengeServer"])
     assertEquals("sbc.example\ncallee, inc.", flat["challengeRealms"])
-    return "the realms and the held audio reached the library, and a declined challenge was flattened"
+    val token = SipralReactCore.flatten(
+        SipralEvent(
+            size = 0,
+            stack = 0,
+            kind = SipralEventKind.TOKEN_REQUIRED.value.toLong(),
+            account = 7,
+            call = 0,
+            message = null,
+            payloadTokenAuthzServer = "https://as.example.com",
+            payloadTokenScope = "sip register",
+            payloadTokenRealm = "example.com",
+            payloadTokenNumbers = longArrayOf(
+                SipralTokenError.INVALID_TOKEN.value.toLong(),
+                SipralToggle.ON.value.toLong(),
+            ),
+        ),
+    )
+    assertEquals("tokenRequired", token["kind"])
+    assertEquals("invalidToken", token["tokenError"])
+    assertEquals(true, token["tokenProxy"])
+    assertEquals("https://as.example.com", token["tokenAuthzServer"])
+    assertEquals("sip register", token["tokenScope"])
+    assertEquals("example.com", token["tokenRealm"])
+    return "the realms and the held audio reached the library, and a declined challenge and a token asked for were flattened"
 }
 
 private fun aSettleAfterShutdownIsRejectedNotThrown(): String {

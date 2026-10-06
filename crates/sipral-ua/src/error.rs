@@ -120,6 +120,9 @@ pub enum UaError {
     /// A recording session could not be written: see
     /// [`SiprecError`](crate::siprec::SiprecError).
     Recording(crate::siprec::SiprecError),
+    /// An access token that is not RFC 6750 §2.1's `b64token`, the only
+    /// shape a `Bearer` field carries. Nothing was changed.
+    InvalidAccessToken,
 }
 
 impl fmt::Display for UaError {
@@ -183,6 +186,9 @@ impl fmt::Display for UaError {
                 f.write_str("the far end of the call did not say it is a conference focus")
             }
             Self::Recording(ref error) => write!(f, "cannot record the call: {error}"),
+            Self::InvalidAccessToken => {
+                f.write_str("not an access token: RFC 6750 section 2.1 allows A-Z a-z 0-9 - . _ ~ + / and '=' padding")
+            }
         }
     }
 }

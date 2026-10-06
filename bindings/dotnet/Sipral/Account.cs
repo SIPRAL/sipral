@@ -353,6 +353,33 @@ public sealed class Account
         }
     }
 
+    /// <summary><c>sipral_account_set_access_token</c>: the OAuth 2.0 access
+    /// token the account's server asked for (RFC 8898), in place of any it
+    /// had; <c>null</c> takes it away. The answer to
+    /// <see cref="SipralEventKind.TokenRequired"/>
+    /// (<see cref="SipralEventArgs.Token"/>), and the way a renewed token goes
+    /// in: from the next request on, the server's <c>Bearer</c> challenge is
+    /// answered with it. A registration that failed for want of one starts
+    /// again with <see cref="Register"/>. Throws
+    /// <see cref="SipralStatus.InvalidArgument"/> for a token that is not RFC
+    /// 6750's <c>b64token</c>, with nothing changed. The copy made to pass it
+    /// across is cleared afterwards.</summary>
+    public void SetAccessToken(string? token)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(token ?? "");
+        var signed = (sbyte[])(Array)bytes;
+        try
+        {
+            SipralErrors.Call(
+                () => NativeMethods.sipral_account_set_access_token(_stack.Handle, Handle, signed, (nuint)signed.Length),
+                "sipral_account_set_access_token");
+        }
+        finally
+        {
+            Array.Clear(bytes);
+        }
+    }
+
     /// <summary><c>sipral_account_refresh_binding</c>: refresh this account's
     /// registration now rather than when its timer says (RFC 8599 §5.5) — for
     /// the wake-up a push brings, or a network the application knows has come

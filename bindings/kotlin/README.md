@@ -99,6 +99,15 @@ call.hangup(SipralHangupReason.NORMAL_CLEARING)   // or hangup(), with no Reason
 client.close()
 ```
 
+A server that signs its users in with OAuth 2.0 (RFC 8898) challenges with
+`Bearer`; the stack raises `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, which
+`tokenRequiredOf(event)` reads into the `authzServer` and the `scope`. Check
+the server against the ones the application trusts, fetch the token, and
+hand it over with `account.setAccessToken(token)`; `register()` again
+registers at once, and a token the server called `INVALID_TOKEN` raises the
+event again (`docs/08-ffi.md`, "What ABI 1.2 added"). The JVM jar's
+`SipralJava.tokenRequiredOf` and `SipralJava.setAccessToken` are the same.
+
 Without `registrar` the account never registers: registering throws, and
 the registrar address is only the outbound proxy. Left out, `bindHost` and
 `mediaHost` are the address of the route toward the registrar.

@@ -109,6 +109,35 @@ final class SipralAccount {
     return out.value;
   });
 
+  /// `sipral_account_set_access_token`: the OAuth 2.0 access token the
+  /// account's server asked for (RFC 8898), in place of any it had; null
+  /// takes it away. The answer to `SipralEventKind.tokenRequired`
+  /// ([SipralStackEvent.tokenAuthzServer], [SipralStackEvent.tokenScope]),
+  /// and the way a renewed token goes in: from the next request on, the
+  /// server's `Bearer` challenge is answered with it. A registration that
+  /// failed for want of one starts again with [register]. Throws a
+  /// [SipralException] with `invalidArgument` for a token that is not RFC
+  /// 6750's `b64token`, with nothing changed.
+  void setAccessToken(String? token) {
+    stack._ensureOpen();
+    using((arena) {
+      final (data, length) = _text(arena, token);
+      _checkNow(
+        stack._sipral,
+        'sipral_account_set_access_token',
+        () => stack._sipral.accountSetAccessToken(
+          stack.handle,
+          handle,
+          data,
+          length,
+        ),
+      );
+      if (length > 0) {
+        data.cast<ffi.Uint8>().asTypedList(length).fillRange(0, length, 0);
+      }
+    });
+  }
+
   /// Start registering, and keep the binding refreshed.
   void register() {
     stack._ensureOpen();

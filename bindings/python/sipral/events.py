@@ -577,6 +577,18 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "protocol": int(resolve.protocol),
         }
 
+    if kind == lib.SIPRAL_EVENT_KIND_TOKEN_REQUIRED:
+        token = payload.token
+        return {
+            "error": int(token.error),
+            "error_code": _text(token.error_code, token.error_code_len) or None,
+            "proxy": int(token.proxy) == lib.SIPRAL_TOGGLE_ON,
+            "server": _text(token.server, token.server_len),
+            "realm": _text(token.realm, token.realm_len) or "",
+            "scope": _text(token.scope, token.scope_len) or None,
+            "authz_server": _text(token.authz_server, token.authz_server_len) or None,
+        }
+
     if kind == lib.SIPRAL_EVENT_KIND_CHALLENGE_DECLINED:
         challenge = payload.challenge
         realms = _text(challenge.realms, challenge.realms_len)

@@ -1229,6 +1229,21 @@ public enum SipralEventKind: UInt32, Sendable {
     /// is what `sipral_account_config_t::realms` is for. `account` is
     /// the account.
     case challengeDeclined = 58
+    /// An account's own server takes an OAuth 2.0 access token (RFC
+    /// 8898) and the account has none it would accept: none was
+    /// supplied, or the one supplied was refused — expired or revoked,
+    /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+    ///
+    /// `payload.token` says where a token comes from: `authz_server`, an
+    /// `https` URI RFC 8898 §2.1.1 says to check against the
+    /// authorization servers the application trusts before going near
+    /// it, and `scope`, what the token has to cover. Fetching it is the
+    /// application's; hand it over with `sipral_account_set_access_token`.
+    /// The refusal settles meanwhile the way an unanswered challenge does
+    /// — a registration failing with `BAD_CREDENTIALS`, a call ending
+    /// with the 401 or 407 — and `sipral_account_register` registers
+    /// again at once with the new token. `account` is the account.
+    case tokenRequired = 59
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2378,6 +2393,26 @@ public enum SipralChallengeRefusal: UInt32, Sendable {
     case notTheAccountsRealm = 2
 }
 
+/// What an account's server said was wrong with the access token it
+/// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+/// `sipral_token_event_t::error`.
+public enum SipralTokenError: UInt32, Sendable {
+    /// The server named no error: no token was offered yet.
+    case none = 0
+    /// `invalid_request`: the request was malformed.
+    case invalidRequest = 1
+    /// `invalid_token`: the token is expired, revoked, malformed or
+    /// otherwise invalid. A new one is needed.
+    case invalidToken = 2
+    /// `insufficient_scope`: the token does not cover what was asked;
+    /// `scope` says what would.
+    case insufficientScope = 3
+    /// `invalid_scope`.
+    case invalidScope = 4
+    /// Another code, as written in `error_code`.
+    case other = 5
+}
+
 /// What a party this end holds is sent:
 /// `sipral_stack_config_t::held_audio`.
 public enum SipralHeldAudio: UInt32, Sendable {
@@ -2931,7 +2966,7 @@ public enum Sipral {
     /// does not ask about. The
     /// rule for all three numbers is the Versioning section of
     /// `docs/08-ffi.md`, which is where the ABI contract is written down.
-    public static let abiVersionMinor: UInt32 = 1
+    public static let abiVersionMinor: UInt32 = 2
 
     /// The ABI's patch version, raised by a fix that changes no declaration.
     public static let abiVersionPatch: UInt32 = 0
@@ -3380,6 +3415,7 @@ public enum Sipral {
         ("sipral_local_conference_event_t", MemoryLayout<sipral_local_conference_event_t>.size, 40, 40, 40),
         ("sipral_locate_event_t", MemoryLayout<sipral_locate_event_t>.size, 48, 32, 32),
         ("sipral_challenge_event_t", MemoryLayout<sipral_challenge_event_t>.size, 40, 20, 20),
+        ("sipral_token_event_t", MemoryLayout<sipral_token_event_t>.size, 88, 48, 48),
         ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 328, 208, 216),
         ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
         ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),
@@ -4137,6 +4173,45 @@ public enum Sipral {
         let status = sipral_account_registration_state(stack, account, &state)
         try check(status)
         return state
+    }
+
+    /// Give an account the OAuth 2.0 access token its server asked for
+    /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+    /// takes the token away. The password, if the account has one, stays.
+    ///
+    /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+    /// renewed ahead of its expiry goes in: from the next request on, a
+    /// `Bearer` challenge from the account's own server is answered with
+    /// `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
+    /// request its cached challenge covers. Offered a `Digest` and a
+    /// `Bearer` challenge for one realm, the token answers. A token the
+    /// server refused is never sent to it again. The token answers the
+    /// account's own server and nobody else, the rule the password is held
+    /// to. Nothing is sent by this call; a registration that failed for
+    /// want of a token starts again with `sipral_account_register`.
+    ///
+    /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+    /// names the authorization server and the scope, and the exchange with
+    /// it is the application's. The token is copied, kept out of every log
+    /// and diagnostic, and wiped when replaced.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+    /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+    /// nothing changed and the error not describing it.
+    ///
+    /// Safety
+    ///
+    /// `token` must be readable for `token_len` bytes, or be null with a
+    /// length of zero.
+    public static func accountSetAccessToken(stack: SipralHandle, account: SipralHandle, token: String) throws {
+        try ensureAbi()
+        let status =
+            Array(token.utf8).withUnsafeBufferPointer { raw2 in
+                raw2.withMemoryRebound(to: CChar.self) { p2 in
+                    sipral_account_set_access_token(stack, account, p2.baseAddress, p2.count)
+                }
+            }
+        try check(status)
     }
 
     /// Place a call, and write its handle to `out_call`.

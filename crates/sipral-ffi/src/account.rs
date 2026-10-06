@@ -965,6 +965,65 @@ entry! {
     }
 }
 
+entry! {
+    /// Give an account the OAuth 2.0 access token its server asked for
+    /// (RFC 8898), in place of any it had (ABI 1.2). A `token_len` of zero
+    /// takes the token away. The password, if the account has one, stays.
+    ///
+    /// The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, and the way a token
+    /// renewed ahead of its expiry goes in: from the next request on, a
+    /// `Bearer` challenge from the account's own server is answered with
+    /// `Authorization: Bearer <token>` (RFC 6750 §2.1), and so is every
+    /// request its cached challenge covers. Offered a `Digest` and a
+    /// `Bearer` challenge for one realm, the token answers. A token the
+    /// server refused is never sent to it again. The token answers the
+    /// account's own server and nobody else, the rule the password is held
+    /// to. Nothing is sent by this call; a registration that failed for
+    /// want of a token starts again with `sipral_account_register`.
+    ///
+    /// The library does not fetch tokens: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
+    /// names the authorization server and the scope, and the exchange with
+    /// it is the application's. The token is copied, kept out of every log
+    /// and diagnostic, and wiped when replaced.
+    ///
+    /// `SIPRAL_STATUS_INVALID_ARGUMENT` for a token that is not RFC 6750
+    /// §2.1's `b64token` — letters, digits, `-._~+/`, then any `=` — with
+    /// nothing changed and the error not describing it.
+    ///
+    /// # Safety
+    ///
+    /// `token` must be readable for `token_len` bytes, or be null with a
+    /// length of zero.
+    fn sipral_account_set_access_token(
+        stack: SipralHandle,
+        account: SipralHandle,
+        token: *const c_char,
+        token_len: usize,
+    ) {
+        let raw = unsafe { crate::text::bytes(token.cast::<u8>(), token_len, "token") }?;
+        let token = match raw {
+            None => None,
+            Some(raw) => match std::str::from_utf8(raw) {
+                Ok(token) if sipral_core::auth::is_access_token(token) => Some(token),
+                _ => {
+                    return Err(fail(
+                        SipralStatus::InvalidArgument,
+                        "token is not an access token: RFC 6750 section 2.1 allows letters, \
+                         digits, - . _ ~ + / and trailing = padding",
+                    ));
+                }
+            },
+        };
+        with_stack(stack, |state| {
+            let id = state.accounts.get(account).map_err(handle_failed)?;
+            state
+                .agent
+                .set_access_token(id, token)
+                .map_err(|error| ua_failed(&error))
+        })
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::{

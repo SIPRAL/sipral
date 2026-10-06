@@ -73,7 +73,7 @@ Q2 2027, planned.
 - How to connect more than forty voice-agent services, one by one *(done)*
 - Direct adapters to the realtime speech APIs of the main voice-agent providers
 - A ready-to-run bridge with one address per agent
-- OAuth2 sign-in to the PBX (RFC 8898)
+- OAuth2 sign-in to the PBX (RFC 8898) *(done)*
 - LiveKit Agents example
 - A phone voice agent that runs in five minutes, speech to speech, from one command
 - Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published

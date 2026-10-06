@@ -103,6 +103,56 @@ public class EventDecodingTests
         }
     }
 
+    /// <summary>An account's server asking for an OAuth access token says
+    /// where one comes from, for what scope, and why the last was
+    /// refused.</summary>
+    [Fact]
+    public void ATokenRequiredCarriesTheAuthorizationServerAndTheError()
+    {
+        string[] texts = { "203.0.113.9:5060", "example.com", "sip register", "https://as.example.com", "invalid_token" };
+        var pointers = new IntPtr[texts.Length];
+        try
+        {
+            for (var i = 0; i < texts.Length; i++)
+            {
+                var bytes = Encoding.UTF8.GetBytes(texts[i]);
+                pointers[i] = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, pointers[i], bytes.Length);
+            }
+            var evt = Raw(SipralEventKind.TokenRequired);
+            evt.Payload.Token.Error = (uint)SipralTokenError.InvalidToken;
+            evt.Payload.Token.Proxy = (uint)SipralToggle.On;
+            evt.Payload.Token.Server = pointers[0];
+            evt.Payload.Token.ServerLen = (nuint)texts[0].Length;
+            evt.Payload.Token.Realm = pointers[1];
+            evt.Payload.Token.RealmLen = (nuint)texts[1].Length;
+            evt.Payload.Token.Scope = pointers[2];
+            evt.Payload.Token.ScopeLen = (nuint)texts[2].Length;
+            evt.Payload.Token.AuthzServer = pointers[3];
+            evt.Payload.Token.AuthzServerLen = (nuint)texts[3].Length;
+            evt.Payload.Token.ErrorCode = pointers[4];
+            evt.Payload.Token.ErrorCodeLen = (nuint)texts[4].Length;
+            var decoded = Decode(evt).Token!;
+            Assert.Equal(SipralTokenError.InvalidToken, decoded.Error);
+            Assert.Equal("invalid_token", decoded.ErrorCode);
+            Assert.True(decoded.Proxy);
+            Assert.Equal("203.0.113.9:5060", decoded.Server);
+            Assert.Equal("example.com", decoded.Realm);
+            Assert.Equal("sip register", decoded.Scope);
+            Assert.Equal("https://as.example.com", decoded.AuthzServer);
+        }
+        finally
+        {
+            foreach (var pointer in pointers)
+            {
+                if (pointer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(pointer);
+                }
+            }
+        }
+    }
+
     [Fact]
     public void ASubscriptionNoticeCarriesItsState()
     {

@@ -321,7 +321,8 @@ pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION
 /// else: accounts, registration, calls, hold, transfer, and the five calls
 /// that drive them.
 pub use sipral_ua::{
-    Account, AccountId, CallEndReason, CallHandle, CallState, ChallengeRefusal, Compaction,
+    Account, AccountId, BearerChallenge, BearerError, CallEndReason, CallHandle, CallState,
+    ChallengeRefusal, Compaction,
     Credentials, DatagramLimit, DtmfError, DtmfInfoForm, EndpointConfig, ForkPolicy, Hold,
     Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle, MessageSummary, Network,
     OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery, Refusals,

@@ -90,6 +90,14 @@ call.on('confirmed', async () => {
 call.on('ended', ({reason, statusCode}) => console.log(reason, statusCode));
 ```
 
+A server that signs its users in with OAuth 2.0 (RFC 8898) challenges with
+`Bearer`; the account and the client emit `tokenRequired`, with the
+`authzServer` and the `scope`. Check the server against the ones the
+application trusts, fetch the token, and hand it over with
+`await account.setAccessToken(token)`; `register()` again registers at once,
+and a token the server called `'invalidToken'` emits the event again
+(`docs/08-ffi.md`, "What ABI 1.2 added").
+
 `bindHost` is the phone's own address on the network the server is reached
 over; the stack signals from it and every call's audio goes out from it. A
 phone has several addresses and only the application knows which one the

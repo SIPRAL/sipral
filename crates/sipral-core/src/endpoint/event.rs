@@ -385,6 +385,24 @@ pub enum Event {
         /// the same credentials are worth sending again.
         stale: bool,
     },
+    /// A request was refused with a `Bearer` challenge: the server takes an
+    /// OAuth 2.0 access token (RFC 8898).
+    ///
+    /// Answered the way [`Event::Challenged`] is, with
+    /// [`super::Endpoint::retry_with_credentials`], by credentials that
+    /// carry a token ([`crate::auth::Credentials::with_access_token`]). The
+    /// token comes from `challenge.authz_server`, for `challenge.scope`, by
+    /// an exchange this stack does not make; RFC 8898 §2.1.1 has the client
+    /// check that server against the ones it trusts first.
+    /// [`super::Endpoint::token_wanted`] says whether the credentials at
+    /// hand can answer it, or a new token is needed.
+    TokenChallenged {
+        /// The transaction that was refused, and the handle
+        /// [`super::Endpoint::retry_with_credentials`] takes.
+        transaction: AnyTransactionId,
+        /// The challenge: realm, scope, authorization server and error.
+        challenge: crate::auth::BearerChallenge,
+    },
     /// A dialog is over and its handle is about to go stale.
     DialogTerminated {
         /// Which one.

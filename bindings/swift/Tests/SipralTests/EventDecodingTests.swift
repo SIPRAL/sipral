@@ -122,4 +122,45 @@ final class EventDecodingTests: XCTestCase {
         XCTAssertEqual(told.server, server)
         XCTAssertEqual(told.realms, ["sbc.example", "callee, inc."])
     }
+
+    /// An account's server asking for an OAuth access token says where one
+    /// comes from, for what scope, and why the last was refused.
+    func testATokenRequiredCarriesTheAuthorizationServerAndTheError() throws {
+        let server = "203.0.113.9:5060"
+        let realm = "example.com"
+        let scope = "sip register"
+        let authz = "https://as.example.com"
+        let code = "invalid_token"
+        let told = try server.withCString { serverText in
+            try realm.withCString { realmText in
+                try scope.withCString { scopeText in
+                    try authz.withCString { authzText in
+                        try code.withCString { codeText in
+                            var event = raw(.tokenRequired)
+                            event.payload.token.error = SipralTokenError.invalidToken.rawValue
+                            event.payload.token.proxy = SipralToggle.off.rawValue
+                            event.payload.token.server = serverText
+                            event.payload.token.server_len = server.utf8.count
+                            event.payload.token.realm = realmText
+                            event.payload.token.realm_len = realm.utf8.count
+                            event.payload.token.scope = scopeText
+                            event.payload.token.scope_len = scope.utf8.count
+                            event.payload.token.authz_server = authzText
+                            event.payload.token.authz_server_len = authz.utf8.count
+                            event.payload.token.error_code = codeText
+                            event.payload.token.error_code_len = code.utf8.count
+                            return try XCTUnwrap(SipralEventDecoder.decode(event).tokenData)
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(told.error, .invalidToken)
+        XCTAssertEqual(told.errorCode, code)
+        XCTAssertFalse(told.proxy)
+        XCTAssertEqual(told.server, server)
+        XCTAssertEqual(told.realm, realm)
+        XCTAssertEqual(told.scope, scope)
+        XCTAssertEqual(told.authzServer, authz)
+    }
 }

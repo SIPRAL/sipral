@@ -79,6 +79,9 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
 
     override fun unregister(account: String, promise: Promise) = settle(promise) { core.unregister(account) }
 
+    override fun setAccessToken(account: String, token: String, promise: Promise) =
+        settle(promise) { core.setAccessToken(account, token) }
+
     override fun removeAccount(account: String, promise: Promise) = settle(promise) { core.removeAccount(account) }
 
     override fun placeCall(account: String, target: String, options: ReadableMap, promise: Promise) = settle(promise) {

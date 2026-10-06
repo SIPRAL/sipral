@@ -45,7 +45,7 @@ use crate::local_conference::SipralLocalConferenceEvent;
 use crate::locate::SipralLocateEvent;
 use crate::media::{
     SipralCodec, SipralDirection, SipralMediaFault, SipralSrtpSuite, SipralStreamStats,
-    direction_of, fault_of, named_codec,
+    SipralToggle, direction_of, fault_of, named_codec,
 };
 use crate::names::Names;
 use crate::nat::{
@@ -740,6 +740,21 @@ event_kinds! {
         /// is what `sipral_account_config_t::realms` is for. `account` is
         /// the account.
         58 = ChallengeDeclined, c"challenge declined";
+        /// An account's own server takes an OAuth 2.0 access token (RFC
+        /// 8898) and the account has none it would accept: none was
+        /// supplied, or the one supplied was refused — expired or revoked,
+        /// which `error` says as `SIPRAL_TOKEN_ERROR_INVALID_TOKEN` (ABI 1.2).
+        ///
+        /// `payload.token` says where a token comes from: `authz_server`, an
+        /// `https` URI RFC 8898 §2.1.1 says to check against the
+        /// authorization servers the application trusts before going near
+        /// it, and `scope`, what the token has to cover. Fetching it is the
+        /// application's; hand it over with `sipral_account_set_access_token`.
+        /// The refusal settles meanwhile the way an unanswered challenge does
+        /// — a registration failing with `BAD_CREDENTIALS`, a call ending
+        /// with the 401 or 407 — and `sipral_account_register` registers
+        /// again at once with the new token. `account` is the account.
+        59 = TokenRequired, c"token required";
     }
 }
 
@@ -819,6 +834,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::Located, "locate"),
     (SipralEventKind::LocateFailed, "locate"),
     (SipralEventKind::ChallengeDeclined, "challenge"),
+    (SipralEventKind::TokenRequired, "token"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1707,6 +1723,68 @@ codes! {
     }
 }
 
+codes! {
+    /// What an account's server said was wrong with the access token it
+    /// was given (RFC 6750 §3.1, RFC 8898 §4). Names for
+    /// `sipral_token_event_t::error`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SipralTokenError: u32 {
+        /// The server named no error: no token was offered yet.
+        None = 0,
+        /// `invalid_request`: the request was malformed.
+        InvalidRequest = 1,
+        /// `invalid_token`: the token is expired, revoked, malformed or
+        /// otherwise invalid. A new one is needed.
+        InvalidToken = 2,
+        /// `insufficient_scope`: the token does not cover what was asked;
+        /// `scope` says what would.
+        InsufficientScope = 3,
+        /// `invalid_scope`.
+        InvalidScope = 4,
+        /// Another code, as written in `error_code`.
+        Other = 5,
+    }
+}
+
+record! {
+    /// What a [`SipralEventKind::TokenRequired`] carries: the `Bearer`
+    /// challenge of an account's server (RFC 8898 §4), and where it came
+    /// from (ABI 1.2). Every text is UTF-8 and not NUL-terminated; one the
+    /// server left out is empty.
+    #[derive(Clone, Copy)]
+    pub struct SipralTokenEvent {
+        /// A [`SipralTokenError`].
+        pub error: Number<SipralTokenError>,
+        /// A `SipralToggle`: `SIPRAL_TOGGLE_ON` when a proxy asked (407,
+        /// answered in `Proxy-Authorization`), `SIPRAL_TOGGLE_OFF` when the
+        /// registrar or the far end did (401).
+        pub proxy: Number<SipralToggle>,
+        /// Where the challenged request went, and the challenge came from,
+        /// as `host:port`.
+        pub server: *const c_char,
+        /// How many bytes of it.
+        pub server_len: usize,
+        /// The protection domain, empty when the challenge named none.
+        pub realm: *const c_char,
+        /// How many bytes of it.
+        pub realm_len: usize,
+        /// The scope the token has to carry: space-separated strings the
+        /// authorization server defines (RFC 6749 §3.3).
+        pub scope: *const c_char,
+        /// How many bytes of it.
+        pub scope_len: usize,
+        /// The authorization server: an `https` URI. A value that was not
+        /// one is left out.
+        pub authz_server: *const c_char,
+        /// How many bytes of it.
+        pub authz_server_len: usize,
+        /// The `error` code as the server wrote it, for `Other`.
+        pub error_code: *const c_char,
+        /// How many bytes of it.
+        pub error_code_len: usize,
+    }
+}
+
 record! {
     /// What a [`SipralEventKind::ChallengeDeclined`] carries: who asked for
     /// the account's password, and why it was not given (ABI 0.36).
@@ -1796,6 +1874,8 @@ record! {
         pub locate: SipralLocateEvent,
         /// For [`SipralEventKind::ChallengeDeclined`].
         pub challenge: SipralChallengeEvent,
+        /// For [`SipralEventKind::TokenRequired`].
+        pub token: SipralTokenEvent,
     }
 }
 
@@ -2138,6 +2218,9 @@ pub(crate) fn translate(
     if let Some(out) = about_a_challenge(known, event, transport) {
         return Some(out);
     }
+    if let Some(out) = about_a_token(known, event, transport) {
+        return Some(out);
+    }
     about_lifecycle(known, event)
 }
 
@@ -2175,6 +2258,69 @@ fn about_a_challenge(
         known.stack,
         SipralEventKind::ChallengeDeclined,
         payload!(challenge: payload),
+    );
+    out.account = known
+        .accounts
+        .name_of(account)
+        .unwrap_or(SIPRAL_HANDLE_NONE);
+    Some(out)
+}
+
+/// An account's server asking for an OAuth 2.0 access token. The address is
+/// `text`, the text [`text_to_point_at`] built for this event, since it has
+/// no bytes of its own; the rest borrows from the event.
+fn about_a_token(
+    known: &mut Vocabulary<'_>,
+    event: &UaEvent,
+    text: Option<&str>,
+) -> Option<SipralEvent> {
+    let UaEvent::TokenRequired {
+        account,
+        ref challenge,
+        ..
+    } = *event
+    else {
+        return None;
+    };
+    let server = text.unwrap_or_default();
+    let realm: &str = &challenge.realm;
+    let scope = challenge.scope.as_deref().unwrap_or_default();
+    let authz_server = challenge.authz_server.as_deref().unwrap_or_default();
+    let (error, code) = match challenge.error {
+        None => (SipralTokenError::None, ""),
+        Some(ref error) => (
+            match error {
+                sipral_ua::BearerError::InvalidRequest => SipralTokenError::InvalidRequest,
+                sipral_ua::BearerError::InvalidToken => SipralTokenError::InvalidToken,
+                sipral_ua::BearerError::InsufficientScope => SipralTokenError::InsufficientScope,
+                sipral_ua::BearerError::InvalidScope => SipralTokenError::InvalidScope,
+                _ => SipralTokenError::Other,
+            },
+            error.code(),
+        ),
+    };
+    let payload = SipralTokenEvent {
+        error: error as u32,
+        proxy: if challenge.proxy {
+            SipralToggle::On as u32
+        } else {
+            SipralToggle::Off as u32
+        },
+        server: server.as_ptr().cast::<c_char>(),
+        server_len: server.len(),
+        realm: realm.as_ptr().cast::<c_char>(),
+        realm_len: realm.len(),
+        scope: scope.as_ptr().cast::<c_char>(),
+        scope_len: scope.len(),
+        authz_server: authz_server.as_ptr().cast::<c_char>(),
+        authz_server_len: authz_server.len(),
+        error_code: code.as_ptr().cast::<c_char>(),
+        error_code_len: code.len(),
+    };
+    let mut out = SipralEvent::of(
+        known.stack,
+        SipralEventKind::TokenRequired,
+        payload!(token: payload),
     );
     out.account = known
         .accounts
@@ -2784,6 +2930,7 @@ pub(crate) fn text_to_point_at(event: &UaEvent) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(","),
         ),
+        UaEvent::TokenRequired { from, .. } => Some(from.to_string()),
         UaEvent::ChallengeDeclined {
             from, ref realms, ..
         } => {
@@ -3992,7 +4139,8 @@ mod tests {
         assert_eq!(SipralEventKind::Located as u32, 56);
         assert_eq!(SipralEventKind::LocateFailed as u32, 57);
         assert_eq!(SipralEventKind::ChallengeDeclined as u32, 58);
-        assert_eq!(SipralEventKind::ALL.len(), 56, "and there are no others");
+        assert_eq!(SipralEventKind::TokenRequired as u32, 59);
+        assert_eq!(SipralEventKind::ALL.len(), 57, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -4104,7 +4252,8 @@ mod tests {
             Some("challenge declined"),
             "58 is live"
         );
-        assert_eq!(name(59), None, "past the last kind");
+        assert_eq!(name(59).as_deref(), Some("token required"), "59 is live");
+        assert_eq!(name(60), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

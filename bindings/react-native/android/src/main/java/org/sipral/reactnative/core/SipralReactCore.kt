@@ -40,6 +40,7 @@ import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
 import org.sipral.idiomatic.declinedChallengeOf
 import org.sipral.idiomatic.locateOf
+import org.sipral.idiomatic.tokenRequiredOf
 import org.sipral.idiomatic.transferOf
 
 /** A refusal JavaScript receives as `SipralError.code`: a status's name, or one of this layer's. */
@@ -219,6 +220,11 @@ class SipralReactCore(
     fun register(account: String) = guarded { accountOf(account).register() }
 
     fun unregister(account: String) = guarded { accountOf(account).unregister() }
+
+    /** The OAuth 2.0 access token [account]'s server asked for (RFC 8898);
+     * an empty one takes it away. */
+    fun setAccessToken(account: String, token: String) =
+        guarded { accountOf(account).setAccessToken(token.ifEmpty { null }) }
 
     fun removeAccount(account: String) = guarded {
         accountOf(account).remove()
@@ -500,6 +506,16 @@ class SipralReactCore(
                     challenge.refusal?.let { flat["challengeRefusal"] = camel(it.name) }
                     challenge.server?.let { flat["challengeServer"] = it }
                     flat["challengeRealms"] = challenge.realms.joinToString("\n")
+                }
+                tokenRequiredOf(event) != null -> {
+                    val token = tokenRequiredOf(event)!!
+                    token.error?.let { flat["tokenError"] = camel(it.name) }
+                    token.errorCode?.let { flat["tokenErrorCode"] = it }
+                    flat["tokenProxy"] = token.proxy
+                    token.server?.let { flat["tokenServer"] = it }
+                    flat["tokenRealm"] = token.realm
+                    token.scope?.let { flat["tokenScope"] = it }
+                    token.authzServer?.let { flat["tokenAuthzServer"] = it }
                 }
                 locateOf(event) != null -> {
                     val locate = locateOf(event)!!

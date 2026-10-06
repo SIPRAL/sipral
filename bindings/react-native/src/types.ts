@@ -72,6 +72,15 @@ export type LocateFailure = 'none' | 'notFound' | 'unanswered' | 'unsupported';
 /** `sipral_challenge_refusal_t`: why an account's password was not given to a challenge. */
 export type ChallengeRefusal = 'unknown' | 'notTheAccountsServer' | 'notTheAccountsRealm';
 
+/** `sipral_token_error_t`: what an account's server said was wrong with its access token (RFC 6750 section 3.1). */
+export type TokenError =
+  | 'none'
+  | 'invalidRequest'
+  | 'invalidToken'
+  | 'insufficientScope'
+  | 'invalidScope'
+  | 'other';
+
 export interface OpenOptions {
   /**
    * The phone's own address on the network the server is reached over: the
