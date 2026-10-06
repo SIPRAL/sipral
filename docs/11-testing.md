@@ -1246,7 +1246,8 @@ machine cannot execute, `cargo fmt --check`, `clippy` and `cargo fuzz build`
 over all thirty-four fuzz targets under their own nightly — which nothing else
 here reaches, since `fuzz/` is a workspace of its own and `--workspace` stops
 at its edge — `cargo deny` for dependency licences, `gitleaks` over the
-history, and the tree checks — SPDX headers, provenance references,
+history, `osv-scanner` for known vulnerabilities in every dependency the tree
+declares, in any language, and the tree checks — SPDX headers, provenance references,
 language, whether an internal file or a capture has reached the tree,
 whether a name on the private list kept outside it (in the ignored `intern/`,
 so that the list does not publish what it guards) appears in a file or in a

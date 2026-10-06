@@ -87,8 +87,11 @@ network is in scope, and the parser especially:
 ## Known advisories that do not apply
 
 A dependency scanner run over this tree will report these. Each is set aside in
-`deny.toml`, with the reason beside it, and the reason is repeated here for
-whoever reads a scan without reading the configuration.
+`deny.toml` and `osv-scanner.toml`, with the reason beside it, and the reason
+is repeated here for whoever reads a scan without reading the configuration.
+`scripts/check.sh` runs `osv-scanner` over every lockfile and manifest in the
+tree — Rust, npm, NuGet, Maven and Python — on every invocation, so an
+advisory published after a commit still stops the next release.
 
 - **RUSTSEC-2023-0071 / CVE-2023-49092, `rsa` (the Marvin attack).** A timing
   side channel in operations with an RSA *private* key — decryption and
@@ -97,6 +100,12 @@ whoever reads a scan without reading the configuration.
   at all: this end's own key is P-256. There is no secret for the channel to
   reach. Any use of an RSA private key added later removes the exception from
   `deny.toml` first.
+- **GHSA-vfj7-8cjw-p6xm, `braces`, and GHSA-hp3w-g68c-fv3c, `sprintf-js`
+  (denial of service on crafted input).** Both are development dependencies of
+  the React Native binding — React Native's bundler and the test coverage
+  plugin — fed only the developer's own files, and neither is part of a
+  shipped package. Neither has a fixed version yet; the exceptions expire on
+  2027-01-06, when the scan fails again and they are looked at anew.
 
 ## Supported versions
 

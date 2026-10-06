@@ -2693,6 +2693,25 @@ step_secrets() {
     fi
 }
 
+# Known vulnerabilities in every dependency the tree declares: the Cargo
+# lockfiles, but also npm, NuGet, Maven and Python, which cargo deny never
+# reads. The database moves while the code stands still, so this is a tree
+# check that runs on every invocation, the release one included.
+step_vulnerabilities() {
+    step "known vulnerabilities"
+    if command -v osv-scanner >/dev/null 2>&1; then
+        local out
+        if out="$(osv-scanner scan source -r --config "$ROOT/osv-scanner.toml" "$ROOT" 2>&1)"; then
+            pass "osv-scanner"
+        else
+            printf '%s\n' "$out" | grep -E '^\| https://osv.dev|^Total' | sed 's/^/        /'
+            fail "osv-scanner: a dependency has a known vulnerability (osv-scanner.toml sets one aside, with its reason)"
+        fi
+    else
+        fail "osv-scanner not installed: brew install osv-scanner"
+    fi
+}
+
 # The figures the README, docs/19-numbers.md, docs/23-compared-with-pjsip.md
 # and the website publish, measured and held to docs/numbers.toml, which says
 # for each one its published value, how far a measurement may pass it and
@@ -2766,6 +2785,7 @@ area_hygiene() {
     step_wire_reader
     step_third_party_licences
     step_secrets
+    step_vulnerabilities
 }
 area_rust() {
     step_build

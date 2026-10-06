@@ -25,6 +25,7 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 - **.NET: the stack's, an account's and a call's raw handles are public** (`SipralStack.Handle`, `Account.Handle`, `Call.Handle`), for an entry point of `sipral.h` the classes do not wrap yet, as the Kotlin, Python and Swift layers already allow.
 - **Every binding's `unregister` says where an editor shows it what the state does.** It reads unregistered as soon as the call returns, and the registrar's answer is the registration-changed event after it; an application that closes the stack on the state alone cannot answer a challenge to the un-REGISTER (`docs/08-ffi.md` said so already).
+- **The gate checks every dependency for known vulnerabilities, in every language.** `scripts/check.sh` runs `osv-scanner` over the Cargo, npm, NuGet, Maven and Python dependencies on each run, `--hygiene-only` included; the advisories that do not apply are set aside in `osv-scanner.toml` with their reasons, and listed in `SECURITY.md`.
 - **The .NET assembly names no build path, and the repository asks for a bug report or feature request in a form.** `Sipral.csproj` maps the project directory to `/_/`; GitHub issue forms for bugs and features, with questions sent to Discussions and vulnerabilities to private reporting.
 
 ### Fixed

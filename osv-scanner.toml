@@ -1,0 +1,19 @@
+# Known advisories set aside by `osv-scanner`, which scripts/check.sh runs over
+# every lockfile and manifest in the tree. Each entry carries its reason, and
+# the Rust ones repeat an exception already in deny.toml. An entry for a
+# development-only package expires, so the scan fails again and the advisory
+# is looked at anew instead of being forgotten.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "rsa, the Marvin attack: public-key verification only, no RSA private key is ever held (deny.toml, SECURITY.md)"
+
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2027-01-06
+reason = "braces, stack exhaustion on nested patterns: reached only through metro, React Native's development bundler, over the developer's own patterns; not part of any shipped package, and no fixed version exists"
+
+[[IgnoredVulns]]
+id = "GHSA-hp3w-g68c-fv3c"
+ignoreUntil = 2027-01-06
+reason = "sprintf-js, unbounded precision specifiers: reached only through the jest coverage plugin while testing; not part of any shipped package, and no fixed version exists"
