@@ -1200,8 +1200,7 @@ median gap 23.98 ms, the standard deviation 5.66 ms (5.80 in a second run).
 The loop waited for SIP with the socket's own read timeout, which Linux
 counts in scheduler ticks — 4 ms at the 250 a second Debian's kernel runs —
 so a 5 ms wait ended 4 to 8 ms later, and a frame went out on whichever turn
-came after it fell due. Asterisk measured 5 ms of jitter on the agent's
-audio over that clean link, in both runs, and none on pjsua's.
+came after it fell due.
 
 **What changed.** One thread reads the SIP socket and hands each datagram
 over a channel, and the loop waits on the channel, whose timeout ends on
@@ -1216,12 +1215,18 @@ runs. No thread per call, no busy wait.
 |---|---|---|
 | Gaps between the frames one call sent, clean link: standard deviation, 99th percentile, share off 20 ms by more than 2 ms | 5.66 and 5.80 ms; 28.0 ms; 98.4 % | 0.05 and 0.20 ms; 20.1 ms; 0.1 % or none |
 | The same for pjsua 2.17, three runs beside them | 0.66, 0.52 and 0.49 ms; 21.3 to 22.1 ms; 0.9 to 2.9 % | |
-| Asterisk's jitter on the agent's audio, clean link | 5 and 5 ms | 1 and 0 ms |
+| Asterisk's own jitter on the agent's audio, clean link | | 0 and 0 ms (7 October, `d41dcd0`) |
 | The agent's own jitter on Asterisk's audio, clean link | 6.1 and 5.5 ms | 0 and 0 ms |
 
 Each column is two runs of the comparison's netem phase, the capture taken in
-the client's network namespace, which sees its packets as they leave. The
-last row is the agent's reading, not Asterisk's sending: the agent times a
+the client's network namespace, which sees its packets as they leave. This
+table first gave Asterisk's jitter on the agent's audio as 5 and 5 ms before
+and 1 and 0 ms after: those were read from the "Receive" jitter of
+`pjsip show channelstats`, which is the agent's own RTCP report of Asterisk's
+audio relayed back, not Asterisk's measurement (`docs/23-compared-with-pjsip.md`,
+"Which of Asterisk's two jitter columns is its own"), and what Asterisk
+itself read of the waiting agent's audio was not kept. The last row is the
+agent's reading, not Asterisk's sending: the agent times a
 packet's arrival at the turn of its loop that reads it, so what it reads of a
 clean link is its own turns' regularity. Its turns were 4 to 8 ms apart and
 are now the grid's 10 ms, so a steady stream reads 0, and jitter finer than

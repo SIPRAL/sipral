@@ -193,9 +193,11 @@ class Views(unittest.TestCase):
             "          labuser-compare-00 00:00:31 ulaw     1470      30    2   0.012"
             "   1500      18    1   0.004   0.081\n"
         )
+        # the jitter under "Receive" is the client's report of Asterisk's
+        # audio; Asterisk's own reading of the client's is under "Transmit"
         self.assertEqual(run(wire.channelstats, path, "labuser-compare"), {
-            "received": "1470", "loss_pct": "2.00", "jitter_ms": "12.00", "rtt_ms": "81.0",
-            "r": "84.2", "mos": "4.17",
+            "received": "1470", "loss_pct": "2.00", "jitter_ms": "4.00", "rtt_ms": "81.0",
+            "r": "84.5", "mos": "4.18",
         })
 
     def test_a_round_trip_asterisk_never_measured_is_not_read_as_zero(self):

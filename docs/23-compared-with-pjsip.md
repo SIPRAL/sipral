@@ -209,66 +209,83 @@ Each end's view of the audio it received: Asterisk's from
 the line it prints when a call ends. Every row is rated by the same reduced
 E-model (ITU-T G.107: G.711 with loss concealment, Bpl 25.1, random loss,
 one-way delay as half the round trip plus one packet plus twice the jitter),
-so the R and MOS columns differ only by what was measured:
+so the R and MOS columns differ only by what was measured. Run on 7 October
+at `d41dcd0` (Rust 1.95.0, release build), Asterisk and pjsua as above: three
+runs of the mobile profile, two of the others, each cell the lowest and the
+highest of them:
 
 | Profile | Measured at | Received | Loss | Jitter | RTT | R | MOS |
 |---|---|---|---|---|---|---|---|
-| lossy | Asterisk, from Sipral | 1402 | 7.09 % | 9.0 ms | 73 ms | 70.5 | 3.62 |
-| lossy | Sipral | 1395 | 8.40 % | 10.4 ms | 103 ms | 67.2 | 3.46 |
-| lossy | Asterisk, from pjsua | 1410 | 7.18 % | 9.0 ms | 85 ms | 70.1 | 3.60 |
-| lossy | pjsua | 1.4K | 7.2 % | 8.9 ms | 87 ms | 70.1 | 3.60 |
-| mobile | Asterisk, from Sipral | 1442 | 4.50 % | 35.0 ms | 119 ms | 75.2 | 3.83 |
-| mobile | Sipral | 1455 | 4.34 % | 52.6 ms | 154 ms | 71.6 | 3.67 |
-| mobile | Asterisk, from pjsua | 1465 | 3.04 % | 22.0 ms | 126 ms | 79.9 | 4.02 |
-| mobile | pjsua | 1.5K | 3.5 % | 18.7 ms | 99 ms | 79.0 | 3.99 |
-| satellite | Asterisk, from Sipral | 1521 | 0.46 % | 13.0 ms | 505 ms | 71.0 | 3.64 |
-| satellite | Sipral | 1553 | 0.64 % | 15.3 ms | 504 ms | 69.8 | 3.59 |
-| satellite | Asterisk, from pjsua | 1550 | 0.58 % | 10.0 ms | 488 ms | 72.5 | 3.71 |
-| satellite | pjsua | 1.6K | 0.4 % | 8.8 ms | 485 ms | 73.7 | 3.76 |
+| lossy | Asterisk, from Sipral | 1447 to 1450 | 7.64 to 7.72 % | 8 to 9 ms | 76 to 79 ms | 69.0 to 69.2 | 3.55 to 3.56 |
+| lossy | Sipral | 1468 to 1472 | 7.36 to 7.85 % | 11.8 to 14.3 ms | 66 to 87 ms | 68.7 to 69.5 | 3.54 to 3.57 |
+| lossy | Asterisk, from pjsua | 1453 to 1521 | 6.74 to 7.57 % | 9 to 10 ms | 89 to 90 ms | 69.2 to 71.1 | 3.56 to 3.65 |
+| lossy | pjsua | 1.5K | 7.0 to 7.8 % | 8.7 ms | 86 to 88 ms | 68.8 to 70.5 | 3.54 to 3.62 |
+| mobile | Asterisk, from Sipral | 1496 to 1533 | 2.42 to 4.47 % | 19 to 28 ms | 106 to 137 ms | 76.2 to 81.8 | 3.87 to 4.09 |
+| mobile | Sipral | 1517 to 1532 | 3.28 to 4.05 % | 27.6 to 33.6 ms | 93 to 121 ms | 76.5 to 78.8 | 3.89 to 3.98 |
+| mobile | Asterisk, from pjsua | 1490 to 1526 | 3.11 to 5.16 % | 18 to 21 ms | 124 to 147 ms | 73.9 to 79.9 | 3.77 to 4.02 |
+| mobile | pjsua | 1.5K | 3.0 to 4.1 % | 18.1 to 19.8 ms | 120 to 138 ms | 77.0 to 80.1 | 3.91 to 4.03 |
+| satellite | Asterisk, from Sipral | 1590 to 1593 | 0.38 to 0.50 % | 9 ms | 506 to 510 ms | 71.6 to 72.3 | 3.67 to 3.70 |
+| satellite | Sipral | 1627 to 1633 | 0.24 to 0.25 % | 12.1 to 12.6 ms | 503 to 515 ms | 71.3 to 72.1 | 3.66 to 3.69 |
+| satellite | Asterisk, from pjsua | 1610 to 1617 | 0.43 to 0.49 % | 8 to 9 ms | 499 to 502 ms | 72.4 to 72.6 | 3.71 to 3.72 |
+| satellite | pjsua | 1.6K | 0.7 % | 8.5 to 9.1 ms | 500 to 505 ms | 71.2 to 71.7 | 3.65 to 3.68 |
 
-pjsua prints its packet count rounded past a thousand ("1.4Kpkt"), and it is
+pjsua prints its packet count rounded past a thousand ("1.5Kpkt"), and it is
 kept as printed. netem draws its loss at random, so two 30-second calls over
-the same profile do not lose the same packets: the mobile run above lost
-4.5 % of Sipral's audio and 3.0 % of pjsua's, which is most of the
-difference between their rows. What the two clients sent was rated alike by
-Asterisk under the same loss (lossy: 70.5 against 70.1; satellite: 71.0
-against 72.5).
+the same profile do not lose the same packets, and the loss of one run says
+little about the next: Asterisk lost 2.4 to 4.5 % of Sipral's audio on the
+mobile profile and 3.1 to 5.2 % of pjsua's. What the two clients sent was
+rated alike by Asterisk on every profile, the jitter included: 19 to 28 ms
+on Sipral's audio and 18 to 21 ms on pjsua's over the mobile profile, and a
+clean link (netem's `delay 0ms`, two runs) read 0 ms on both.
 
-Two differences are the clients' own. On the mobile profile Sipral reported
-more jitter than pjsua did for a similar loss (52.6 ms against 18.7 ms), and
-Asterisk measured more jitter on Sipral's audio than on pjsua's (35 ms
-against 22 ms); this run does not say whether that is the two senders or two
-draws of the profile's 30 ms delay variation, and a second run is what
-would. And the agent's own rating, from its RTCP XR VoIP metrics block
-(RFC 3611), is lower than the uniform one above — R 31, 48 and 76 over the
-three profiles — because the stack rates G.711 with the Bpl of 4.3 that
-G.113 gives it without concealment (`sipral-rtp`'s `emodel.rs`) where the
-uniform rating assumes concealment; it is printed beside the uniform one in
-the `cmp` lines (`own_r`, `own_mos`).
+**Which of Asterisk's two jitter columns is its own.** Until 7 October the
+comparison read the jitter under "Receive" in `pjsip show channelstats`,
+and the mobile profile read 27 to 40 ms on Sipral's audio against 14 to 23
+on pjsua's over six runs between 2 and 7 October (35.0 against 22.0 in the
+table this one replaces). That column is not Asterisk's measurement. Read
+once a second through a call, beside a capture, the "Receive" jitter changes
+only when the client's RTCP report arrives, and then to the jitter that
+report carries — the client's reading of Asterisk's audio, 34.2, 36.6, 28.4,
+35.2, 28.2 and 30.4 ms in turn for the agent, the value printed each time;
+in three earlier runs it was the agent's last report to the tenth of a
+millisecond (35.0, 33.0 and 37.2). The "Transmit" jitter moves with every
+packet and stays near what Asterisk's own reports to the client say of the
+client's audio. So the old rows compared the agent's reading of a link with
+Asterisk's, which differ for the reason below, and `interop/compare/wire.py`
+now reads the "Transmit" one. The counts are the right way round.
 
-**The senders, 4 October.** The 2 October run read the same on the mobile
-profile (Asterisk: 34 ms on Sipral's audio against 13 on pjsua's), so the
-bad-link phase was run again with a capture in each client's network
-namespace, the profiles' rules unchanged, beside a call over a clean link.
-Two things were found. The agent's frames did leave unevenly: 16, 24 or
+**Why the agent reads more jitter than pjsua.** The two clients estimate it
+differently, not hear different links. Over the mobile profile netem's 30 ms
+of normal spread puts about a third of the packets behind a later one. By
+RFC 3550's estimator (§6.4.1, A.8), applied to every packet in the order it
+arrived, the audio Asterisk sent read 29.8 to 33.9 ms on the agent's side of
+the link and 33.4 to 35.5 ms on pjsua's, in the captures taken after the
+impairment; the agent reported 27.6 to 33.6 ms, which is that estimator, and
+pjsua 18.1 to 19.8 ms. pjsua's reports follow the same estimator with every
+packet that arrives behind a later one left out — 20.4 to 23.4 ms on the same
+captures — and Asterisk's own reading of either client's audio does the same.
+Neither way is a fault: the RFC's counts every packet, and the other says
+more about what a jitter buffer has to absorb. The agent's lower R and MOS
+on the audio it received come from that higher jitter in the rating's delay
+term (twice the jitter) and from its round trip, the last RTCP exchange's
+rather than pjsua's average over the call; what its jitter buffer and loss
+concealment made of the audio is not what this table measures. The agent's
+own rating, from its RTCP XR VoIP metrics block (RFC 3611), is lower again —
+R 32 to 34, 48 to 53 and 83 to 84 over the three profiles — because the stack
+rates G.711 with the Bpl of 4.3 that G.113 gives it without concealment
+(`sipral-rtp`'s `emodel.rs`) where the uniform rating assumes concealment; it
+is printed beside the uniform one in the `cmp` lines (`own_r`, `own_mos`).
+
+**The senders, 4 October.** The bad-link phase was run with a capture in
+each client's network namespace, the profiles' rules unchanged, beside a
+call over a clean link. The agent's frames did leave unevenly: 16, 24 or
 28 ms apart rather than 20 on a clean link, a standard deviation of 5.7 ms
-where pjsua's was 0.5 to 0.7, and Asterisk read 5 ms of jitter on them with
-no impairment at all. The 1.1 agent sends on a steady clock
-(`docs/19-numbers.md`, 4 October): 0.05 to 0.20 ms, and 0 or 1 ms at
-Asterisk. But that is not what the mobile rows show. Read where the packets
+where pjsua's was 0.5 to 0.7. The 1.1 agent sends on a steady clock
+(`docs/19-numbers.md`, 4 October): 0.05 to 0.20 ms. Read where the packets
 leave the impaired link, the audio each client sent carries the same jitter
-by RFC 3550's own estimator — a mean of 34.3 to 36.1 ms for the agent before
-and after the change, 33.7 to 35.3 ms for pjsua, over 30 ms of netem's normal
-spread — and yet Asterisk's reading of the same calls was 38 and 39 ms for the
-waiting agent, 27, 29, 40 and 27 ms for the agent on the steady clock, and
-14, 19 and 23 ms for pjsua. Whatever separates those readings is in how
-Asterisk measured the two streams, not in what either sent, and this lab
-does not say what it is. Leaving out the packets that arrive behind a later
-one, the same captures read about 22 ms for both clients. The clients' own
-reports of Asterisk's audio through the same link differ the same way — the
-agent 29.5 to 46.6 ms, its estimate at the call's end with every packet in
-arrival order; pjsua 17.6 to 18.4 ms, its average over the call — two ways of
-reading one link, not two links.
+by RFC 3550's estimator — a mean of 34.3 to 36.1 ms for the agent before and
+after the change, 33.7 to 35.3 ms for pjsua — and 29.9 to 33.9 ms against
+35.1 to 41.9 ms in the 7 October runs above.
 
 ### A moved address
 

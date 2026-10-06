@@ -264,9 +264,17 @@ def figures(received, loss_pct, jitter_ms, rtt_ms):
 
 def channelstats(path, endpoint):
     """Asterisk's own view of the call, from `pjsip show channelstats`: what
-    it received from the client (count, lost, per cent, jitter) and the
-    round trip. Its jitter and round trip are printed in seconds, and a round
-    trip of zero is one it has not measured."""
+    it received from the client (count, lost, jitter) and the round trip.
+    Its jitter and round trip are printed in seconds, and a round trip of
+    zero is one it has not measured.
+
+    The jitter is the one under "Transmit", not "Receive". Read once a
+    second through a call (Asterisk 22.10.1), the "Receive" jitter changes
+    only when the client's RTCP report arrives and then equals the jitter
+    that report carries, which is the client's reading of Asterisk's audio;
+    the "Transmit" one moves with every packet, and is what Asterisk's own
+    reports to the client say of the client's audio. The counts are the
+    right way round: "Receive" is what Asterisk counted itself."""
     with open(path, encoding="latin-1") as handle:
         for line in handle:
             tokens = line.split()
@@ -276,7 +284,7 @@ def channelstats(path, endpoint):
                 values = tokens[index + 1:index + 12]
                 if len(values) < 11:
                     continue
-                received, lost, jitter, rtt = values[2], values[3], values[5], values[10]
+                received, lost, jitter, rtt = values[2], values[3], values[9], values[10]
                 count = int(received) + int(lost)
                 loss = 0.0 if count == 0 else int(lost) * 100.0 / count
                 # a round trip it never measured is printed as zero
