@@ -190,7 +190,10 @@ mod tests {
     use crate::msg::{ChallengeRef, HeaderName};
 
     fn read(value: &str, proxy: bool) -> Option<BearerChallenge> {
-        BearerChallenge::read(&ChallengeRef::parse(value.as_bytes()).expect("parses"), proxy)
+        BearerChallenge::read(
+            &ChallengeRef::parse(value.as_bytes()).expect("parses"),
+            proxy,
+        )
     }
 
     #[test]
@@ -229,7 +232,10 @@ mod tests {
     #[test]
     fn an_unknown_error_is_kept_as_written() {
         let challenge = read("Bearer error=\"use_dpop\"", false).expect("bearer");
-        assert_eq!(challenge.error.as_ref().map(BearerError::code), Some("use_dpop"));
+        assert_eq!(
+            challenge.error.as_ref().map(BearerError::code),
+            Some("use_dpop")
+        );
     }
 
     #[test]

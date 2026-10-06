@@ -106,9 +106,8 @@ fn a_bearer_challenge_asks_the_application_for_a_token_and_the_token_answers_it(
 fn a_token_set_before_the_challenge_answers_it_on_the_retry() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
-    let id = agent.add_account(
-        account().credentials(Credentials::bearer("first.token").expect("a token")),
-    );
+    let id = agent
+        .add_account(account().credentials(Credentials::bearer("first.token").expect("a token")));
     agent.register(id, t0).expect("the REGISTER goes");
     let first = sent(&mut agent);
     deliver(
@@ -130,9 +129,8 @@ fn a_token_set_before_the_challenge_answers_it_on_the_retry() {
 fn an_invalid_token_is_never_offered_again_and_a_new_one_is_asked_for() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
-    let id = agent.add_account(
-        account().credentials(Credentials::bearer("expired.token").expect("a token")),
-    );
+    let id = agent
+        .add_account(account().credentials(Credentials::bearer("expired.token").expect("a token")));
     agent.register(id, t0).expect("the REGISTER goes");
     let first = sent(&mut agent);
     deliver(
@@ -147,12 +145,7 @@ fn an_invalid_token_is_never_offered_again_and_a_new_one_is_asked_for() {
     // RFC 6750 section 3.1: "expired, revoked, malformed, or invalid"
     deliver(
         &mut agent,
-        &reply(
-            &retry,
-            401,
-            "Unauthorized",
-            &bearer(Some("invalid_token")),
-        ),
+        &reply(&retry, 401, "Unauthorized", &bearer(Some("invalid_token"))),
         t0,
     );
     assert!(
@@ -167,7 +160,11 @@ fn an_invalid_token_is_never_offered_again_and_a_new_one_is_asked_for() {
     // and not ahead of a challenge either
     agent.register(id, t0).expect("the REGISTER goes");
     let again = sent(&mut agent);
-    assert!(authorization(&again).is_empty(), "{}", authorization(&again));
+    assert!(
+        authorization(&again).is_empty(),
+        "{}",
+        authorization(&again)
+    );
     events(&mut agent);
 
     agent

@@ -421,7 +421,11 @@ impl Endpoint {
         credentials: Option<&Credentials>,
     ) -> Option<crate::auth::BearerChallenge> {
         let held = self.challenges.get(failed)?;
-        let to = held.request.as_raw().header(HeaderName::To).and_then(destination)?;
+        let to = held
+            .request
+            .as_raw()
+            .header(HeaderName::To)
+            .and_then(destination)?;
         self.known
             .peek(&to)?
             .token_wanted(credentials)

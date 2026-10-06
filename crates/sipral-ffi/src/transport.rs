@@ -3835,7 +3835,10 @@ pub(crate) mod tests {
         let refused = reply(&register, 401, "Unauthorized", &bearer(""));
         assert_eq!(feed(handle, REGISTRAR, &refused, 1_010), SipralStatus::Ok);
         poll(handle, 1_010);
-        assert!(drain(handle).is_empty(), "a password does not answer Bearer");
+        assert!(
+            drain(handle).is_empty(),
+            "a password does not answer Bearer"
+        );
         assert_eq!(wanted.seen.len(), 1);
         let (whose, error, proxy, server, realm, scope, authz_server) = &wanted.seen[0];
         assert_eq!(*whose, account);
@@ -3846,7 +3849,10 @@ pub(crate) mod tests {
         assert_eq!(scope, "sip");
         assert_eq!(authz_server, "https://as.example.com");
 
-        assert_eq!(set_token(handle, account, "not a token"), SipralStatus::InvalidArgument);
+        assert_eq!(
+            set_token(handle, account, "not a token"),
+            SipralStatus::InvalidArgument
+        );
         assert!(
             !last_error_text().contains("not a token"),
             "the refusal does not repeat the token"
@@ -3870,7 +3876,10 @@ pub(crate) mod tests {
         );
         assert_eq!(feed(handle, REGISTRAR, &expired, 2_010), SipralStatus::Ok);
         poll(handle, 2_010);
-        assert!(drain(handle).is_empty(), "the refused token is not sent again");
+        assert!(
+            drain(handle).is_empty(),
+            "the refused token is not sent again"
+        );
         assert_eq!(wanted.seen.len(), 2);
         assert_eq!(
             wanted.seen[1].1,

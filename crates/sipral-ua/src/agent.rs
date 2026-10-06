@@ -693,8 +693,8 @@ impl UserAgent {
             (None, None) => return Ok(()),
         }
         .map_err(|_| UaError::InvalidAccessToken)?;
-        config.credentials = (renewed.has_password() || renewed.has_access_token())
-            .then(|| Arc::new(renewed));
+        config.credentials =
+            (renewed.has_password() || renewed.has_access_token()).then(|| Arc::new(renewed));
         Ok(())
     }
 

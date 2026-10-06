@@ -439,14 +439,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", \
 opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"",
             false,
         );
-        let value = challenge.respond(
-            &Credentials::new("Mufasa", "Circle Of Life"),
-            Method::from_bytes(b"GET").expect("a method"),
-            b"/dir/index.html",
-            1,
-            "0a4f113b",
-        )
-        .expect("a password");
+        let value = challenge
+            .respond(
+                &Credentials::new("Mufasa", "Circle Of Life"),
+                Method::from_bytes(b"GET").expect("a method"),
+                b"/dir/index.html",
+                1,
+                "0a4f113b",
+            )
+            .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("9af0a23c6a2ee2c252998f4fa7a1b84b")
@@ -478,14 +479,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm={name}"
                 ),
                 false,
             );
-            let value = challenge.respond(
-                &Credentials::new("alice", "secret"),
-                Method::Register,
-                b"sip:example.com",
-                1,
-                "0a4f113b",
-            )
-            .expect("a password");
+            let value = challenge
+                .respond(
+                    &Credentials::new("alice", "secret"),
+                    Method::Register,
+                    b"sip:example.com",
+                    1,
+                    "0a4f113b",
+                )
+                .expect("a password");
             assert_eq!(
                 field(&value, "response").as_deref(),
                 Some(expected),
@@ -504,14 +506,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm={name}"
 nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             false,
         );
-        let value = challenge.respond(
-            &Credentials::new("alice", "secret"),
-            Method::Register,
-            b"sip:example.com",
-            1,
-            "0a4f113b",
-        )
-        .expect("a password");
+        let value = challenge
+            .respond(
+                &Credentials::new("alice", "secret"),
+                Method::Register,
+                b"sip:example.com",
+                1,
+                "0a4f113b",
+            )
+            .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("f017e479dbee9ec264fe1118766c910d")
@@ -579,14 +582,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
         assert!(!challenge.qop_auth);
         assert_eq!(challenge.algorithm, DigestAlgorithm::Md5, "the default");
 
-        let value = challenge.respond(
-            &Credentials::new("alice", "secret"),
-            Method::Register,
-            b"sip:example.com",
-            1,
-            "0a4f113b",
-        )
-        .expect("a password");
+        let value = challenge
+            .respond(
+                &Credentials::new("alice", "secret"),
+                Method::Register,
+                b"sip:example.com",
+                1,
+                "0a4f113b",
+            )
+            .expect("a password");
         assert_eq!(
             field(&value, "response").as_deref(),
             Some("b75dc11e0cde1fc2f921ce28378036bb")
@@ -604,14 +608,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
             "Digest realm=\"example.com\", nonce=\"abc\", qop=\"auth\"",
             false,
         );
-        let value = challenge.respond(
-            &Credentials::new("alice", "secret"),
-            Method::Register,
-            b"sip:example.com",
-            0x2a,
-            "0a4f113b",
-        )
-        .expect("a password");
+        let value = challenge
+            .respond(
+                &Credentials::new("alice", "secret"),
+                Method::Register,
+                b"sip:example.com",
+                0x2a,
+                "0a4f113b",
+            )
+            .expect("a password");
         // "For SIP, the 'uri' MUST be enclosed in quotation marks."
         assert!(value.contains("uri=\"sip:example.com\""), "{value}");
         assert!(value.contains("nc=0000002a"), "{value}");
@@ -625,14 +630,15 @@ nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", qop=\"auth\", algorithm=MD5-sess",
     #[test]
     fn a_quotation_mark_in_a_user_name_cannot_end_the_value() {
         let challenge = challenge("Digest realm=\"example.com\", nonce=\"abc\"", false);
-        let value = challenge.respond(
-            &Credentials::new("ali\"ce", "secret"),
-            Method::Register,
-            b"sip:example.com",
-            1,
-            "0a4f113b",
-        )
-        .expect("a password");
+        let value = challenge
+            .respond(
+                &Credentials::new("ali\"ce", "secret"),
+                Method::Register,
+                b"sip:example.com",
+                1,
+                "0a4f113b",
+            )
+            .expect("a password");
         assert!(value.contains("username=\"ali\\\"ce\""), "{value}");
         assert_eq!(field(&value, "username").as_deref(), Some("ali\"ce"));
     }

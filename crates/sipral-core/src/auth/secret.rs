@@ -265,10 +265,25 @@ mod tests {
 
     #[test]
     fn an_access_token_is_a_b64token() {
-        for good in ["abc", "eyJhbGciOi.eyJzdWIi.c2ln", "a-b_c~d+e/f", "QUJD==", "x="] {
+        for good in [
+            "abc",
+            "eyJhbGciOi.eyJzdWIi.c2ln",
+            "a-b_c~d+e/f",
+            "QUJD==",
+            "x=",
+        ] {
             assert!(super::is_access_token(good), "{good}");
         }
-        for bad in ["", "=", "==abc", "a b", "a,b", "a\"b", "ab=c", "a\r\nVia: x"] {
+        for bad in [
+            "",
+            "=",
+            "==abc",
+            "a b",
+            "a,b",
+            "a\"b",
+            "ab=c",
+            "a\r\nVia: x",
+        ] {
             assert!(!super::is_access_token(bad), "{bad:?}");
         }
         assert!(Credentials::bearer("a b").is_err());

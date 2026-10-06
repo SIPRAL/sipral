@@ -106,7 +106,7 @@ frames.
 from a softphone, or on a PBX extension, and joins each to OpenAI Realtime
 when `OPENAI_API_KEY` is set, or with no key to a local echo agent that
 speaks the same protocol and plays the caller back; the steps are in
-[`integrations/agents/README.md`](../integrations/agents/README.md), "A
+[`integrations/agents/README.md`](../integrations/agents/), "A
 voice agent in five minutes".
 
 **A bridge from a configuration file.** `python -m sipral_agents
@@ -118,7 +118,7 @@ address, bridged as in path 1. API keys and passwords are named by the
 environment variable that holds them (`api_key_env`,
 `auth_password_env`), never written in the file, and `--check` reads the
 file and the environment and prints the routes without starting anything.
-The format is in [`integrations/agents/README.md`](../integrations/agents/README.md)
+The format is in [`integrations/agents/README.md`](../integrations/agents/)
 and [`examples/bridge.toml`](../integrations/agents/examples/bridge.toml)
 is a complete one.
 

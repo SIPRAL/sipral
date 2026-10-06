@@ -53,8 +53,6 @@ mod audit_tests;
 mod auth_scope_tests;
 #[cfg(test)]
 mod bridging_tests;
-#[cfg(test)]
-mod oauth_tests;
 mod call;
 mod calls;
 /// The conference event package (RFC 4575): the document a focus notifies,
@@ -84,6 +82,8 @@ mod lifecycle;
 pub mod locate;
 mod message;
 mod mwi;
+#[cfg(test)]
+mod oauth_tests;
 mod options;
 mod oversize;
 mod parked;

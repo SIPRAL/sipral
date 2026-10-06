@@ -322,13 +322,12 @@ pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION
 /// that drive them.
 pub use sipral_ua::{
     Account, AccountId, BearerChallenge, BearerError, CallEndReason, CallHandle, CallState,
-    ChallengeRefusal, Compaction,
-    Credentials, DatagramLimit, DtmfError, DtmfInfoForm, EndpointConfig, ForkPolicy, Hold,
-    Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle, MessageSummary, Network,
-    OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery, Refusals,
-    RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening, StatusCode,
-    Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit, TransportId,
-    TransportProtocol, UaError, UaEvent, Uri, UserAgent,
+    ChallengeRefusal, Compaction, Credentials, DatagramLimit, DtmfError, DtmfInfoForm,
+    EndpointConfig, ForkPolicy, Hold, Incoming, Input, Link, MAX_UNSAFE_BODY_BYTES, MessageHandle,
+    MessageSummary, Network, OutgoingCall, OutgoingExtras, Rate, RateError, ReceiveError, Recovery,
+    Refusals, RegistrationFailure, RegistrationState, Replacing, STREAM_WAIT, Screen, Screening,
+    StatusCode, Subscribe, SubscriptionEnd, SubscriptionHandle, SubscriptionState, Transmit,
+    TransportId, TransportProtocol, UaError, UaEvent, Uri, UserAgent,
 };
 pub use sipral_ua::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,

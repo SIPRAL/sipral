@@ -40,3 +40,4 @@ Copyright (c) 2026 Sytek
 - [Security policy](SECURITY.md)
 - [Third-party notices](THIRD-PARTY-NOTICES.md)
 - [Sipral for Pipecat](integrations/pipecat/README.md)
+- [Sipral for voice agents](integrations/agents/README.md)

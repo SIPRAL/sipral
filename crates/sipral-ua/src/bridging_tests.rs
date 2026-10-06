@@ -154,7 +154,11 @@ fn referred(agent: &mut UserAgent, branch: &str, now: Instant) -> CallHandle {
         .answer(call, Some(Arc::from(ANSWER)), now)
         .expect("200 goes");
     let ok = sent(agent);
-    deliver(agent, &in_dialog(&ok, "ACK", &format!("{branch}ack"), 1), now);
+    deliver(
+        agent,
+        &in_dialog(&ok, "ACK", &format!("{branch}ack"), 1),
+        now,
+    );
     events(agent);
     let refer = plus(
         &in_dialog(&ok, "REFER", &format!("{branch}refer"), 2),
