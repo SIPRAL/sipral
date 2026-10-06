@@ -15,6 +15,12 @@ final class LocalConferenceTests: XCTestCase {
         (0..<samples).map { ($0 / 8) % 2 == 0 ? 8000 : -8000 }
     }
 
+    /// Above this, a frame of `square` that came through PCMU whole: it
+    /// decodes at 7900. A frame concealed in place of one that never came
+    /// fades from the last one heard and stays under it, so it is not
+    /// counted as heard.
+    private let wholeFrame = 7500
+
     private func loudness(_ frame: [Int16]) -> Int {
         frame.isEmpty ? 0 : frame.reduce(0) { $0 + abs(Int($1)) } / frame.count
     }
@@ -105,9 +111,9 @@ final class LocalConferenceTests: XCTestCase {
     /// Alice calls Bob and Carol and bridges the two calls, taking no part
     /// herself: what Bob says, Carol hears.
     func testWhatOneFarEndSaysTheOtherHears() async throws {
-        let alice = try SipralStack(audio: .application)
-        let bob = try SipralStack(audio: .application)
-        let carol = try SipralStack(audio: .application)
+        let alice = try SipralStack(audio: .application, codecs: "PCMU")
+        let bob = try SipralStack(audio: .application, codecs: "PCMU")
+        let carol = try SipralStack(audio: .application, codecs: "PCMU")
         defer { alice.close(); bob.close(); carol.close() }
         let (toBob, bobCall) = try await call(alice, bob, "bob")
         let (toCarol, carolCall) = try await call(alice, carol, "carol")
@@ -129,29 +135,24 @@ final class LocalConferenceTests: XCTestCase {
         }
         let heard = Recorder(carolFrames)
         var loudest = 0
-        var steady = 0
-        var counted = 0
+        var whole = 0
         _ = await eventually(within: 10) {
-            loudest = 0
-            steady = 0
-            counted = 0
-            for frame in heard.elements {
-                if loudest > 2000 {
-                    // and steadily, for sixty of Bob's hundred frames: a
-                    // call whose own thread still carried frames beside the
-                    // conference would have every other frame taken from
-                    // under it, and a frame clock slower than the
-                    // conference's leaves gaps the buffers fill with silence
-                    steady += loudness(frame) > 2000 ? 1 : 0
-                    counted += 1
-                    if counted == 60 { return true }
-                }
-                loudest = max(loudest, loudness(frame))
-            }
-            return false
+            // and in full, ninety-five of Bob's hundred frames at least: a
+            // call whose own thread still carried frames beside the
+            // conference would have every other frame taken from under it,
+            // and a frame clock slower than the conference's overflows the
+            // buffers and drops them. Counted whenever they arrive rather
+            // than as an unbroken run: on a machine with more work than
+            // cores, the threads of all three stacks are held up together
+            // for a hundred milliseconds and more, Carol's buffer runs dry,
+            // and the frames play late but all play.
+            let frames = heard.elements
+            loudest = frames.map { loudness($0) }.max() ?? 0
+            whole = frames.filter { loudness($0) > wholeFrame }.count
+            return whole >= 95
         }
         XCTAssertGreaterThan(loudest, 2000, "Carol never heard Bob")
-        XCTAssertGreaterThanOrEqual(steady, 57, "Carol heard Bob in \(steady) of 60 frames")
+        XCTAssertGreaterThanOrEqual(whole, 95, "Carol heard \(whole) of Bob's 100 frames")
 
         try conference.remove(toCarol)
         XCTAssertEqual(try conference.info().members, 1)

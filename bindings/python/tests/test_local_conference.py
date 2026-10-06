@@ -20,6 +20,11 @@ from sipral.enums import AudioDirection, AudioMode, EventKind, LocalConferenceCh
 
 TIMEOUT = 10.0
 
+# Above this, a frame of _square that came through PCMU whole: it decodes at
+# 7900. A frame concealed in place of one that never came fades from the last
+# one heard and stays under it, so it is not counted as heard.
+WHOLE_FRAME = 7500
+
 
 def _loudness(pcm: bytes) -> int:
     samples = array.array("h", pcm)
@@ -94,9 +99,9 @@ class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         loop = asyncio.get_running_loop()
-        self.alice = Stack(loop=loop, audio=AudioMode.APPLICATION)
-        self.bob = Stack(loop=loop, audio=AudioMode.APPLICATION)
-        self.carol = Stack(loop=loop, audio=AudioMode.APPLICATION)
+        self.alice = Stack(loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
+        self.bob = Stack(loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
+        self.carol = Stack(loop=loop, audio=AudioMode.APPLICATION, codecs="PCMU")
         self.addAsyncCleanup(self._close)
 
     async def _close(self) -> None:
@@ -136,21 +141,29 @@ class TwoCallsBridged(unittest.IsolatedAsyncioTestCase):
             samples = bob_call.media.frame_samples
             bob_call.media.send_audio(_square(100, samples))
             loudest = 0
+            whole = 0
             deadline = asyncio.get_running_loop().time() + TIMEOUT
             while loudest < 2000 and asyncio.get_running_loop().time() < deadline:
                 frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)
                 loudest = max(loudest, _loudness(frame))
+                whole += _loudness(frame) > WHOLE_FRAME
             self.assertGreater(loudest, 2000, "Carol never heard Bob")
-            # and steadily, for sixty of Bob's hundred frames: a call whose
-            # own thread still carried frames beside the conference would
-            # have every other frame taken from under it, and a frame clock
-            # slower than the conference's leaves gaps the buffers fill with
-            # silence
-            steady = 0
-            for _ in range(60):
-                frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)
-                steady += _loudness(frame) > 2000
-            self.assertGreaterEqual(steady, 57, f"Carol heard Bob in {steady} of 60 frames")
+            # and in full, ninety-five of Bob's hundred frames at least: a
+            # call whose own thread still carried frames beside the
+            # conference would have every other frame taken from under it,
+            # and a frame clock slower than the conference's overflows the
+            # buffers and drops them. Counted whenever they arrive rather
+            # than as an unbroken run: on a machine with more work than
+            # cores, the threads of all three stacks are held up together for
+            # a hundred milliseconds and more, Carol's buffer runs dry, and
+            # the frames play late but all play.
+            while whole < 95 and asyncio.get_running_loop().time() < deadline:
+                try:
+                    frame = await asyncio.wait_for(carol_call.media.frames.get(), timeout=TIMEOUT)
+                except asyncio.TimeoutError:
+                    break
+                whole += _loudness(frame) > WHOLE_FRAME
+            self.assertGreaterEqual(whole, 95, f"Carol heard {whole} of Bob's 100 frames")
 
             while not bob_call.media.frames.empty():
                 bob_call.media.frames.get_nowait()

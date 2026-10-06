@@ -43,6 +43,12 @@ public sealed class LocalConferenceTests : IDisposable
     private static short[] Square(int samples) =>
         Enumerable.Range(0, samples).Select(n => (short)((n / 8) % 2 == 0 ? 8000 : -8000)).ToArray();
 
+    /// <summary>Above this, a frame of <see cref="Square"/> that came
+    /// through PCMU whole: it decodes at 7900. A frame concealed in place of
+    /// one that never came fades from the last one heard and stays under
+    /// it, so it is not counted as heard.</summary>
+    private const int WholeFrame = 7500;
+
     private static int Loudness(short[] frame) =>
         frame.Length == 0 ? 0 : (int)(frame.Sum(sample => Math.Abs((int)sample)) / frame.Length);
 
@@ -158,18 +164,27 @@ public sealed class LocalConferenceTests : IDisposable
         }
         var loudest = await FirstMatchingAsync(carol.Media!.Frames, frame => Loudness(frame) > 2000);
         Assert.True(Loudness(loudest) > 2000, "Carol never heard Bob");
-        // and steadily, for sixty of Bob's hundred frames: a call whose own
-        // thread still carried frames beside the conference would have every
-        // other frame taken from under it, and a frame clock slower than the
-        // conference's leaves gaps the buffers fill with silence
-        var steady = 0;
-        var counted = 0;
-        await FirstMatchingAsync(carol.Media.Frames, frame =>
+        // and in full, ninety-five of Bob's hundred frames at least: a call
+        // whose own thread still carried frames beside the conference would
+        // have every other frame taken from under it, and a frame clock
+        // slower than the conference's overflows the buffers and drops them.
+        // Counted whenever they arrive rather than as an unbroken run: on a
+        // machine with more work than cores, the threads of all three stacks
+        // are held up together for a hundred milliseconds and more, Carol's
+        // buffer runs dry, and the frames play late but all play.
+        var whole = Loudness(loudest) > WholeFrame ? 1 : 0;
+        try
         {
-            steady += Loudness(frame) > 2000 ? 1 : 0;
-            return ++counted == 60;
-        });
-        Assert.True(steady >= 57, $"Carol heard Bob in {steady} of 60 frames");
+            await FirstMatchingAsync(carol.Media.Frames, frame =>
+            {
+                whole += Loudness(frame) > WholeFrame ? 1 : 0;
+                return whole == 95;
+            });
+        }
+        catch (TimeoutException)
+        {
+        }
+        Assert.True(whole >= 95, $"Carol heard {whole} of Bob's 100 frames");
 
         conference.Remove(toCarol);
         Assert.Equal(1u, conference.Info().Members);

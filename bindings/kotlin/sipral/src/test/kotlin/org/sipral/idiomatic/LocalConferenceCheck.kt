@@ -17,9 +17,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.sipral.SipralAudioDirection
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
@@ -27,6 +26,11 @@ import org.sipral.SipralLocalConferenceChange
 import org.sipral.SipralStatus
 
 private fun square(samples: Int): ShortArray = ShortArray(samples) { n -> if ((n / 8) % 2 == 0) 8000 else -8000 }
+
+// Above this, a frame of square() that came through PCMU whole: it decodes at
+// 7900. A frame concealed in place of one that never came fades from the last
+// one heard and stays under it, so it is not counted as heard.
+private const val WHOLE_FRAME = 7_500
 
 private fun loudness(frame: ShortArray): Int =
     if (frame.isEmpty()) 0 else frame.sumOf { abs(it.toInt()) } / frame.size
@@ -128,13 +132,24 @@ private suspend fun whatOneFarEndSaysTheOtherHears(): String {
                 val carolFrames = assertNotNull(carolCall.media).frames
                 val heard = withTimeout(10_000) { carolFrames.first { loudness(it) > 2_000 } }
                 assertTrue(loudness(heard) > 2_000, "Carol never heard Bob")
-                // and steadily, for sixty of Bob's hundred frames: a call
-                // whose own thread still carried frames beside the conference
-                // would have every other frame taken from under it, and a
-                // frame clock slower than the conference's leaves gaps the
-                // buffers fill with silence
-                val steady = withTimeout(10_000) { carolFrames.take(60).toList() }.count { loudness(it) > 2_000 }
-                assertTrue(steady >= 57, "Carol heard Bob in $steady of 60 frames")
+                // and in full, ninety-five of Bob's hundred frames at least:
+                // a call whose own thread still carried frames beside the
+                // conference would have every other frame taken from under
+                // it, and a frame clock slower than the conference's
+                // overflows the buffers and drops them. Counted whenever they
+                // arrive rather than as an unbroken run: on a machine with
+                // more work than cores, the threads of all three clients are
+                // held up together for a hundred milliseconds and more,
+                // Carol's buffer runs dry, and the frames play late but all
+                // play.
+                var whole = if (loudness(heard) > WHOLE_FRAME) 1 else 0
+                withTimeoutOrNull(10_000) {
+                    carolFrames.first { frame ->
+                        if (loudness(frame) > WHOLE_FRAME) whole++
+                        whole >= 95
+                    }
+                }
+                assertTrue(whole >= 95, "Carol heard $whole of Bob's 100 frames")
 
                 conference.remove(toCarol)
                 assertEquals(1L, conference.info().members)
