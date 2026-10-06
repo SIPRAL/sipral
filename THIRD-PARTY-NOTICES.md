@@ -238,7 +238,7 @@ beside it.
 | `cfg-if` 1.0.4 | compile-time selection inside `sha2` | MIT OR Apache-2.0 |
 | `ctutils` 0.4.2 | constant-time comparison and selection | Apache-2.0 OR MIT |
 | `cmov` 0.5.4 | constant-time conditional moves `ctutils` uses | Apache-2.0 OR MIT |
-| `rsa` 0.10.0-rc.18 | RSA public keys and RSASSA-PKCS1-v1_5 verification; its signing and decryption are never called | MIT OR Apache-2.0 |
+| `rsa` 0.10.0-rc.19 | RSA public keys and RSASSA-PKCS1-v1_5 verification; its signing and decryption are never called | MIT OR Apache-2.0 |
 | `crypto-primes` 0.7.2 | prime generation, arriving with `rsa`; unused here, since no key is generated | Apache-2.0 OR MIT |
 | `rand_core` 0.10.1 | randomness traits the curve crates name; no generator is linked | MIT OR Apache-2.0 |
 | `subtle` 2.6.1 | constant-time comparison and selection | BSD-3-Clause |
@@ -446,7 +446,7 @@ that is not one `deny.toml` allows.
 
 | Build tool | What it is | Licence |
 |---|---|---|
-| Gradle 9.7.1 | the build, and the wrapper `android.sh` generates from it | Apache-2.0 |
+| Gradle 9.8.0 | the build, and the wrapper `android.sh` generates from it | Apache-2.0 |
 | Android Gradle Plugin 9.4.1 | Android builds under Gradle | Apache-2.0 |
 | Kotlin Gradle plugin and Compose compiler plugin 2.4.20 | the Kotlin compiler under Gradle, and Compose's compiler step | Apache-2.0 |
 | Kotlin compiler 2.4.20 | `kotlinc`, which `aar.sh` compiles `sipral.aar`'s classes with | Apache-2.0 |
@@ -651,10 +651,10 @@ crate rather than opening the allow-list.
 `bindings/dotnet/Sipral.Tests` carries its own test-only NuGet dependencies,
 declared in that project alone and never referenced from `bindings/dotnet/Sipral`
 itself, so none of them reaches an application that only links the package
-that ships: `xunit` 2.9.2, `xunit.runner.visualstudio` 2.8.2 and the packages
+that ships: `xunit` 2.9.3, `xunit.runner.visualstudio` 4.0.0 and the packages
 either pulls in (`xunit.core`, `xunit.assert`, `xunit.extensibility.core`,
 `xunit.extensibility.execution`, `xunit.analyzers`, `xunit.abstractions`), all
-Apache-2.0, plus `Microsoft.NET.Test.Sdk` 17.11.1, MIT.
+Apache-2.0, plus `Microsoft.NET.Test.Sdk` 18.10.1, MIT.
 
 The RFC 4475 torture test corpus under `fixtures/rfc4475/` is IETF Trust
 material, reproduced under the IETF Trust Legal Provisions.

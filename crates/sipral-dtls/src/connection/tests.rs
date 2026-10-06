@@ -516,7 +516,7 @@ fn the_timer_starts_at_a_second_doubles_stops_at_sixty_and_then_gives_up() {
     assert_eq!(client.poll_timeout(), Some(due));
     client.handle_timeout(due);
     // no alert for a peer that never answered
-    assert!(drain(&mut client).is_empty());
+    assert_eq!(drain(&mut client), [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(refused(&events(&mut client)), Failure::Timeout);
     assert_eq!(client.state(), State::Failed);
     assert_eq!(client.poll_timeout(), None);
@@ -630,7 +630,7 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     deliver(&mut hand.client, &flight4[..1], hand.now);
     let now = hand.later(Duration::from_millis(600));
     deliver(&mut hand.client, &flight4[..1], now);
-    assert!(drain(&mut hand.client).is_empty());
+    assert_eq!(drain(&mut hand.client), [] as [std::vec::Vec<u8>; 0]);
     deliver(&mut hand.client, &flight4[1..], now);
     assert!(carries(
         &drain(&mut hand.client).concat(),
@@ -655,11 +655,11 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     // and is answered by flight 5 — the same ephemeral key, not a new one
     let now = hand.later(Duration::from_millis(100));
     deliver(&mut hand.client, &flight4, now);
-    assert!(drain(&mut hand.client).is_empty());
+    assert_eq!(drain(&mut hand.client), [] as [std::vec::Vec<u8>; 0]);
     let now = hand.later(Duration::from_millis(500));
     deliver(&mut hand.client, &flight4, now);
     let again = drain(&mut hand.client);
-    assert!(!again.is_empty());
+    assert_ne!(again, [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(exchange(&again), exchange(&flight5));
     assert!(events(&mut hand.client).is_empty());
     // the retransmission is unauthenticated in epoch 0, so it does not touch
@@ -673,7 +673,7 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     // flight 6 and nothing else
     deliver(&mut hand.server, &flight5, now);
     let flight6 = drain(&mut hand.server);
-    assert!(!flight6.is_empty());
+    assert_ne!(flight6, [] as [std::vec::Vec<u8>; 0]);
     keyed(&events(&mut hand.server));
     let now = hand.later(Duration::from_secs(1));
     deliver(&mut hand.server, &again, now);
@@ -690,7 +690,7 @@ fn a_retransmitted_flight_is_answered_with_the_last_flight_and_never_processed_t
     deliver(&mut hand.client, &flight6_again, now);
     deliver(&mut hand.client, &flight6, now);
     keyed(&events(&mut hand.client));
-    assert!(drain(&mut hand.client).is_empty());
+    assert_eq!(drain(&mut hand.client), [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(hand.client.poll_timeout(), None);
 }
 
@@ -1143,12 +1143,12 @@ fn an_empty_use_srtp_is_a_hello_that_does_not_parse() {
         .map(|datagram| rewrite(datagram, HandshakeType::CLIENT_HELLO, &with_empty_use_srtp))
         .collect();
     deliver(&mut hand.server, &emptied, hand.now);
-    assert!(drain(&mut hand.server).is_empty());
+    assert_eq!(drain(&mut hand.server), [] as [std::vec::Vec<u8>; 0]);
     assert!(events(&mut hand.server).is_empty());
     assert_eq!(hand.server.state(), State::Handshaking);
     // and the genuine hello is still answered afterwards
     deliver(&mut hand.server, &hello, hand.now);
-    assert!(!drain(&mut hand.server).is_empty());
+    assert_ne!(drain(&mut hand.server), [] as [std::vec::Vec<u8>; 0]);
 
     // in a ServerHello, it fails the client's handshake
     let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
@@ -1501,7 +1501,7 @@ fn a_finished_in_the_clear_is_discarded_and_the_protected_one_still_counts() {
     .unwrap();
     deliver(&mut hand.server, &[datagram], hand.now);
     assert!(events(&mut hand.server).is_empty());
-    assert!(drain(&mut hand.server).is_empty());
+    assert_eq!(drain(&mut hand.server), [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(hand.server.state(), State::Handshaking);
 
     deliver(&mut hand.server, &flight5, hand.now);
@@ -1621,7 +1621,7 @@ fn once_only_the_finished_is_due_an_epoch_zero_message_at_or_past_it_is_discarde
         );
     }
     assert!(events(&mut hand.server).is_empty());
-    assert!(drain(&mut hand.server).is_empty());
+    assert_eq!(drain(&mut hand.server), [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(hand.server.state(), State::Handshaking);
 
     deliver(&mut hand.server, &flight5, now);
@@ -1656,17 +1656,17 @@ fn a_connected_server_answers_only_an_authenticated_retransmission_of_the_last_f
     }
     let now = hand.later(Duration::from_secs(1));
     deliver(&mut hand.server, &epoch_zero_only(&flight5), now);
-    assert!(drain(&mut hand.server).is_empty());
+    assert_eq!(drain(&mut hand.server), [] as [std::vec::Vec<u8>; 0]);
 
     // the client's own retransmission carries its Finished, protected under
     // a new record number, and is answered with flight 6
     hand.client.handle_timeout(hand.now);
     let again = drain(&mut hand.client);
-    assert!(!again.is_empty());
+    assert_ne!(again, [] as [std::vec::Vec<u8>; 0]);
     let now = hand.later(Duration::from_secs(1));
     deliver(&mut hand.server, &again, now);
     let flight6 = drain(&mut hand.server);
-    assert!(!flight6.is_empty());
+    assert_ne!(flight6, [] as [std::vec::Vec<u8>; 0]);
     assert!(events(&mut hand.server).is_empty());
     deliver(&mut hand.client, &flight6, now);
     keyed(&events(&mut hand.client));
@@ -2222,7 +2222,7 @@ fn a_plaintext_alert_ends_a_handshake_and_not_an_established_connection() {
         Failure::PeerAlert(AlertDescription::HANDSHAKE_FAILURE)
     );
     // a peer's alert is not answered with one
-    assert!(drain(&mut hand.client).is_empty());
+    assert_eq!(drain(&mut hand.client), [] as [std::vec::Vec<u8>; 0]);
 
     let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
     let flight4 = hand.flight4();
@@ -2643,7 +2643,7 @@ fn an_alert_before_this_ends_own_change_cipher_spec_is_sent_in_epoch_zero() {
     let sent = drain(&mut hand.server);
     assert_eq!(sent.len(), 1);
     let (record, rest) = Record::parse(&sent[0]).unwrap();
-    assert!(rest.is_empty());
+    assert_eq!(rest, []);
     assert_eq!(
         record.header.epoch, 0,
         "the server had not sent its own ChangeCipherSpec yet"

@@ -357,7 +357,7 @@ mod tests {
             }
         );
         assert_eq!(record.fragment, [0xAA, 0xBB, 0xCC]);
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
         assert_eq!(record.header.epoch_and_sequence(), [0, 1, 0, 0, 1, 2, 3, 4]);
 
         let mut out = Vec::new();

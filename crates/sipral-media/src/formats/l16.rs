@@ -211,9 +211,9 @@ impl Format {
         for (sample, pair) in samples
             .iter()
             .take(converted)
-            .zip(octets.chunks_exact_mut(SAMPLE_OCTETS))
+            .zip(octets.as_chunks_mut::<SAMPLE_OCTETS>().0)
         {
-            pair.copy_from_slice(&sample.to_be_bytes());
+            *pair = sample.to_be_bytes();
         }
         converted
     }
@@ -228,14 +228,13 @@ impl Format {
         let instants = (octets.len() / self.frame_bytes()).min(samples.len() / width);
         let converted = instants * width;
         for (pair, sample) in octets
-            .chunks_exact(SAMPLE_OCTETS)
+            .as_chunks::<SAMPLE_OCTETS>()
+            .0
+            .iter()
             .zip(samples.iter_mut())
             .take(converted)
         {
-            *sample = i16::from_be_bytes([
-                pair.first().copied().unwrap_or(0),
-                pair.get(1).copied().unwrap_or(0),
-            ]);
+            *sample = i16::from_be_bytes(*pair);
         }
         converted
     }
@@ -272,11 +271,11 @@ pub fn encode_stereo_into(left: &[i16], right: &[i16], octets: &mut [u8]) -> usi
     for ((l, r), out) in left
         .iter()
         .zip(right)
-        .zip(octets.chunks_exact_mut(2 * SAMPLE_OCTETS))
+        .zip(octets.as_chunks_mut::<{ 2 * SAMPLE_OCTETS }>().0)
     {
         let [l0, l1] = l.to_be_bytes();
         let [r0, r1] = r.to_be_bytes();
-        out.copy_from_slice(&[l0, l1, r0, r1]);
+        *out = [l0, l1, r0, r1];
         instants += 1;
     }
     instants
@@ -288,16 +287,16 @@ pub fn encode_stereo_into(left: &[i16], right: &[i16], octets: &mut [u8]) -> usi
 /// hold, and returns how many.
 pub fn decode_stereo_into(octets: &[u8], left: &mut [i16], right: &mut [i16]) -> usize {
     let mut instants = 0;
-    for ((frame, l), r) in octets
-        .chunks_exact(2 * SAMPLE_OCTETS)
+    for ((&[l0, l1, r0, r1], l), r) in octets
+        .as_chunks::<{ 2 * SAMPLE_OCTETS }>()
+        .0
+        .iter()
         .zip(left.iter_mut())
         .zip(right.iter_mut())
     {
-        if let [l0, l1, r0, r1] = *frame {
-            *l = i16::from_be_bytes([l0, l1]);
-            *r = i16::from_be_bytes([r0, r1]);
-            instants += 1;
-        }
+        *l = i16::from_be_bytes([l0, l1]);
+        *r = i16::from_be_bytes([r0, r1]);
+        instants += 1;
     }
     instants
 }

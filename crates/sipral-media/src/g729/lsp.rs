@@ -711,11 +711,14 @@ pub(super) fn midpoint(previous: &Vector, current: &Vector) -> Vector {
 pub(super) fn to_coefficients(lsp: &Vector) -> Coefficients {
     let mut odd = [0_i16; 5];
     let mut even = [0_i16; 5];
-    for (pair, (o, e)) in lsp.chunks_exact(2).zip(odd.iter_mut().zip(even.iter_mut())) {
-        if let [first, second] = pair {
-            *o = *first;
-            *e = *second;
-        }
+    for (&[first, second], (o, e)) in lsp
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(odd.iter_mut().zip(even.iter_mut()))
+    {
+        *o = first;
+        *e = second;
     }
     let mut sum = polynomial(&odd);
     let mut difference = polynomial(&even);

@@ -27,7 +27,7 @@
 # dl.google.com/android/repository/repository2-3.xml (NDK r30 is the current
 # LTS), services.gradle.org and the Kotlin releases.
 
-FROM rust:1.95-trixie
+FROM rust:1.99-trixie
 
 ARG ANDROID_SDK_LICENSE_ACCEPTED=no
 RUN if [ "$ANDROID_SDK_LICENSE_ACCEPTED" != "yes" ]; then \
@@ -100,8 +100,8 @@ RUN cd /tmp \
     && unzip -q kotlin.zip -d /opt \
     && rm kotlin.zip
 
-ARG GRADLE_VERSION=9.7.1
-ARG GRADLE_SHA256=acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a
+ARG GRADLE_VERSION=9.8.0
+ARG GRADLE_SHA256=bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c
 RUN cd /tmp \
     && curl -fsSL -o gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
     && echo "$GRADLE_SHA256  gradle.zip" | sha256sum -c - \

@@ -775,7 +775,7 @@ fn top_up(keys: &mut KeySource, client: &mut TurnClient) {
     let mut wanted = client.transaction_ids_wanted();
     while wanted > 0 {
         let block = keys.block();
-        for chunk in block.chunks_exact(12).take(wanted.min(2)) {
+        for chunk in block.as_chunks::<12>().0.iter().take(wanted.min(2)) {
             let mut id = [0_u8; 12];
             id.copy_from_slice(chunk);
             client.supply_transaction_id(TransactionId::new(id));

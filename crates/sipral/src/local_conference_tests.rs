@@ -825,8 +825,10 @@ fn the_recording_keeps_the_whole_mix() {
         LOCAL_RATE
     );
     let samples: Vec<i16> = wav[HEADER_LEN..]
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     assert_eq!(samples.len(), 25 * 320);
     for (hz, who) in [

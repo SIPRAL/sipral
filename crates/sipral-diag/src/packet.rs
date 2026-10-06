@@ -40,13 +40,11 @@ fn ethernet_header(ethertype: u16) -> Vec<u8> {
 /// over a different span of bytes, for a UDP or TCP segment.
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        if let [a, b] = *chunk {
-            sum += u32::from(u16::from_be_bytes([a, b]));
-        }
+    let (pairs, rest) = data.as_chunks::<2>();
+    for pair in pairs {
+        sum += u32::from(u16::from_be_bytes(*pair));
     }
-    if let [last] = *chunks.remainder() {
+    if let [last] = *rest {
         sum += u32::from(u16::from_be_bytes([last, 0]));
     }
     while sum > 0xFFFF {

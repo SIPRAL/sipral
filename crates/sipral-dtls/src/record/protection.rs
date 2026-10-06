@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(out[HEADER_LEN + 8 + 51..], tag[..]);
 
         let (record, rest) = Record::parse(&out).unwrap();
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
         let mut opened = Vec::new();
         protection.open(&record, &mut opened).unwrap();
         assert_eq!(opened, plaintext);
@@ -467,7 +467,7 @@ mod tests {
             ),
             Err(Error::SequenceExhausted)
         );
-        assert!(refused.is_empty());
+        assert_eq!(refused, [] as [u8; 0]);
 
         // a record inside the ciphertext limit whose plaintext would be over
         // 2^14 is refused before anything is decrypted

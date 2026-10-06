@@ -235,7 +235,7 @@ impl Encoder {
     pub fn encode_into(&mut self, samples: &[i16], octets: &mut [u8]) -> usize {
         let frames = (samples.len() / FRAME_SAMPLES).min(octets.len() / FRAME_OCTETS);
         let mut written = 0;
-        for input in samples.chunks_exact(FRAME_SAMPLES).take(frames) {
+        for input in samples.as_chunks::<FRAME_SAMPLES>().0.iter().take(frames) {
             let mut frame = [0_i16; FRAME_SAMPLES];
             frame.copy_from_slice(input);
             let encoded = self.encode(&frame);
@@ -560,8 +560,10 @@ mod tests {
         let mut encoder = Encoder::with_dtx();
         assert!(encoder.dtx());
         let sent: Vec<Encoded> = input
-            .chunks_exact(FRAME_SAMPLES)
-            .map(|chunk| encoder.encode(&chunk.try_into().unwrap()))
+            .as_chunks::<FRAME_SAMPLES>()
+            .0
+            .iter()
+            .map(|chunk| encoder.encode(chunk))
             .collect();
 
         let speech = |range: core::ops::Range<usize>| {
@@ -620,13 +622,10 @@ mod tests {
         input.extend(hiss(60));
         let mut one_by_one = Encoder::with_dtx();
         let expected: Vec<u8> = input
-            .chunks_exact(FRAME_SAMPLES)
-            .flat_map(|chunk| {
-                one_by_one
-                    .encode(&chunk.try_into().unwrap())
-                    .octets()
-                    .to_vec()
-            })
+            .as_chunks::<FRAME_SAMPLES>()
+            .0
+            .iter()
+            .flat_map(|chunk| one_by_one.encode(chunk).octets().to_vec())
             .collect();
         let mut octets = vec![0_u8; 100 * FRAME_OCTETS];
         let written = Encoder::with_dtx().encode_into(&input, &mut octets);
@@ -662,8 +661,10 @@ mod tests {
 
     fn encode_all(encoder: &mut Encoder, samples: &[i16]) -> Vec<[u8; FRAME_OCTETS]> {
         samples
-            .chunks_exact(FRAME_SAMPLES)
-            .map(|chunk| encoder.encode(&chunk.try_into().unwrap()).speech().unwrap())
+            .as_chunks::<FRAME_SAMPLES>()
+            .0
+            .iter()
+            .map(|chunk| encoder.encode(chunk).speech().unwrap())
             .collect()
     }
 
@@ -705,8 +706,10 @@ mod tests {
         input.extend(hiss(40));
         let run = |encoder: &mut Encoder| -> Vec<Encoded> {
             input
-                .chunks_exact(FRAME_SAMPLES)
-                .map(|chunk| encoder.encode(&chunk.try_into().unwrap()))
+                .as_chunks::<FRAME_SAMPLES>()
+                .0
+                .iter()
+                .map(|chunk| encoder.encode(chunk))
                 .collect()
         };
         let mut encoder = Encoder::with_dtx();

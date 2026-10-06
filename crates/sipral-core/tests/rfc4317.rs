@@ -857,8 +857,14 @@ fn audio_and_video_then_video_deleted() {
 fn no_media_then_audio_added() {
     let rounds = exchanges("5.1");
     assert_eq!(rounds.len(), 2);
-    assert!(rounds[0].offer.media.is_empty());
-    assert!(plans(&rounds[0]).is_empty());
+    assert_eq!(
+        rounds[0].offer.media,
+        [] as [sipral_core::sdp::MediaDescription; 0]
+    );
+    assert_eq!(
+        plans(&rounds[0]),
+        [] as [std::option::Option<sipral_core::sdp::MediaPlan>; 0]
+    );
     assert_eq!(settled(plans(&rounds[1])[0].as_ref()).0, "iLBC");
 }
 

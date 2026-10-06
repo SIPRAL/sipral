@@ -338,11 +338,11 @@ impl Coder {
                 };
                 let count = pair.1.decode_into(payload, out);
                 let rest = out.get_mut(count..).unwrap_or_default();
-                let mut chunks = rest.chunks_exact_mut(g729::FRAME_SAMPLES);
-                for chunk in &mut chunks {
-                    chunk.copy_from_slice(&pair.1.conceal());
+                let (frames, tail) = rest.as_chunks_mut::<{ g729::FRAME_SAMPLES }>();
+                for frame in frames {
+                    *frame = pair.1.conceal();
                 }
-                chunks.into_remainder().fill(0);
+                tail.fill(0);
                 Ok(if parsed.frame_count() == 0 {
                     Decoded::Noise(out.len())
                 } else {
@@ -411,14 +411,14 @@ impl Coder {
             return None;
         }
         let frame = self.frame_samples.min(out.len());
-        let mut chunks = out
+        let (frames, tail) = out
             .get_mut(..frame)
             .unwrap_or_default()
-            .chunks_exact_mut(g729::FRAME_SAMPLES);
-        for chunk in &mut chunks {
-            chunk.copy_from_slice(&pair.1.untransmitted());
+            .as_chunks_mut::<{ g729::FRAME_SAMPLES }>();
+        for chunk in frames {
+            *chunk = pair.1.untransmitted();
         }
-        chunks.into_remainder().fill(0);
+        tail.fill(0);
         Some(frame)
     }
 
@@ -452,14 +452,14 @@ impl Coder {
             // one leaves a remainder, and that is written silent. In a pause
             // the decoder's concealment is the pause going on (B.4.5)
             Kind::Celp(pair) => {
-                let mut chunks = out
+                let (frames, tail) = out
                     .get_mut(..frame)
                     .unwrap_or_default()
-                    .chunks_exact_mut(g729::FRAME_SAMPLES);
-                for chunk in &mut chunks {
-                    chunk.copy_from_slice(&pair.1.conceal());
+                    .as_chunks_mut::<{ g729::FRAME_SAMPLES }>();
+                for chunk in frames {
+                    *chunk = pair.1.conceal();
                 }
-                chunks.into_remainder().fill(0);
+                tail.fill(0);
                 Ok(frame)
             }
             #[cfg(feature = "opus")]
@@ -506,11 +506,15 @@ impl Coder {
 /// One frame of G.729 with Annex B's DTX, cut into a payload as
 /// [`Coder::encode`] describes.
 fn discontinuous(encoder: &mut g729::Encoder, samples: &[i16], out: &mut [u8]) -> Sent {
-    let frames = samples.chunks_exact(g729::FRAME_SAMPLES).map(|chunk| {
-        let mut frame = [0_i16; g729::FRAME_SAMPLES];
-        frame.copy_from_slice(chunk);
-        encoder.encode(&frame)
-    });
+    let frames = samples
+        .as_chunks::<{ g729::FRAME_SAMPLES }>()
+        .0
+        .iter()
+        .map(|chunk| {
+            let mut frame = [0_i16; g729::FRAME_SAMPLES];
+            frame.copy_from_slice(chunk);
+            encoder.encode(&frame)
+        });
     cut(frames, out)
 }
 

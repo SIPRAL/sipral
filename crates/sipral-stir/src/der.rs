@@ -152,7 +152,7 @@ mod tests {
             let encoded = write(0x04, &contents);
             let (tlv, rest) = read(&encoded).unwrap();
             assert_eq!(tlv.contents, &contents[..], "{length}");
-            assert!(rest.is_empty());
+            assert_eq!(rest, []);
         }
         assert_eq!(write(0x04, &[0; 0x80])[..3], [0x04, 0x81, 0x80]);
         assert_eq!(write(0x04, &[0; 0x100])[..4], [0x04, 0x82, 0x01, 0x00]);

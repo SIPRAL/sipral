@@ -1082,7 +1082,7 @@ impl Ice {
             // out of each one and the last eight bytes are not stretched into
             // a third
             let block = full.keys.block();
-            for chunk in block.chunks_exact(12).take(wanted.min(2)) {
+            for chunk in block.as_chunks::<12>().0.iter().take(wanted.min(2)) {
                 let mut id = [0_u8; 12];
                 id.copy_from_slice(chunk);
                 full.agent.supply_transaction_id(TransactionId::new(id));

@@ -577,8 +577,10 @@ mod tests {
         assert!(frames.abs_diff(8_000) <= 64, "{frames} frames");
         // the microphone's constant is this end's, on the left
         let left: Vec<i16> = wav[HEADER..]
-            .chunks_exact(4)
-            .map(|frame| i16::from_le_bytes([frame[0], frame[1]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&[l0, l1, _, _]| i16::from_le_bytes([l0, l1]))
             .collect();
         assert!(
             left.iter()

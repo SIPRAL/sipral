@@ -1671,8 +1671,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(&wav[..4], b"RIFF");
         let data: Vec<i16> = wav[wav.len() - 25 * 160 * 2..]
-            .chunks_exact(2)
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
             .collect();
         assert!(
             loudness(&data[20 * 160..]) > 2_000,

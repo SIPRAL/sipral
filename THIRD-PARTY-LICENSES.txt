@@ -9363,7 +9363,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------
-rsa 0.10.0-rc.18 -- MIT OR Apache-2.0
+rsa 0.10.0-rc.19 -- MIT OR Apache-2.0
 -------------------------------------
 
 [LICENSE-APACHE]

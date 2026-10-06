@@ -289,13 +289,13 @@ impl Decoder {
     pub fn decode_into(&mut self, octets: &[u8], samples: &mut [i16]) -> usize {
         let frames = (octets.len() / FRAME_OCTETS).min(samples.len() / FRAME_SAMPLES);
         for (frame, out) in octets
-            .chunks_exact(FRAME_OCTETS)
-            .zip(samples.chunks_exact_mut(FRAME_SAMPLES))
+            .as_chunks::<FRAME_OCTETS>()
+            .0
+            .iter()
+            .zip(samples.as_chunks_mut::<FRAME_SAMPLES>().0)
             .take(frames)
         {
-            let mut bytes = [0_u8; FRAME_OCTETS];
-            bytes.copy_from_slice(frame);
-            out.copy_from_slice(&self.decode(&bytes));
+            *out = self.decode(frame);
         }
         let written = frames * FRAME_SAMPLES;
         let sid = Payload::parse(octets)

@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn a_fragment_reads_in_the_field_order_of_rfc_6347() {
         let (fragment, rest) = Fragment::parse(&FRAGMENT).unwrap();
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
         assert_eq!(
             fragment.header,
             FragmentHeader {
@@ -438,7 +438,7 @@ mod tests {
         // nothing of a message that has nothing: ServerHelloDone
         let done = [14, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0];
         let (fragment, _) = Fragment::parse(&done).unwrap();
-        assert!(fragment.body.is_empty());
+        assert_eq!(fragment.body, []);
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
         for (i, piece) in pieces.iter().enumerate() {
             assert!(piece.len() <= 212);
             let (fragment, rest) = Fragment::parse(piece).unwrap();
-            assert!(rest.is_empty());
+            assert_eq!(rest, []);
             assert_eq!(fragment.header.msg_type, HandshakeType::CERTIFICATE);
             assert_eq!(fragment.header.length, 1000);
             assert_eq!(fragment.header.message_seq, 2);

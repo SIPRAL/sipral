@@ -167,8 +167,10 @@ impl AudioConfig {
 /// as half a sample.
 pub fn read_samples(payload: &[u8]) -> impl Iterator<Item = i16> + '_ {
     payload
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes(<[u8; 2]>::try_from(pair).unwrap_or_default()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
 }
 
 /// Write samples as a signed 16-bit little-endian PCM payload.

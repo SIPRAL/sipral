@@ -246,9 +246,10 @@ impl<'a> RtpPacket<'a> {
     /// with them; only a mixer writes them.
     pub fn csrc(&self) -> impl Iterator<Item = u32> + use<'a> {
         self.csrc
-            .chunks_exact(CSRC_LEN)
-            .filter_map(|id| <[u8; CSRC_LEN]>::try_from(id).ok())
-            .map(u32::from_be_bytes)
+            .as_chunks::<CSRC_LEN>()
+            .0
+            .iter()
+            .map(|id| u32::from_be_bytes(*id))
     }
 
     /// The header extension, when the X bit was set.

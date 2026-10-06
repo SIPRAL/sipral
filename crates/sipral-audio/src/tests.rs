@@ -853,7 +853,7 @@ fn a_call_that_ends_is_let_go_of() {
     call.end();
     wait_ticks(&engine, 2);
     engine.service();
-    assert!(engine.attached().is_empty());
+    assert_eq!(engine.attached(), []);
     assert!(!engine.is_active());
 }
 
@@ -1577,7 +1577,7 @@ fn an_attach_returns_at_once_and_the_call_is_carried_while_the_devices_open() {
         without,
         "still standing in for a loudspeaker that is open"
     );
-    assert!(!fake.played_by("builtin-out").is_empty());
+    assert_ne!(fake.played_by("builtin-out"), [] as [i16; 0]);
 }
 
 /// A device lost under a call is reopened in the background too: the
@@ -1741,7 +1741,7 @@ fn the_pump_asks_for_the_audio_scheduling_class_from_its_own_thread() {
         if granted.is_some() {
             assert_eq!(asked, vec!["sipral-audio".to_owned()]);
         } else {
-            assert!(asked.is_empty());
+            assert_eq!(asked, [] as [std::string::String; 0]);
         }
         engine.deactivate();
         assert_eq!(engine.pump_scheduling(), None);

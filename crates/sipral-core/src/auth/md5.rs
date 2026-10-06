@@ -64,13 +64,12 @@ pub(super) fn md5(data: &[u8]) -> [u8; 16] {
 fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
     let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
-    let mut chunks = data.chunks_exact(64);
-    for chunk in &mut chunks {
-        compress(&mut state, chunk, &mut scratch.words);
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
+        compress(&mut state, block, &mut scratch.words);
     }
 
     // the tail: 0x80, zeros, and the length in bits as 64 little-endian bits
-    let rest = chunks.remainder();
     let mut len = rest.len();
     scratch
         .tail
@@ -96,7 +95,7 @@ fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
     scratch.wipe();
 
     let mut out = [0_u8; 16];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     out
@@ -107,13 +106,8 @@ fn md5_in(data: &[u8], scratch: &mut Scratch) -> [u8; 16] {
     reason = "a, b, c, d and m are RFC 1321's own names, and this has to be readable against it"
 )]
 fn compress(state: &mut [u32; 4], block: &[u8], m: &mut [u32; 16]) {
-    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-        ]);
+    for (word, chunk) in m.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*chunk);
     }
 
     let [mut a, mut b, mut c, mut d] = *state;

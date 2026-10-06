@@ -45,7 +45,7 @@ impl Digest for Sha1 {
         blocks.finish(|block| compress(&mut state, block), false);
 
         let mut digest = [0_u8; 20];
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+        for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
             chunk.copy_from_slice(&word.to_be_bytes());
         }
         digest
@@ -58,13 +58,8 @@ impl Digest for Sha1 {
 )]
 fn compress(state: &mut [u32; 5], block: &[u8]) {
     let mut w = [0_u32; 80];
-    for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-        ]);
+    for (word, chunk) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*chunk);
     }
     for i in 16..80 {
         let mixed = w.get(i - 3).unwrap_or(&0)

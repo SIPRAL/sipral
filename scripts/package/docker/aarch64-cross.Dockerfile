@@ -19,7 +19,7 @@
 # means every libc symbol the linker resolves is one manylinux_2_28 has,
 # which scripts/package/aarch64-cross.sh's aarch64_glibc_check then confirms
 # by reading the binary's own symbol versions.
-FROM rust:1.95-trixie
+FROM rust:1.99-trixie
 
 # cmake: the `opus` feature vendors libopus and builds it with the `cmake`
 # Rust crate, which shells out to a real cmake. python3-venv: scripts/

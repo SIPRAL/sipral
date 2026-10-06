@@ -736,7 +736,12 @@ fn through_headless_media(name: &str, seed: &[u8]) -> Result<(Vec<bool>, usize),
         let take = (usize::from(len) * 2).min(tail.len());
         let (payload, tail) = tail.split_at(take);
         cursor = tail;
-        let samples: Vec<i16> = payload.chunks_exact(2).map(sample_from_pair).collect();
+        let samples: Vec<i16> = payload
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| sample_from_pair(*pair))
+            .collect();
         match op % 6 {
             0 => {
                 let _ = session.hear(&samples);
@@ -1688,15 +1693,9 @@ fn datagrams(run: &[u8]) -> Vec<&[u8]> {
 // ---------------------------------------------------------------- media
 
 /// One sample out of a byte pair, the same native-endian reading every
-/// `media_*` target does. `.get` rather than indexing: the pair a
-/// `chunks_exact(2)` iterator hands over is always two bytes, but nothing
-/// here needs to lean on that to stay panic-free.
-fn sample_from_pair(pair: &[u8]) -> i16 {
-    let bytes = [
-        pair.first().copied().unwrap_or(0),
-        pair.get(1).copied().unwrap_or(0),
-    ];
-    i16::from_ne_bytes(bytes)
+/// `media_*` target does.
+fn sample_from_pair(pair: [u8; 2]) -> i16 {
+    i16::from_ne_bytes(pair)
 }
 
 /// Appends one length-prefixed chunk of samples the way every `media_*`
@@ -1794,7 +1793,12 @@ fn through_media_resample(name: &str, data: &[u8]) -> Result<(), Wrong> {
         let take = (usize::from(len) * 2).min(tail.len());
         let (bytes, tail) = tail.split_at(take);
         cursor = tail;
-        let samples: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let samples: Vec<i16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| sample_from_pair(*pair))
+            .collect();
         let mut output = vec![0_i16; resampler.output_capacity(samples.len())];
         let produced = resampler
             .process(&samples, &mut output)
@@ -1844,7 +1848,12 @@ fn through_media_plc(_name: &str, data: &[u8]) {
         let take = (usize::from(len) * 2).min(tail.len());
         let (bytes, tail) = tail.split_at(take);
         cursor = tail;
-        let mut frame: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let mut frame: Vec<i16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| sample_from_pair(*pair))
+            .collect();
         if op & 1 == 0 {
             concealer.received(&mut frame);
         } else {
@@ -1881,7 +1890,12 @@ fn through_media_drift(_name: &str, data: &[u8]) {
         let take = (usize::from(len) * 2).min(tail.len());
         let (bytes, tail) = tail.split_at(take);
         cursor = tail;
-        let samples: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let samples: Vec<i16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| sample_from_pair(*pair))
+            .collect();
         let mut output = vec![0_i16; samples.len() + 1];
         let _ = drift.process(&samples, &mut output);
         drift.consumed(samples.len());
@@ -1931,7 +1945,12 @@ fn through_media_vad(_name: &str, data: &[u8]) {
         let take = (usize::from(len) * 2).min(tail.len());
         let (bytes, tail) = tail.split_at(take);
         cursor = tail;
-        let frame: Vec<i16> = bytes.chunks_exact(2).map(sample_from_pair).collect();
+        let frame: Vec<i16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| sample_from_pair(*pair))
+            .collect();
         let _ = vad.process(&frame);
     }
 }
@@ -2001,7 +2020,7 @@ fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
     // each frame behind its tag, a SID frame, a frame not sent, a loss in
     // the pause, and one frame more
     let mut stream = Vec::new();
-    for frame in payload.chunks_exact(FRAME_OCTETS) {
+    for frame in payload.as_chunks::<FRAME_OCTETS>().0 {
         stream.push(0);
         stream.extend_from_slice(frame);
     }
@@ -2018,14 +2037,14 @@ fn media_g729_seeds() -> Result<Vec<Seed>, Wrong> {
     let mut talking = vec![0_u8; 40 * FRAME_OCTETS];
     Encoder::new().encode_into(&triangle(40 * 80, 20, 9_000), &mut talking);
     let mut long_pause = Vec::new();
-    for frame in talking.chunks_exact(FRAME_OCTETS) {
+    for frame in talking.as_chunks::<FRAME_OCTETS>().0 {
         long_pause.push(0);
         long_pause.extend_from_slice(frame);
     }
     // energy index 2, zero decibels
     long_pause.extend_from_slice(&[1, 0x00, 0x04]);
     long_pause.extend((0..150).map(|frame| if frame == 75 { 2 } else { 3 }));
-    for frame in talking.chunks_exact(FRAME_OCTETS).take(20) {
+    for frame in talking.as_chunks::<FRAME_OCTETS>().0.iter().take(20) {
         long_pause.push(0);
         long_pause.extend_from_slice(frame);
     }
@@ -2108,7 +2127,12 @@ fn through_media_mix(name: &str, data: &[u8]) -> Result<(), Wrong> {
         return Err(Wrong(format!("the {name} seed has no gain byte")));
     };
     let gain = sipral_media::mix::Gain::from_q15(i32::from(gain_byte) * 512);
-    let samples: Vec<i16> = rest.chunks_exact(2).map(sample_from_pair).collect();
+    let samples: Vec<i16> = rest
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| sample_from_pair(*pair))
+        .collect();
     if samples.is_empty() {
         return Err(Wrong(format!("the {name} seed has no samples")));
     }

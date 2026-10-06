@@ -72,12 +72,11 @@ fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
         0x5be0_cd19,
     ];
 
-    let mut chunks = data.chunks_exact(64);
-    for chunk in &mut chunks {
-        compress256(&mut state, chunk, &mut scratch.words);
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
+        compress256(&mut state, block, &mut scratch.words);
     }
 
-    let rest = chunks.remainder();
     scratch
         .tail
         .get_mut(..rest.len())
@@ -101,7 +100,7 @@ fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
     scratch.wipe();
 
     let mut out = [0_u8; 32];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(state) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
     out
@@ -112,13 +111,8 @@ fn sha256_in(data: &[u8], scratch: &mut Scratch256) -> [u8; 32] {
     reason = "a through h and w are FIPS 180-4's own names, and this has to be readable against it"
 )]
 fn compress256(state: &mut [u32; 8], block: &[u8], w: &mut [u32; 64]) {
-    for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-        ]);
+    for (word, chunk) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*chunk);
     }
     for i in 16..64 {
         let a = *w.get(i - 15).unwrap_or(&0);
@@ -211,12 +205,11 @@ fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
         0x0eb7_2ddc_81c5_2ca2,
     ];
 
-    let mut chunks = data.chunks_exact(128);
-    for chunk in &mut chunks {
-        compress512(&mut state, chunk, &mut scratch.words);
+    let (blocks, rest) = data.as_chunks::<128>();
+    for block in blocks {
+        compress512(&mut state, block, &mut scratch.words);
     }
 
-    let rest = chunks.remainder();
     scratch
         .tail
         .get_mut(..rest.len())
@@ -241,7 +234,7 @@ fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
 
     // "the result cut to 32 bytes": the leftmost 256 bits
     let mut out = [0_u8; 32];
-    for (chunk, word) in out.chunks_exact_mut(8).zip(state) {
+    for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
     out
@@ -252,19 +245,10 @@ fn sha512_256_in(data: &[u8], scratch: &mut Scratch512) -> [u8; 32] {
     reason = "a through h and w are FIPS 180-4's own names, and this has to be readable against it"
 )]
 fn compress512(state: &mut [u64; 8], block: &[u8], w: &mut [u64; 80]) {
-    for (word, chunk) in w.iter_mut().zip(block.chunks_exact(8)) {
-        // read out a byte at a time, as `compress256` does: a buffer copied
-        // into and left behind is one more place the message lives
-        *word = u64::from_be_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-            *chunk.get(4).unwrap_or(&0),
-            *chunk.get(5).unwrap_or(&0),
-            *chunk.get(6).unwrap_or(&0),
-            *chunk.get(7).unwrap_or(&0),
-        ]);
+    for (word, chunk) in w.iter_mut().zip(block.as_chunks::<8>().0) {
+        // read straight out of the block, as `compress256` does: a buffer
+        // copied into and left behind is one more place the message lives
+        *word = u64::from_be_bytes(*chunk);
     }
     for i in 16..80 {
         let a = *w.get(i - 15).unwrap_or(&0);

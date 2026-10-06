@@ -551,9 +551,10 @@ impl<'a> Goodbye<'a> {
     /// The sources that are leaving, in the order they were listed.
     pub fn sources(&self) -> impl Iterator<Item = u32> + use<'a> {
         self.sources
-            .chunks_exact(SSRC_LEN)
-            .filter_map(|id| <[u8; SSRC_LEN]>::try_from(id).ok())
-            .map(u32::from_be_bytes)
+            .as_chunks::<SSRC_LEN>()
+            .0
+            .iter()
+            .map(|id| u32::from_be_bytes(*id))
     }
 
     /// Why, if it said.

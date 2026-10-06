@@ -166,9 +166,8 @@ mod tests {
             .collect();
 
         let mut output = Vec::with_capacity(input.len());
-        for pair in input.chunks_exact(2) {
-            let (lower, higher) =
-                analysis.split(*pair.first().unwrap_or(&0), *pair.get(1).unwrap_or(&0));
+        for &[even, odd] in input.as_chunks::<2>().0 {
+            let (lower, higher) = analysis.split(even, odd);
             let (first, second) = synthesis.join(lower, higher);
             output.push(first);
             output.push(second);

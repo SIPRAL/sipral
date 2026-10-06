@@ -114,7 +114,13 @@ impl Encoder {
     /// would put the two ends half a sample apart for the rest of the call.
     pub fn encode_into(&mut self, samples: &[i16], octets: &mut [u8]) -> usize {
         let pairs = (samples.len() / 2).min(octets.len());
-        for (pair, octet) in samples.chunks_exact(2).zip(octets.iter_mut()).take(pairs) {
+        for (pair, octet) in samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(octets.iter_mut())
+            .take(pairs)
+        {
             let (low, high) = self
                 .filter
                 .split(*pair.first().unwrap_or(&0), *pair.get(1).unwrap_or(&0));
@@ -170,16 +176,15 @@ impl Decoder {
     /// Returns the samples written, which is twice the octets consumed.
     pub fn decode_into(&mut self, octets: &[u8], samples: &mut [i16]) -> usize {
         let pairs = octets.len().min(samples.len() / 2);
-        for (octet, pair) in octets.iter().zip(samples.chunks_exact_mut(2)).take(pairs) {
+        for (octet, pair) in octets
+            .iter()
+            .zip(samples.as_chunks_mut::<2>().0)
+            .take(pairs)
+        {
             let low = self.lower.decode(*octet & 0x3f, self.mode);
             let high = self.higher.decode(*octet >> 6, self.mode);
             let (first, second) = self.filter.join(low, high);
-            if let Some(slot) = pair.first_mut() {
-                *slot = first;
-            }
-            if let Some(slot) = pair.get_mut(1) {
-                *slot = second;
-            }
+            *pair = [first, second];
         }
         pairs * 2
     }

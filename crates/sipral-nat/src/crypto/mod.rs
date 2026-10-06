@@ -108,11 +108,10 @@ impl Blocks {
             self.filled = 0;
         }
 
-        let mut whole = data.chunks_exact(BLOCK);
-        for block in &mut whole {
+        let (whole, rest) = data.as_chunks::<BLOCK>();
+        for block in whole {
             compress(block);
         }
-        let rest = whole.remainder();
         if let Some(room) = self.buffer.get_mut(..rest.len()) {
             room.copy_from_slice(rest);
         }

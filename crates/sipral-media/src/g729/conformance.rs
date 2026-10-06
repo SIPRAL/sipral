@@ -37,16 +37,20 @@ fn directory() -> PathBuf {
 
 fn words(bytes: &[u8]) -> Vec<u16> {
     bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect()
 }
 
 /// A file of sixteen-bit little-endian samples.
 fn samples(bytes: &[u8]) -> Vec<i16> {
     bytes
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect()
 }
 
@@ -59,7 +63,9 @@ fn frames(stream: &[u16]) -> Vec<Option<[u8; FRAME_OCTETS]>> {
         "a stream of whole frames"
     );
     stream
-        .chunks_exact(WORDS_PER_FRAME)
+        .as_chunks::<WORDS_PER_FRAME>()
+        .0
+        .iter()
         .map(|frame| {
             assert_eq!(frame[0], SYNC, "a frame without its synchronisation word");
             assert_eq!(
@@ -150,9 +156,14 @@ fn check_encoder(name: &str) {
 
     let mut encoder = Encoder::new();
     let mut differing = Vec::new();
-    for (index, (chunk, reference)) in input.chunks_exact(FRAME_SAMPLES).zip(&expected).enumerate()
+    for (index, (chunk, reference)) in input
+        .as_chunks::<FRAME_SAMPLES>()
+        .0
+        .iter()
+        .zip(&expected)
+        .enumerate()
     {
-        let frame: [i16; FRAME_SAMPLES] = chunk.try_into().unwrap();
+        let frame = *chunk;
         let ours = encoder.encode(&frame).speech().expect("no DTX, so speech");
         let reference = reference.expect("an encoder's stream has no erasures");
         if ours != reference {
@@ -284,9 +295,14 @@ fn check_annex_b_encoder(input: &str, reference: &str) {
     );
     let mut encoder = Encoder::with_dtx();
     let mut differing = Vec::new();
-    for (index, (chunk, reference)) in input.chunks_exact(FRAME_SAMPLES).zip(&expected).enumerate()
+    for (index, (chunk, reference)) in input
+        .as_chunks::<FRAME_SAMPLES>()
+        .0
+        .iter()
+        .zip(&expected)
+        .enumerate()
     {
-        let frame: [i16; FRAME_SAMPLES] = chunk.try_into().unwrap();
+        let frame = *chunk;
         let ours = match encoder.encode(&frame) {
             Encoded::Speech(octets) => Received::Speech(octets),
             Encoded::Sid(sid) => Received::Sid(sid),
@@ -378,8 +394,8 @@ fn speech_through_encoder_and_decoder() {
     let mut encoder = Encoder::new();
     let mut decoder = Decoder::new();
     let mut ours = Vec::with_capacity(expected.len());
-    for chunk in input.chunks_exact(FRAME_SAMPLES) {
-        let frame: [i16; FRAME_SAMPLES] = chunk.try_into().unwrap();
+    for chunk in input.as_chunks::<FRAME_SAMPLES>().0 {
+        let frame = *chunk;
         let octets = encoder.encode(&frame).speech().expect("no DTX, so speech");
         ours.extend_from_slice(&decoder.decode(&octets));
     }

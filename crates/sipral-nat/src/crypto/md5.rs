@@ -118,7 +118,7 @@ impl Digest for Md5 {
         blocks.finish(|block| compress(&mut state, block), true);
 
         let mut digest = [0_u8; 16];
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+        for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         digest
@@ -131,13 +131,8 @@ impl Digest for Md5 {
 )]
 fn compress(state: &mut [u32; 4], block: &[u8]) {
     let mut x = [0_u32; 16];
-    for (word, chunk) in x.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-        ]);
+    for (word, chunk) in x.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*chunk);
     }
 
     let [mut a, mut b, mut c, mut d] = *state;

@@ -13,7 +13,7 @@
 # Debian's own packages. libpipewire is MIT; nothing here pulls in libpulse
 # or alsa-lib for this crate to link, and it links neither.
 
-FROM rust:1.95-trixie
+FROM rust:1.99-trixie
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

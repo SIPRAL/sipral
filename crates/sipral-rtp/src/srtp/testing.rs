@@ -6,12 +6,10 @@
 /// The bytes a run of hexadecimal digits stands for.
 pub(crate) fn unhex(text: &str) -> Vec<u8> {
     text.as_bytes()
-        .chunks_exact(2)
-        .filter_map(|pair| {
-            let high = digit(*pair.first()?)?;
-            let low = digit(*pair.get(1)?)?;
-            Some(high << 4 | low)
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter_map(|&[high, low]| Some(digit(high)? << 4 | digit(low)?))
         .collect()
 }
 

@@ -69,12 +69,11 @@ impl Sha1 {
             self.buffered = 0;
         }
 
-        let mut blocks = data.chunks_exact(BLOCK);
-        for block in &mut blocks {
+        let (blocks, rest) = data.as_chunks::<BLOCK>();
+        for block in blocks {
             compress(&mut self.state, block);
         }
 
-        let rest = blocks.remainder();
         if let Some(slot) = self.buffer.get_mut(..rest.len()) {
             slot.copy_from_slice(rest);
         }
@@ -108,8 +107,8 @@ impl Sha1 {
         }
 
         let mut out = [0_u8; DIGEST];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *chunk = word.to_be_bytes();
         }
         out
     }
@@ -132,13 +131,8 @@ impl ZeroizeOnDrop for Sha1 {}
 )]
 fn compress(state: &mut [u32; 5], block: &[u8]) {
     let mut w = [0_u32; 80];
-    for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes([
-            *chunk.first().unwrap_or(&0),
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-            *chunk.get(3).unwrap_or(&0),
-        ]);
+    for (word, chunk) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*chunk);
     }
     for t in 16..80 {
         let value = (w.get(t - 3).unwrap_or(&0)

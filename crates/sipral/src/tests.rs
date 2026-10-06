@@ -1267,8 +1267,10 @@ fn the_consent_tone_beeps_to_the_far_end_while_the_call_is_recorded() {
     );
     let wav = file.contents();
     let samples: Vec<i16> = wav[sipral_media::formats::wav::HEADER_LEN..]
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     let left: Vec<i16> = samples.iter().step_by(2).copied().collect();
     assert!(
@@ -4024,8 +4026,10 @@ fn a_recording_takes_both_directions_of_a_live_call() {
     assert_eq!(wav.len(), header + 10 * 160 * 2);
 
     let audio: Vec<i16> = wav[header..]
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     assert!(
         audio.iter().any(|sample| *sample > 7_000),
@@ -4116,8 +4120,10 @@ fn a_recording_keeps_silence_for_this_end_while_muted_and_on_hold() {
         .expect("the file is finished");
     let wav = file.contents();
     let samples: Vec<i16> = wav[sipral_media::formats::wav::HEADER_LEN..]
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     let this_end: Vec<i16> = samples.iter().step_by(2).copied().collect();
     let heard: Vec<bool> = this_end
@@ -12570,8 +12576,10 @@ fn a_joined_calls_recording_keeps_a_far_end_it_never_dialled() {
     let audio: Vec<i16> = wav
         .get(44..)
         .unwrap_or_default()
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect();
     assert!(
         loudness(&audio) > 1_000,

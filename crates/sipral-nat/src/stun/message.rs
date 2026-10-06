@@ -687,7 +687,9 @@ impl<'a> Message<'a> {
     pub fn unknown_attributes(&self) -> impl Iterator<Item = AttributeType> + use<'a> {
         self.find(AttributeType::UNKNOWN_ATTRIBUTES)
             .unwrap_or_default()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 AttributeType::new(u16::from_be_bytes([
                     *pair.first().unwrap_or(&0),

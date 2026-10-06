@@ -39,7 +39,7 @@ hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 # key is ever held here. The release candidate rather than 0.9: 0.9 is the
 # previous RustCrypto generation, and would bring a second SHA-2 and a second
 # `digest` in beside the ones the four crates above share
-rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["sha2"] }
+rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["sha2"] }
 # wiping master secrets, key blocks and exported SRTP keys where this crate
 # holds them; the write that survives the optimiser needs `unsafe`, which this
 # crate denies

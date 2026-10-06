@@ -310,7 +310,7 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(put_u24(&mut out, 0x0100_0000), Err(Error::TooLarge));
         assert_eq!(put_u48(&mut out, 1 << 48), Err(Error::SequenceExhausted));
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         put_u48(&mut out, (1 << 48) - 1).unwrap();
         assert_eq!(out, [0xFF; 6]);
     }

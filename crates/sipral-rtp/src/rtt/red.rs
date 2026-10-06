@@ -99,10 +99,10 @@ impl<'a> RedPayload<'a> {
     pub fn redundant(&self) -> impl Iterator<Item = RedundantBlock<'a>> + use<'a> {
         let mut data = self.blocks;
         self.headers
-            .chunks_exact(REDUNDANT_HEADER_LEN)
-            .map(move |header| {
-                let [first, offset_high, middle, low] =
-                    <[u8; REDUNDANT_HEADER_LEN]>::try_from(header).unwrap_or_default();
+            .as_chunks::<REDUNDANT_HEADER_LEN>()
+            .0
+            .iter()
+            .map(move |&[first, offset_high, middle, low]| {
                 let length = usize::from(u16::from_be_bytes([middle, low]) & 0x3FF);
                 let offset = (u16::from(offset_high) << 6) | u16::from(middle >> 2);
                 let (block, rest) = data.split_at(length.min(data.len()));

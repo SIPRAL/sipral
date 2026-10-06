@@ -23,6 +23,8 @@ two numbers, each moved by its own rule (`docs/08-ffi.md`, "Versioning").
 
 ### Changed
 
+- **Dependencies brought up to date.** `rsa` 0.10.0-rc.19; the .NET tests on `xunit` 2.9.3, `xunit.runner.visualstudio` 4.0.0 and `Microsoft.NET.Test.Sdk` 18.10.1; Gradle 9.8.0 for the Kotlin Android build; the Linux build images on `rust:1.99-trixie`, the toolchain the workspace is pinned to. Every other crate, npm, Maven, Android and Dart dependency was already at its latest release.
+- **Fixed-size blocks are read as arrays.** The hashes (MD5, SHA-1, SHA-256, SHA-512), the codecs (G.722, G.729, L16), RTP's CSRC and RTCP's BYE lists and the packet checksum split their input with `as_chunks`, so each block has its length in its type and the fallbacks that stood in for a short block are gone; the output is bit for bit what it was.
 - **.NET: the stack's, an account's and a call's raw handles are public** (`SipralStack.Handle`, `Account.Handle`, `Call.Handle`), for an entry point of `sipral.h` the classes do not wrap yet, as the Kotlin, Python and Swift layers already allow.
 - **Every binding's `unregister` says where an editor shows it what the state does.** It reads unregistered as soon as the call returns, and the registrar's answer is the registration-changed event after it; an application that closes the stack on the state alone cannot answer a challenge to the un-REGISTER (`docs/08-ffi.md` said so already).
 - **The gate checks every dependency for known vulnerabilities, in every language.** `scripts/check.sh` runs `osv-scanner` over the Cargo, npm, NuGet, Maven and Python dependencies on each run, `--hygiene-only` included; the advisories that do not apply are set aside in `osv-scanner.toml` with their reasons, and listed in `SECURITY.md`.

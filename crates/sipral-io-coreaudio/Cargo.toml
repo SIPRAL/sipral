@@ -24,8 +24,8 @@ unreachable_pub = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 doc_markdown = "allow"
+# as the workspace, and for its reason
 assert_is_empty = "allow"
-chunks_exact_to_as_chunks = "allow"
 panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
