@@ -664,7 +664,7 @@ impl Endpoint {
             // a 100, a response with no tag to name a dialog by, or one that
             // found no room for the dialog it would have opened
             Fork::Ignored => {
-                let names_a_dialog = response.to().ok().is_some_and(|to| to.tag().is_some());
+                let names_a_dialog = response.to().is_ok_and(|to| to.tag().is_some());
                 if status.is_provisional() {
                     self.push(Event::Provisional {
                         invite: id,

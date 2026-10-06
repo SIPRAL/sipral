@@ -881,7 +881,7 @@ impl Engine {
 
     /// Hand every parked call to the pump just started.
     fn unpark(&mut self) {
-        let parked: Vec<_> = self.parked.drain(..).collect();
+        let parked = std::mem::take(&mut self.parked);
         for (id, audio) in parked {
             let channels = self.channels_of(id);
             if let Some(pump) = self.pump.as_ref() {

@@ -86,7 +86,7 @@ impl Oscillator {
         let im = self.re * self.step_im + self.im * self.step_re;
         // one Newton step toward unit length: the error it leaves is the
         // square of the one it found, so the phasor stays on the circle
-        let fix = 1.5 - 0.5 * (re * re + im * im);
+        let fix = 1.5 - f64::midpoint(re * re, im * im);
         self.re = re * fix;
         self.im = im * fix;
         value

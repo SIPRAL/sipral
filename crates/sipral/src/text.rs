@@ -78,9 +78,9 @@ pub(crate) fn answer(offered: &MediaDescription, port: u16) -> StreamAnswer {
         .formats
         .iter()
         .filter(|format| {
-            format.parse::<u8>().ok().is_some_and(|payload| {
-                payload == t140 || red.is_some_and(|(red, _)| red == payload)
-            })
+            format
+                .parse::<u8>()
+                .is_ok_and(|payload| payload == t140 || red.is_some_and(|(red, _)| red == payload))
         })
         .cloned()
         .collect();

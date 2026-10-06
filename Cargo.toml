@@ -38,6 +38,10 @@ doc_markdown = "allow"
 # `Retry-After: 600`, T1 in milliseconds — and rewriting 3060 as "51 minutes"
 # hides the arithmetic the line exists to show
 duration_suboptimal_units = "allow"
+# new in Rust 1.99, 63 places between them, style only; the rewrite to
+# `as_chunks` and `assert!(x.is_empty())` is a change of its own
+assert_is_empty = "allow"
+chunks_exact_to_as_chunks = "allow"
 panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"

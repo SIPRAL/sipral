@@ -531,9 +531,7 @@ impl ProgressDetector {
             history.spans.clear();
             history.last_end = None;
         }
-        for reported in &mut self.reported {
-            *reported = false;
-        }
+        self.reported.fill(false);
         self.sit_bank.reset();
         self.sit_hops.reset();
         self.sit_previous = None;

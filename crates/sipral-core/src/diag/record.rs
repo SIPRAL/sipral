@@ -100,7 +100,6 @@ impl Record {
     }
 
     /// The decisions, oldest first.
-    #[must_use]
     pub fn decisions(&self) -> impl ExactSizeIterator<Item = &Decision> {
         self.entries.iter()
     }

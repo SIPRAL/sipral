@@ -71,9 +71,8 @@ entry! {
     /// Safe to call with any handle value.
     fn sipral_stack_rtp_port_release(stack: SipralHandle, port: u32) {
         with_stack(stack, |state| {
-            let released = u16::try_from(port)
-                .ok()
-                .is_some_and(|port| state.engine.release_rtp_port(port));
+            let released =
+                u16::try_from(port).is_ok_and(|port| state.engine.release_rtp_port(port));
             if released {
                 Ok(())
             } else {

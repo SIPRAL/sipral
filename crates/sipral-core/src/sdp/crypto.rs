@@ -404,14 +404,13 @@ impl SessionParams {
                     return None;
                 }
                 params.kdr = Some(rate);
-            } else if let Some(value) = strip_prefix_ignore_case(text, "WSH=") {
+            } else {
+                let value = strip_prefix_ignore_case(text, "WSH=")?;
                 let window: u32 = value.parse().ok()?;
                 if window < 64 {
                     return None;
                 }
                 params.window = Some(window);
-            } else {
-                return None;
             }
         }
         Some(params)

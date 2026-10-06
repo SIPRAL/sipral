@@ -1170,15 +1170,18 @@ public final class SipralStack: @unchecked Sendable {
         box.logQueue.sync { box.logHandler = level == .off ? nil : handler }
         let on = level != .off && handler != nil
         let boxPointer = Unmanaged.passUnretained(box).toOpaque()
+        // Two calls rather than a conditional over the callback: Swift 6.4
+        // forms a C function pointer only from a direct function reference.
         try retryingBusy {
-            try Sipral.check(
-                sipral_stack_log(
-                    handle,
-                    on ? level.rawValue : SipralLogLevel.off.rawValue,
-                    on ? sipralLogTrampoline : nil,
-                    on ? boxPointer : nil
+            if on {
+                try Sipral.check(
+                    sipral_stack_log(handle, level.rawValue, sipralLogTrampoline, boxPointer)
                 )
-            )
+            } else {
+                try Sipral.check(
+                    sipral_stack_log(handle, SipralLogLevel.off.rawValue, nil, nil)
+                )
+            }
         }
     }
 

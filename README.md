@@ -137,7 +137,7 @@ cargo build --workspace && cargo test --workspace
 ./scripts/check.sh        # the full release gate
 ```
 
-Rust 1.95 (pinned in `rust-toolchain.toml`) and CMake for libopus are enough
+Rust 1.99 (pinned in `rust-toolchain.toml`; the crates build from 1.95) and CMake for libopus are enough
 to build and test. `./scripts/check.sh` also builds and tests every binding,
 so it needs their toolchains as well
 ([`docs/11-testing.md`, "Where the checks run"](docs/11-testing.md#where-the-checks-run));

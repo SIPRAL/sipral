@@ -360,7 +360,6 @@ impl RegistrarInfo {
     /// "to request services from the system it just registered with", and a
     /// refresh sent along it would make a stale route unrecoverable: the one
     /// request that can replace it would have to travel it.
-    #[must_use]
     pub fn service_route(&self) -> impl ExactSizeIterator<Item = &[u8]> {
         self.service_route.iter().map(|hop| &**hop)
     }

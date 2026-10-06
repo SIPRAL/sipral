@@ -10,7 +10,7 @@ use core::fmt;
 /// The convention across `libpipewire` and SPA is a plain negated `errno`:
 /// zero or a positive number is success, and a negative one is `-errno`. This
 /// type stores the positive magnitude, because that is what
-/// [`std::io::Error::from_raw_os_error`] and every `strerror` table index by,
+/// `std::io::Error::from_raw_os_error` and every `strerror` table index by,
 /// and turns the two-argument convention of the C side into one number here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Errno(i32);
