@@ -154,7 +154,7 @@ streaming API where there is no SIP.
 | [SignalWire AI Agent](#signalwire-ai-agent) | hosted platform | SIP bridge | yes | Opus, G.722, PCMU, PCMA, G.729 |
 | [Telnyx AI Assistants](#telnyx-ai-assistants) | hosted platform | SIP bridge, through the PBX | yes | not listed |
 | [Pipecat](#pipecat) | framework | Pipecat | no | PCM, 16 kHz in and 24 kHz out by default |
-| [LiveKit Agents](#livekit-agents) | framework | SIP bridge | yes | PCMU, PCMA, G.722; Opus and others on request |
+| [LiveKit Agents](#livekit-agents) | framework | SIP bridge; room participant (example) | yes | PCMU, PCMA, G.722; Opus and others on request |
 | [jambonz](#jambonz) | framework | SIP bridge | yes | PCMU, PCMA, G.722, Opus |
 | [OpenAI Agents SDK](#openai-agents-sdk) | framework | SIP bridge | yes, through OpenAI | as OpenAI Realtime |
 | [Google ADK](#google-adk) | framework | SIP bridge, through LiveKit | yes, through LiveKit | as LiveKit |
@@ -771,7 +771,11 @@ https://docs.pipecat.ai/pipecat/telephony/daily-sip
 A framework for agents that join LiveKit rooms as participants; LiveKit's
 SIP service brings a SIP call into a room.
 
-**Path: SIP bridge.**
+**Path: SIP bridge**, or Sipral as a room participant itself:
+`integrations/agents/examples/livekit_bridge.py` joins each call to a room
+with LiveKit's Python SDK (Apache-2.0), publishing the caller at 48 kHz and
+playing the first audio track another participant publishes, so no LiveKit
+SIP trunk is needed. It was run against `livekit-server --dev` on loopback.
 
 - **Address (LiveKit Cloud):** `sip:<subdomain>.sip.livekit.cloud`, where the
   subdomain is the project ID without `p_`; regional endpoints restrict a

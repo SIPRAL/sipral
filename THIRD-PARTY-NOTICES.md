@@ -559,6 +559,18 @@ service's protocol is written from its public documentation.
 `scripts/check.sh --only agents` installs `websockets` 17.2 into a virtual
 environment under `target/check` to run the tests.
 
+`integrations/agents/examples/livekit_bridge.py`, and only that example,
+imports LiveKit's Python SDK, which the package does not depend on and
+nothing here ships: `livekit` 1.1.20 and `livekit-api` 1.2.1, both
+Apache-2.0, used through their public API. What they require, from each
+package's own metadata: `livekit-protocol`, `aiofiles`, `types-protobuf`,
+`yarl`, `propcache`, `frozenlist`, `multidict` and `aiosignal` under
+Apache-2.0, `aiohttp` under Apache-2.0 AND MIT, `protobuf` and `idna` under
+BSD-3-Clause, `numpy` under BSD-3-Clause with 0BSD, MIT, Zlib and CC0-1.0
+parts, `PyJWT` and `attrs` under MIT, and `aiohappyeyeballs` under PSF-2.0.
+The `livekit` wheel carries LiveKit's native client library, under the
+same Apache-2.0.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

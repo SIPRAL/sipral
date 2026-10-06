@@ -152,6 +152,17 @@ A call to a SIP account with no agent is answered 404. One stack checks TLS
 certificates against one name, so SIP agents over TLS on different hosts
 need a bridge each.
 
+## LiveKit
+
+[`examples/livekit_bridge.py`](examples/livekit_bridge.py) puts each call
+in a LiveKit room as a participant: the caller's voice published as a
+track at 48 kHz, the first audio track another participant publishes (a
+LiveKit Agents worker, a person in a browser) played to the caller, and
+either side leaving ending the other. It needs `pip install livekit
+livekit-api` (Apache-2.0), which the package does not depend on, and was
+run against `livekit-server --dev` on loopback with a second participant
+echoing the caller back.
+
 ## Environment variables of the example
 
 | Variable | What it is |
