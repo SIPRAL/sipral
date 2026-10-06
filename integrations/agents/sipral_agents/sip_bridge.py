@@ -17,7 +17,8 @@ A REFER from the agent goes to one function, :func:`decide`: by default a
 user part naming an outcome other than ``human`` ends the call with it, and
 anything else is a transfer to that user at the PBX -- a REFER of the
 caller's call, so the PBX places the new call and owns it
-(``SIPRAL_TRANSFER=bridge`` places it from here and bridges it instead).
+(``SIPRAL_TRANSFER=bridge`` places it from here and bridges it instead,
+answering the agent's REFER 202 and reporting that call to it in NOTIFYs).
 
     SIPRAL_AOR=sip:bridge@pbx.example \\
     SIPRAL_REGISTRAR=sip:pbx.example \\
@@ -40,18 +41,15 @@ when the address's host is not it. ``SIPRAL_OUTCOMES=refer`` with
 returns the caller to the PBX by REFER for those outcomes.
 ``SIPRAL_AGENT_MAX_SECONDS`` hangs the agent up after that long, as
 ``expired``. ``SIPRAL_COPY_HEADERS`` (default ``X-*``) names the PBX
-INVITE's fields that make up the caller's context, with its number and name.
+INVITE's fields that make up the caller's context, with its number and name;
+they go on the INVITE to the agent.
 ``SIPRAL_INVITE_LIMIT=voice-agent`` takes a PBX's rush of calls the default
 rate floor would answer 480.
 
-This binding's ``Call`` has no ``ring``, ``transfer`` or ``set_headers`` and
-``Stack.place_call`` no ``headers``, though the C ABI has all four
-(``sipral_call_ring``, ``sipral_call_transfer``, ``sipral_call_set_headers``,
-``sipral_call_config_t::headers``). So the caller is answered at once and
-hears a tone from here rather than the PBX's own ringback, the REFER and the
-outcome field go through the two C entry points directly (:func:`refer`,
-:func:`set_headers`), and the caller's context is printed rather than sent:
-``crates/sipral/examples/agent-bridge.rs`` sends it.
+The caller is answered at once and hears a tone from here until the agent
+answers. The PBX refusing a REFER of the caller's call, or never answering
+it, arrives as ``TRANSFER_DONE`` with its status, and the agent's own BYE is
+read for the outcome it names in ``X-Sipral-Outcome`` when it sends one.
 """
 
 from __future__ import annotations
@@ -64,18 +62,13 @@ import socket
 from dataclasses import dataclass, field
 
 from sipral import Call, InviteLimit, LocalConference, Stack, TlsTrust
-from sipral._sipral_cffi import ffi, lib
 from sipral.enums import AudioMode, Codec, EventKind, Transport
 from sipral.errors import SipralError
-from sipral.errors import call as abi_call
 
 _log = logging.getLogger("sipral_agents.sip_bridge")
 
 OUTCOMES = ("human", "callback", "resolved", "unresolved", "expired")
 OUTCOME_HEADER = "X-Sipral-Outcome"
-# A REFER refused outright is not reported by the stack -- only the NOTIFYs
-# of one it took are -- so this long without a word is read as a refusal.
-REFER_PATIENCE = 10.0
 
 
 @dataclass
@@ -116,33 +109,6 @@ def decide(target: str, pbx_domain: str) -> Transfer | End | None:
     return Transfer(f"sip:{user}@{pbx_domain}")
 
 
-def refer(call: Call, target: str) -> None:
-    """`sipral_call_transfer`: REFER the call's far end to ``target``."""
-    encoded = target.encode("utf-8")
-    abi_call(
-        lambda: lib.sipral_call_transfer(
-            call.stack.handle, call.handle, encoded, len(encoded), call.stack.now_ms()
-        ),
-        "sipral_call_transfer",
-    )
-
-
-def set_headers(call: Call, fields: list[tuple[str, str]]) -> None:
-    """`sipral_call_set_headers`: fields on what this call sends next,
-    the BYE of a hangup among it."""
-    kept = [(name.encode("utf-8"), value.encode("utf-8")) for name, value in fields]
-    # the buffers outlive the call: the array only points at them
-    buffers = [(ffi.new("char[]", name), ffi.new("char[]", value)) for name, value in kept]
-    array = ffi.new("sipral_header_t[]", len(kept))
-    for i, ((name, value), (name_buf, value_buf)) in enumerate(zip(kept, buffers)):
-        array[i].name, array[i].name_len = name_buf, len(name)
-        array[i].value, array[i].value_len = value_buf, len(value)
-    abi_call(
-        lambda: lib.sipral_call_set_headers(call.stack.handle, call.handle, array, len(kept)),
-        "sipral_call_set_headers",
-    )
-
-
 def caller_context(invite: bytes | None, copy: list[str]) -> list[tuple[str, str]]:
     """The caller's number and display name, and the INVITE's fields
     ``copy`` names (a name ending in ``*`` is a prefix)."""
@@ -171,6 +137,20 @@ def caller_context(invite: bytes | None, copy: list[str]) -> list[tuple[str, str
         if wanted:
             fields.append((name, value))
     return fields
+
+
+def outcome_of(message: bytes | None) -> str | None:
+    """The outcome a BYE names in ``X-Sipral-Outcome``, when it is one of
+    :data:`OUTCOMES`."""
+    head = (message or b"").decode("utf-8", "replace").split("\r\n\r\n", 1)[0]
+    if not head.startswith("BYE "):
+        return None
+    for line in head.split("\r\n")[1:]:
+        name, colon, value = line.partition(":")
+        if colon and name.strip().lower() == OUTCOME_HEADER.lower():
+            value = value.strip().lower()
+            return value if value in OUTCOMES else None
+    return None
 
 
 def domain_of(uri: str) -> str:
@@ -263,7 +243,6 @@ class BridgedCall:
         self.person: Call | None = None
         self.person_up = False
         self.referred = False
-        self.refer_heard = False
         self.outcome: str | None = None
         self.refer_event = None
         self.conference: LocalConference | None = None
@@ -310,16 +289,10 @@ class BridgedCall:
             self.agent.hangup()
 
     def refer_caller(self, target: str, outcome: str) -> None:
-        """REFER the caller's call to the PBX, and give up on it after
-        :data:`REFER_PATIENCE` with no word from the PBX."""
-        refer(self.caller, target)
-        self.referred, self.refer_heard, self.outcome = True, False, outcome
-
-        async def patience() -> None:
-            await asyncio.sleep(REFER_PATIENCE)
-            await self.inbox.put(("timer", None, ("refer-silent", None)))
-
-        self.tasks.append(asyncio.create_task(patience()))
+        """REFER the caller's call to the PBX; ``TRANSFER_DONE`` says how it
+        went, a refusal and a REFER nobody answered included."""
+        self.caller.transfer(target)
+        self.referred, self.outcome = True, outcome
 
     def refused(self, status: int) -> None:
         """The PBX did not take the REFER: the caller stays with the agent,
@@ -345,7 +318,7 @@ class BridgedCall:
                 _log.info(f"cannot refer {self.caller.handle:x} to {uri}: {error!r}")
         _log.info(f"ending {self.caller.handle:x} with {OUTCOME_HEADER}: {outcome}")
         try:
-            set_headers(self.caller, [(OUTCOME_HEADER, outcome)])
+            self.caller.set_headers([(OUTCOME_HEADER, outcome)])
             self.caller.hangup()
         except SipralError:
             pass
@@ -371,6 +344,7 @@ class BridgedCall:
             self.person = self.stack.place_call(self.cfg.line, action.target)
             self.watch(self.person, "person")
             self.outcome, self.refer_event = "human", event
+            self.stack.accept_transfer_placed(event, self.person)
             _log.info(f"calling {action.target} as {self.person.handle:x}")
 
     async def expire(self) -> None:
@@ -382,7 +356,9 @@ class BridgedCall:
         context = caller_context(self.invite, self.cfg.copy)
         _log.info(f"incoming {self.caller.handle:x}: context {context}")
         try:
-            self.agent = self.stack.place_call(self.cfg.agent_account, self.cfg.agent_uri)
+            self.agent = self.stack.place_call(
+                self.cfg.agent_account, self.cfg.agent_uri, headers=context
+            )
         except SipralError as error:
             _log.info(f"cannot call the agent: {error!r}")
             self.end_caller("unresolved")
@@ -422,8 +398,6 @@ class BridgedCall:
             if to is not None and to.media is not None:
                 to.send_dtmf(value)
                 _log.info(f"dtmf {value} from {role}")
-        elif kind == "refer-silent" and self.referred and not self.refer_heard:
-            self.refused(480)
         elif kind == "expired" and self.agent is not None and not self.agent.ended:
             if not self.referred and self.person is None:
                 _log.info(f"the agent's call {self.agent.handle:x} ran its time: hanging it up")
@@ -438,7 +412,6 @@ class BridgedCall:
         elif event.kind == EventKind.TRANSFER_REQUESTED and role == "agent":
             self.transfer_asked(event)
         elif event.kind == EventKind.TRANSFER_PROGRESS and role == "caller":
-            self.refer_heard = True
             _log.info(f"the PBX is transferring {call.handle:x}: {event.fields.get('status_code')}")
         elif event.kind == EventKind.TRANSFER_DONE and role == "caller":
             status = int(event.fields.get("status_code", 0))
@@ -450,6 +423,9 @@ class BridgedCall:
         elif event.kind == EventKind.CALL_CONFIRMED and role == "person":
             self.person_up = True
         elif event.kind == EventKind.CALL_ENDED:
+            said = outcome_of(event.message) if role == "agent" else None
+            if said is not None and self.outcome is None:
+                self.outcome = said
             self.ended(role, call)
 
     def ended(self, role: str, call: Call) -> None:
@@ -465,9 +441,9 @@ class BridgedCall:
             if self.person_up:
                 self.caller.hangup()
             elif self.agent is not None and not self.agent.ended:
+                # the agent hears it from the NOTIFY that reported the call
                 _log.info("the transfer failed: the caller stays with the agent")
                 self.person, self.outcome = None, None
-                self.stack.reject_referral(self.refer_event, 480)
             else:
                 self.end_caller("unresolved")
         else:
