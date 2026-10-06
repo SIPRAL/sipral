@@ -197,3 +197,32 @@ margin = 2.71
 where = [
     "docs/19-numbers.md, 3 October 2026: the detector alone, white noise at -10 dBm0, 2.71 us",
 ]
+
+# Figures measured in the lab rather than by the gate: a call through a real
+# PBX, which `scripts/check.sh` has no way to place. Kept here beside the
+# gated ones so that every published figure has one home, but listed as
+# `lab_figure`, which scripts/numbers.py does not read; `scripts/soak.sh
+# latency` measures them again, docs/19-numbers.md says how. Fields as
+# above, `unit` ms, plus `p95`, the 95th percentile of the same `runs`.
+
+[[lab_figure]]
+key = "agent.invite_to_first_frame"
+what = "an INVITE in, to the first audio frame read by the agent on the socket"
+unit = "ms"
+published = 31.5
+p95 = 31.9
+runs = 300
+where = [
+    "docs/19-numbers.md, 7 October 2026: a voice agent's first frame and first reply, 31.5 ms median",
+]
+
+[[lab_figure]]
+key = "agent.reply_to_first_rtp"
+what = "the agent's first frame written to the socket, to the first RTP packet carrying it"
+unit = "ms"
+published = 20.4
+p95 = 20.6
+runs = 300
+where = [
+    "docs/19-numbers.md, 7 October 2026: a voice agent's first frame and first reply, 20.4 ms median",
+]

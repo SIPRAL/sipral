@@ -1315,6 +1315,54 @@ Read together:
   out of it: the payload is the same size either way. A clean link stops
   paying after the first report.
 
+## 7 October 2026 — unreleased, for `1.2.0`: a voice agent's first frame and first reply
+
+`scripts/soak.sh latency 300`: three hundred calls from the lab's Asterisk to the headless
+socket application (`crates/sipral/examples/headless-socket-agent.rs`), each answered and
+bridged to the reference echo agent (`crates/sipral-headless/examples/agent.rs`) over the
+socket, both started with `--timings`, release build. The application prints when the
+INVITE reached it and when the first RTP packet carrying the agent's audio left its socket;
+the agent prints when it read the call's first audio frame and when it wrote its first frame
+back. The two processes run in two containers on one host and read the same wall clock, so
+each figure is a difference of two readings of one clock. No speech service sits behind the
+agent: what is measured is the stack and the socket, not a model's thinking time, which an
+application adds on top. The second lab machine (Debian 13, Linux 6.12, 32 cores), the lab's
+own Asterisk 22 on the same host's Docker bridge.
+
+| Figure | Median | 95th percentile | Min | Max |
+|---|---|---|---|---|
+| INVITE in, to the first audio frame read by the agent | 31.5 ms | 31.9 ms | 31.2 ms | 32.7 ms |
+| The agent's first frame written, to the first RTP packet carrying it | 20.4 ms | 20.6 ms | 20.0 ms | 20.9 ms |
+
+300 calls of 300 timed, none failed. What the two are made of:
+
+- **INVITE to the first frame** is the answer's round trip — 200 OK out, the ACK back,
+  which is when the call is up and the socket hears `answered` — and then the next
+  twenty-millisecond media tick, which delivers the first frame of the caller's audio. The
+  agent hears the stream from its first frame on; the caller's speech itself starts
+  wherever the caller starts talking.
+- **The first reply to the first RTP** is one frame: the application sends a call's audio on
+  a steady twenty-millisecond clock, and a reply that arrives just after a tick leaves on
+  the next one. The echo agent replies to each frame as it reads it, which is just after a
+  tick, so this is the worst case of that wait; an agent whose reply falls anywhere in the
+  frame waits between 0 and 20 ms, 10 on average.
+
+The logs stay on the lab machine, under `/opt/sipral/soak-logs/latency-20261007`
+(`app.log`, `agent.log`, `latency.csv`); `docs/numbers.toml` holds both figures as
+`lab_figure`s.
+
+## 7 October 2026 — unreleased, for `1.2.0`: endurance
+
+`scripts/soak.sh endurance 24` keeps the same pair up for a day against the lab's Asterisk:
+one call after another, each three minutes of cadenced tone and then the "#" on which the
+agent hangs up, so every BYE is the stack's own; the account's registration is held to two
+minutes, so the stack registers again every minute or two throughout. Each minute it writes
+the application's resident memory, processor time, open descriptors, threads, calls ended,
+registrations and errors to `samples.csv`. Started on 6 October at 21:16 UTC on the second
+lab machine; its first half hour read 5.7 MB resident and flat, 8 descriptors, 3 threads,
+about 2 % of one core, a call every 3 min 10 s, 23 registrations and no error. The day's
+result is added here when the run ends.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty

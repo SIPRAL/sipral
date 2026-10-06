@@ -51,6 +51,13 @@
 //! only, so every call is 8 kHz regardless of which law is chosen, and
 //! `HeadlessSession` resamples between the two both ways — proving that seam
 //! rather than assuming the two rates happen to agree.
+//!
+//! `--timings` prints two lines a call, each with the wall clock in
+//! microseconds since the Unix epoch: `timing invite <call> <us>` the turn the
+//! INVITE is handed to this binary, and `timing first-rtp <call> <us>` when
+//! the first RTP packet carrying audio the agent sent leaves for the caller.
+//! The agent example's own `--timings` prints the other half of each figure;
+//! `scripts/soak.sh latency` pairs them, `docs/19-numbers.md` says how.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -75,7 +82,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral::{
     Account, CallHandle, CallMedia, CodecCatalog, Credentials, EndpointConfig, Event, IcePolicy,
@@ -148,6 +155,16 @@ struct Registration {
 struct Answering {
     catalog: CodecCatalog,
     public: Option<std::net::IpAddr>,
+    /// `--timings`: print the instants the latency figures are read from.
+    timings: bool,
+}
+
+/// The wall clock in microseconds since the Unix epoch: the one clock this
+/// process and the agent's, on the same host, both read.
+fn epoch_us() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_micros())
 }
 
 impl Answering {
@@ -180,6 +197,7 @@ fn args() -> Args {
     let mut pass = String::new();
     let mut ice_lite = false;
     let mut public = None;
+    let mut timings = false;
     let mut it = env::args().skip(1);
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -208,6 +226,7 @@ fn args() -> Args {
             "--pass" => pass = it.next().unwrap_or_default(),
             "--ice-lite" => ice_lite = true,
             "--public" => public = it.next().and_then(|t| t.parse().ok()),
+            "--timings" => timings = true,
             _ => {}
         }
     }
@@ -229,7 +248,11 @@ fn args() -> Args {
         port,
         socket,
         registration,
-        answering: Answering { catalog, public },
+        answering: Answering {
+            catalog,
+            public,
+            timings,
+        },
     }
 }
 
@@ -387,6 +410,11 @@ struct Bridge {
     /// `bridge` straight away, so that later event still finds a `call_id`
     /// to report against; `bridge` itself is only cleared once that arrives.
     ended: bool,
+    /// The agent has sent this call audio, and the next packet out carries it.
+    agent_spoke: bool,
+    /// Whether the first packet carrying the agent's audio is still to be
+    /// timed: `Some(false)` until it is, `None` without `--timings`.
+    first_rtp_timed: Option<bool>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -508,8 +536,10 @@ fn drain_agent(
     loop {
         match reader.try_recv() {
             Ok(FromAgent::Audio(payload)) => {
-                if let Some(active) = bridge.as_mut() {
-                    let _ = active.session.protocol_mut().push_playback(payload);
+                if let Some(active) = bridge.as_mut()
+                    && active.session.protocol_mut().push_playback(payload).is_ok()
+                {
+                    active.agent_spoke = true;
                 }
             }
             Ok(FromAgent::Refused(error)) => {
@@ -607,8 +637,17 @@ fn drive_bridge(
     while let Some(bytes) = active.session.protocol_mut().pop_capture() {
         let _ = encode_audio(session_audio(), &bytes, &mut out.audio);
     }
-    if let Ok(Some(datagram)) = active.session.speak(media, turn) {
-        let _ = active.rtp.send_to(datagram.payload, datagram.destination);
+    let carries_agent = active.agent_spoke;
+    if let Ok(Some(datagram)) = active.session.speak(media, turn)
+        && active
+            .rtp
+            .send_to(datagram.payload, datagram.destination)
+            .is_ok()
+        && carries_agent
+        && active.first_rtp_timed == Some(false)
+    {
+        active.first_rtp_timed = Some(true);
+        println!("timing first-rtp {} {}", active.call_id, epoch_us());
     }
 }
 
@@ -710,6 +749,8 @@ fn open_bridge(
         rtp,
         session,
         ended: false,
+        agent_spoke: false,
+        first_rtp_timed: answering.timings.then_some(false),
     });
     let _ = encode_control(
         &ControlMessage::SessionOpen(SessionOpen::new(session_audio().sample_rate())),
@@ -778,6 +819,9 @@ fn handle_event(
         Event::Signalling(UaEvent::IncomingCall { call, .. })
             if bridge.as_ref().is_none_or(|b| b.ended) =>
         {
+            if answering.timings {
+                println!("timing invite {call:?} {}", epoch_us());
+            }
             open_bridge(endpoint, bridge, out, (*call, answering), now);
         }
         Event::Media {

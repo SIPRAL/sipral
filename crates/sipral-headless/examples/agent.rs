@@ -27,6 +27,12 @@
 //! ```text
 //! cargo run --example agent -p sipral-headless -- --addr 127.0.0.1:7001
 //! ```
+//!
+//! `--timings` prints, once a call, the wall clock in microseconds since the
+//! Unix epoch: `timing first-frame <call> <us>` when the call's first audio
+//! frame is read off the socket, and `timing reply <call> <us>` just before
+//! the first frame this agent sends back is written to it — the halves of
+//! `docs/19-numbers.md`'s voice agent figures this side of the socket sees.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
@@ -34,7 +40,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sipral_headless::{
     ControlMessage, ErrorCode, ErrorMessage, FrameDecoder, FrameKind, Hangup, MAX_CONTROL_PAYLOAD,
@@ -62,6 +68,94 @@ fn addr() -> String {
         }
     }
     "127.0.0.1:7001".to_owned()
+}
+
+/// The wall clock in microseconds since the Unix epoch, the clock the
+/// application on the same host prints its own half of each figure in.
+fn epoch_us() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_micros())
+}
+
+/// Where a call is, as far as `--timings` goes: its first frame not heard
+/// yet, heard, its first reply queued to be written, or both timed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Opened,
+    Heard,
+    Replying,
+    Timed,
+}
+
+/// `--timings`: the two instants a call this side of the socket prints.
+struct Timings {
+    on: bool,
+    stage: Stage,
+}
+
+impl Timings {
+    fn new() -> Self {
+        Self {
+            on: env::args().skip(1).any(|flag| flag == "--timings"),
+            stage: Stage::Timed,
+        }
+    }
+
+    fn call_opened(&mut self) {
+        self.stage = Stage::Opened;
+    }
+
+    fn frame_heard(&mut self, call_id: &str) {
+        if self.stage == Stage::Opened {
+            self.stage = Stage::Heard;
+            if self.on {
+                println!("timing first-frame {call_id} {}", epoch_us());
+            }
+        }
+    }
+
+    fn reply_queued(&mut self) {
+        if self.stage == Stage::Heard {
+            self.stage = Stage::Replying;
+        }
+    }
+
+    /// Writes what `out` holds to `stream`, timing the call's first reply
+    /// if it is among it.
+    fn flush(
+        &mut self,
+        stream: &mut TcpStream,
+        out: &mut Vec<u8>,
+        call_id: &str,
+    ) -> std::io::Result<()> {
+        if out.is_empty() {
+            return Ok(());
+        }
+        let at = epoch_us();
+        stream.write_all(out)?;
+        out.clear();
+        if self.stage == Stage::Replying {
+            self.stage = Stage::Timed;
+            if self.on {
+                println!("timing reply {call_id} {at}");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Holds `payload` [`ECHO_DELAY`] frames and queues whatever frame is due
+/// back onto `out`; whether one was.
+fn echo_frame(echo: &mut VecDeque<Vec<u8>>, payload: &[u8], out: &mut Vec<u8>) -> bool {
+    echo.push_back(payload.to_vec());
+    if echo.len() > ECHO_DELAY
+        && let Some(due) = echo.pop_front()
+    {
+        let _ = write_frame(FrameKind::Audio.to_u8(), &due, out);
+        return true;
+    }
+    false
 }
 
 fn connect(addr: &str) -> std::io::Result<TcpStream> {
@@ -105,6 +199,7 @@ fn main() -> std::io::Result<()> {
     let mut out = Vec::new();
     let mut echo: VecDeque<Vec<u8>> = VecDeque::new();
     let mut call_id = String::new();
+    let mut timings = Timings::new();
 
     loop {
         let read = stream.read(&mut read_buf)?;
@@ -127,11 +222,9 @@ fn main() -> std::io::Result<()> {
                 continue;
             };
             if kind == FrameKind::Audio {
-                echo.push_back(frame.payload().to_vec());
-                if echo.len() > ECHO_DELAY
-                    && let Some(due) = echo.pop_front()
-                {
-                    let _ = write_frame(FrameKind::Audio.to_u8(), &due, &mut out);
+                timings.frame_heard(&call_id);
+                if echo_frame(&mut echo, frame.payload(), &mut out) {
+                    timings.reply_queued();
                 }
                 continue;
             }
@@ -153,6 +246,8 @@ fn main() -> std::io::Result<()> {
                 }
                 Ok(ControlMessage::IncomingCall(incoming)) => {
                     call_id.clone_from(&incoming.call_id);
+                    timings.call_opened();
+                    echo.clear();
                     println!("call {call_id} from {}", incoming.caller);
                 }
                 Ok(ControlMessage::CallState(state)) => {
@@ -199,9 +294,6 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        if !out.is_empty() {
-            stream.write_all(&out)?;
-            out.clear();
-        }
+        timings.flush(&mut stream, &mut out, &call_id)?;
     }
 }
