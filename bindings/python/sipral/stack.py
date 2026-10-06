@@ -29,7 +29,7 @@ from . import events as _events
 from ._sipral_cffi import ffi, lib
 from .account import Account, _default_contact
 from .audio import Audio
-from .call import Call
+from .call import Call, header_array
 from .counters import Counters
 from .enums import AudioMode, Feature, Link, LogLevel, Recovery
 from .errors import PASSING as _PASSING
@@ -1102,6 +1102,7 @@ class Stack:
         feedback: bool = False,
         focus: bool = False,
         codecs: str | None = None,
+        headers=None,
     ) -> Call:
         """`sipral_call_place`, with this stack running the call's audio.
 
@@ -1130,6 +1131,8 @@ class Stack:
         the focus of a conference (RFC 4579): `isfocus` on its `Contact`.
         ``codecs`` -- ``"PCMA,PCMU"`` -- is what this call offers and in what
         order, in place of the stack's (`sipral_call_config_t::codecs`).
+        ``headers`` -- ``(name, value)`` pairs or a mapping -- go on the
+        INVITE (`sipral_call_config_t::headers`).
 
         ``media_host`` left out binds the media socket at the address of the
         route toward ``destination``, or toward the account's server.
@@ -1171,6 +1174,11 @@ class Stack:
             codecs_buf = ffi.new("char[]", codecs_bytes)
             config.codecs = codecs_buf
             config.codecs_len = len(codecs_bytes)
+        headers_kept = None
+        if headers:
+            headers_array, headers_kept = header_array(headers)
+            config.headers = headers_array
+            config.headers_len = len(headers_kept) // 2
 
         out_call = ffi.new("sipral_handle_t *")
         try:
@@ -1225,14 +1233,16 @@ class Stack:
         ``media_host`` left out binds the media socket at the address of the
         route toward the server of the account the call came to.
         """
-        media_host = self._media_host(media_host, self._account_for(event.account), None)
-        media_socket = self.open_media_socket(media_host, media_port)
-        media_address = format_address(*media_socket.getsockname())
-        self._map_media_socket(media_socket, media_address)
-        text_socket = self.open_media_socket(media_host) if text else None
-
-        call = Call(self, event.call, media_socket, media_address, text_socket)
-        self.register_call(call)
+        rung = self.call_for(event.call)
+        if rung is not None:
+            if text or feedback or focus or codecs is not None:
+                rung.answer_with(feedback=feedback, focus=focus, codecs=codecs)
+            else:
+                rung.answer()
+            return rung
+        call = self._incoming(event, media_host, media_port, text)
+        media_socket, media_address = call._media_socket, call._media_address
+        text_socket = call._text_socket
         try:
             if text or feedback or focus or codecs is not None:
                 call.answer_with(feedback=feedback, focus=focus, codecs=codecs)
@@ -1246,6 +1256,66 @@ class Stack:
                 self._close_socket(text_socket)
             raise
         return call
+
+    def _incoming(
+        self, event: _events.Event, media_host: str | None, media_port: int, text: bool
+    ) -> Call:
+        """The :class:`Call` of an incoming one, with its media socket open
+        and mapped, registered and not yet answered."""
+        media_host = self._media_host(media_host, self._account_for(event.account), None)
+        media_socket = self.open_media_socket(media_host, media_port)
+        media_address = format_address(*media_socket.getsockname())
+        self._map_media_socket(media_socket, media_address)
+        text_socket = self.open_media_socket(media_host) if text else None
+        call = Call(self, event.call, media_socket, media_address, text_socket)
+        self.register_call(call)
+        return call
+
+    def ring_call(
+        self,
+        event: _events.Event,
+        *,
+        media: bool = False,
+        media_host: str | None = None,
+        media_port: int = 0,
+        srtp: int = 0,
+        codecs: str | None = None,
+    ) -> Call:
+        """Say an incoming call is ringing, and build its :class:`Call`.
+
+        ``event`` is the `SIPRAL_EVENT_KIND_INCOMING_CALL`. The media socket
+        is opened as :meth:`answer_call` opens it, and the call is not
+        answered: :meth:`answer_call` with the same event, or
+        :meth:`Call.answer`, does that later on the same socket. Without
+        ``media`` this sends a 180 Ringing (`sipral_call_ring`); with it a
+        183 whose answer this stack writes, so the caller hears what the
+        application plays before anybody answers (`sipral_call_ring_media`,
+        ``srtp`` and ``codecs`` as :meth:`place_call` takes them).
+        """
+        call = self._incoming(event, media_host, media_port, False)
+        try:
+            if media:
+                call.ring_media(srtp=srtp, codecs=codecs)
+            else:
+                call.ring()
+        except Exception:
+            self.forget_call(call.handle)
+            self._forget_media_socket(call._media_address)
+            call._media_socket.close()
+            raise
+        return call
+
+    def accept_transfer_placed(self, event: _events.Event, placed: Call) -> None:
+        """Take the REFER of a `SIPRAL_EVENT_KIND_TRANSFER_REQUESTED` with a
+        call this application placed itself: `sipral_call_accept_transfer_placed`.
+        The REFER is answered 202 and ``placed``'s progress goes to the far
+        end in NOTIFYs, as though the stack had placed it for the REFER."""
+        _retry(
+            lambda: lib.sipral_call_accept_transfer_placed(
+                self.handle, event.call, placed.handle, self.now_ms()
+            ),
+            "sipral_call_accept_transfer_placed",
+        )
 
     def _close_socket(self, sock: socket.socket) -> None:
         """Close a socket :meth:`open_media_socket` opened beside a call's

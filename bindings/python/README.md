@@ -78,6 +78,16 @@ the application trusts, fetch the token, and hand it over with
 a token the server called `TokenError.INVALID_TOKEN` raises the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+`stack.ring_call(event)` sends a 180 for an incoming call (`media=True`, a 183
+with this stack's audio) and `stack.answer_call(event)` answers it later;
+`stack.place_call(..., headers={"X-Ticket": "42"})` puts fields on the
+INVITE, `call.set_headers(...)` on what the call sends next, the BYE of a
+hangup among it, and the far end's BYE is `message` on its `CALL_ENDED`.
+`call.transfer(target)` REFERs the far end, a refusal arriving as
+`TRANSFER_DONE` with its status; a `TRANSFER_REQUESTED` is taken with
+`stack.accept_referral`, refused with `stack.reject_referral`, or taken with
+a call of the application's own with `stack.accept_transfer_placed(event, call)`.
+
 That is a whole softphone on macOS and Windows: the stack is in **device
 mode** there by default, so the library opens the machine's own microphone
 and loudspeaker and pumps the call through them, and the code above has no

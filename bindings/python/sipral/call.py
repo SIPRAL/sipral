@@ -20,7 +20,23 @@ from .subscription import Subscription, read_text
 if TYPE_CHECKING:
     from .stack import Stack
 
-__all__ = ["Call"]
+__all__ = ["Call", "header_array"]
+
+
+def header_array(fields) -> tuple[object, list[object]]:
+    """``fields`` -- ``(name, value)`` pairs, or a mapping -- as a
+    `sipral_header_t` array, and the buffers it points into, which have to
+    outlive the call it is handed to."""
+    pairs = list(fields.items()) if hasattr(fields, "items") else list(fields)
+    array = ffi.new("sipral_header_t[]", max(len(pairs), 1))
+    kept: list[object] = [array]
+    for i, (name, value) in enumerate(pairs):
+        name_bytes, value_bytes = name.encode("utf-8"), value.encode("utf-8")
+        name_buf, value_buf = ffi.new("char[]", name_bytes), ffi.new("char[]", value_bytes)
+        kept += [name_buf, value_buf]
+        array[i].name, array[i].name_len = name_buf, len(name_bytes)
+        array[i].value, array[i].value_len = value_buf, len(value_bytes)
+    return array, kept
 
 
 class Call:
@@ -171,6 +187,70 @@ class Call:
                 self.stack.handle, self.handle, address, len(address), self.stack.now_ms()
             ),
             "sipral_call_answer_media",
+        )
+
+    def ring(self, sdp: bytes | None = None) -> None:
+        """`sipral_call_ring`: 180 Ringing, or with ``sdp`` a 183 Session
+        Progress carrying that description of the application's own."""
+        body = ffi.from_buffer(sdp) if sdp else ffi.NULL
+        _call(
+            lambda: lib.sipral_call_ring(
+                self.stack.handle, self.handle, body, len(sdp or b""), self.stack.now_ms()
+            ),
+            "sipral_call_ring",
+        )
+
+    def ring_media(self, *, srtp: int = 0, codecs: str | None = None) -> None:
+        """`sipral_call_ring_media`: a 183 whose answer this stack writes
+        against this call's media socket, so the caller hears what the
+        application plays before :meth:`answer`, which reuses that session.
+        ``srtp`` and ``codecs`` mean what they do on
+        :meth:`sipral.stack.Stack.place_call`."""
+        address = self._media_address.encode("utf-8")
+        address_buf = ffi.new("char[]", address)
+        config = ffi.new("sipral_call_config_t *")
+        config.size = ffi.sizeof("sipral_call_config_t")
+        config.media_address = address_buf
+        config.media_address_len = len(address)
+        config.srtp = srtp
+        codecs_buf = None
+        if codecs is not None:
+            codecs_bytes = codecs.encode("utf-8")
+            codecs_buf = ffi.new("char[]", codecs_bytes)
+            config.codecs = codecs_buf
+            config.codecs_len = len(codecs_bytes)
+        _call(
+            lambda: lib.sipral_call_ring_media(
+                self.stack.handle, self.handle, config, self.stack.now_ms()
+            ),
+            "sipral_call_ring_media",
+        )
+
+    def set_headers(self, fields) -> None:
+        """`sipral_call_set_headers`: header fields -- ``(name, value)`` pairs
+        or a mapping -- on what this call sends at the application's request
+        from now on (the 180, the 200, a refusal, the BYE of :meth:`hangup`),
+        in place of any set before; empty takes them all off."""
+        array, kept = header_array(fields)
+        count = len(kept) // 2
+        _call(
+            lambda: lib.sipral_call_set_headers(
+                self.stack.handle, self.handle, array if count else ffi.NULL, count
+            ),
+            "sipral_call_set_headers",
+        )
+
+    def transfer(self, target: str) -> None:
+        """`sipral_call_transfer`: REFER the far end to ``target`` (RFC 3515).
+        ``TRANSFER_PROGRESS`` and then ``TRANSFER_DONE`` follow on
+        :attr:`events`; a REFER the far end refuses is a ``TRANSFER_DONE``
+        carrying the refusal's status."""
+        encoded = target.encode("utf-8")
+        _call(
+            lambda: lib.sipral_call_transfer(
+                self.stack.handle, self.handle, encoded, len(encoded), self.stack.now_ms()
+            ),
+            "sipral_call_transfer",
         )
 
     def reject(self, code: int = 486) -> None:
