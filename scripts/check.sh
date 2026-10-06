@@ -29,9 +29,9 @@ ROOT="$PWD"
 export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
 
 # In the order the complete gate reports them.
-AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat dart rn site"
+AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat agents dart rn site"
 # The layers: every area that loads the C library built from sipral-ffi.
-LAYERS="swift dotnet kotlin jvm python pipecat dart rn"
+LAYERS="swift dotnet kotlin jvm python pipecat agents dart rn"
 
 usage() {
     cat <<'EOF'
@@ -68,6 +68,9 @@ areas:
            linux-arm64 cross path.
   pipecat  integrations/pipecat tested over bindings/python, in a virtual
            environment with pipecat-ai.
+  agents   integrations/agents tested over bindings/python against local
+           stand-ins for each service, in a virtual environment with
+           websockets.
   dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
@@ -2266,6 +2269,47 @@ step_pipecat() {
     fi
 }
 
+# integrations/agents over bindings/python and $DYLIB: calls between two
+# stacks on loopback, each joined to a local WebSocket server that speaks one
+# service's protocol as its public documentation describes it. No network
+# beyond loopback and no key. websockets is the package's and not the
+# binding's, so it goes into a virtual environment under target/check, at
+# the lowest version the package accepts, as for the Pipecat integration.
+step_agents() {
+    step "the voice-agent connectors"
+    local venv="$CHECK_DIR/venv-agents" websockets work
+    websockets=$(sed -n 's/.*"websockets>=\([0-9.]*\)".*/\1/p' "$ROOT/integrations/agents/pyproject.toml")
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python3 is not installed"
+    elif ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+        fail "python3 is $(python3 -c 'import platform; print(platform.python_version())'), and sipral-agents needs 3.11 or later"
+    elif ! python3 -c 'import cffi' >/dev/null 2>&1; then
+        fail "python3 has no cffi (pip install cffi)"
+    elif [ -z "$websockets" ]; then
+        fail "integrations/agents/pyproject.toml names no websockets>= version"
+    elif [ ! -s "$DYLIB" ]; then
+        fail "the voice-agent connectors: $DYLIB is not there to load (the build of the library, above, says why)"
+    else
+        work=$(mktemp -d)
+        if [ ! -x "$venv/bin/python" ] && ! python3 -m venv --system-site-packages "$venv" >"$work/venv" 2>&1; then
+            fail "python3 -m venv $venv:"
+            sed 's/^/        /' "$work/venv"
+        elif ! "$venv/bin/python" -m pip show websockets 2>/dev/null | found -x "Version: $websockets" \
+            && ! "$venv/bin/python" -m pip install -q "websockets==$websockets" >"$work/pip" 2>&1; then
+            fail "pip install websockets==$websockets, into $venv:"
+            tail -20 "$work/pip" | sed 's/^/        /'
+        elif SIPRAL_LIBRARY="$ROOT/$DYLIB" PYTHONPATH="$ROOT/integrations/agents:$ROOT/bindings/python" \
+            "$venv/bin/python" -m unittest discover -s "$ROOT/integrations/agents/tests" \
+            -t "$ROOT/integrations/agents" >"$work/out" 2>&1; then
+            pass "python3 -m unittest discover, integrations/agents/tests (websockets $websockets)"
+        else
+            fail "python3 -m unittest discover, integrations/agents/tests (websockets $websockets):"
+            sed 's/^/        /' "$work/out"
+        fi
+        rm -rf "$work"
+    fi
+}
+
 # Like the Python one, bindings/dart/lib/src/sipral_abi.dart is printed by
 # "the header and the bindings", so a machine without dart has not
 # checked that step's own output: a missing SDK fails. `dart analyze` is the
@@ -2813,6 +2857,7 @@ area_kotlin() { need_library; step_kotlin_compiles; step_kotlin_on_a_jvm; step_a
 area_jvm() { need_library; step_jvm; step_jvm_package; }
 area_python() { need_library; step_python; step_wheels; step_linux_arm64; }
 area_pipecat() { need_library; step_pipecat; }
+area_agents() { need_library; step_agents; }
 area_dart() { need_library; step_dart; step_pub; }
 area_rn() { need_library; step_react_native; step_npm; }
 area_site() { step_site; }
@@ -2892,9 +2937,11 @@ route() {
         bindings/jvm/*)
             route_to jvm "the server jar's own code" ;;
         bindings/python/*)
-            route_to "python pipecat" "the Python layer, which the Pipecat integration runs on" ;;
+            route_to "python pipecat agents" "the Python layer, which the Pipecat and agent integrations run on" ;;
         integrations/pipecat/*)
             route_to pipecat "the Pipecat integration" ;;
+        integrations/agents/*)
+            route_to agents "the voice-agent connectors" ;;
         bindings/dart/*)
             route_to dart "the Dart layer" ;;
         bindings/react-native/android/src/main/java/org/sipral/reactnative/core/*|bindings/react-native/android/jvm-check/*)
@@ -2994,7 +3041,7 @@ run_area() {
 # done; the others start at once.
 waits_for() {
     case "$1" in
-        numbers|swift|dotnet|kotlin|jvm|python|pipecat|dart|rn) printf 'abi\n' ;;
+        numbers|swift|dotnet|kotlin|jvm|python|pipecat|agents|dart|rn) printf 'abi\n' ;;
     esac
 }
 

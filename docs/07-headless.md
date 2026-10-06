@@ -396,6 +396,12 @@ codec frame at a time in real time so that an interruption silences it within
 end hanging up -- and `serve` answers every call to an account with a
 pipeline of its own, many calls to one process.
 
+Without a framework, `sipral-agents`
+([`integrations/agents`](../integrations/agents/)) joins each call to a
+speech-to-speech service over its WebSocket API -- OpenAI Realtime or Gemini
+Live -- with the frames at the service's rate, barge-in, reconnection and
+either side's end ending the other (`24-voice-agents.md`).
+
 ## What it does not do
 
 No speech recognition, no synthesis, no turn detection, no agent logic. Those

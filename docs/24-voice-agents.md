@@ -86,9 +86,19 @@ application converts between Sipral's frames and the service's messages —
 base64 in JSON for most of the APIs below — and chooses the rate the
 service asks for, so that only Sipral resamples: on the socket when the
 session opens, and in process with `sipral_media_set_app_rate`
-(`08-ffi.md`, "What ABI 1.1 added"). Direct adapters for
-OpenAI Realtime, Gemini Live, ElevenLabs, Vapi and Deepgram, in a package
-`sipral-agents`, are **planned, not available**.
+(`08-ffi.md`, "What ABI 1.1 added").
+
+The package `sipral-agents` ([`integrations/agents`](../integrations/agents/))
+does this for OpenAI Realtime and Gemini Live: `serve(account, factory)`
+answers each call and joins it to the service over its WebSocket API, with
+the call's frames switched to the service's rate (24 kHz for both), the
+agent's audio paced a codec frame at a time so that a barge-in silences it
+at once, events for the application, reconnection with backoff (a Gemini
+session resumed after a dropped connection or a `goAway`) and either side's
+end ending the other. It is tested against local stand-ins written from
+each vendor's public protocol documentation, not against the vendors'
+services. Adapters for ElevenLabs, Vapi and Deepgram over the same core are
+**planned, not available**.
 
 ## Summary
 
@@ -98,10 +108,10 @@ streaming API where there is no SIP.
 
 | Service | Kind | Path | SIP | Audio |
 |---|---|---|---|---|
-| [OpenAI Realtime](#openai-realtime) | speech-to-speech API | SIP bridge; Pipecat | yes | SIP: not listed; WebSocket: PCM 24 kHz, PCMU, PCMA |
+| [OpenAI Realtime](#openai-realtime) | speech-to-speech API | SIP bridge; Pipecat; `sipral-agents` | yes | SIP: not listed; WebSocket: PCM 24 kHz, PCMU, PCMA |
 | [Azure OpenAI Realtime](#azure-openai-realtime) | speech-to-speech API | SIP bridge | yes | SIP: not listed; WebSocket as OpenAI |
 | [Azure Voice Live](#azure-voice-live) | speech-to-speech API | Pipecat; headless | no | PCM 16 or 24 kHz, G.711 in; PCM 8, 16 or 24 kHz, G.711 out |
-| [Gemini Live](#gemini-live) | speech-to-speech API | Pipecat; headless | no | PCM in at any rate, PCM 24 kHz out |
+| [Gemini Live](#gemini-live) | speech-to-speech API | Pipecat; `sipral-agents` | no | PCM in at any rate, PCM 24 kHz out |
 | [Amazon Nova Sonic](#amazon-nova-sonic) | speech-to-speech API | Pipecat; headless | no | LPCM 8, 16 or 24 kHz both ways |
 | [xAI Grok Voice Agent](#xai-grok-voice-agent) | speech-to-speech API | SIP bridge; Pipecat | yes | SIP: PCMU, PCMA, G.722 (Telnyx guide); WebSocket: PCMU 8 kHz, PCM |
 | [Ultravox](#ultravox) | speech-to-speech API | SIP bridge; Pipecat | yes | G.722, Opus, PCMU, PCMA, iLBC and more |
@@ -151,7 +161,8 @@ A stateful API to a speech-in, speech-out model such as `gpt-realtime`,
 used over WebRTC, WebSocket or SIP.
 
 **Path: SIP bridge.** Also Pipecat (`OpenAIRealtimeLLMService`, and
-`OpenAILiveLLMService` for the newer Live API).
+`OpenAILiveLLMService` for the newer Live API), and the WebSocket API through
+`sipral-agents` (`OpenAIRealtime`).
 
 - **Address:** `sip:proj_<project-id>@sip.api.openai.com;transport=tls`;
   for European data residency, `sip-eu.api.openai.com`. The project ID
@@ -235,7 +246,8 @@ Google's bidirectional streaming API (`BidiGenerateContent`) for audio
 sessions with Gemini models, on the Gemini Developer API and on Vertex AI.
 
 **Path: Pipecat** (`GeminiLiveLLMService`, `GeminiLiveVertexLLMService`),
-**or headless.** No SIP endpoint is documented.
+**or headless**, which `sipral-agents` does (`GeminiLive`, on the Gemini
+Developer API's endpoint). No SIP endpoint is documented.
 
 - **Endpoints:** `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.{version}.GenerativeService.BidiGenerateContent`,
   and on Vertex AI

@@ -542,6 +542,23 @@ so that it is made rather than discovered.
 requires into a virtual environment under `target/check` to run the
 integration's tests; nothing of it is committed or shipped.
 
+### The voice-agent connectors
+
+`integrations/agents`, published as `sipral-agents`, is a Python package of
+its own beside the binding, with one dependency besides it, which is neither
+in `libsipral_ffi` nor in the `sipral` wheel.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `sipral` 1.1.0 or later | this repository's Python binding | AGPL-3.0-only OR LicenseRef-Sipral-Commercial |
+| `websockets` 17.2 or later | the WebSocket client the connectors use, through its public asyncio API; none of its code is copied here | BSD-3-Clause |
+
+`websockets`' licence is its own `License-Expression` on PyPI and its
+`LICENSE` file; it requires no other package. No vendor SDK is used: each
+service's protocol is written from its public documentation.
+`scripts/check.sh --only agents` installs `websockets` 17.2 into a virtual
+environment under `target/check` to run the tests.
+
 ## Allowed licences
 
 `deny.toml` holds the machine-readable allow-list, which `scripts/check.sh`

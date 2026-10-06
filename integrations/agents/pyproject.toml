@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sipral-agents"
+version = "1.1.0"
+description = "Sipral for voice-agent APIs: a SIP phone call joined to OpenAI Realtime or Gemini Live over WebSocket."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only OR LicenseRef-Sipral-Commercial"
+authors = [{ name = "Sytek" }]
+keywords = ["sip", "voip", "telephony", "voice-agent", "openai-realtime", "gemini-live"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Telecommunications Industry",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = ["sipral>=1.1.0", "websockets>=17.2"]
+
+[project.urls]
+Homepage = "https://sipral.org"
+Repository = "https://github.com/SIPRAL/sipral"
+Changelog = "https://github.com/SIPRAL/sipral/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sipral_agents"]
