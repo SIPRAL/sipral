@@ -156,7 +156,11 @@ memory, 5.8 MB resident and 3.8 MB private idle, is above the 29 September
 agent's below; the 1.0.0 agent and this one measure the same on the host (4.4
 to 4.6 MB idle), so that growth is older than the change to the loop. The bad
 links and the moved address came out within what two draws of the same
-profiles differ by. `docs/19-numbers.md` has the set-up time on loopback,
+profiles differ by. The outgoing call's gap to pjsua is on the server's side:
+in a 7 October capture Sipral's authenticated INVITE left 0.17 to 0.23 ms
+after the 401 (pjsua's 0.24 to 0.34 ms), and the rest of the time to the 200
+was Asterisk's, 3.0 to 5.5 ms for Sipral's calls and 2.4 to 3.4 ms for pjsua's.
+`docs/19-numbers.md` has the set-up time on loopback,
 before and after. The INVITE sizes are not noise: pjsua offers every
 codec its build has (Speex three ways, iLBC, GSM, G.722, Opus, G.711) and
 Sipral its default catalogue (Opus, G.722, G.711, telephone-event).
