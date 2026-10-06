@@ -188,6 +188,11 @@ class _FakeStunServer:
     :attr:`requests` the same way every request is, signed or not, answered
     or not (`bindings/swift/Tests/SipralTests/NatTests.swift`'s
     `FakeStunServer` and `bindings/kotlin/.../NatCheck.kt`'s own).
+
+    It listens on ``host``, which a stack bound at this machine's routable
+    address has to be given as its own: Windows sends by the strong host
+    model, and a datagram from a socket bound there to ``127.0.0.1`` is
+    refused with WinError 10049 rather than looped back.
     """
 
     REALM = "sipral.test"
@@ -199,14 +204,15 @@ class _FakeStunServer:
         public_host: str,
         public_port: int,
         credential: tuple[str, str] | None = None,
+        host: str = "127.0.0.1",
     ) -> None:
         self.public_host = public_host
         self.public_port = public_port
         self._credential = credential
         self._socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
-        self._socket.bind(("127.0.0.1", 0))
+        self._socket.bind((host, 0))
         self._socket.settimeout(0.05)
-        self.address = f"127.0.0.1:{self._socket.getsockname()[1]}"
+        self.address = f"{host}:{self._socket.getsockname()[1]}"
         self.other_requests: list[bytes] = []
         self.requests: list[tuple[int, dict[int, bytes]]] = []
         self.signed_allocate_verified: bool | None = None
@@ -591,7 +597,8 @@ class TurnAllocationIsGivenBackWhenTheCallEnds(unittest.IsolatedAsyncioTestCase)
         self.host = host
         self.password = "turn-secret-42"
         self.server = _FakeStunServer(
-            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password)
+            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password),
+            host=host,
         )
         self.addAsyncCleanup(self._close_server)
         loop = asyncio.get_running_loop()
@@ -716,7 +723,8 @@ class TurnAllocationIsGivenBackWhenTheCallIsClosedAtItsEnd(unittest.IsolatedAsyn
         self.host = host
         self.password = "turn-secret-43"
         self.server = _FakeStunServer(
-            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password)
+            self.PUBLIC_HOST, self.PUBLIC_PORT, credential=("alice-turn", self.password),
+            host=host,
         )
         self.addAsyncCleanup(self._close_server)
         loop = asyncio.get_running_loop()

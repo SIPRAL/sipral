@@ -1936,7 +1936,14 @@ class Stack:
                 continue
             destination = ffi.string(transmit.destination, transmit.destination_len)
             host, port = parse_address(destination.decode("utf-8"))
-            self._socket.sendto(payload, (host, port))
+            try:
+                self._socket.sendto(payload, (host, port))
+            except OSError:
+                # a destination this socket cannot reach from where it is
+                # bound: the datagram is lost, as on the wire, and the
+                # transaction's own retransmissions and timeout say so --
+                # the poll thread carries on for every other one
+                continue
 
     def _drain_farewells(self) -> None:
         """`sipral_stack_poll_farewell`: what a call that just ended still
@@ -2835,11 +2842,29 @@ class Stack:
             # said so itself
             self._lose_link(lib.SIPRAL_TRANSPORT_ERROR_OTHER, lib.SIPRAL_TLS_FAILURE_NONE, "", tell=False)
 
+    def _wait_for_sockets(self, timeout: float) -> list:
+        """What the selector has ready within ``timeout`` seconds.
+
+        A stack signalling over TCP or TLS has no socket to watch while its
+        connection is down -- refused at creation, or lost and not yet made
+        again -- and Windows' ``select()`` refuses three empty sets with
+        WinError 10022 instead of waiting, which would end the poll thread
+        and with it every retry and event. With nothing registered, or with
+        the last socket taken away while this was about to wait, the wait
+        is the timeout itself."""
+        if self._selector.get_map():
+            try:
+                return self._selector.select(timeout)
+            except OSError:
+                if self._selector.get_map():
+                    raise
+        self._closed.wait(timeout)
+        return []
+
     def _run(self) -> None:
         result = ffi.new("sipral_poll_result_t *")
         while not self._closed.is_set():
-            timeout = 0.05
-            events = self._selector.select(timeout)
+            events = self._wait_for_sockets(0.05)
             for key, _mask in events:
                 if isinstance(key.data, tuple) and key.data[0] == "turn":
                     self._read_turn_stream(key.data[1])

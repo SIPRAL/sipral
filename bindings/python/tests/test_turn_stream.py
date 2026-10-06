@@ -255,7 +255,7 @@ class _TwoStacks(unittest.IsolatedAsyncioTestCase):
         # no openssl, and a cleanup already registered would then close a
         # server that was never made
         certificate = self.certificate()
-        self.stun = _FakeStunServer(*self.PUBLIC)
+        self.stun = _FakeStunServer(*self.PUBLIC, host=host)
         self.turn = _FakeTurnOverStream(("alice-turn", "turn-secret-7"), certificate)
         self.addAsyncCleanup(self._close_servers)
         loop = asyncio.get_running_loop()
