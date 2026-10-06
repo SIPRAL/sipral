@@ -94,12 +94,19 @@ class SipralInputTransport(BaseInputTransport):
         self._transport = transport
         self._tasks: list[asyncio.Task] = []
 
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        if isinstance(frame, StartFrame):
+            # What arrived while the pipeline was being built is stale by now.
+            # Dropped here, before the StartFrame goes on: Pipecat passes it
+            # downstream before calling start(), so the pipeline counts as
+            # started first, and audio the caller sends from then on is kept.
+            frames = self._transport.call.media.frames
+            while not frames.empty():
+                frames.get_nowait()
+        await super().process_frame(frame, direction)
+
     async def start(self, frame: StartFrame):
         await super().start(frame)
-        frames = self._transport.call.media.frames
-        # what arrived while the pipeline was being built is stale by now
-        while not frames.empty():
-            frames.get_nowait()
         if not self._tasks:
             self._tasks = [
                 self.create_task(self._receive_audio()),
@@ -175,6 +182,7 @@ class SipralOutputTransport(BaseOutputTransport):
         # when the media will have played everything handed to it
         self._due = 0.0
         self._interruptions = 0
+        self._interrupting = False
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -190,21 +198,34 @@ class SipralOutputTransport(BaseOutputTransport):
         await self._transport.hang_up()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        if isinstance(frame, InterruptionFrame):
-            self._remainder = b""
-            self._interruptions += 1
-        await super().process_frame(frame, direction)
+        if not isinstance(frame, InterruptionFrame):
+            await super().process_frame(frame, direction)
+            return
+        self._remainder = b""
+        self._interruptions += 1
+        # Pipecat drops the audio it still holds only once the frame has
+        # gone on; until then its audio task can hand over more, which is
+        # not to reach the call.
+        self._interrupting = True
+        try:
+            await super().process_frame(frame, direction)
+        finally:
+            self._interrupting = False
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         if self._transport.call.ended:
             return False
+        if self._interrupting and frame.interruptible:
+            return True
         data = self._remainder + frame.audio
         self._remainder = b""
         interruptions = self._interruptions
         sent = 0
         while len(data) - sent >= self._frame_bytes:
             await self._wait_for_room()
-            if self._interruptions != interruptions and frame.interruptible:
+            if frame.interruptible and (
+                self._interrupting or self._interruptions != interruptions
+            ):
                 return True
             self._send(data[sent : sent + self._frame_bytes])
             sent += self._frame_bytes

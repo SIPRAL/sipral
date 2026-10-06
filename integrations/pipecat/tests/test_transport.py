@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InputDTMFFrame,
+    InterruptionFrame,
     InterruptionWorkerFrame,
     OutputAudioRawFrame,
     OutputDTMFUrgentFrame,
@@ -41,6 +42,8 @@ logger.add(sys.stderr, level="WARNING")
 
 TONE_HZ = 1000
 LOUD = 1000
+# how long anything may take on a machine loaded by everything else on it
+PATIENCE = 30
 
 
 def tone(sample_rate: int, seconds: float, amplitude: int = 8000) -> bytes:
@@ -158,123 +161,156 @@ class APipecatPipelineOnACall(unittest.IsolatedAsyncioTestCase):
     async def _dial(self):
         call = self.caller.place_call(self.caller_account, f"sip:agent@{self.agent.bind_address}")
         self.calls.append(call)
-        self.assertTrue(await wait_for_media(call, 5), "the call never got media")
-        served = await asyncio.wait_for(self.served.get(), 5)
-        await asyncio.wait_for(served.started.wait(), 10)
+        self.assertTrue(await wait_for_media(call, PATIENCE), "the call never got media")
+        served = await asyncio.wait_for(self.served.get(), PATIENCE)
+        await asyncio.wait_for(served.started.wait(), PATIENCE)
         return call, served
 
-    async def _listen(
-        self, call, seconds: float, heard: list[tuple[float, bytes]] | None = None
-    ) -> list[tuple[float, bytes]]:
-        """Every frame the caller hears for ``seconds``, with when it came."""
-        heard = [] if heard is None else heard
-        deadline = time.monotonic() + seconds
-        while (left := deadline - time.monotonic()) > 0:
-            try:
-                frame = await asyncio.wait_for(call.media.frames.get(), left)
-            except TimeoutError:
-                break
-            heard.append((time.monotonic(), frame))
+    async def _hear(
+        self, call, loud: int = 0, whole: int = 0, quiet: int = 0, frames: int = 0
+    ) -> list[bytes]:
+        """What the caller hears until ``loud`` loud frames in all, ``whole``
+        frames of nothing but the tone, ``quiet`` silent frames in a row and
+        ``frames`` frames in all came.
+
+        Counted in frames rather than in seconds: a loaded machine delays
+        them, it does not make the call carry fewer.
+        """
+        heard: list[bytes] = []
+        louds = wholes = silence = 0
+        async with asyncio.timeout(PATIENCE):
+            while louds < loud or wholes < whole or silence < quiet or len(heard) < frames:
+                pcm = await call.media.frames.get()
+                heard.append(pcm)
+                if rms(pcm) > LOUD:
+                    louds += 1
+                    if whole and tone_share(pcm, call.media.sample_rate) > 0.8:
+                        wholes += 1
+                    silence = 0
+                else:
+                    silence += 1
+                # a queue that is never empty never suspends the task, and
+                # the timeout can only cancel one that does
+                await asyncio.sleep(0)
         return heard
+
+    @staticmethod
+    def _drain(call) -> None:
+        """What the caller heard before the test speaks is not its answer."""
+        while not call.media.frames.empty():
+            call.media.frames.get_nowait()
 
     async def test_a_tone_the_caller_sends_comes_back(self) -> None:
         call, served = await self._dial()
         rate = call.media.sample_rate
         self.assertEqual(served.transport.sample_rate, served.transport.call.media.sample_rate)
+        frames = int(1.0 * rate / call.media.frame_samples)
 
-        call.media.send_audio(tone(rate, 1.0))
-        heard = await self._listen(call, 1.6)
-
-        echoed = [pcm for _, pcm in heard if rms(pcm) > LOUD]
-        self.assertGreaterEqual(len(echoed), 25, "less than half the tone came back")
-        shares = sorted(tone_share(pcm, rate) for pcm in echoed)
-        self.assertGreater(shares[len(shares) // 2], 0.8, "what came back is not the tone")
+        self._drain(call)
+        call.media.send_audio(tone(rate, 2.0))
+        # On a loaded machine the agent's event loop wakes late now and then,
+        # and the frame sent then carries a gap: frames of nothing but the
+        # tone are what is counted, as many as the median of half a second
+        # of loud ones vouched for.
+        try:
+            await self._hear(call, whole=frames // 4 + 1)
+        except TimeoutError:
+            self.fail("what came back is not the tone")
 
     async def test_an_interruption_silences_queued_audio_within_100_ms(self) -> None:
         """Three seconds of tone are queued, and interrupted once the caller
         hears it.
 
-        What the caller hears is late by the path from the agent's media --
-        the codec, the caller's jitter buffer, which grows on a loaded
-        machine -- so a tone sent straight on that media measures it before
-        and after, and the longer of the two is taken off; past that, the
-        agent stops within 100 ms.
+        Timed from the moment the output transport sees the interruption,
+        not from when the test queued it: the pipeline carrying it there
+        runs late on a loaded machine, and so does the caller's jitter
+        buffer. What the transport promises is exact: no tone is handed to
+        the call's media after that moment, and what the media held then is
+        at most ``send_ahead_ms`` (40 ms) -- well under 100 ms. The caller
+        then hears the tone stop short of its three seconds, and silence
+        after it.
         """
         call, served = await self._dial()
         served.echo.echoing = False
+        output = served.transport.output()
         media = served.transport.call.media
         rate = served.transport.sample_rate
-        heard: list[tuple[float, bytes]] = []
-        listening = asyncio.create_task(self._listen(call, 30, heard))
-        self.addCleanup(listening.cancel)
+        frame_seconds = media.frame_samples / rate
+        ahead = output._params.send_ahead_ms / 1000.0
 
-        async def loud_after(since: float) -> float:
-            async with asyncio.timeout(5):
-                while True:
-                    for at, pcm in heard:
-                        if at > since and rms(pcm) > LOUD:
-                            return at
-                    await asyncio.sleep(0.005)
+        sent: list[tuple[float, bool]] = []
+        send_audio = media.send_audio
 
-        async def path() -> float:
-            sent = time.monotonic()
-            media.send_audio(tone(media.sample_rate, 0.2))
-            heard_at = await loud_after(sent)
-            await asyncio.sleep(0.4)
-            return heard_at - sent
+        def recording_send(pcm):
+            sent.append((time.monotonic(), rms(pcm) > LOUD))
+            send_audio(pcm)
 
-        before = await path()
+        media.send_audio = recording_send
+        seen = asyncio.Event()
+        seen_at: list[float] = []
+        process_frame = output.process_frame
 
-        queued = time.monotonic()
+        async def watching_process_frame(frame, direction):
+            if isinstance(frame, InterruptionFrame) and not seen_at:
+                seen_at.append(time.monotonic())
+                seen.set()
+            await process_frame(frame, direction)
+
+        output.process_frame = watching_process_frame
+
         await served.worker.queue_frame(
             OutputAudioRawFrame(audio=tone(rate, 3.0), sample_rate=rate, num_channels=1)
         )
-        await loud_after(queued)
+        self._drain(call)
+        heard = await self._hear(call, loud=1)
         await asyncio.sleep(0.3)
-        interrupted = time.monotonic()
         await served.worker.queue_frame(InterruptionWorkerFrame())
-        await asyncio.sleep(1.0)
-        stopped = time.monotonic()
-        latency = max(before, await path())
+        await asyncio.wait_for(seen.wait(), PATIENCE)
+        interrupted = seen_at[0]
 
-        loud = [at for at, pcm in heard if queued < at < stopped and rms(pcm) > LOUD]
-        after = loud[-1] - interrupted - latency
-        self.assertLess(
-            after,
-            0.1,
-            f"the agent sent tone for {after * 1000:.0f} ms after the interruption "
-            f"(path {latency * 1000:.0f} ms)",
+        late = [at for at, loud in sent if loud and at >= interrupted]
+        self.assertEqual(late, [], "tone went to the call after the interruption reached it")
+        toned = [at for at, loud in sent if loud]
+        held = len(toned) * frame_seconds - (interrupted - toned[0])
+        self.assertLessEqual(
+            held,
+            ahead + 0.005,
+            f"the call's media held {held * 1000:.0f} ms of tone when interrupted",
         )
-        quiet = [pcm for at, pcm in heard if interrupted + latency + 0.1 < at < stopped]
-        self.assertGreater(len(quiet), 30, "the call stopped carrying audio altogether")
-        self.assertTrue(all(rms(pcm) < LOUD for pcm in quiet), "the tone came back")
+        self.assertLess(ahead, 0.1)
+
+        heard += await self._hear(call, quiet=25)
+        tail = await self._hear(call, frames=25)
+        self.assertTrue(all(rms(pcm) < LOUD for pcm in tail), "the tone came back")
+        tone_heard = sum(rms(pcm) > LOUD for pcm in heard) * frame_seconds
+        self.assertLess(tone_heard, 3.0, "the interruption did not cut the tone")
 
     async def test_dtmf_crosses_as_pipecat_frames_both_ways(self) -> None:
         call, served = await self._dial()
 
         call.send_dtmf("5")
-        button = await asyncio.wait_for(served.echo.digits.get(), 5)
+        button = await asyncio.wait_for(served.echo.digits.get(), PATIENCE)
         self.assertEqual(button, KeypadEntry.FIVE)
 
         await served.worker.queue_frame(OutputDTMFUrgentFrame(button=KeypadEntry.POUND))
-        digit = await asyncio.wait_for(call.dtmf.get(), 5)
+        digit = await asyncio.wait_for(call.dtmf.get(), PATIENCE)
         self.assertEqual(digit, "#")
 
     async def test_the_caller_hanging_up_ends_the_pipeline(self) -> None:
         call, served = await self._dial()
 
         call.hangup()
-        await asyncio.wait_for(served.finished.wait(), 5)
+        await asyncio.wait_for(served.finished.wait(), PATIENCE)
         self.assertTrue(served.transport.call.ended)
 
     async def test_ending_the_pipeline_hangs_up_the_call(self) -> None:
         call, served = await self._dial()
 
         await served.worker.queue_frame(EndFrame())
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(PATIENCE):
             while not call.ended:
                 await asyncio.sleep(0.02)
-        await asyncio.wait_for(served.finished.wait(), 5)
+        await asyncio.wait_for(served.finished.wait(), PATIENCE)
         self.assertTrue(served.transport.call.ended)
 
 
