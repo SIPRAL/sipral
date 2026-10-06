@@ -29,9 +29,9 @@ ROOT="$PWD"
 export UseSharedCompilation=false MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0
 
 # In the order the complete gate reports them.
-AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat agents dart rn site"
+AREAS="hygiene rust abi numbers swift dotnet kotlin jvm python pipecat agents windows dart rn site"
 # The layers: every area that loads the C library built from sipral-ffi.
-LAYERS="swift dotnet kotlin jvm python pipecat agents dart rn"
+LAYERS="swift dotnet kotlin jvm python pipecat agents windows dart rn"
 
 usage() {
     cat <<'EOF'
@@ -71,6 +71,9 @@ areas:
   agents   integrations/agents tested over bindings/python against local
            stand-ins for each service, in a virtual environment with
            websockets.
+  windows  bindings/python tested on a Windows machine over ssh, against a
+           sipral_ffi.dll built there from this tree (SIPRAL_WINDOWS_SSH;
+           SIPRAL_WINDOWS=off leaves it out, as a skip).
   dart     bindings/dart analysed, formatted and tested, pub.sh --dry-run.
   rn       bindings/react-native: jest, tsc, codegen, the Android library
            with Gradle, the iOS half, npm.sh --dry-run.
@@ -2227,6 +2230,71 @@ step_python() {
     fi
 }
 
+# bindings/python/tests on a real Windows machine, against a sipral_ffi.dll
+# built there from this tree: the win-x64 path of scripts/package/nuget.sh
+# and wheels.sh (cargo with Rust's MSVC toolchain, on Windows), not a DLL
+# kept from an earlier release, whose ABI is older. The machine is reached
+# over ssh and is named by SIPRAL_WINDOWS_SSH (the ssh arguments, e.g.
+# "-J gateway -p 22 user@host"), or else by the first line of
+# intern/ops/windows-host.txt, which stays outside the tree like the private
+# names. It needs rustup with the toolchain rust-toolchain.toml pins, Visual
+# Studio's C++ build tools and Python 3 at SIPRAL_WINDOWS_PYTHON (default
+# C:\Python312\python.exe); everything this step writes stays under
+# C:\sipral-gate: one directory per run, removed afterwards, the cargo target
+# directory the runs share, and a virtual environment holding cffi. A machine
+# that does not answer is a FAIL. SIPRAL_WINDOWS=off leaves the step out
+# explicitly, for working offline, and says so as a skip: a run with it has
+# not checked Windows.
+step_windows_python() {
+    step "the python bindings on Windows"
+    if [ "${SIPRAL_WINDOWS:-}" = off ]; then
+        skip "the python bindings on Windows: SIPRAL_WINDOWS=off"
+        return
+    fi
+    local spec="${SIPRAL_WINDOWS_SSH:-}" py="${SIPRAL_WINDOWS_PYTHON:-C:\\Python312\\python.exe}"
+    if [ -z "$spec" ] && [ -s "$ROOT/intern/ops/windows-host.txt" ]; then
+        spec=$(head -1 "$ROOT/intern/ops/windows-host.txt")
+    fi
+    if [ -z "$spec" ]; then
+        fail "the python bindings on Windows: no machine named (SIPRAL_WINDOWS_SSH, or intern/ops/windows-host.txt; SIPRAL_WINDOWS=off to leave it out)"
+        return
+    fi
+    local ssh_args work run base
+    # shellcheck disable=SC2206 # the spec is ssh's own arguments, split as a shell would
+    ssh_args=(-o BatchMode=yes -o ConnectTimeout=20 $spec)
+    work=$(mktemp -d)
+    if ! ssh "${ssh_args[@]}" ver >"$work/out" 2>&1; then
+        fail "the python bindings on Windows: ssh $spec does not answer:"
+        sed 's/^/        /' "$work/out"
+        rm -rf "$work"
+        return
+    fi
+    run="run-$(hostname -s 2>/dev/null || echo host)-$$"
+    base="C:\\sipral-gate"
+    # what the build and the tests read, as this tree has it now, committed or not
+    tracked Cargo.toml Cargo.lock rust-toolchain.toml 'crates/*' 'interop/harness/*' 'tools/*' \
+        'bindings/python/*' 'bindings/fixtures/*' 'bindings/c/*' \
+        | grep -v '^crates/sipral-aec-webrtc/' >"$work/list"
+    if ! tar -czf "$work/src.tgz" -T "$work/list" 2>"$work/out" \
+        || ! ssh "${ssh_args[@]}" "mkdir $base\\$run && tar -xzf - -C $base/$run" <"$work/src.tgz" >>"$work/out" 2>&1; then
+        fail "the python bindings on Windows: copying the tree to $base\\$run failed:"
+        sed 's/^/        /' "$work/out"
+    elif ! ssh "${ssh_args[@]}" "cd /d $base\\$run && set CARGO_TARGET_DIR=$base\\target&& %USERPROFILE%\\.cargo\\bin\\cargo.exe build --release -p sipral-ffi" >"$work/out" 2>&1; then
+        fail "the python bindings on Windows: cargo build --release -p sipral-ffi failed:"
+        tail -40 "$work/out" | sed 's/^/        /'
+    elif ! ssh "${ssh_args[@]}" "(if not exist $base\\venv\\Scripts\\python.exe $py -m venv $base\\venv) && $base\\venv\\Scripts\\python.exe -m pip install --disable-pip-version-check -q cffi" >"$work/out" 2>&1; then
+        fail "the python bindings on Windows: the virtual environment with cffi under $base\\venv:"
+        tail -20 "$work/out" | sed 's/^/        /'
+    elif ssh "${ssh_args[@]}" "cd /d $base\\$run && set SIPRAL_LIBRARY=$base\\target\\release\\sipral_ffi.dll&& set PYTHONDONTWRITEBYTECODE=1&& $base\\venv\\Scripts\\python.exe -m unittest discover -s bindings\\python\\tests -t bindings\\python" >"$work/out" 2>&1; then
+        pass "python -m unittest discover, bindings/python/tests, on Windows x64 ($(grep -E '^Ran [0-9]+ tests' "$work/out" | head -1))"
+    else
+        fail "python -m unittest discover, bindings/python/tests, on Windows x64:"
+        sed 's/^/        /' "$work/out"
+    fi
+    ssh "${ssh_args[@]}" "if exist $base\\$run rmdir /s /q $base\\$run" >/dev/null 2>&1
+    rm -rf "$work"
+}
+
 # integrations/pipecat over bindings/python and $DYLIB: a Pipecat pipeline
 # on a call between two stacks on loopback. pipecat-ai and what it brings are
 # the integration's and not the binding's, so they go into a virtual
@@ -2858,6 +2926,7 @@ area_jvm() { need_library; step_jvm; step_jvm_package; }
 area_python() { need_library; step_python; step_wheels; step_linux_arm64; }
 area_pipecat() { need_library; step_pipecat; }
 area_agents() { need_library; step_agents; }
+area_windows() { step_windows_python; }
 area_dart() { need_library; step_dart; step_pub; }
 area_rn() { need_library; step_react_native; step_npm; }
 area_site() { step_site; }
@@ -2937,7 +3006,7 @@ route() {
         bindings/jvm/*)
             route_to jvm "the server jar's own code" ;;
         bindings/python/*)
-            route_to "python pipecat agents" "the Python layer, which the Pipecat and agent integrations run on" ;;
+            route_to "python pipecat agents windows" "the Python layer, which the Pipecat and agent integrations run on and the windows area tests on Windows" ;;
         integrations/pipecat/*)
             route_to pipecat "the Pipecat integration" ;;
         integrations/agents/*)

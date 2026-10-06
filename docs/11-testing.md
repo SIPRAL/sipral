@@ -1284,8 +1284,25 @@ the interop matrix, the third-party licences and `gitleaks`, with no build
 of the workspace), `rust`, `abi`, `numbers` (the published figures, below),
 one area per layer -- `swift`, `dotnet`, `kotlin`, `jvm`, `python`, `dart`,
 `rn` -- `pipecat` (the Pipecat integration over the Python layer, in a
-virtual environment of its own under `target/check` that holds `pipecat-ai`)
-and `site`. An area is a list of
+virtual environment of its own under `target/check` that holds `pipecat-ai`),
+`windows` and `site`.
+
+The `windows` area runs `bindings/python/tests` on a real Windows x64
+machine. It copies the files the build and the tests read, as the tree has
+them (committed or not, about 4.6 MB compressed), over ssh into a directory of
+its own under `C:\sipral-gate`, builds `sipral_ffi.dll` there with
+`cargo build --release -p sipral-ffi` and Rust's MSVC toolchain -- the
+win-x64 path `nuget.sh collect` and `wheels.sh` take, never a DLL kept from an
+earlier release -- and runs `python -m unittest discover` in a virtual
+environment under `C:\sipral-gate\venv` that holds `cffi`. The cargo target
+directory is shared between runs, the run's directory is removed afterwards,
+and nothing is written outside `C:\sipral-gate`. The machine is named by
+`SIPRAL_WINDOWS_SSH` (ssh's own arguments) or by a file outside the tree that
+`scripts/check.sh` names, beside the private names; it needs rustup with the pinned toolchain,
+Visual Studio's C++ build tools and Python 3 at `SIPRAL_WINDOWS_PYTHON`
+(default `C:\Python312\python.exe`). A machine that is not named or does not
+answer fails the step. `SIPRAL_WINDOWS=off` leaves it out on purpose, for
+working offline, and prints a `skip`: such a run has not checked Windows. An area is a list of
 the gate's own step functions, so `scripts/check.sh --only kotlin,jvm` runs
 exactly what the complete gate runs for those two and nothing else, and
 `--hygiene-only` is `--only hygiene`. `--only rust --crates
@@ -1313,7 +1330,7 @@ The mapping errs towards running more:
 | `bindings/swift`, `bindings/Package.swift`, the root `Package.swift` | swift and rn |
 | `bindings/kotlin` | kotlin, jvm and rn |
 | `bindings/react-native`'s Android core and its JVM check | rn and kotlin |
-| `bindings/python` | python and pipecat |
+| `bindings/python` | python, pipecat and windows |
 | `integrations/pipecat` | pipecat |
 | any other layer's directory | that layer |
 | `scripts/package/` | the layers whose packages the script makes |
