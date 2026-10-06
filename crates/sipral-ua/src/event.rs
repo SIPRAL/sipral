@@ -525,6 +525,11 @@ pub enum UaEvent {
     },
     /// And how it ended. A success hangs this call up, because this end is not
     /// in it any more; a failure leaves it exactly where it was.
+    ///
+    /// A REFER the far end refused outright (§2.4.2's 4xx–6xx) opens no
+    /// subscription and no NOTIFY follows it, so its refusal is reported
+    /// here too, with the refusal's status — as is one that went unanswered,
+    /// as a 408, or whose transport failed, as a 503 (RFC 3261 §8.1.3.1).
     TransferDone {
         /// The call that was transferred.
         call: CallHandle,
@@ -779,6 +784,10 @@ pub enum UaEvent {
         /// The refusal, whole, when there was one. A 302 names where to try
         /// instead, and a 380 carries an alternative service.
         response: Option<OwnedMessage>,
+        /// The BYE or the CANCEL the far end ended the call with, whole,
+        /// when that is how it ended: a header field of the far end's own on
+        /// it — an outcome, a disposition — is the application's to read.
+        request: Option<OwnedMessage>,
         /// Why the far end said it ended the call (RFC 3326): the `Reason`
         /// of the BYE or the CANCEL that ended it, or of the refusal when a
         /// gateway put one there (RFC 6432). One value per protocol, in the

@@ -1137,6 +1137,7 @@ impl UserAgent {
         // the BYE's or the CANCEL's own, kept when it arrived; otherwise
         // whatever the refusal carried (RFC 6432)
         let mut causes = core::mem::take(&mut held.ended_by);
+        let request = held.ended_with.take();
         if causes.is_empty()
             && let Some(refusal) = response.as_ref()
         {
@@ -1147,6 +1148,7 @@ impl UserAgent {
             reason,
             status,
             response,
+            request,
             causes,
         });
         // §2.4.7 makes the closing NOTIFY the last word on a transfer, and
@@ -1268,6 +1270,7 @@ impl UserAgent {
     fn ended_because(&mut self, call: CallHandle, request: &OwnedMessage) {
         if let Some(held) = self.calls.get_mut(&call) {
             held.ended_by = Reason::all_in(&request.as_raw());
+            held.ended_with = Some(request.clone());
         }
     }
 
@@ -2538,6 +2541,29 @@ impl UserAgent {
         }
     }
 
+    /// A REFER of this end's was refused, or gave up unanswered, while it
+    /// still held its call's seat: RFC 3515 §2.4.2 has such an answer open
+    /// no subscription, so no NOTIFY will ever say how the transfer went,
+    /// and [`UaEvent::TransferDone`] carrying the refusal's status is the
+    /// application's only news of it. A no-op for any other request, and for
+    /// a REFER whose seat has already been given back, so the outcome is
+    /// told once.
+    fn refer_refused(&mut self, id: AnyTransactionId, status: StatusCode) {
+        let Some(&(call, method)) = self.by_request.get(&id) else {
+            return;
+        };
+        if method != Method::Refer
+            || !self
+                .calls
+                .get(&call)
+                .is_some_and(|held| held.referring == Some(id))
+        {
+            return;
+        }
+        self.events
+            .push_back(UaEvent::TransferDone { call, status });
+    }
+
     /// The last word on an INFO carrying a digit, told to the application
     /// once: whichever of its answer, a challenge nothing could answer, or a
     /// transaction that gave up without either gets here first takes the
@@ -2759,6 +2785,9 @@ impl UserAgent {
             return None;
         }
         if status.is_final() {
+            if !status.is_success() {
+                self.refer_refused(id, status);
+            }
             self.release_refer(id, status.is_success());
             // an INFO carrying a digit is the one request in this map whose
             // answer the application is owed: BYE, CANCEL, PRACK, REFER and
@@ -2793,7 +2822,11 @@ impl UserAgent {
         // `Completed`) already had its answer seen by `on_request_answered`,
         // which is the one place a 2xx REFER's seat may be kept, so nothing
         // here may re-run for it.
-        if failed.is_some() {
+        if let Some(status) = failed {
+            // and the application is told the transfer did not happen, as
+            // RFC 3261 §8.1.3.1 has a transaction that gave up read: a 408
+            // when its timer ran out, a 503 when its transport failed
+            self.refer_refused(transaction, status);
             self.release_refer(transaction, false);
         }
         // a REFER the far end sent that nobody took or refused: the endpoint

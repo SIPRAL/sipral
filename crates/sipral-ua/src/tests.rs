@@ -7323,7 +7323,7 @@ fn a_refresh_that_fell_due_before_the_ack_still_goes_before_the_session_expires(
 // -- reliable provisional responses ------------------------------------------
 
 /// The same message with extra header fields, inserted after the start line.
-fn plus(message: &[u8], extra: &str) -> Vec<u8> {
+pub(crate) fn plus(message: &[u8], extra: &str) -> Vec<u8> {
     let head = message
         .iter()
         .position(|byte| *byte == b'\n')

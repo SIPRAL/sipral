@@ -3306,6 +3306,15 @@ Java_org_sipral_SipralNative_sipral_1call_1reject_1transfer(JNIEnv *env, jobject
 }
 
 JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1call_1accept_1transfer_1placed(JNIEnv *env, jobject self, jlong stack, jlong call, jlong placed, jlong nowMs)
+{
+    (void)env;
+    (void)self;
+    sipral_status_t status = sipral_call_accept_transfer_placed((sipral_handle_t)stack, (sipral_handle_t)call, (sipral_handle_t)placed, (uint64_t)nowMs);
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_sipral_SipralNative_sipral_1call_1state(JNIEnv *env, jobject self, jlong stack, jlong call, jlongArray state)
 {
     (void)env;

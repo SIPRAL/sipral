@@ -3670,3 +3670,29 @@ of the event's fields and `Account.set_access_token`, Dart
 `SipralAccount.setAccessToken`, React Native the `tokenRequired` event on the
 client and the account and `account.setAccessToken(token)` (TypeScript,
 Android and iOS halves).
+
+**What a bridge between two calls needs.** Three gaps a bridge from a PBX to
+a voice agent ran into, filled without a new event kind:
+
+- A REFER this end sent and the far end refused outright (4xx–6xx, RFC 3515
+  §2.4.2) opens no subscription, so no NOTIFY would ever report it; it is now
+  `SIPRAL_EVENT_KIND_TRANSFER_DONE` with the refusal's `status_code`, and one
+  nobody answered is the same with 408, or 503 when its transport failed. The
+  call stays as it was and may transfer again. Before, nothing came at all.
+- `SIPRAL_EVENT_KIND_CALL_ENDED` of a call the far end hung up carries the
+  BYE (or the CANCEL) in `message`, where a refusal already travelled, so a
+  field of the far end's own on it — an outcome, a disposition — is read with
+  `sipral_message_header`. Null still when this end ended the call.
+- `sipral_call_accept_transfer_placed(stack, call, placed, now_ms)` takes the
+  REFER of a `SIPRAL_EVENT_KIND_TRANSFER_REQUESTED` with a call the
+  application placed itself: 202, then `placed`'s provisional and final
+  statuses in NOTIFYs as `message/sipfrag` (§2.4.5, §2.4.7), a call already up
+  reported with a 200 at once. `SIPRAL_STATUS_WRONG_STATE` for a referral's
+  handle, a REFER no longer waiting, or a `placed` that is `call`, is over or
+  already reports to a REFER; nothing is answered then.
+
+The facade carries them as `UaEvent::TransferDone`, the `request` of
+`UaEvent::CallEnded` and `UserAgent::accept_transfer_placed`. Python has
+`Stack.accept_transfer_placed(event, placed)` and .NET
+`SipralStack.AcceptTransferPlaced(args, placed)`; the other layers reach the
+entry point through their printed bindings.

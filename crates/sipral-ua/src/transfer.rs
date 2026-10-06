@@ -455,6 +455,91 @@ impl UserAgent {
         self.place_referred(call, account, &wanted, offer, &extra, now)
     }
 
+    /// Take a transfer that was asked for with a call the application placed
+    /// itself, and report that call's progress to the far end as though the
+    /// REFER had placed it.
+    ///
+    /// For an application that does not hand the transfer on: a bridge that
+    /// reaches the target on a line of its own and joins the two calls
+    /// rather than sending an INVITE with the REFER's `Replaces` and
+    /// `Referred-By`. The REFER is answered 202 (§2.4.2), with RFC 4488's
+    /// `Refer-Sub: false` back when it asked for no subscription, and from
+    /// then on `placed` reports to it exactly as a call
+    /// [`UserAgent::accept_transfer`] placed does: a NOTIFY carrying each
+    /// provisional status as a `message/sipfrag` (§2.4.5), and the final one
+    /// ending the subscription (§2.4.7). A `placed` already answered is
+    /// reported at once with a 200, and that is the last word.
+    ///
+    /// Only a REFER inside a call: a referral
+    /// ([`crate::referral`]) asks this end to place the call it names, and
+    /// [`UserAgent::accept_transfer`] is what does that.
+    ///
+    /// # Errors
+    /// [`UaError::NoSuchCall`] when either handle names nothing (a
+    /// referral's among them), [`UaError::WrongState`] when nothing was
+    /// asked on `call`, when `placed` is `call` itself, is over, or already
+    /// reports to a REFER; or [`UaError::Send`]. Everything is checked
+    /// before the REFER is answered, so a refusal leaves it waiting.
+    pub fn accept_transfer_placed(
+        &mut self,
+        call: CallHandle,
+        placed: CallHandle,
+        now: Instant,
+    ) -> Result<(), UaError> {
+        let answered = {
+            let other = self.calls.get(&placed).ok_or(UaError::NoSuchCall)?;
+            if placed == call
+                || other.state == CallState::Terminated
+                || other.reporting_to.is_some()
+            {
+                return Err(UaError::WrongState(other.state));
+            }
+            other.state.is_confirmed()
+        };
+        let (transaction, wanted) = {
+            let held = self.calls.get_mut(&call).ok_or(UaError::NoSuchCall)?;
+            let state = held.state;
+            let waiting = held
+                .referred
+                .is_some_and(|referred| referred.transaction.is_some());
+            if !waiting || held.asked_to_refer.is_none() {
+                return Err(UaError::WrongState(state));
+            }
+            let wanted = held
+                .asked_to_refer
+                .take()
+                .ok_or(UaError::WrongState(state))?;
+            let transaction = held
+                .referred
+                .as_mut()
+                .and_then(|referred| referred.transaction.take())
+                .ok_or(UaError::WrongState(state))?;
+            (transaction, wanted)
+        };
+        let mut response = OutgoingResponse::new(StatusCode::ACCEPTED);
+        if wanted.quiet {
+            response = response.header(REFER_SUB, b"false");
+        }
+        self.endpoint.respond(transaction, &response, now)?;
+        self.subscribed(call, wanted.quiet, now);
+        let reporting = if let Some(referred) = self.referred_mut(call) {
+            referred.placed = Some(placed);
+            !referred.finished
+        } else {
+            false
+        };
+        if reporting {
+            if let Some(held) = self.calls.get_mut(&placed) {
+                held.reporting_to = Some(call);
+            }
+            if answered {
+                self.report_transfer(placed, StatusCode::OK, now);
+            }
+        }
+        self.drain(now);
+        Ok(())
+    }
+
     /// A REFER was just answered 202: its subscription starts, with §2.4.5's
     /// 100 while it is only trying, or — granted `Refer-Sub: false` — does not
     /// start at all (RFC 4488 §4: "no implicit subscription is created").

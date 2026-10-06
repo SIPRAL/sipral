@@ -1150,7 +1150,12 @@ enum class SipralEventKind(val value: Int) {
      */
     TRANSFER_PROGRESS(11),
     /**
-     * And how it ended.
+     * And how it ended: the final status the far end reported, a 2xx
+     * hanging this call up. A REFER the far end refused outright
+     * (4xx–6xx, RFC 3515 §2.4.2) ends here too, with the refusal's
+     * status, and so does one that went unanswered, as a 408, or whose
+     * transport failed, as a 503 (ABI 1.2); either way the call stays
+     * as it was.
      */
     TRANSFER_DONE(12),
     /**
@@ -1160,6 +1165,11 @@ enum class SipralEventKind(val value: Int) {
     CALL_REPLACED(13),
     /**
      * The call is over, and its handle is stale from here on.
+     *
+     * `message` is the refusal when a response ended it, and the BYE
+     * or the CANCEL when the far end did (ABI 1.2), so that a header
+     * field of the far end's own on it can be read with
+     * `sipral_message_header`; null otherwise.
      */
     CALL_ENDED(14),
     /**
@@ -9729,6 +9739,7 @@ internal object SipralNative {
     external fun sipral_call_transfer_to(stack: Long, call: Long, other: Long, nowMs: Long): Int
     external fun sipral_call_accept_transfer(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, placed: LongArray, nowMs: Long): Int
     external fun sipral_call_reject_transfer(stack: Long, call: Long, code: Long, nowMs: Long): Int
+    external fun sipral_call_accept_transfer_placed(stack: Long, call: Long, placed: Long, nowMs: Long): Int
     external fun sipral_call_state(stack: Long, call: Long, state: LongArray): Int
     external fun sipral_call_hold_state(stack: Long, call: Long, here: LongArray, there: LongArray): Int
     external fun sipral_codec_name(codec: Long): String?
@@ -11975,6 +11986,35 @@ object Sipral {
      */
     fun callRejectTransfer(stack: Long, call: Long, code: Long, nowMs: Long) {
         check(SipralNative.sipral_call_reject_transfer(stack, call, code, nowMs))
+    }
+
+    /**
+     * Take a transfer that was asked for inside `call` with a call the
+     * application placed itself, `placed`, and report that call's progress
+     * to the far end as though the REFER had placed it (ABI 1.2).
+     *
+     * For an application that reaches the target its own way — a bridge
+     * that calls it on a line of its own and joins the two calls — rather
+     * than having `sipral_call_accept_transfer` send an INVITE with the
+     * REFER's `Replaces` and `Referred-By`. The REFER is answered 202 (RFC
+     * 3515 §2.4.2), and from then on `placed` reports to it as a call the
+     * stack placed for it would: a NOTIFY carrying each provisional status
+     * (§2.4.5), and its final status ending the subscription (§2.4.7). A
+     * `placed` already up is reported with a 200 at once. `call` stays as
+     * it is: ending it once the transfer has worked is the application's.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` when nothing is waiting to be taken on
+     * `call` — a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`) among
+     * them, which `sipral_call_accept_transfer` takes — or when `placed` is
+     * `call`, is over, or already reports to another REFER. Everything is
+     * checked before the REFER is answered, so a refusal leaves it waiting.
+     *
+     * Safety
+     *
+     * Safe to call with any handle values.
+     */
+    fun callAcceptTransferPlaced(stack: Long, call: Long, placed: Long, nowMs: Long) {
+        check(SipralNative.sipral_call_accept_transfer_placed(stack, call, placed, nowMs))
     }
 
     /**

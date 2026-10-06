@@ -2020,6 +2020,54 @@ entry! {
 }
 
 entry! {
+    /// Take a transfer that was asked for inside `call` with a call the
+    /// application placed itself, `placed`, and report that call's progress
+    /// to the far end as though the REFER had placed it (ABI 1.2).
+    ///
+    /// For an application that reaches the target its own way — a bridge
+    /// that calls it on a line of its own and joins the two calls — rather
+    /// than having `sipral_call_accept_transfer` send an INVITE with the
+    /// REFER's `Replaces` and `Referred-By`. The REFER is answered 202 (RFC
+    /// 3515 §2.4.2), and from then on `placed` reports to it as a call the
+    /// stack placed for it would: a NOTIFY carrying each provisional status
+    /// (§2.4.5), and its final status ending the subscription (§2.4.7). A
+    /// `placed` already up is reported with a 200 at once. `call` stays as
+    /// it is: ending it once the transfer has worked is the application's.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` when nothing is waiting to be taken on
+    /// `call` — a referral's handle (`SIPRAL_EVENT_KIND_REFERRAL`) among
+    /// them, which `sipral_call_accept_transfer` takes — or when `placed` is
+    /// `call`, is over, or already reports to another REFER. Everything is
+    /// checked before the REFER is answered, so a refusal leaves it waiting.
+    ///
+    /// # Safety
+    ///
+    /// Safe to call with any handle values.
+    fn sipral_call_accept_transfer_placed(
+        stack: SipralHandle,
+        call: SipralHandle,
+        placed: SipralHandle,
+        now_ms: u64,
+    ) {
+        with_stack_at(stack, now_ms, |state, now| {
+            let id = state.calls.get(call).map_err(handle_failed)?;
+            let placed = state.calls.get(placed).map_err(handle_failed)?;
+            if state.agent.referral_waiting(id) {
+                return Err(fail(
+                    SipralStatus::WrongState,
+                    "a referral asks this end to place the call it names: take it with \
+                     sipral_call_accept_transfer",
+                ));
+            }
+            state
+                .agent
+                .accept_transfer_placed(id, placed, now)
+                .map_err(|error| ua_failed(&error))
+        })
+    }
+}
+
+entry! {
     /// Refuse one instead.
     ///
     /// # Safety

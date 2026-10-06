@@ -231,12 +231,22 @@ event_kinds! {
         10 = TransferRequested, c"transfer requested";
         /// A transfer this end asked for is under way.
         11 = TransferProgress, c"transfer progress";
-        /// And how it ended.
+        /// And how it ended: the final status the far end reported, a 2xx
+        /// hanging this call up. A REFER the far end refused outright
+        /// (4xx–6xx, RFC 3515 §2.4.2) ends here too, with the refusal's
+        /// status, and so does one that went unanswered, as a 408, or whose
+        /// transport failed, as a 503 (ABI 1.2); either way the call stays
+        /// as it was.
         12 = TransferDone, c"transfer done";
         /// A call arrived carrying a `Replaces` and took over one already up.
         /// `payload.call.other` is the one being replaced.
         13 = CallReplaced, c"call replaced";
         /// The call is over, and its handle is stale from here on.
+        ///
+        /// `message` is the refusal when a response ended it, and the BYE
+        /// or the CANCEL when the far end did (ABI 1.2), so that a header
+        /// field of the far end's own on it can be read with
+        /// `sipral_message_header`; null otherwise.
         14 = CallEnded, c"call ended";
 
         /// A subscription moved: it was asked for, granted, put on probation,
@@ -3126,6 +3136,7 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
             reason,
             status,
             ref response,
+            ref request,
             ref causes,
         } => {
             let mut payload = call_payload(known, call);
@@ -3136,7 +3147,10 @@ fn about_a_call_ending(known: &mut Vocabulary<'_>, event: &UaEvent) -> Option<Si
             payload.status_code = status_of(status);
             said_why(&mut payload, causes);
             let mut out = call_event(known, SipralEventKind::CallEnded, call, payload);
-            attach(&mut out, response.as_ref());
+            // the refusal when there was one, or the BYE or the CANCEL the
+            // far end ended the call with: never both, since a call that was
+            // refused had no dialog to send a BYE in
+            attach(&mut out, response.as_ref().or(request.as_ref()));
             Some(out)
         }
         _ => None,

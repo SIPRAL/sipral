@@ -52,6 +52,8 @@ mod audit_tests;
 #[cfg(test)]
 mod auth_scope_tests;
 #[cfg(test)]
+mod bridging_tests;
+#[cfg(test)]
 mod oauth_tests;
 mod call;
 mod calls;

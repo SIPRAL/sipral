@@ -475,6 +475,9 @@ pub(crate) struct Call {
     /// this call, kept from the moment it arrives until the call's end is
     /// reported with them.
     pub(crate) ended_by: Box<[crate::Reason]>,
+    /// That BYE or CANCEL itself, kept with them, for the end to be reported
+    /// with.
+    pub(crate) ended_with: Option<OwnedMessage>,
     /// Who the INVITE of a call this end answered said was calling, read
     /// once, as it arrived, behind the account's trust gate.
     pub(crate) identity: Option<Arc<CallIdentity>>,
@@ -714,6 +717,7 @@ impl Call {
             asked: None,
             headers: Vec::new(),
             ended_by: Box::default(),
+            ended_with: None,
             identity: None,
             signed: None,
             remote_focus: None,
@@ -773,6 +777,7 @@ impl Call {
             asked: None,
             headers: Vec::new(),
             ended_by: Box::default(),
+            ended_with: None,
             identity: None,
             signed: None,
             remote_focus: None,
@@ -826,6 +831,7 @@ impl Call {
             // the application labelled the call, and a branch of it is the call
             headers: other.headers.clone(),
             ended_by: Box::default(),
+            ended_with: None,
             identity: None,
             signed: None,
             remote_focus: None,
