@@ -130,6 +130,66 @@ public sealed class CallControlTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task ARefusedTransferIsReportedWithTheRefusal()
+    {
+        var alice = Stack();
+        var bob = Stack();
+        var aliceLine = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+        bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: alice.BindAddress);
+        var (toBob, bobSide) = await ConnectAsync(alice, aliceLine, bob);
+        try
+        {
+            var done = toBob.WaitForTransferAsync();
+            toBob.Transfer("sip:carol@sipral.invalid");
+            bob.RejectReferral(await NextAsync(bob, SipralEventKind.TransferRequested), 603);
+            var outcome = await done.WaitAsync(Timeout);
+            Assert.NotNull(outcome);
+            Assert.Equal(603u, outcome!.StatusCode);
+            Assert.Equal(SipralCallState.Confirmed, toBob.State);
+        }
+        finally
+        {
+            bobSide.Close();
+            toBob.Close();
+        }
+    }
+
+    [Fact]
+    public async Task ATransferTakenWithACallOfTheApplicationsOwnReportsThatCall()
+    {
+        var alice = Stack();
+        var bob = Stack();
+        var carol = Stack();
+        var aliceLine = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
+        var bobLine = bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: carol.BindAddress);
+        carol.AddAccount("sip:carol@sipral.invalid", registrarAddress: bob.BindAddress);
+
+        var (toBob, bobSide) = await ConnectAsync(alice, aliceLine, bob);
+        Call? placed = null;
+        Call? carolSide = null;
+        try
+        {
+            var done = toBob.WaitForTransferAsync();
+            toBob.Transfer($"sip:carol@{carol.BindAddress}");
+            var asked = await NextAsync(bob, SipralEventKind.TransferRequested);
+            placed = bob.PlaceCall(bobLine, $"sip:carol@{carol.BindAddress}");
+            bob.AcceptTransferPlaced(asked, placed);
+            carolSide = carol.AnswerCall(await NextAsync(carol, SipralEventKind.IncomingCall));
+
+            var outcome = await done.WaitAsync(Timeout);
+            Assert.NotNull(outcome);
+            Assert.Equal(200u, outcome!.StatusCode);
+        }
+        finally
+        {
+            carolSide?.Close();
+            placed?.Close();
+            bobSide.Close();
+            toBob.Close();
+        }
+    }
+
     /// <summary>Bob is asked for an attended transfer and takes it; his
     /// INVITE carries the <c>Replaces</c> naming Alice's consultation with
     /// Carol. Carol's end takes a <c>Replaces</c> only from the far end of

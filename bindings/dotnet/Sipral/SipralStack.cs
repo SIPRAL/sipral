@@ -1328,6 +1328,18 @@ public sealed partial class SipralStack : IDisposable
         return call;
     }
 
+    /// <summary>Takes the REFER of a
+    /// <see cref="SipralEventKind.TransferRequested"/> with a call this
+    /// application placed itself, <paramref name="placed"/>:
+    /// <c>sipral_call_accept_transfer_placed</c>. The REFER is answered 202
+    /// and the far end hears that call's progress in NOTIFYs, as though the
+    /// stack had placed it for the REFER; the call the REFER came in stays
+    /// as it is.</summary>
+    public void AcceptTransferPlaced(SipralEventArgs args, Call placed)
+    {
+        SipralErrors.Call(() => NativeMethods.sipral_call_accept_transfer_placed(Handle, args.Call, placed.Handle, NowMs), "sipral_call_accept_transfer_placed");
+    }
+
     /// <summary>Refuses a REFER outside any dialog, or a
     /// <see cref="SipralEventKind.TransferRequested"/>, with
     /// <paramref name="code"/>, 300 to 699:

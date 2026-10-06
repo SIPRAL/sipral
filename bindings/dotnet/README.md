@@ -113,6 +113,11 @@ over with `account.SetAccessToken(token)`; `Register()` again registers at
 once, and a token the server called `InvalidToken` raises the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+A `TransferRequested` can be taken with a call the application placed itself,
+`stack.AcceptTransferPlaced(args, call)`: the far end hears that call's
+progress. A transfer the far end refuses ends `WaitForTransferAsync` with
+the refusal's status.
+
 That is a whole softphone on Windows and macOS: the stack is in **device
 mode** there by default, so the library opens the machine's own microphone
 and loudspeaker and pumps the call through them, and the code above has no
