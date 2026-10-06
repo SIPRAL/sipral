@@ -2681,3 +2681,171 @@ fn a_server_holds_at_most_eight_epoch_one_records_before_its_own_keys_exist() {
     }
     assert_eq!(hand.server.core.early.len(), 8);
 }
+
+/// What a man in the middle who cannot sign might still rewrite, one way per
+/// rule: a suite or version the client never offered, a curve it never
+/// offered, a point that is not on the curve, a request for a certificate
+/// kind it cannot present.
+fn downgrade_rewrites() -> [Rewrite; 6] {
+    [
+        // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: the same key, never offered
+        (
+            1,
+            HandshakeType::SERVER_HELLO,
+            |body| edit_server_hello(body, &|h| h.cipher_suite = CipherSuite(0xC02C)),
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        // DTLS 1.3's version number in a ServerHello
+        (
+            1,
+            HandshakeType::SERVER_HELLO,
+            |body| {
+                edit_server_hello(body, &|h| {
+                    h.server_version = ProtocolVersion {
+                        major: 254,
+                        minor: 252,
+                    };
+                })
+            },
+            Failure::ProtocolVersion,
+            AlertDescription::PROTOCOL_VERSION,
+        ),
+        // secp384r1 named in place of secp256r1: curve_type, then the group
+        (
+            1,
+            HandshakeType::SERVER_KEY_EXCHANGE,
+            |body| {
+                let mut out = body.to_vec();
+                out[1..3].copy_from_slice(&0x0018u16.to_be_bytes());
+                out
+            },
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        // the client's point moved off the curve: the last octet of y
+        (
+            0,
+            HandshakeType::CLIENT_KEY_EXCHANGE,
+            flip_last_octet,
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        // the client's point in the compressed form RFC 8422 deprecates
+        (
+            0,
+            HandshakeType::CLIENT_KEY_EXCHANGE,
+            |body| {
+                let mut out = body.to_vec();
+                out[1] = 0x03;
+                out
+            },
+            Failure::IllegalParameter,
+            AlertDescription::ILLEGAL_PARAMETER,
+        ),
+        // a request naming neither kind of key this client certifies with
+        (
+            1,
+            HandshakeType::CERTIFICATE_REQUEST,
+            |body| {
+                let mut out = body.to_vec();
+                let count = usize::from(out[0]);
+                for kind in &mut out[1..=count] {
+                    *kind = 2;
+                }
+                out
+            },
+            Failure::NoCommonParameters,
+            AlertDescription::HANDSHAKE_FAILURE,
+        ),
+    ]
+}
+
+#[test]
+fn a_suite_version_curve_or_point_that_was_never_offered_is_refused() {
+    let (one, other) = (identity(1), identity(2));
+    for (sender, msg_type, edit, reason, alert) in downgrade_rewrites() {
+        let mut pair = Pair::new(pair_configs(Role::Client, &one, &other), Path::CLEAN, 37);
+        pair.tamper = Some(Box::new(move |from, datagram| {
+            if from == sender {
+                rewrite(&datagram, msg_type, &edit)
+            } else {
+                datagram
+            }
+        }));
+        pair.run(Duration::from_secs(10));
+        assert_eq!(refused(&pair.events[1 - sender]), reason, "{msg_type:?}");
+        assert_eq!(
+            refused(&pair.events[sender]),
+            Failure::PeerAlert(alert),
+            "{msg_type:?} {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hello_rewritten_on_the_path_to_a_later_version_is_caught_by_the_transcript() {
+    let (one, other) = (identity(1), identity(2));
+    let mut pair = Pair::new(pair_configs(Role::Client, &one, &other), Path::CLEAN, 41);
+    pair.tamper = Some(Box::new(|from, datagram| {
+        if from == 0 {
+            rewrite(&datagram, HandshakeType::CLIENT_HELLO, &|body| {
+                edit_client_hello(body, &|h| {
+                    h.client_version = ProtocolVersion {
+                        major: 254,
+                        minor: 252,
+                    };
+                })
+            })
+        } else {
+            datagram
+        }
+    }));
+    pair.run(Duration::from_secs(10));
+    // the server answers a later version with 1.2, as RFC 5246 §E.1 has it,
+    // and the client's CertificateVerify, over the hello it really sent, no
+    // longer verifies over the one the server saw
+    let server_hello = pair
+        .sent
+        .iter()
+        .filter(|(from, _)| *from == 1)
+        .flat_map(|(_, datagram)| plaintext_fragments(datagram))
+        .find(|(_, header, _)| header.msg_type == HandshakeType::SERVER_HELLO)
+        .map(|(_, _, body)| ServerHello::parse(&body).unwrap())
+        .unwrap();
+    assert_eq!(server_hello.server_version, ProtocolVersion::DTLS_1_2);
+    assert_eq!(refused(&pair.events[1]), Failure::BadSignature);
+}
+
+#[test]
+fn a_replayed_protected_record_is_delivered_once_and_a_relabelled_one_never() {
+    let mut hand = ByHand::new(DEFAULT_MAX_DATAGRAM);
+    let flight4 = hand.flight4();
+    deliver(&mut hand.client, &flight4, hand.now);
+    deliver(&mut hand.server, &drain(&mut hand.client), hand.now);
+    deliver(&mut hand.client, &drain(&mut hand.server), hand.now);
+    keyed(&events(&mut hand.client));
+    keyed(&events(&mut hand.server));
+
+    hand.client.send_application_data(b"once").unwrap();
+    let record = drain(&mut hand.client);
+    for _ in 0..3 {
+        deliver(&mut hand.server, &record, hand.now);
+    }
+    let seen = events(&mut hand.server);
+    assert!(
+        matches!(&seen[..], [Event::ApplicationData(data)] if data == b"once"),
+        "{seen:?}"
+    );
+
+    // the same record relabelled epoch 2: no epoch past 1 is read at all
+    let mut relabelled = record.concat();
+    relabelled[3..5].copy_from_slice(&2u16.to_be_bytes());
+    // and renumbered within epoch 1: the window lets it through, and the
+    // tag, whose additional data carries the number, does not
+    let mut renumbered = record.concat();
+    renumbered[10] ^= 0x40;
+    deliver(&mut hand.server, &[relabelled, renumbered], hand.now);
+    assert!(events(&mut hand.server).is_empty());
+    assert_eq!(hand.server.state(), State::Connected);
+}
