@@ -89,7 +89,8 @@ session opens, and in process with `sipral_media_set_app_rate`
 (`08-ffi.md`, "What ABI 1.1 added").
 
 The package `sipral-agents` ([`integrations/agents`](../integrations/agents/))
-does this for OpenAI Realtime and Gemini Live: `serve(account, factory)`
+does this for OpenAI Realtime, Gemini Live, ElevenLabs Agents, Vapi and
+Deepgram Voice Agent: `serve(account, factory)`
 answers each call and joins it to the service over its WebSocket API, with
 the call's frames switched to the service's rate (24 kHz for both), the
 agent's audio paced a codec frame at a time so that a barge-in silences it
@@ -97,8 +98,14 @@ at once, events for the application, reconnection with backoff (a Gemini
 session resumed after a dropped connection or a `goAway`) and either side's
 end ending the other. It is tested against local stand-ins written from
 each vendor's public protocol documentation, not against the vendors'
-services. Adapters for ElevenLabs, Vapi and Deepgram over the same core are
-**planned, not available**.
+services. ElevenLabs runs at the agent's own PCM rate (16 kHz by default),
+Vapi at 16 kHz in binary frames, Deepgram `linear16` at 24 kHz in binary
+frames. Their WebSocket protocols were read again on 7 October 2026 from
+the pages under each section and ElevenLabs' Agents WebSocket reference
+(https://elevenlabs.io/docs/eleven-agents/api-reference/eleven-agents/websocket),
+Vapi's WebSocket transport guide (https://docs.vapi.ai/calls/websocket-transport)
+and Deepgram's Voice Agent reference
+(https://developers.deepgram.com/reference/voice-agent/voice-agent).
 
 ## Summary
 
@@ -117,12 +124,12 @@ streaming API where there is no SIP.
 | [Ultravox](#ultravox) | speech-to-speech API | SIP bridge; Pipecat | yes | G.722, Opus, PCMU, PCMA, iLBC and more |
 | [Hume EVI](#hume-evi) | speech-to-speech API | headless | no | linear16 in at a declared rate; WAV out |
 | [Inworld Realtime](#inworld-realtime) | speech-to-speech API | Pipecat; headless | no | G.711 μ-law, PCM |
-| [Deepgram Voice Agent](#deepgram-voice-agent) | agent API | headless | no | linear16 24 kHz by default; μ-law, A-law and others |
+| [Deepgram Voice Agent](#deepgram-voice-agent) | agent API | headless; `sipral-agents` | no | linear16 24 kHz by default; μ-law, A-law and others |
 | [Qwen-Omni Realtime](#qwen-omni-realtime) | speech-to-speech API | headless | no | PCM 16 kHz in, 24 kHz out |
-| [Vapi](#vapi) | hosted platform | SIP bridge | yes | not listed |
+| [Vapi](#vapi) | hosted platform | SIP bridge; `sipral-agents` | yes | not listed |
 | [Retell AI](#retell-ai) | hosted platform | SIP bridge | yes | PCMU, PCMA, G.722 |
 | [Bland AI](#bland-ai) | hosted platform | SIP bridge | yes | PCMU, PCMA, Opus, G.722; SRTP required |
-| [ElevenLabs Agents](#elevenlabs-agents) | hosted platform | SIP bridge | yes | PCMU, PCMA, G.722 |
+| [ElevenLabs Agents](#elevenlabs-agents) | hosted platform | SIP bridge; `sipral-agents` | yes | PCMU, PCMA, G.722 |
 | [Synthflow](#synthflow) | hosted platform | SIP bridge | yes | G.711 |
 | [PolyAI](#polyai) | hosted platform | SIP bridge | yes | PCMU stated |
 | [Cognigy Voice Gateway](#cognigy-voice-gateway) | hosted platform | SIP bridge | yes | G.711, Opus, G.722 |
@@ -378,8 +385,11 @@ https://docs.pipecat.ai/api-reference/server/services/s2s/inworld
 A WebSocket API that chains Deepgram speech recognition, a configurable
 language model and Deepgram speech synthesis.
 
-**Path: headless.** No SIP; Pipecat has Deepgram's speech-to-text and
-text-to-speech services but not this API.
+**Path: headless**, which `sipral-agents` does (`DeepgramAgent`: the
+`agent` object with its listen, think and speak providers is the
+application's, `linear16` at 24 kHz both ways is set by the adapter). No
+SIP; Pipecat has Deepgram's speech-to-text and text-to-speech services but
+not this API.
 
 - **Endpoint:** `wss://agent.deepgram.com/v1/agent/converse`.
 - **In** (`audio.input` in the settings message): `linear16` at 24000 Hz if
@@ -412,9 +422,12 @@ https://github.com/QwenLM/Qwen3-Omni/blob/main/README.md
 A hosted platform that runs voice assistants (speech recognition, language
 model and synthesis) and connects them to phone numbers, SIP and WebSocket.
 
-**Path: SIP bridge.** No Pipecat integration.
+**Path: SIP bridge**, or the WebSocket transport, which `sipral-agents`
+does (`VapiAgent`: a call created with `POST /call` and a `vapi.websocket`
+transport in `pcm_s16le` at 16 kHz, its audio in binary frames). No Pipecat
+integration.
 
-Two ways in:
+Two ways in over SIP:
 
 - **A Vapi SIP number.** `POST /phone-number` with `provider` `vapi` and a
   `sipUri` of `sip:<any-username>@sip.vapi.ai` (US) or
@@ -500,8 +513,11 @@ Source: https://docs.bland.ai/enterprise-features/SIP-integration
 ElevenLabs' hosted conversational agent platform. SIP trunking is
 available to enterprise accounts.
 
-**Path: SIP bridge.** Pipecat has ElevenLabs' speech services, not its
-agents.
+**Path: SIP bridge**, for enterprise accounts, or the conversation
+WebSocket, which `sipral-agents` does (`ElevenLabsAgent`: the agent's
+input and output formats must be the same PCM rate, 16 kHz by default, and
+a session in another format is refused). Pipecat has ElevenLabs' speech
+services, not its agents.
 
 - **Address:** `sip:<number>@sip.rtc.elevenlabs.io:5060;transport=tcp` or
   `sip:<number>@sip.rtc.elevenlabs.io:5061;transport=tls`; UDP on 5060 is
@@ -1074,4 +1090,4 @@ them. The pipeline adds its own processing between frames.
 service's connection, chooses the rate, sees every frame and every
 `VoiceActivity` message, and decides when to barge in (`07-headless.md`,
 "Latency"). The application writes the protocol for each service itself,
-until `sipral-agents` provides it for the five services it is planned for.
+or uses `sipral-agents` for the five services it covers.

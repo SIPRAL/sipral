@@ -47,8 +47,11 @@ class FakeService(abc.ABC):
     Every connection is kept in :attr:`connections`, every message it got
     in :attr:`received` as parsed JSON, and the request's path and headers
     in :attr:`requests`. ``echo`` sends the caller's audio straight back as
-    the agent's.
+    the agent's. A binary frame of a service whose audio travels as raw PCM
+    (``binary_audio``) is kept as ``{"pcm": bytes}``.
     """
+
+    binary_audio = False
 
     def __init__(self) -> None:
         self.connections: list[ServerConnection] = []
@@ -78,7 +81,10 @@ class FakeService(abc.ABC):
         self.requests.append((ws.request.path, dict(ws.request.headers)))
         try:
             async for message in ws:
-                body = json.loads(message)
+                if self.binary_audio and isinstance(message, bytes):
+                    body = {"pcm": message}
+                else:
+                    body = json.loads(message)
                 self.log.append(body)
                 await self.on_message(ws, body)
                 self.received.put_nowait(body)

@@ -6,8 +6,8 @@ Copyright (c) 2026 Sytek
 # Sipral for voice-agent APIs
 
 `sipral-agents` joins a SIP phone call to a speech-to-speech service that
-talks over a WebSocket, with no framework in between: OpenAI Realtime and
-Gemini Live today. Sipral does the SIP, the RTP and the codecs; the service
+talks over a WebSocket, with no framework in between: OpenAI Realtime,
+Gemini Live, ElevenLabs Agents, Vapi and Deepgram Voice Agent. Sipral does the SIP, the RTP and the codecs; the service
 does the listening, the thinking and the speaking.
 
 - `serve(account, factory)` answers every call to a Sipral account and joins
@@ -17,9 +17,23 @@ does the listening, the thinking and the speaking.
   application that answers or places its calls itself: `await run()` until
   either side ends, `await close()` to end both.
 - `OpenAIRealtime(model=..., api_key=...)` and `GeminiLive(model=...,
-  api_key=...)` are the two services, each with `instructions`, `voice`, a
-  `url` to use instead of the vendor's (a proxy, a test server), and a
-  dictionary merged into the session's setup for anything else.
+  api_key=...)` take `instructions`, `voice`, a `url` to use instead of the
+  vendor's (a proxy, a test server), and a dictionary merged into the
+  session's setup for anything else.
+- `ElevenLabsAgent(agent_id=..., api_key=...)` talks to an agent configured
+  at ElevenLabs, whose input and output formats must both be PCM at
+  `sample_rate` (16000 by default); a conversation in another format is
+  refused rather than played at the wrong speed. `overrides` and
+  `dynamic_variables` go in the conversation's first message, and the
+  service's pings are answered.
+- `VapiAgent(api_key=..., assistant_id=...)` (or `assistant=` inline)
+  creates one Vapi call per SIP call with `POST /call` and a WebSocket
+  transport in `pcm_s16le` at 16 kHz, and sends `hangup` when the caller
+  hangs up. `call` is merged into the request body.
+- `DeepgramAgent(api_key=..., agent=...)` opens a Voice Agent session with
+  `linear16` at 24 kHz both ways; `agent` is the `Settings` message's
+  `agent` object -- the listen, think and speak providers and models are the
+  application's to name -- and `settings` is merged into the message.
 
 ## What the core does for every service
 
@@ -33,7 +47,10 @@ does the listening, the thinking and the speaking.
   in real time, with never more than `send_ahead_ms` (40 ms) queued in the
   call's media. When the service says the caller started speaking (OpenAI's
   `input_audio_buffer.speech_started`) or that it cut its own turn short
-  (Gemini's `interrupted`), what is queued is dropped at once; OpenAI is
+  (Gemini's `interrupted`, ElevenLabs' `interruption`, Vapi's
+  `user-interrupted`, Deepgram's `UserStartedSpeaking`), what is queued is
+  dropped at once -- and ElevenLabs audio numbered before the interruption
+  that still arrives after it is dropped too; OpenAI is
   then told how much of its turn the caller heard
   (`conversation.item.truncate`), so the conversation holds what was said
   and not what was generated.
@@ -45,7 +62,11 @@ does the listening, the thinking and the speaking.
   tries, then the call is hung up). Gemini's `goAway` moves the session to
   a new connection at once, and Gemini sessions resume with the last
   resumption handle the service gave; an OpenAI reconnection is a new
-  session, which `CONNECTED` reports with `resumed=False`.
+  session, which `CONNECTED` reports with `resumed=False`, as are
+  ElevenLabs' and Deepgram's; a Vapi reconnection goes back to the same
+  call's WebSocket. A session the service turns down for good -- a format
+  or a setting it rejects, a Vapi call it will not create -- ends the call
+  at once with the reason `refused` instead of retrying.
 - **Ending.** The caller hanging up closes the WebSocket with a normal
   closure; the service closing its side plays the last of its audio and
   hangs up the call.
@@ -55,10 +76,14 @@ does the listening, the thinking and the speaking.
 A service is a `Provider` subclass: `sample_rate`, `url()`, `headers()`,
 `open(ws, resuming)` to set the session up, `audio_message(pcm)` for a frame
 of the caller's audio, `parse(message)` returning `Audio`, `SpeechStarted`,
-`Interrupted`, `TurnComplete`, `Transcript`, `ProviderError` or `GoAway`
-values, and optionally `barge_in(item, heard_ms)`. Rate, pacing, barge-in,
-events, reconnection and the end of the call stay in the core. ElevenLabs,
-Vapi and Deepgram are planned as such subclasses.
+`Interrupted`, `TurnComplete`, `Transcript`, `ProviderError`, `GoAway` or
+`Reply` (a message to send back at once) values, and optionally
+`prepare(resuming)` (a request before each connection, such as creating the
+call that hands out the WebSocket address), `barge_in(item, heard_ms)` and
+`farewell()` (messages before a closure because the call ended). Raising
+`SessionRefused` from `prepare` or `open` ends the call with no retry.
+Rate, pacing, barge-in, events, reconnection and the end of the call stay
+in the core.
 
 ## Install
 
@@ -121,11 +146,14 @@ SIPRAL_LIBRARY=target/release PYTHONPATH=integrations/agents:bindings/python \
 from the repository's root, in an environment with `websockets` and `cffi`
 installed. Two stacks on loopback and, for each service, a local WebSocket
 server that speaks its protocol as the vendor's public documentation
-describes it; no network and no key. They check the session's setup, that a
-tone the caller sends comes back through the service at 24 kHz, that a
-barge-in silences the agent, that OpenAI's turn is truncated to what was
-heard, that a dropped connection and a `goAway` are recovered (Gemini's
-resumed), and that either side ending ends the other. They have not been
+describes it (for Vapi, an HTTP server for `POST /call` as well); no network
+and no key. They check the session's setup, that a tone the caller sends
+comes back through the service at its rate, that a barge-in silences the
+agent, that OpenAI's turn is truncated to what was heard, that ElevenLabs'
+pings are answered and its stale audio dropped, that a dropped connection
+and a `goAway` are recovered (Gemini's resumed, Vapi's back on the same
+call), that a session the service refuses ends the call without retries,
+and that either side ending ends the other. They have not been
 run against the vendors' own services. `scripts/check.sh --only agents`
 runs them in a virtual environment of its own.
 

@@ -398,8 +398,8 @@ pipeline of its own, many calls to one process.
 
 Without a framework, `sipral-agents`
 ([`integrations/agents`](../integrations/agents/)) joins each call to a
-speech-to-speech service over its WebSocket API -- OpenAI Realtime or Gemini
-Live -- with the frames at the service's rate, barge-in, reconnection and
+voice-agent service over its WebSocket API -- OpenAI Realtime, Gemini Live,
+ElevenLabs Agents, Vapi or Deepgram Voice Agent -- with the frames at the service's rate, barge-in, reconnection and
 either side's end ending the other (`24-voice-agents.md`).
 
 ## What it does not do

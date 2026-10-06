@@ -51,6 +51,8 @@ __all__ = [
     "Interrupted",
     "Provider",
     "ProviderError",
+    "Reply",
+    "SessionRefused",
     "Signal",
     "SpeechStarted",
     "Transcript",
@@ -106,7 +108,24 @@ class GoAway:
     """The service will close this connection soon; open another now."""
 
 
-Signal = Audio | SpeechStarted | Interrupted | TurnComplete | Transcript | ProviderError | GoAway
+@dataclass(frozen=True)
+class Reply:
+    """A message the service expects back at once, such as an answer to its
+    keep-alive ping."""
+
+    message: str | bytes
+
+
+Signal = (
+    Audio | SpeechStarted | Interrupted | TurnComplete | Transcript | ProviderError | GoAway | Reply
+)
+
+
+class SessionRefused(Exception):
+    """The service turned the session down for a reason another attempt
+    would not change (a wrong agent, a format it will not use): raised from
+    :meth:`Provider.open` or :meth:`Provider.prepare`, it ends the call
+    with no retry."""
 
 
 class Provider(abc.ABC):
@@ -120,6 +139,11 @@ class Provider(abc.ABC):
 
     name = "provider"
     sample_rate = 24000
+
+    async def prepare(self, resuming: bool) -> None:
+        """Called before every connection, before :meth:`url`: where a
+        service hands out its WebSocket address through another request
+        first, that request goes here. Nothing by default."""
 
     @abc.abstractmethod
     def url(self) -> str:
@@ -149,6 +173,11 @@ class Provider(abc.ABC):
         into the agent's turn ``item``; none by default."""
         return []
 
+    def farewell(self) -> list[str | bytes]:
+        """Messages to send before the WebSocket is closed because the call
+        ended; none by default."""
+        return []
+
 
 # -- what an application sees ----------------------------------------------
 
@@ -172,7 +201,8 @@ class AgentEvent:
     session); ``RECONNECTING`` the ``attempt`` and ``delay`` in seconds;
     ``INTERRUPTED`` the ``heard_ms`` of the turn that was cut; ``TRANSCRIPT``
     ``role`` and ``text``; ``ERROR`` ``message``; ``ENDED`` ``reason``, one
-    of ``"call_ended"``, ``"agent_closed"``, ``"gave_up"``, ``"closed"``.
+    of ``"call_ended"``, ``"agent_closed"``, ``"gave_up"``, ``"refused"``,
+    ``"closed"``.
     """
 
     kind: AgentEventKind
@@ -279,8 +309,6 @@ class AgentCall:
         self._closing = True
         self._hang_up()
         self._call_ended.set()
-        if self._ws is not None:
-            await self._ws.close()
         await self._stopped.wait()
 
     # -- sessions ----------------------------------------------------------
@@ -298,6 +326,9 @@ class AgentCall:
                 ws = None
             except _Ended as ended:
                 return ended.reason
+            except SessionRefused as refused:
+                self._emit(AgentEventKind.ERROR, message=f"{self.provider.name}: {refused}")
+                return "refused"
             if ws is not None:
                 attempt = 0
                 resuming = True
@@ -325,6 +356,7 @@ class AgentCall:
                 pass
 
     async def _connect(self, resuming: bool) -> ClientConnection:
+        await self.provider.prepare(resuming)
         ws = await connect(
             self.provider.url(),
             additional_headers=self.provider.headers(),
@@ -358,6 +390,11 @@ class AgentCall:
                 {uplink, downlink, ended}, return_when=asyncio.FIRST_COMPLETED
             )
             if ended in done:
+                for message in self.provider.farewell():
+                    try:
+                        await ws.send(message)
+                    except ConnectionClosed:
+                        break
                 await ws.close()
                 raise _Ended("closed" if self._closing else "call_ended")
             for task in done:
@@ -421,6 +458,8 @@ class AgentCall:
             if signal.fatal:
                 await ws.close()
                 raise _Ended("agent_closed")
+        elif isinstance(signal, Reply):
+            await ws.send(signal.message)
         elif isinstance(signal, GoAway):
             await ws.close()
             raise _Replace()
