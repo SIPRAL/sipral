@@ -2143,24 +2143,27 @@ fn through_media_mix(name: &str, data: &[u8]) -> Result<(), Wrong> {
     Ok(())
 }
 
+/// One 20 ms wideband frame of a 71-sample-period triangle wave at a peak of
+/// 8000, as this repository's Opus encoder wrote it at 24 kbit/s.
+///
+/// Written out rather than encoded on every run: RFC 6716 makes only the
+/// decoder bit-exact, and libopus's floating-point encoder, with its own
+/// SIMD paths per architecture, writes a different packet for the same
+/// samples on x86-64 than on arm64. Every one of them is a valid frame, so a
+/// seed encoded afresh would make the corpus depend on the machine that
+/// generated it. The decoder, which is normative, still reads this one
+/// through the target's own path below.
+const WIDEBAND_FRAME: [u8; 69] = [
+    72, 132, 84, 95, 208, 127, 224, 84, 200, 168, 0, 0, 32, 202, 41, 175, 50, 226, 55, 48, 222,
+    247, 41, 165, 88, 57, 143, 251, 82, 152, 167, 147, 176, 167, 24, 93, 97, 189, 195, 69, 18,
+    81, 98, 5, 255, 34, 206, 5, 195, 81, 117, 232, 13, 35, 151, 118, 254, 213, 33, 13, 210, 227,
+    78, 239, 202, 0, 246, 20, 128,
+];
+
 fn media_opus_seeds() -> Result<Vec<Seed>, Wrong> {
     // SampleRate::Wideband is index 2, FrameDuration::Micros20000 is index 3
-    let rate = sipral_media::opus::SampleRate::Wideband;
-    let frame = sipral_media::opus::FrameDuration::Micros20000;
-    let mut encoder = sipral_media::opus::Encoder::new(rate, frame)
-        .map_err(|why| Wrong(format!("the opus encoder does not build: {why}")))?;
-    encoder
-        .set_bitrate(24_000)
-        .map_err(|why| Wrong(format!("the opus bitrate does not set: {why}")))?;
-    let samples = triangle(frame.samples(rate), 71, 8_000);
-    let mut packet = vec![0_u8; frame.max_packet_bytes()];
-    let written = encoder
-        .encode(&samples, &mut packet)
-        .map_err(|why| Wrong(format!("the opus seed does not encode: {why}")))?;
-    packet.truncate(written);
-
-    let mut seed = vec![2, 3]; // Wideband, Micros20000
-    seed.extend_from_slice(&packet);
+    let mut seed = vec![2, 3];
+    seed.extend_from_slice(&WIDEBAND_FRAME);
 
     let out = vec![("an-encoded-wideband-frame", seed)];
     for (name, bytes) in &out {

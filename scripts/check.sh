@@ -21,6 +21,14 @@ found() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
+# The language scans match Romanian letters, which are two bytes each in
+# UTF-8. Under the C locale a fresh container or a cron job starts in, grep
+# reads bytes instead of characters and those patterns match pieces of other
+# letters: two dozen files flagged that hold no Romanian at all. The scans
+# that want bytes say LC_ALL=C on their own command line; everything else
+# reads characters. C.UTF-8 is there on glibc and on macOS alike.
+export LC_ALL=C.UTF-8
+
 # Every `dotnet` below runs once and exits. Left to its defaults it starts a
 # compiler server and MSBuild worker nodes that outlive it by minutes and
 # inherit this script's file descriptors, so anything waiting on this run --
@@ -202,8 +210,13 @@ listed() {
 }
 
 # The C library, as the release build of sipral-ffi leaves it: what the abi
-# area checks and every layer loads.
-DYLIB="target/release/libsipral_ffi.dylib"
+# area checks and every layer loads. Linux names a shared object .so: a
+# Mach-O name there is a file that never exists, and every layer that loads
+# it fails without having run.
+case "$(uname -s)" in
+    Darwin) DYLIB="target/release/libsipral_ffi.dylib" ;;
+    *) DYLIB="target/release/libsipral_ffi.so" ;;
+esac
 ARCHIVE="target/release/libsipral_ffi.a"
 
 # Apple's nm is an LLVM 14 tool and refuses to read an object carrying newer
