@@ -5,17 +5,12 @@
 
 /// A source of cryptographically secure random octets, supplied by the caller.
 ///
-/// Nothing in this crate reads the operating system's entropy itself, for the
-/// same reason nothing in the tree reads the clock: a sans-I/O library that
-/// reached for either could not be driven deterministically in a test, and
-/// could not be handed a source the application trusts more than the one the
-/// library would have picked.
+/// Caller-supplied so tests are deterministic and the application chooses
+/// the source.
 ///
-/// The obligation that comes with that is the caller's, and it is not a small
-/// one. Every secret this crate makes — the ephemeral ECDH key, the ECDSA key
-/// behind a certificate, the hello randoms, the cookie secret — is exactly as
-/// unpredictable as what this trait returns. A seeded generator is acceptable
-/// only when the seed itself was drawn from the operating system's entropy.
+/// Every secret here (ECDH and ECDSA keys, hello randoms, cookie secret) is
+/// only as unpredictable as this. A seeded generator is acceptable only if
+/// the seed came from OS entropy.
 pub trait Random {
     /// Fill every octet of `dest`.
     fn fill(&mut self, dest: &mut [u8]);

@@ -38,41 +38,24 @@
 //! - [`x509`]: a self-signed certificate written in DER, the public key read
 //!   out of a peer's certificate, and certificate fingerprints.
 //!
-//! # What is not here yet
+//! # Primitives
 //!
-//! What joins a connection to a call: the `a=fingerprint` and `a=setup` lines
-//! of a session description, telling DTLS apart from STUN and RTP on one
-//! socket (RFC 7983), and keying a media session with what a connection
-//! exports. Nothing outside the fuzz targets calls this crate yet.
-//!
-//! # What is not written here at all
-//!
-//! The primitives. P-256 (ECDH and ECDSA), AES-GCM, SHA-2 and HMAC are the
-//! RustCrypto crates: constant-time elliptic curve arithmetic is the place
-//! where an implementation of one's own is a liability rather than a virtue.
-//! What is written here is the protocol around them.
-//!
-//! SHA-1 is the exception, written in-tree like the two other copies in the
-//! tree, because its only use is reading an old `sha-1` fingerprint of a
-//! certificate that is public anyway: nothing secret goes through it, so how
-//! long it takes reveals nothing.
+//! P-256, AES-GCM, SHA-2 and HMAC come from RustCrypto: constant-time curve
+//! arithmetic is not something to write in-house. Only the protocol is
+//! written here. SHA-1 is in-tree, used only for legacy `sha-1`
+//! fingerprints of public certificates, where timing reveals nothing.
 //!
 //! # The extended master secret
 //!
-//! RFC 5764 predates RFC 7627 and does not mention it; RFC 8827 does not
-//! require it either. RFC 7627 §5.4 does: a session that continues without
-//! it "MUST disable \[RFC5705\]", and RFC 5705 is the exporter every DTLS-SRTP
-//! key comes out of. RFC 9325 §3.5 then requires TLS 1.2 implementations to
-//! support the extension. So [`MasterSecret::export`] refuses a master secret
-//! derived the old way, and a peer whose TLS library predates RFC 7627 cannot
-//! key SRTP through this crate.
+//! RFC 7627 §5.4 says a session without it "MUST disable \[RFC5705\]", the
+//! exporter all DTLS-SRTP keys come from (RFC 9325 §3.5 also requires
+//! support). So [`MasterSecret::export`] refuses an old-style master secret,
+//! and a peer whose TLS predates RFC 7627 cannot key SRTP here.
 //!
 //! # Sans-I/O
 //!
-//! Like the rest of the tree, nothing here opens a socket, reads a clock or
-//! draws a random number. Datagrams, the current time for a certificate's
-//! validity and for a retransmission, and every random octet ([`Random`])
-//! come from the caller.
+//! Datagrams, the time and every random octet ([`Random`]) come from the
+//! caller.
 //!
 //! Written from RFC 6347, RFC 5246, RFC 5288, RFC 5289, RFC 5705, RFC 5746,
 //! RFC 5763, RFC 5764, RFC 7714, RFC 4145, RFC 7627, RFC 8422, RFC 8827, RFC

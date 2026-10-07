@@ -9,10 +9,8 @@
 //! active end is the DTLS client and the passive end the server, and an
 //! `actpass` offer leaves the choice to the answer.
 //!
-//! The mapping is kept apart from everything that reads SDP, as a pure
-//! function, because getting it wrong is silent: two ends that both believe
-//! they are the server wait for each other until the handshake times out, and
-//! two clients each answer the other's ClientHello with nothing.
+//! A separate pure function because mistakes are silent: two servers wait
+//! until timeout, two clients ignore each other.
 
 use crate::{Error, Role};
 

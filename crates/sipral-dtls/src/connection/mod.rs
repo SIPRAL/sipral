@@ -6,63 +6,47 @@
 //!
 //! # Shape
 //!
-//! A [`Connection`] is one association with one peer. Nothing in it opens a
-//! socket or reads a clock: the caller hands in every datagram that arrived
-//! with [`Connection::handle_datagram`] and the passing of time with
-//! [`Connection::handle_timeout`], sends what [`Connection::poll_transmit`]
-//! gives it to the peer, wakes at [`Connection::poll_timeout`], and learns
-//! what happened from [`Connection::poll_event`]: [`Event::Connected`] with
-//! the SRTP keys, [`Event::Failed`] with the reason, [`Event::Closed`].
+//! A [`Connection`] is one association with one peer, sans-I/O: feed
+//! [`Connection::handle_datagram`] and [`Connection::handle_timeout`], send
+//! what [`Connection::poll_transmit`] yields, wake at
+//! [`Connection::poll_timeout`], and read [`Connection::poll_event`]
+//! ([`Event::Connected`] with the SRTP keys, [`Event::Failed`],
+//! [`Event::Closed`]).
 //!
-//! Every random octet a handshake needs — the hello random, the ephemeral
-//! ECDH key, the cookie secret — is drawn from the caller's [`Random`] when
-//! the connection is made. A connection performs one handshake and no other,
-//! so nothing is ever drawn later.
+//! All randomness (hello random, ECDH key, cookie secret) is drawn from the
+//! caller's [`Random`] at construction; one connection, one handshake.
 //!
 //! # The handshake
 //!
-//! The one DTLS-SRTP needs. `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` over
-//! P-256. The extended master secret in both hellos: RFC 7627 §5.2 lets
-//! either end abort a handshake without it, and §5.4 forbids exporting keys
-//! from a session without it, which is all DTLS-SRTP does with a session.
-//! `use_srtp` in both hellos, with a profile both ends can key. And a
-//! certificate from both ends: a server always asks for the client's and
-//! refuses a client that sends none, and a client refuses a server that does
-//! not ask, because RFC 5763 §5 has each end check the other's certificate
-//! against the fingerprint the signalling carried. That fingerprint is the
-//! only thing a certificate is checked against; when the signalling carried
-//! several, RFC 8122 §5.1 picks the ones under the most preferred hash —
-//! SHA-512, then SHA-384, SHA-256 and SHA-1 — and the certificate has to
-//! match one of those.
+//! `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` over P-256. Extended master
+//! secret in both hellos: RFC 7627 §5.4 forbids exporting keys without it,
+//! and exporting is all DTLS-SRTP does. `use_srtp` with a profile both ends
+//! can key. Certificates from both ends (the server always requests one,
+//! the client refuses a server that does not), since RFC 5763 §5 has each
+//! end check the other against the signalled fingerprint, the only check
+//! made. With several fingerprints, RFC 8122 §5.1 keeps those under the
+//! strongest hash (SHA-512, SHA-384, SHA-256, SHA-1) and one must match.
 //!
-//! No renegotiation: RFC 8827 §6.5 has it refused with `no_renegotiation`,
-//! and so it is. No session resumption. No MKI: a server answers a client's
-//! MKI with an empty one, which RFC 5764 §4.1.3 reads as "cannot make use of
-//! the MKI", and a client refuses a server that names one.
+//! No renegotiation (refused with `no_renegotiation`, RFC 8827 §6.5), no
+//! resumption, no MKI: a server answers a client MKI with an empty one (RFC
+//! 5764 §4.1.3), and a client refuses a server that names one.
 //!
 //! # Flights and retransmission
 //!
-//! Messages go out in the flights of RFC 6347 §4.2.4, and the last flight sent
-//! is kept whole, so that sending it again sends the same messages under the
-//! same message sequence numbers, cut into records of their own. A flight
-//! that expects an answer starts a timer at one second; each expiry sends it
-//! again and doubles the wait, up to sixty seconds (§4.2.4.1); when
-//! [`Retransmission::attempts`] retransmissions have gone unanswered the
-//! handshake fails with [`Failure::Timeout`].
+//! Flights follow RFC 6347 §4.2.4. The last flight is kept whole so a resend
+//! repeats the same messages and sequence numbers. The timer starts at one
+//! second and doubles up to sixty (§4.2.4.1); after
+//! [`Retransmission::attempts`] unanswered resends the handshake fails with
+//! [`Failure::Timeout`].
 //!
-//! A peer that sends its previous flight again has not received ours. It is
-//! answered by sending ours again, and never by processing its flight a
-//! second time: the reassembler hands each message out once, and a message
-//! older than the flight being waited for is recognised as such without
-//! being looked at. A retransmission of the flight being waited for, of which
-//! part is already in, changes nothing — "partial reads ... do not cause
-//! state transitions or timer resets". One answer per half of the initial
-//! timer, so a flight that arrives duplicated, or spread over several
-//! datagrams, is answered once and not once per datagram. The end that sends
-//! the last flight, the server, goes on answering a retransmitted last flight
-//! from the client for as long as the connection lives, but only once its
-//! Finished, which travels protected, has authenticated: after the handshake
-//! an epoch-0 fragment proves nothing about who sent it.
+//! A peer resending its previous flight has not received ours: we resend
+//! ours, never reprocess theirs (the reassembler hands each message out
+//! once). A partial retransmission of the awaited flight changes nothing
+//! ("partial reads ... do not cause state transitions or timer resets").
+//! At most one resend per half initial timer, so a duplicated or split
+//! flight is answered once. The server keeps answering a retransmitted last
+//! client flight for the connection's life, but only after that flight's
+//! protected Finished authenticated: later epoch-0 fragments prove nothing.
 //!
 //! # Epochs
 //!
@@ -71,23 +55,16 @@
 //! handshake fragment in epoch 1, is discarded before the reassembler sees
 //! it. A Finished can then only come from someone holding the keys.
 //!
-//! Once the peer's Finished is the only message left to come — a client that
-//! has sent flight 5, a server that has verified CertificateVerify — every
-//! epoch-0 handshake fragment numbered at or past it is discarded as well:
-//! nothing the peer could still send there is unprotected, and anyone who can
-//! spoof its address could otherwise end the handshake with a message out of
-//! place, or have one take the Finished's number so that the genuine Finished
-//! is read as a retransmission and the handshake waits until it times out.
-//! A HelloRequest is discarded before reassembly at any point of a
-//! handshake, for the second of those reasons (RFC 5246 §7.4.1.1 has a
-//! client that is negotiating ignore it).
+//! Once only the peer's Finished is left to come (client after flight 5,
+//! server after CertificateVerify), epoch-0 handshake fragments numbered at
+//! or past it are discarded too: otherwise a spoofer could end the handshake
+//! with a misplaced message, or take the Finished's number so the real one
+//! is read as a retransmission and the handshake times out. HelloRequest is
+//! always discarded for the second reason (RFC 5246 §7.4.1.1).
 //!
-//! ChangeCipherSpec itself changes nothing here. The read keys exist from the
-//! moment the master secret does, and an epoch-1 record is opened with them
-//! whether or not the ChangeCipherSpec announcing it has arrived — the two
-//! travel in separate records and may be reordered — so nothing done to a
-//! ChangeCipherSpec record moves a key. A few epoch-1 records that arrive
-//! before the keys exist are held and opened once they do.
+//! ChangeCipherSpec moves no key: read keys exist once the master secret
+//! does, and epoch-1 records are opened with them regardless of CCS order.
+//! A few epoch-1 records arriving before the keys are held until then.
 //!
 //! # What is released, and when
 //!
@@ -108,32 +85,22 @@
 //! [`Failure::PeerAlert`]; `close_notify` is answered with a `close_notify` of
 //! our own and ends it with [`Event::Closed`]; other warnings are ignored.
 //!
-//! An alert in epoch 0 is believed only while the handshake is running. Until
-//! the keys exist a peer has no other way to say why it gave up, and anyone
-//! able to forge that alert could as easily forge a handshake message that
-//! ends the handshake anyway. Once the connection is established every
-//! genuine alert arrives protected, and a plaintext one is discarded. And a
-//! server that has accepted no ClientHello yet has had nothing from its peer
-//! to refuse, so it discards one too: believed, a single forged datagram
-//! would end it before its handshake began.
+//! An epoch-0 alert is believed only during the handshake (a forger could
+//! end it with a forged handshake message anyway). Once established, only
+//! protected alerts count. A server with no accepted ClientHello discards
+//! alerts too, so one forged datagram cannot end it.
 //!
 //! # The server's cookie exchange
 //!
-//! With [`Config::cookie_exchange`] on, the default, a server answers a
-//! ClientHello without a valid cookie with a HelloVerifyRequest and keeps
-//! nothing (RFC 6347 §4.2.1): no allocation, no signature, no reassembly. So
-//! until a cookie comes back a server reads only a ClientHello that arrives
-//! in one fragment, and discards one that does not parse rather than answer
-//! it — an answer would let a single forged datagram end the handshake. It
-//! discards every alert and every protected record before that ClientHello
-//! too, for the same reason and so as to hold nothing. A DTLS-SRTP
-//! ClientHello is a couple of hundred octets and is not fragmented.
+//! With [`Config::cookie_exchange`] (the default) a server answers a
+//! cookieless ClientHello with HelloVerifyRequest and keeps nothing (RFC
+//! 6347 §4.2.1). Until a cookie returns it reads only unfragmented
+//! ClientHellos (a DTLS-SRTP one is a few hundred octets), silently drops
+//! unparsable ones, alerts and protected records, so no single forged
+//! datagram can end it.
 //!
-//! The cookie is computed without a client address. A connection is one
-//! association, and every datagram it produces goes where the caller sends
-//! it, not to wherever a ClientHello claims to come from; a cookie that comes
-//! back proves the client reads what is sent there, which is the property
-//! the address in §4.2.1's formula exists to prove.
+//! The cookie has no client address: the caller decides where datagrams go,
+//! so a returned cookie already proves the client reads that destination.
 
 mod client;
 mod flight;
@@ -657,14 +624,9 @@ impl Core {
     /// The peer sent a flight from before our last one again: send ours
     /// again, at most once per half of the initial timer.
     ///
-    /// The give-up timer is left running on its own schedule. This prompt
-    /// travels in epoch 0, before any key exists, so nothing ties it to the
-    /// peer that owns the handshake — anyone able to spoof that address can
-    /// forge it, as often as the quiet gap above lets one through. Letting
-    /// it push the deadline back would let a forged stream of these hold a
-    /// handshake open forever, long past the point the real peer, if it is
-    /// even still there, would have been given up on. RFC 6347 §4.2.4 asks
-    /// only that the flight be sent again, not that the deadline move.
+    /// The give-up deadline does not move: this unauthenticated prompt could
+    /// be forged to hold the handshake open forever. RFC 6347 §4.2.4 only
+    /// asks for a resend.
     fn on_peer_retransmission(&mut self, now: Instant) {
         let gap = self.settings.retransmission.initial / 2;
         if self

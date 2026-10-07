@@ -4,43 +4,25 @@
 //! Putting fragmented handshake messages back together (RFC 6347 §4.2.2 and
 //! §4.2.3), with a bound on everything a peer can make it hold.
 //!
-//! §4.2.3 obliges a receiver to "buffer it until it has the entire handshake
-//! message" and to "handle overlapping fragment ranges". Taken literally that
-//! is an invitation: a 24-bit length announced in a twelve-octet datagram asks
-//! for sixteen megabytes, and one-octet fragments at every other offset ask
-//! for a bookkeeping entry each. So a peer gets exactly what [`Limits`] says —
-//! a longest message, a most pieces per message, a most messages held ahead,
-//! a most octets across all of them — and a fragment that would pass one is
-//! refused without disturbing what is already held.
+//! Taken literally, §4.2.3's buffering would let a 12-octet datagram demand
+//! 16 MiB, or one-octet fragments demand a bookkeeping entry each. So a peer
+//! gets exactly what [`Limits`] allows, and a fragment exceeding it is refused
+//! without disturbing what is held.
 //!
 //! # When two fragments of one message disagree
 //!
-//! Another type, another total length, other octets where they overlap: two
-//! such fragments cannot both be the sender's, and in epoch 0 neither is
-//! authenticated. Keeping the first to arrive would let an injector that gets
-//! one forged fragment in ahead of the genuine message refuse every genuine
-//! fragment after it, and the retransmissions of those, for good — the
-//! forgery never leaves. So the later one wins: what is held for that message
-//! is discarded, and the disagreeing fragment starts it again.
-//!
-//! A genuine sender retransmits its whole flight until it is answered, so the
-//! message is rebuilt by the first transmission to arrive after the last
-//! injection, and an injector has to keep pace with every retransmission to
-//! hold it off rather than win once. What an injector can do under any rule —
-//! deliver a whole forged message first — is caught by the transcript, at
-//! CertificateVerify or Finished. A message already handed out is never
-//! touched.
+//! In epoch 0 neither is authenticated. Keeping the first would let one
+//! forged fragment lock out the genuine message forever, so the later one
+//! wins and the message restarts. A genuine sender retransmits whole
+//! flights, so an injector must keep pace with every retransmission. A
+//! wholly forged message is caught by the transcript at CertificateVerify
+//! or Finished. Messages already handed out are never touched.
 //!
 //! # When the octets held run out
 //!
-//! The same injector can lock a message out another way: a fragment of a
-//! message announced at the longest length allowed, numbered ahead of the
-//! flight where no genuine fragment comes to replace it, and a second one
-//! beside it, hold every octet [`Limits::max_buffered`] allows, and no
-//! genuine message fits after them. So a message nearer the next one to be
-//! delivered takes its room from what is held further ahead, the furthest
-//! first. Nothing is lost by it: the peer sends a message it sent again, and
-//! one that is genuinely next always gets in.
+//! Two forged maximum-length fragments numbered far ahead could fill
+//! [`Limits::max_buffered`]. So a message nearer delivery takes room from
+//! those held further ahead, furthest first; the peer resends those anyway.
 
 use super::{Fragment, HandshakeType};
 use crate::Error;
@@ -253,14 +235,8 @@ impl Reassembler {
     /// `message_seq`, `freed` of those held now going with what they are
     /// replaced by.
     ///
-    /// What is held for messages further ahead gives way, the furthest first:
-    /// the peer sends those again, and a message nearer the next one to be
-    /// delivered is never refused for their sake. Otherwise two unauthenticated
-    /// fragments, each announcing the longest message allowed at a sequence
-    /// number no genuine message takes, would fill the budget and refuse every
-    /// genuine message, and every retransmission of it, for as long as the
-    /// handshake lasts. When giving all of them way would not be enough, nothing
-    /// is given up.
+    /// Messages further ahead give way, furthest first (see the module
+    /// docs). If evicting all of them would not suffice, nothing is evicted.
     fn make_room(&mut self, message_seq: u16, freed: usize, length: usize) -> Result<(), Error> {
         let max_buffered = self.limits.max_buffered;
         let ahead: usize = self

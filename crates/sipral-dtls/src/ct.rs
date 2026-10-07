@@ -8,13 +8,9 @@ use core::hint::black_box;
 /// Whether `a` and `b` hold the same octets, without returning early at the
 /// first difference.
 ///
-/// The lengths are compared first and in the open: every caller compares
-/// values whose length is public — a hash output, a `verify_data`, a cookie
-/// the peer sent. What must not leak is how many leading octets of a secret
-/// an attacker has guessed right, and the loop gives that away to nobody
-/// because it runs to the end and folds every difference into one octet. The
-/// fold goes through `black_box` so the optimiser is not invited to turn it
-/// back into a search for the first mismatch.
+/// Lengths are compared openly (they are public for every caller). The loop
+/// folds all differences into one octet so the matching prefix length does
+/// not leak; `black_box` keeps the optimiser from reintroducing early exit.
 pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
