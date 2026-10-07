@@ -48,10 +48,10 @@ What each release brings, the same list as <https://sipral.org/roadmap/>: the si
 
 October 2026, released.
 
-- SIP signalling, media, SRTP and DTLS-SRTP, ICE, STUN and TURN, STIR/SHAKEN behind one C ABI
-- Swift, Kotlin and Java, .NET, Python, Dart and React Native bindings
-- Device mode with the platform echo cancellation, or application mode for voice agents
-- Ten thousand concurrent calls in one process
+- SIP signalling, media, SRTP and DTLS-SRTP, ICE, STUN and TURN, STIR/SHAKEN behind one C ABI *(done)*
+- Swift, Kotlin and Java, .NET, Python, Dart and React Native bindings *(done)*
+- Device mode with the platform echo cancellation, or application mode for voice agents *(done)*
+- Ten thousand concurrent calls in one process *(done)*
 
 ### 1.1 — Sharper at scale, released ahead of schedule
 
