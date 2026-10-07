@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The names the native halves hand over, as types. Each is the library's own
-// enumeration in lower camel case -- SIPRAL_CALL_STATE_EARLY_MEDIA is
-// "earlyMedia" -- which is what the Swift layer's cases are called already
-// and what the Kotlin half turns its constants into.
+// The names the native halves hand over: the library's enumerations in lower
+// camel case (SIPRAL_CALL_STATE_EARLY_MEDIA is "earlyMedia").
 
 /** `sipral_registration_state_t`. */
 export type RegistrationState =
@@ -95,13 +93,10 @@ export type ServerReach = 'notTested' | 'answered' | 'timedOut' | 'transportFail
 
 export interface OpenOptions {
   /**
-   * The phone's own address on the network the server is reached over: the
-   * stack signals from it and every call's audio is sent from it. Left out,
-   * the stack listens on every interface and advertises the address of the
-   * route toward its first account's server -- the address a PBX on the
-   * network reaches the phone at -- and each call's audio goes from the
-   * route toward the far end. A loopback address is never advertised to a
-   * server elsewhere: the library refuses that as `unreachableAddress`.
+   * The local address for signalling and audio. Left out, the stack listens
+   * on every interface and advertises the route toward each server. A
+   * loopback address is never advertised to a remote server: the library
+   * refuses it as `unreachableAddress`.
    */
   bindHost?: string;
   /** Zero, or left out, for any free port. */
@@ -116,16 +111,15 @@ export interface OpenOptions {
   /** host:port of a STUN server, for the address the phone is seen from. */
   stunServer?: string;
   /**
-   * "automatic" (the default) opens the microphone and the speaker with the
-   * first call's audio and closes them with the last; "manual" opens them
-   * only between `audio.activate()` and `audio.deactivate()`, which is what
-   * CallKit's audio session callbacks and Android's audio focus are for.
+   * "automatic" (the default) opens the audio devices with the first call and
+   * closes them with the last; "manual" opens them only between
+   * `audio.activate()` and `audio.deactivate()`, for CallKit's audio session
+   * callbacks and Android's audio focus.
    */
   audioActivation?: 'automatic' | 'manual';
   /**
-   * What every call does about SRTP. "bestEffort" offers SDES on plain
-   * RTP/AVP: encrypted when the server's answer takes a key, plain when it
-   * takes none, for a PBX that answers an RTP/SAVP offer with 488.
+   * "bestEffort" offers SDES on plain RTP/AVP and encrypts only if the answer
+   * takes a key, for a PBX that answers an RTP/SAVP offer with 488.
    */
   srtp?: Srtp;
   /** SRTP suites, most preferred first, by their RFC 4568 and RFC 7714 names. */
@@ -133,48 +127,40 @@ export interface OpenOptions {
   /** The path MTU toward the server when the deployment knows it; RFC 3261 §18.1.1 moves a request to a stream within 200 bytes of it. */
   pathMtu?: number;
   /**
-   * A deliberate deviation from RFC 3261 §18.1.1, for a server that takes
-   * SIP over UDP alone: once no stream to it can be had, a request up to this
-   * many bytes goes over UDP anyway. Zero, or left out, for never.
+   * A deliberate deviation from RFC 3261 §18.1.1 for UDP-only servers: when
+   * no stream can be had, requests up to this size go over UDP anyway. Zero
+   * for never.
    */
   datagramWithoutStreamBytes?: number;
-  /** At least 16 bytes the installation keeps, as hexadecimal, keying the log's pseudonyms so that two runs compare; a secret, like a key. */
+  /** At least 16 bytes, as hex, keying the log's pseudonyms so runs compare. A secret. */
   pseudonymSalt?: string;
-  /** The trace writes whole SIP messages, credentials and keys taken out; `client.setDiagnosticTrace` turns it on and off later. */
+  /** The trace writes whole SIP messages, credentials removed. */
   diagnosticTrace?: boolean;
   /**
-   * The SHA-256 fingerprint of the one certificate the TLS connection to
-   * `signallingServer` trusts -- "SHA256 Fingerprint=AB:CD:..." as openssl
-   * prints it, or any other form `pinDigest` reads -- for a PBX that signed
-   * its own: the whole verdict, no authority or name consulted. Read before
-   * the native half is asked, and handed to it as bare digits.
+   * The SHA-256 fingerprint of the one certificate `signallingServer` may
+   * present, in any form `pinDigest` reads, for a self-signed PBX. No
+   * authority or name is consulted.
    */
   tlsPin?: string;
   /**
-   * False opens the microphone and the speaker past the platform's echo
-   * cancellation -- the voice-processing unit's processing bypassed on iOS,
-   * the voice-recognition preset rather than the voice-communication one on
-   * Android -- for a headset, which has no echo to cancel, or an application
-   * that cancels it on each call itself. On unless said otherwise.
+   * False bypasses the platform's echo cancellation (voice processing on
+   * iOS, the voice-recognition preset on Android), for a headset or an
+   * application that cancels echo itself. On by default.
    */
   systemEchoCancellation?: boolean;
   /**
-   * What a party this end holds is sent while the hold lasts. Left out,
-   * silence, in either mode. "application" sends what the client sends --
-   * for a client in application mode playing hold music or an announcement
-   * itself.
+   * What a held party receives: silence by default; "application" sends what
+   * the client sends (hold music, an announcement).
    */
   heldAudio?: 'silence' | 'application';
   /**
-   * The most calls the client holds at once, either way; left out or 0,
-   * 128. Past it a call that arrives is answered 503 with `Retry-After: 2`
-   * and `placeCall` rejects with `limitReached`.
+   * Maximum concurrent calls (0 for 128). Past it an incoming call gets 503
+   * with `Retry-After: 2` and `placeCall` rejects with `limitReached`.
    */
   maxDialogs?: number;
   /**
-   * The most requests from other ends the client works on at once; left out
-   * or 0, 256. Raised beside `maxDialogs` past a few hundred calls, to three
-   * a call and 256 more (`docs/08-ffi.md`, "Limits, and what went out twice").
+   * Maximum concurrent incoming requests (0 for 256). Raise it with
+   * `maxDialogs`, to three per call plus 256 (`docs/08-ffi.md`).
    */
   maxServerTransactions?: number;
 }
@@ -218,9 +204,8 @@ export interface AccountOptions {
   /** host:port that requests go to: the registrar, or the outbound proxy. One of this and `serverUri`. */
   registrarAddress?: string;
   /**
-   * The server named by a URI whose host RFC 3263 locates --
-   * "sip:pbx.example.com" -- in place of `registrarAddress`. The native half
-   * asks the platform's resolver; `located` and `locateFailed` say how it went.
+   * A server URI ("sip:pbx.example.com") located by RFC 3263 instead of
+   * `registrarAddress`; `located` and `locateFailed` report the outcome.
    */
   serverUri?: string;
   /** Ask the domain for NAPTR records before SRV (RFC 3263 §4.1). */
@@ -236,12 +221,9 @@ export interface AccountOptions {
   /** Zero, or left out, for the library's own default. */
   expiresSeconds?: number;
   /**
-   * "tcp" or "tls": a connection of the account's own to its server, beside
-   * accounts on the client's UDP socket to other servers, so that one client
-   * holds an account on UDP with one PBX and another on TCP or TLS with a
-   * second. The native half opens it when the stack asks, and the REGISTER
-   * and every call of the account go over it. Only on a client signalling
-   * over "udp".
+   * "tcp" or "tls": the account gets its own connection to its server, so
+   * one client can mix UDP and stream accounts. The REGISTER and every call
+   * go over it. Only on a client signalling over "udp".
    */
   streamProtocol?: 'tcp' | 'tls';
   /**
@@ -251,12 +233,10 @@ export interface AccountOptions {
    */
   tlsPin?: string;
   /**
-   * The realms the password answers (RFC 3261 §22.1). Left out, the account
-   * answers the realm its server first challenges it with and every realm
-   * its REGISTERs are challenged with, and no other; an SBC or outbound
-   * proxy at the server's address that challenges calls under a realm of its
-   * own needs both named. A challenge the password is not for is not
-   * answered, and `challengeDeclined` says who asked and why.
+   * The realms the password answers (RFC 3261 §22.1). Left out: the first
+   * challenge's realm plus every realm REGISTER is challenged with; an SBC
+   * challenging calls under its own realm needs both named. Other challenges
+   * are not answered and raise `challengeDeclined`.
    */
   realms?: string[];
 }
@@ -267,18 +247,16 @@ export interface PlaceCallOptions {
   /** This call's codecs, in place of the client's. */
   codecs?: string;
   /**
-   * Send the call on to the targets a 3xx names (RFC 3261 §8.1.3.4). Off by
-   * default: a 3xx then ends the call with its status, and where it pointed
-   * is the application's to act on.
+   * Follow a 3xx's targets (RFC 3261 §8.1.3.4). Off by default: a 3xx ends
+   * the call with its status.
    */
   followRedirects?: boolean;
 }
 
 export interface AnswerOptions {
   /**
-   * The codecs this call takes, in place of the client's: "PCMA,PCMU". An
-   * answer keeps the offer's order (RFC 3264 §6.1), so this chooses which
-   * codecs rather than which comes first.
+   * The codecs this call takes ("PCMA,PCMU"). It chooses which, not their
+   * order: an answer keeps the offer's order (RFC 3264 §6.1).
    */
   codecs?: string;
 }

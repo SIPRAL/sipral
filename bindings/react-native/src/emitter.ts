@@ -7,13 +7,11 @@ export interface Subscription {
 }
 
 /**
- * An emitter whose event names and payloads are one type, so that a listener
- * for "callEnded" is handed a `CallEndedEvent` and a misspelt name does not
- * compile.
+ * An emitter typed by event name, so a misspelt name does not compile.
  *
- * A listener that throws does not stop the others: what it threw is handed
- * to `onListenerError`, which rethrows it on a later turn by default so that
- * it still reaches the application's own error reporting.
+ * A listener that throws does not stop the others: the error goes to
+ * `onListenerError`, which by default rethrows it on a later turn so it
+ * still reaches the application's error reporting.
  */
 export class TypedEmitter<Events extends {[K in keyof Events]: unknown}> {
   private readonly listeners = new Map<keyof Events, Set<(payload: never) => void>>();

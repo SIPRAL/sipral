@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The codegen spec: what crosses between JavaScript and the two native
-// halves. React Native's codegen reads this file and writes the Java and
-// Objective-C++ interfaces those halves implement, so everything here is in
-// the few types codegen understands -- strings, numbers, booleans, plain
-// objects -- and `src/index.ts` is where they become a typed API.
+// The codegen spec for the two native halves, so only codegen's types
+// (strings, numbers, booleans, plain objects); `src/index.ts` types them.
 //
 // Handles cross as strings: a Sipral handle is 64 bits, and a JavaScript
-// number holds 53 of them exactly.
+// number holds only 53 exactly.
 
 import type {CodegenTypes, TurboModule} from 'react-native';
 import {TurboModuleRegistry} from 'react-native';
@@ -221,7 +218,7 @@ export interface Spec extends TurboModule {
   activateAudio(): Promise<void>;
   deactivateAudio(): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
-  /** `sipral_audio_set_system_echo_cancellation`: the devices reopened at once with or without the platform's canceller. */
+  /** `sipral_audio_set_system_echo_cancellation`; open devices are reopened at once. */
   setSystemEchoCancellation(on: boolean): Promise<void>;
   setDiagnosticTrace(on: boolean): Promise<void>;
   /** A network test before a call; "" leaves the account or the echo call out. Resolves with the test's number. */

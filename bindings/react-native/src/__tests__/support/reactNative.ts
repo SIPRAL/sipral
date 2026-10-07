@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// What `react-native` is under jest: the one export this package imports at
-// run time, TurboModuleRegistry, answering with a marker that names the
-// module asked for, so a test can see which name the spec looks up.
+// `react-native` under jest: TurboModuleRegistry returns a marker naming the
+// module asked for, so a test can check which name the spec looks up.
 
 export const asked: string[] = [];
 

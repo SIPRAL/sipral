@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The API an application writes against: a client, its accounts and its
-// calls, each with the state the native events last reported and a typed
-// emitter. What a call cannot do in the state it is in is refused here,
-// before anything crosses to native code, with the same `wrongState` the
-// library would answer -- so a button pressed twice, or after the far end
-// hung up, is one rejected promise and not a request sent into a call that
-// is gone.
+// The application-facing API: a client, its accounts and calls, each with
+// its last reported state and a typed emitter. An action the call's state
+// does not allow is refused here with `wrongState` before crossing to
+// native code, so a button pressed twice is one rejected promise rather than
+// a request into a call that is gone.
 
 import type {EventSubscription} from 'react-native';
 import type {NativeEvent, Spec} from './NativeSipral';
@@ -46,7 +44,7 @@ export interface RegistrationChangedEvent {
   statusCode: number;
   /** When the next attempt goes, for "retrying"; zero otherwise. */
   retryInMs: number;
-  /** Why it failed -- "unreachableContact" for a Contact the registrar cannot reach -- or "none". */
+  /** Why it failed ("unreachableContact": the registrar cannot reach the Contact), or "none". */
   failure: RegistrationFailure;
 }
 
@@ -74,9 +72,8 @@ export interface ChallengeDeclinedEvent {
 }
 
 /**
- * An account's server asking for an OAuth 2.0 access token (RFC 8898):
- * check `authzServer` against the authorization servers the application
- * trusts, fetch a token for `scope`, and hand it to
+ * The server wants an OAuth 2.0 access token (RFC 8898). Check `authzServer`
+ * against the trusted ones, fetch a token for `scope`, and pass it to
  * `account.setAccessToken`.
  */
 export interface TokenRequiredEvent {
@@ -97,11 +94,7 @@ export interface TokenRequiredEvent {
   authzServer: string;
 }
 
-/**
- * What a network test found: every part of one test
- * `client.networkTest` started, and the verdict, the worst of the parts
- * tested.
- */
+/** A network test's result; `verdict` is the worst of the parts tested. */
 export interface NetworkTestEvent {
   /** The number `client.networkTest` resolved with. */
   test: number;
@@ -280,24 +273,21 @@ export class SipralAccount {
   }
 
   /**
-   * Gives the binding up: a REGISTER with Expires: 0. The registration state
-   * reads unregistered as soon as this returns, before the registrar answers;
-   * the answer is the registration-changed event that follows. Wait for that
-   * event before closing the stack, which otherwise cannot answer a challenge
-   * to the un-REGISTER.
+   * Gives the binding up (REGISTER with Expires: 0). The state reads
+   * unregistered at once; the registrar's answer comes as a later
+   * registration event. Wait for it before closing, or a challenge to the
+   * un-REGISTER goes unanswered.
    */
   unregister(): Promise<void> {
     return this.client.run(() => this.usable(), (native) => native.unregister(this.id));
   }
 
   /**
-   * The OAuth 2.0 access token this account's server asked for (RFC 8898),
-   * in place of any it had; null takes it away. The answer to
-   * 'tokenRequired', and the way a renewed token goes in: from the next
-   * request on, the server's Bearer challenge is answered with it. A
-   * registration that failed for want of one starts again with
-   * `register()`. Rejected with 'invalidArgument' for a token that is not
-   * RFC 6750's b64token.
+   * Sets the OAuth 2.0 access token (RFC 8898), replacing any previous one;
+   * null removes it. Answers 'tokenRequired' and renews a token; the next
+   * Bearer challenge is answered with it. A registration that failed for
+   * want of a token restarts with `register()`. Rejects with
+   * 'invalidArgument' for a token that is not an RFC 6750 b64token.
    */
   setAccessToken(token: string | null): Promise<void> {
     return this.client.run(
@@ -306,10 +296,7 @@ export class SipralAccount {
     );
   }
 
-  /**
-   * Resolve once the account is registered, reject with the event that
-   * said it will not be. Registering is asked for here too.
-   */
+  /** Registers, resolving once registered or rejecting with the failing event. */
   registerAndWait(timeoutMs = 30_000): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -424,12 +411,10 @@ export class SipralCall {
   }
 
   /**
-   * The call's own audio on top of the client's: `input` is what the
-   * microphone sends this call alone, `output` how loud it is in the speaker
-   * beside the other calls. Mute the call being spoken about in a
-   * consultation, turn one down. They last from the moment the call's audio
-   * starts to its end, through a hold and back; before and after, the native
-   * half refuses them as `wrongState`.
+   * Per-call audio on top of the client's: `input` is what the microphone
+   * sends this call alone, `output` its loudness beside other calls. Valid
+   * from the start of the call's audio to its end, holds included; outside
+   * that the native half refuses with `wrongState`.
    */
   readonly audio = {
     setGain: (direction: AudioDirection, gain: number): Promise<void> =>
@@ -460,12 +445,10 @@ export class SipralCall {
         (native) => native.callAudio(this.id, direction),
       ),
     /**
-     * The rate the call's frames cross the native layer at, whatever rate
-     * the codec runs at: 8000, 16000, 24000 or 48000, or 0 for the codec's
-     * own. Resolves with the rate and the length of one frame there, which
-     * keeps the call's duration. It is for a call whose frames the
-     * application carries; on the phone's own devices the native half
-     * refuses it as `wrongState`.
+     * The PCM rate of the call's frames, independent of the codec: 8000,
+     * 16000, 24000 or 48000, or 0 for the codec's own. Resolves with the rate
+     * and frame length. Only for application-carried audio; on the phone's
+     * devices it is refused as `wrongState`.
      */
     setAppRate: (hz: number): Promise<AppRate> =>
       this.client.run(
@@ -667,10 +650,7 @@ export class SipralClient {
 
   private constructor(private readonly native: Spec) {}
 
-  /**
-   * Open the stack. Events are listened for before the native half is asked
-   * to open, so that nothing it raises while opening is missed.
-   */
+  /** Open the stack. Listening starts first so no event raised while opening is missed. */
   static async open(options: OpenOptions, native: Spec): Promise<SipralClient> {
     if (SipralClient.opened !== undefined) {
       throw new SipralError('wrongState', 'a client is already open; close it first');
@@ -810,18 +790,11 @@ export class SipralClient {
   }
 
   /**
-   * Whether the trace writes every SIP message whole, with its peer, from now
-   * on -- credentials and keys taken out either way -- or pseudonymised, as
-   * by default. For a diagnosis.
-   */
-  /**
-   * Test the network before a call without placing one of its own, and
-   * resolve with the test's number; what it found arrives as
-   * 'networkTest'. `account` has its server asked with an OPTIONS on its
-   * own transport. `echoCall` is a call placed to an echo service: its
-   * audio is measured for `echoMs` (8000 by default) once its media
-   * starts, and the test hangs it up. A part that has not answered within
-   * `timeoutMs` (30000 by default) counts as failed.
+   * Start a network test and resolve with its number; the result arrives as
+   * 'networkTest'. `account`'s server gets an OPTIONS. `echoCall`, a call to
+   * an echo service, is measured for `echoMs` (8000 by default) and then
+   * hung up by the test. Parts silent after `timeoutMs` (30000 by default)
+   * count as failed.
    */
   networkTest(
     options: {account?: SipralAccount; echoCall?: SipralCall; echoMs?: number; timeoutMs?: number} = {},
@@ -838,16 +811,12 @@ export class SipralClient {
     );
   }
 
+  /** Switch the trace between whole SIP messages and pseudonymised ones; credentials are removed either way. */
   setDiagnosticTrace(on: boolean): Promise<void> {
     return this.run(() => undefined, (native) => native.setDiagnosticTrace(on));
   }
 
-  /**
-   * What the stack runs with, every default filled in: the transport, the
-   * codecs' count and frame, the SRTP suites the calls offer in order,
-   * whether a pseudonym salt was given, whether the diagnostic trace is whole
-   * now, and whether the platform's echo cancellation is asked for.
-   */
+  /** The settings in effect, defaults filled in. */
   async settings(): Promise<Settings> {
     const read = await this.run(() => undefined, (native) => native.settings());
     return {
@@ -862,12 +831,9 @@ export class SipralClient {
   }
 
   /**
-   * The audio devices: the library runs them, this only says when they are
-   * open, whether the microphone is heard, and whether the platform's own
-   * echo cancellation runs behind it. `setSystemEchoCancellation` switches
-   * that on the running client (ABI 1.1): open devices are reopened at once
-   * with or without it, where they were and with the mute, and a call keeps
-   * its media through a gap as long as the reopen; `settings()` reads it back.
+   * The audio devices, which the library runs. `setSystemEchoCancellation`
+   * reopens open devices at once with or without the platform's canceller;
+   * calls keep their media across the reopen.
    */
   readonly audio = {
     activate: (): Promise<void> => this.run(() => undefined, (native) => native.activateAudio()),
@@ -906,10 +872,8 @@ export class SipralClient {
   }
 
   /**
-   * @internal The call a handle names. An event can name a call before the
-   * promise that made it has resolved -- the far end answers a placed call
-   * that fast on a quiet network -- so the first to arrive makes it and the
-   * other finds it.
+   * @internal An event can name a call before the promise that made it
+   * resolves, so whichever arrives first creates it.
    */
   callFor(id: string, direction: CallDirection, remote: string): SipralCall {
     let call = this.calls.get(id);
