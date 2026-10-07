@@ -148,7 +148,10 @@ impl End {
             }
         }
         while let Some(event) = self.connection.poll_event() {
-            assert!(!self.finished, "an event after the end failed or closed: {event:?}");
+            assert!(
+                !self.finished,
+                "an event after the end failed or closed: {event:?}"
+            );
             match event {
                 Event::Connected(keys) => {
                     assert!(self.keys.is_none(), "connected twice");
@@ -207,7 +210,11 @@ fuzz_target!(|data: &[u8]| {
     server_config.cookie_exchange = setup & 1 != 0;
     server_config.srtp_profiles = profiles(setup >> 2);
 
-    let expected = if setup & 0x40 != 0 { stranger } else { server_identity };
+    let expected = if setup & 0x40 != 0 {
+        stranger
+    } else {
+        server_identity
+    };
     let mut client_config = Config::new(
         Role::Client,
         client_identity.0.clone(),

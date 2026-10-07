@@ -274,11 +274,20 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
             await FirstMatchingAsync(
                 aliceCall.Events, e => e.Kind == SipralEventKind.SessionChanged && e.CallInfo!.HeldHere, Timeout);
 
-            var tone = new short[aliceCall.Media!.FrameSamples * 40];
+            // The tone goes out a frame at a time for the whole window, so a
+            // loaded machine that settles the hold late still has tone to carry.
+            var tone = new short[aliceCall.Media!.FrameSamples];
             Array.Fill(tone, (short)8000);
-            aliceCall.Media.SendAudio(tone);
             var loudest = 0;
-            using var listening = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+            using var listening = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var speaking = Task.Run(async () =>
+            {
+                while (!listening.IsCancellationRequested)
+                {
+                    aliceCall.Media.SendAudio(tone);
+                    await Task.Delay(20);
+                }
+            });
             try
             {
                 await foreach (var frame in bobCall.Media!.Frames.WithCancellation(listening.Token))
@@ -287,11 +296,16 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
                     {
                         loudest = Math.Max(loudest, Math.Abs((int)sample));
                     }
+                    if (loudest > 1000)
+                    {
+                        listening.Cancel();
+                    }
                 }
             }
             catch (OperationCanceledException)
             {
             }
+            await speaking;
             return loudest;
         }
         finally
