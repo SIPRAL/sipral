@@ -4,34 +4,21 @@
 //! One node, in one direction: samples in from a source, or samples out to a
 //! sink, and nothing else.
 //!
-//! One direction, because a PipeWire node is one: `media.class` is
-//! `Audio/Source` or `Audio/Sink`, never both. A duplex type here would be two
-//! of these in a coat, and it would hide the case a softphone most needs to
-//! get right — microphone on one node, speaker on another — so there are two
-//! types and the caller holds both, the same as `sipral-io-wasapi`.
+//! A node is one direction, so the caller holds a capture and a playback
+//! stream.
 //!
-//! Each stream is a `pw_stream` of its own, on a `pw_thread_loop` of its own,
-//! made with `pw_stream_new_simple`, which gives it its own context and its
-//! own connection to the daemon. That costs a socket per direction and buys
-//! a teardown that is local: closing one stream stops one loop and touches
-//! nothing another stream is using.
+//! Each stream has its own `pw_stream` and `pw_thread_loop`
+//! (`pw_stream_new_simple`): a socket per direction, but a local teardown.
 //!
-//! Three threads meet here. The caller's, which opens, starts, stops, reads
-//! and writes. The thread loop's, which PipeWire runs every event on except
-//! one — `state_changed` and `param_changed` arrive there, with the loop's
-//! lock held. And PipeWire's realtime data thread, which runs `process`,
-//! because the stream is connected with `PW_STREAM_FLAG_RT_PROCESS`: that is
-//! the only way a period is never late behind whatever else the loop is
-//! doing, and it is why `process` touches nothing but the ring, the level
-//! channel, a handful of atomics, and the calls `pipewire/stream.h` marks RT
-//! safe — `pw_stream_dequeue_buffer`, `pw_stream_queue_buffer` and
-//! `pw_stream_get_time_n`. It never takes a lock and never allocates.
+//! Threads: the caller's; the loop's (`state_changed`, `param_changed`, with
+//! the loop lock held); and PipeWire's realtime data thread, which runs
+//! `process` (`PW_STREAM_FLAG_RT_PROCESS`). `process` touches only the ring,
+//! the level channel, atomics and the calls `pipewire/stream.h` marks RT safe
+//! (`pw_stream_dequeue_buffer`, `pw_stream_queue_buffer`,
+//! `pw_stream_get_time_n`); no locks, no allocation.
 //!
-//! The format is offered as one fixed object — mono, signed sixteen-bit, at
-//! the rate asked for — and PipeWire's adapter converts between that and
-//! whatever the graph runs. So unlike a WASAPI stream, what a caller asked for
-//! is what a caller gets, and resampling to the graph's rate is PipeWire's
-//! work rather than a number the caller has to size its frames by.
+//! One fixed format is offered and PipeWire's adapter converts, so the caller
+//! gets the rate it asked for.
 
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::size_of;
@@ -58,14 +45,12 @@ use crate::ring::Ring;
 use crate::status::Error;
 use crate::sys::{self, PwStream, PwThreadLoop};
 
-/// Frames the ring holds unless the caller says otherwise: enough to ride out
-/// a scheduling hiccup, short enough that a stalled reader is heard as a gap
-/// rather than as a delay that never recovers.
+/// Enough for a scheduling hiccup; short enough that a stalled reader is a
+/// gap, not a permanent delay.
 const DEFAULT_DEPTH_FRAMES: usize = 16;
 
-/// How long `open` waits for the daemon to take the stream on. Negotiation is
-/// a couple of round trips on a working desktop; whole seconds are for a
-/// daemon that is not answering.
+/// How long `open` waits for the daemon; negotiation takes a couple of round
+/// trips.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
 /// Samples the capture side scales at a time, on the realtime thread's own
@@ -97,15 +82,12 @@ pub struct StreamConfig {
     /// Rate and frame length wanted, which is what is delivered: PipeWire's
     /// adapter converts to and from whatever the graph runs.
     pub format: StreamFormat,
-    /// Which node, and what to do when it is not there. The default is the
-    /// session's default node as the stream opens, which is what a softphone
-    /// usually wants.
+    /// Which node; by default the session's default at open time.
     pub device: DeviceChoice,
     /// Frames of buffering between the node and the caller.
     ///
-    /// This sizes the ring in this crate and nothing else. The graph's own
-    /// buffering is the quantum, which the stream asks to be one frame long
-    /// with `node.latency` — a request the graph may round, never a promise.
+    /// Sizes this crate's ring only. The quantum is requested as one frame
+    /// via `node.latency`, which the graph may round.
     pub depth_frames: usize,
 }
 
@@ -134,10 +116,7 @@ impl StreamConfig {
     /// A saved selection, at the given format: that node when the graph has
     /// it, and the session's route when it does not.
     ///
-    /// This is the one to build from a [`DeviceId`] read out of a
-    /// configuration file. A headset that powers off takes its node away and
-    /// brings it back under the same `node.name`, and in between a call still
-    /// has to have somewhere to go.
+    /// Use this for a [`DeviceId`] from a configuration file.
     #[must_use]
     pub fn preferring(device: DeviceId, format: StreamFormat) -> Self {
         Self {
@@ -153,10 +132,7 @@ impl Default for StreamConfig {
     }
 }
 
-/// What the realtime thread has to say, in numbers because it cannot speak.
-///
-/// Relaxed throughout: nothing depends on having seen them, and a reader one
-/// increment behind is reading a number that was true a moment ago.
+/// Realtime statistics, relaxed: nothing depends on them.
 #[derive(Default)]
 struct Meters {
     captured: AtomicU64,
@@ -186,10 +162,8 @@ impl Meters {
 
 /// The last `pw_time` the realtime thread read, kept field by field.
 ///
-/// Each field is its own relaxed atomic, so a reader can see one field from
-/// one cycle and the next from the following one. That is a few samples of
-/// disagreement in a figure that moves only when the graph's quantum or
-/// topology does, and it keeps the realtime side to plain stores.
+/// Fields may come from adjacent cycles; a few samples of skew is fine for a
+/// figure that rarely moves, and keeps the realtime side to plain stores.
 #[derive(Default)]
 struct Timing {
     delay: AtomicU64,
@@ -201,9 +175,7 @@ struct Timing {
 
 impl Timing {
     fn store(&self, time: &PwTime) {
-        // a negative delay is a capture stream's clock running ahead of the
-        // device it reads, by less than a cycle; as a distance back in time
-        // it is zero
+        // a capture clock slightly ahead of its device: treat as zero
         self.delay
             .store(u64::try_from(time.delay).unwrap_or(0), Ordering::Relaxed);
         self.rate_num.store(time.rate.num, Ordering::Relaxed);
@@ -228,11 +200,9 @@ impl Timing {
 
 /// Everything the three threads touch.
 ///
-/// The `pw_stream` is handed a pointer to this as its callbacks' `data`, and
-/// PipeWire keeps that pointer for the stream's whole life without Rust
-/// seeing the borrow. The `Arc` is what the owner holds, and it is dropped
-/// only after the stream is destroyed and the loop's thread is joined — or,
-/// when the realtime thread cannot be shown to have left, never.
+/// PipeWire holds a raw pointer to this as callback `data`. The owner's
+/// `Arc` is dropped only after the stream is destroyed and the loop joined,
+/// or never if the realtime thread may still be inside.
 struct Shared {
     direction: Direction,
     format: StreamFormat,
@@ -447,9 +417,7 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
     let Some(_pass) = shared.gate.enter() else {
         return;
     };
-    // A panic cannot be allowed to cross back into C, and a stream that
-    // stopped on one would be a call that went silent with nothing said. It
-    // is counted instead, and the counter above zero is the bug report.
+    // a panic must not cross into C: count it instead
     if panic::catch_unwind(AssertUnwindSafe(|| shared.process())).is_err() {
         Meters::add(&shared.meters.panics, 1);
     }
@@ -480,9 +448,7 @@ unsafe extern "C" fn on_state_changed(
     if state == abi::PW_STREAM_STATE_PAUSED || state == abi::PW_STREAM_STATE_STREAMING {
         shared.connected.store(true, Ordering::SeqCst);
     }
-    // Taken on and then gone, without this crate asking: the session manager
-    // destroyed the stream's node because its target went away, which is
-    // what `node.dont-reconnect` tells it to do, or the daemon itself went.
+    // gone unasked: the target left (`node.dont-reconnect`) or the daemon did
     if (state == abi::PW_STREAM_STATE_ERROR || state == abi::PW_STREAM_STATE_UNCONNECTED)
         && shared.connected.load(Ordering::SeqCst)
         && !shared.closing.load(Ordering::SeqCst)
@@ -496,11 +462,7 @@ unsafe extern "C" fn on_state_changed(
 
 /// `pw_stream_events.param_changed`, on the loop's thread.
 ///
-/// Only the settled format is read, and only to check it. The adapter is
-/// asked for one fixed format and converts everything else, so the format
-/// that comes back is the one offered; one that is not would be samples of
-/// the wrong shape in the ring, which is an error to report rather than a
-/// signal to reinterpret.
+/// Only checks the settled format; anything but the one offered is an error.
 unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const SpaPod) {
     if id != abi::SPA_PARAM_FORMAT || param.is_null() {
         return;
@@ -559,14 +521,11 @@ struct Session {
     thread_loop: *mut PwThreadLoop,
     /// Null only if `pw_stream_new_simple` refused.
     stream: *mut PwStream,
-    /// The format offered to `pw_stream_connect`. Kept for the stream's
-    /// life: the header does not say whether the call copies its params, so
-    /// this does not rely on it.
+    /// Kept alive: the header does not say whether connect copies params.
     offer: Box<FormatPod>,
     /// How far `open` got, and whether teardown has run.
     phase: Phase,
-    /// Kept so that a recover can ask for the same thing again and have the
-    /// choice resolved against the graph as it is then.
+    /// Re-resolved on a recover.
     config: StreamConfig,
     /// The node the choice resolved to, or `None` when it fell back to a
     /// session that had named no default.
@@ -574,9 +533,7 @@ struct Session {
     /// Held here as well as in `shared` so that a recover carries the volume
     /// and the mute across.
     channel: Arc<Channel>,
-    /// Whether the owner has asked for it to be running, which survives the
-    /// node going away — a stream carrying a call when that happened should
-    /// carry one after it is recovered.
+    /// What the owner asked for; survives a loss so a recover restarts it.
     started: bool,
     /// Whether the loss has been handed over, so it is reported once.
     loss_reported: bool,
@@ -757,19 +714,11 @@ impl Session {
         self.check_target_survived()
     }
 
-    /// Close the race `open`'s own two steps leave open: `registry::resolve`
-    /// names a node from a snapshot, and everything between that and this
-    /// call taking the loop's lock — building properties, starting the
-    /// thread, PipeWire answering `PW_ID_CORE`'s round trip — is time enough
-    /// for the node to be gone before `pw_stream_connect` ever reaches the
-    /// session manager. `target.object` is a property, not a promise it is
-    /// checked against anything, and `node.dont-fallback` (`abi.rs`) means a
-    /// target it cannot find is left unlinked rather than rerouted — which
-    /// changes nothing about the stream's own state, so `on_state_changed`
-    /// never sees it and never sets [`Shared::lost`]. One look at the
-    /// registry, taken the moment the stream reports itself connected,
-    /// turns that silent, unlinked stream into the same
-    /// [`StreamEvent::DeviceLost`] a node that goes later is reported as.
+    /// The node resolved from a snapshot may vanish before
+    /// `pw_stream_connect` reaches the session manager. `target.object` is
+    /// not validated and `node.dont-fallback` leaves the stream unlinked with
+    /// no state change, so [`Shared::lost`] would never be set. One registry
+    /// check once connected turns that into [`StreamEvent::DeviceLost`].
     fn check_target_survived(&self) -> Result<(), Error> {
         let Some(target) = &self.target else {
             return Ok(());
@@ -841,9 +790,7 @@ impl Session {
             return Err(Error::StreamError { message });
         }
         if self.shared.lost.load(Ordering::SeqCst) {
-            // The owner is still asking for a running stream; the loss is
-            // what `recover` answers, and it starts again only what was
-            // started.
+            // record the wish so `recover` restarts it
             self.started = true;
             return Err(Error::NoDevice);
         }
@@ -911,11 +858,8 @@ impl Session {
     /// 6. destroy the loop; `Shared` and the offered format go when `self`
     ///    does.
     ///
-    /// Step 3 failing is not survivable by carrying on. The realtime thread
-    /// is inside our memory and not coming out, so nothing is destroyed and
-    /// nothing is freed: the stream, the loop and `Shared` are leaked,
-    /// deliberately, because a buffer freed under a thread still reading it
-    /// is a crash somewhere else entirely.
+    /// If step 3 fails, the stream, loop and `Shared` are deliberately
+    /// leaked rather than freed under the realtime thread.
     fn teardown(&mut self) -> Result<(), Error> {
         let phase = core::mem::replace(&mut self.phase, Phase::Closed);
         if phase == Phase::Closed {
@@ -976,9 +920,7 @@ pub struct PlaybackStream {
 
 /// The methods that are the same in both directions.
 ///
-/// A macro rather than a trait, because a trait would put these in the
-/// caller's namespace only after an import, and rather than two copies
-/// because two copies drift.
+/// A macro, so callers need no trait import and the copies cannot drift.
 macro_rules! session_methods {
     () => {
         /// What the caller is handed: exactly what it asked for, because
@@ -988,11 +930,9 @@ macro_rules! session_methods {
             self.session.config.format
         }
 
-        /// The node the stream is on: the one named, or — for the session's
-        /// route, and for a [`StreamConfig::preferring`] whose node was not
-        /// there — the session's default as the stream opened. `None` only
-        /// when the session had named no default, in which case the session
-        /// manager places the stream wherever it routes one.
+        /// The node the stream is on: the named one, or the session default
+        /// at open. `None` when the session named no default and the session
+        /// manager placed it.
         #[must_use]
         pub const fn device(&self) -> Option<&DeviceId> {
             self.session.target.as_ref()
@@ -1020,9 +960,7 @@ macro_rules! session_methods {
 
         /// The volume, the mute and the meter for this direction.
         ///
-        /// A handle, not a borrow: the slider and the bar are on the thread
-        /// that draws the window and the frames are on the thread that
-        /// carries the call. It survives a recover with its settings intact.
+        /// A handle for the UI thread; it survives a recover.
         #[must_use]
         pub fn controls(&self) -> Controls {
             Controls::new(&self.session.channel)
@@ -1105,21 +1043,16 @@ impl CaptureStream {
 
     /// Open again, on whatever this stream's [`StreamConfig`] names now.
     ///
-    /// This is the answer to [`StreamEvent::DeviceLost`], and the reason a
-    /// saved selection is worth storing as [`StreamConfig::preferring`]:
-    /// that choice resolves to the saved node when it is back and to the
-    /// session's route when it is not. [`StreamConfig::on`] names one node
-    /// and nothing else, so recovering onto one that has gone fails, and
-    /// says so.
+    /// The answer to [`StreamEvent::DeviceLost`].
+    /// [`StreamConfig::preferring`] falls back to the session route;
+    /// [`StreamConfig::on`] fails if its node is gone.
     ///
-    /// The controls carry over, and a [`Controls`] handed out earlier keeps
-    /// working. Whatever was in the ring does not — those samples came from a
-    /// node that is not there. A stream that was started is started again.
+    /// Controls carry over; ring contents do not. A started stream is
+    /// restarted.
     ///
     /// # Errors
-    /// [`Error::Draining`] when the old stream could not be shown to be out
-    /// of its memory, in which case nothing is reopened. Otherwise whatever
-    /// [`Self::open`] would have said.
+    /// [`Error::Draining`] when the old stream could not be drained; nothing
+    /// is reopened then. Otherwise what [`Self::open`] would say.
     pub fn recover(self) -> Result<Self, Error> {
         Ok(Self {
             session: self.session.recovered(Direction::Input)?,
@@ -1132,8 +1065,7 @@ impl CaptureStream {
         self.session.shared.ring.read_frame(frame)
     }
 
-    /// Samples waiting to be read. A number that keeps growing is a reader
-    /// falling behind, and the drop counter is about to start moving.
+    /// Samples waiting. A growing number means the reader is falling behind.
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.session.shared.ring.filled()
@@ -1274,16 +1206,10 @@ mod tests {
         assert_eq!(timing.read(8_000).delay_ticks, 0);
     }
 
-    /// Against a real PipeWire, reaching the race `check_target_survived`
-    /// closes without having to win it: `registry::resolve` is asked for the
-    /// node while it is still there, exactly as [`Session::open`] asks it,
-    /// and only then is the node made to vanish — before [`Session::open_on`]
-    /// ever builds the stream that names it. `pw_stream_connect` still
-    /// succeeds, because the daemon never validates `target.object` against
-    /// anything; what would have stayed a silently unlinked stream, said
-    /// nothing until an unrelated `recover`, is instead
-    /// [`StreamEvent::DeviceLost`] the moment `open` returns — no polling
-    /// loop, because there is nothing to wait for.
+    /// Forces the race `check_target_survived` closes: the node is resolved,
+    /// then removed before [`Session::open_on`] connects. Connect still
+    /// succeeds (no validation), and the stream must report
+    /// [`StreamEvent::DeviceLost`] as soon as `open` returns.
     #[test]
     #[ignore = "needs a running PipeWire with pw-loopback on the path"]
     fn a_node_gone_before_connect_reaches_it_is_reported_without_waiting_for_recover() {

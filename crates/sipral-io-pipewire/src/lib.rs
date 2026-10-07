@@ -3,78 +3,37 @@
 
 //! PipeWire device I/O for Linux desktops.
 //!
-//! Frames of mono sixteen-bit samples come out of the microphone and go into
-//! the speaker, at a size and a rate fixed when the stream opens. That is the
-//! whole of it. There is no codec here, no jitter buffer, no packet and no
-//! call: `docs/05-media.md` draws the line and this crate stays under it.
+//! Mono 16-bit frames in and out, at a size and rate fixed at open; no
+//! codec or call (`docs/05-media.md`). Node enumeration, default changes and
+//! unplugs are handled here; an unplug is a polled [`DeviceEvent`].
 //!
-//! What is here, because the same document says it belongs here, is the
-//! platform work that eats the time on this kind of project: enumerating
-//! nodes, noticing that the default one changed, and coping with a headset
-//! being unplugged in the middle of a call. That last one is not an error and
-//! is not reported as one — it arrives as a [`DeviceEvent`] the caller polls
-//! for, so that nothing above this crate has to know PipeWire exists.
+//! * **A node is one direction** (`Audio/Sink` or `Audio/Source`), so there
+//!   is a [`CaptureStream`] and a [`PlaybackStream`], no duplex type.
+//! * **One fixed format is offered**: mono S16 at the requested rate, as a
+//!   hand-built `SPA_TYPE_OBJECT_Format` pod (SPA's builder is `static
+//!   inline`). PipeWire's adapter converts, so the caller always gets the
+//!   rate it asked for.
 //!
-//! Two things about PipeWire shape the interface and are worth reading before
-//! the rest:
+//! Streams set `media.role` `"Communication"` for routing; that is not echo
+//! cancellation. PipeWire's canceller is `libpipewire-module-echo-cancel`,
+//! loaded by the session, and a call is cancelled only when routed through
+//! its source and sink (as defaults or named in the [`StreamConfig`]s).
+//! Otherwise use the processor seam in `docs/05-media.md`.
 //!
-//! * **A node is one direction.** `media.class` is `"Audio/Sink"` or
-//!   `"Audio/Source"` and never both, the same as a WASAPI endpoint and
-//!   unlike a CoreAudio device. So there is a [`CaptureStream`] and a
-//!   [`PlaybackStream`] and no duplex type, which is what lets a softphone put
-//!   the microphone on one node and the speaker on another.
-//! * **The format is not negotiated away from.** [`CaptureStream::open`] and
-//!   [`PlaybackStream::open`] offer exactly one format — mono, signed
-//!   sixteen-bit, at the rate asked for — built by hand as the
-//!   `SPA_TYPE_OBJECT_Format` pod `crate::abi` declares, because SPA's own
-//!   builder for it is `static inline` and this crate links no such symbol.
-//!   PipeWire reads that as one fixed format rather than a set to pick
-//!   from, and its own adapter converts between it and whatever the graph
-//!   is actually running, so a caller never sees a rate it did not ask for
-//!   the way a WASAPI client does.
+//! Volume, mute and metering are applied to the frames ([`Controls`]).
 //!
-//! Every stream says `media.role` `"Communication"`, which is how a session
-//! manager's routing rules can tell a call from music. It is not echo
-//! cancellation: PipeWire's canceller is `libpipewire-module-echo-cancel`,
-//! which the session loads — a `pipewire.conf.d` fragment, or
-//! `pactl load-module module-echo-cancel` on a desktop running
-//! `pipewire-pulse` — and which appears in the graph as one more source and
-//! one more sink. A call is cancelled when its two streams are routed
-//! through that pair, as the session's defaults or by naming the two nodes
-//! in the [`StreamConfig`]s; nothing a stream can set on itself turns it on.
-//! Where the session has not loaded it, the processor seam in
-//! `docs/05-media.md` is the canceller.
+//! A lost node is reported once as [`StreamEvent::DeviceLost`], never
+//! silently rerouted: `PW_STREAM_FLAG_DONT_RECONNECT` pins each stream to
+//! the node it opened on. A later default change is a
+//! [`DeviceEvent::DefaultChanged`]; [`CaptureStream::recover`] and
+//! [`PlaybackStream::recover`] move a stream.
 //!
-//! The volume, the mute and the level meter are here too, and they are
-//! applied to the frames rather than to the node's own volume — see
-//! [`Controls`] for why that is the only version of the feature a call can
-//! own. They are on a handle that can be moved to the thread drawing the
-//! window, because that is where a slider and a meter live.
+//! Off Linux the portable types still compile. On Linux, linking needs
+//! `libpipewire-0.3.so` (Debian `libpipewire-0.3-dev`) and running needs a
+//! PipeWire daemon; `interop/pipewire/` has an image with both.
 //!
-//! A lost node is reported once, as [`StreamEvent::DeviceLost`], and never
-//! silently rerouted underneath a call. Every stream is pinned to a node as
-//! it opens — the session's route to the session's default node of that
-//! moment — and `PW_STREAM_FLAG_DONT_RECONNECT` is what keeps it there;
-//! `crate::abi` says so where the flag is declared. A default that changes
-//! later is a [`DeviceEvent::DefaultChanged`], not a stream that moved. What
-//! puts a node back under a stream is [`CaptureStream::recover`] and
-//! [`PlaybackStream::recover`].
-//!
-//! On a target that is not Linux the crate still compiles, and still exports
-//! [`StreamFormat`], [`Device`], [`DeviceChoice`], [`DeviceEvent`],
-//! [`StreamEvent`], [`Controls`], [`Gain`], [`Level`], [`Counters`],
-//! [`Latency`], [`Rate`], [`RenderDelay`] and [`Error`], so that portable code
-//! above can name what it will be handed. What it does not export there is
-//! anything that would need `libpipewire` to link against.
-//!
-//! On Linux, linking anything that uses this crate — its own tests included —
-//! needs `libpipewire-0.3.so`, which Debian ships in `libpipewire-0.3-dev`;
-//! running it needs a PipeWire daemon on the session. `interop/pipewire/`
-//! has an image with both, and the script that tests this crate against it.
-//!
-//! Written from PipeWire's and SPA's published headers; see
-//! `docs/02-clean-room.md` for why that matters, and `THIRD-PARTY-NOTICES.md`
-//! for the one library this crate links.
+//! Written from PipeWire's and SPA's published headers
+//! (`docs/02-clean-room.md`, `THIRD-PARTY-NOTICES.md`).
 //!
 //! # Getting a call's worth of audio
 //!
@@ -104,14 +63,8 @@
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
     html_favicon_url = "https://sipral.org/brand/favicon.svg"
 )]
-// The stream types the rules above link to are behind cfg(target_os =
-// "linux"), so on any other target there is no item for those links to find
-// and rustdoc is right to say so. They are not written as code spans for it:
-// a link is what a reader of this crate's documentation needs, and the
-// documentation a reader reads is built for Linux. It is the gate that keeps
-// them honest -- scripts/check.sh runs rustdoc against
-// x86_64-unknown-linux-gnu with warnings fatal, where every one of them
-// resolves or the step goes red.
+// The stream types linked above exist only on Linux, where scripts/check.sh
+// runs rustdoc with warnings fatal, so the links stay checked there.
 #![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
 // tests say what they mean; the no-panic discipline is for the library
 #![cfg_attr(
@@ -137,26 +90,13 @@ pub use latency::{Latency, Rate, RenderDelay};
 pub use level::{Controls, Gain, Level};
 pub use status::{Errno, Error};
 
-// Volume, mute and the meter are not about PipeWire and were never written
-// here twice on purpose: `sipral-io-coreaudio` and `sipral-io-wasapi` had the
-// same file, once each. They live in `sipral-io-common` now, and are
-// re-exported so that a caller of this crate sees the same names the other
-// two do.
 pub(crate) use sipral_io_common::level;
 
-// The ring and the gate were the same story. They are `sipral-io-common`'s
-// now, which compiles and tests them everywhere unconditionally, so this is
-// left naming only what actually reaches them: the one module that runs on
-// Linux.
 #[cfg(target_os = "linux")]
 pub(crate) use sipral_io_common::{gate, ring};
 
-// The structure layouts declared from PipeWire's and SPA's headers compile
-// and test everywhere -- there is nothing in `abi.rs` that links a symbol --
-// so its layout tests run on every target the workspace builds on, the same
-// reasoning `sipral-io-wasapi::abi` gives for its own. Off Linux the tests
-// are all that reads it, and the constants only the stream and the registry
-// use are unused there by construction rather than by mistake.
+// Layouts link nothing, so their tests run everywhere; off Linux only the
+// tests read them, hence `dead_code`.
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod abi;
@@ -180,9 +120,6 @@ mod tests {
         Latency, Level, RenderDelay, StreamEvent, StreamFormat,
     };
 
-    /// Everything named here has to exist on every target the workspace
-    /// builds, or portable code a layer up cannot describe what it will be
-    /// given.
     #[test]
     fn the_portable_surface_is_portable() {
         fn shareable<T: Send + Sync>() {}
@@ -209,8 +146,6 @@ mod tests {
         assert_eq!(Gain::default(), Gain::UNITY);
         assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
-        // a delay nobody has asked a stream for is no delay, which is what a
-        // session that was never told one already assumes
         assert_eq!(Latency::default().duration(), core::time::Duration::ZERO);
         assert_eq!(RenderDelay::default().total(), core::time::Duration::ZERO);
         assert_eq!(
@@ -233,8 +168,6 @@ mod tests {
         let config = StreamConfig::new(StreamFormat::narrowband());
         assert_eq!(config.format, StreamFormat::narrowband());
         assert_eq!(config.device, DeviceChoice::System);
-        // a stream has to be able to live on the thread that does the media,
-        // which is not the thread that opened it
         movable::<CaptureStream>();
         movable::<PlaybackStream>();
     }
@@ -242,9 +175,6 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn nothing_that_needs_libpipewire_is_compiled_elsewhere() {
-        // The crate builds on macOS and on Windows with the platform modules
-        // gated out entirely, which is what lets the workspace be built and
-        // linted on a machine that has never heard of PipeWire.
         assert_eq!(StreamFormat::default(), StreamFormat::narrowband());
     }
 }

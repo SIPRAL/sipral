@@ -5,34 +5,19 @@
 //! sinks or sources, and the metadata object for which one is the session's
 //! default.
 //!
-//! Unlike CoreAudio's `AudioObjectGetPropertyData`, PipeWire has no
-//! synchronous "give me the current list" call — the registry hands over
-//! nodes as `global` events on the connection's own thread loop, as they
-//! exist at the moment a client asks for one, and `pipewire/core.h` says how
-//! to find the end of that burst: `pw_core_sync` right after
-//! `pw_core_get_registry`, and wait for the core's `done` event carrying the
-//! sequence number the sync returned. So a one-shot [`devices`] still starts
-//! a thread loop, waits for that burst, reads the snapshot, and tears the
-//! loop down — the same steps [`DeviceMonitor`] takes, except it keeps the
-//! loop running afterward for hotplug.
+//! There is no synchronous list call: nodes arrive as `global` events, and
+//! the end of the initial burst is the core's `done` for a `pw_core_sync`
+//! issued after `pw_core_get_registry` (`pipewire/core.h`). So even a
+//! one-shot [`devices`] runs a thread loop; [`DeviceMonitor`] keeps it.
 //!
-//! The default route is not a property of a node at all: it is the
-//! `"default.audio.sink"` / `"default.audio.source"` key on the metadata
-//! object named `"default"`, a convention every PipeWire session manager and
-//! `pipewire-pulse` follow, holding a small JSON object — `{"name":
-//! "<node.name>"}` — as its value. This crate binds that one metadata global
-//! reactively, the moment the registry's own `global` event reports it,
-//! rather than assuming its id. Binding it happens *during* the first burst,
-//! so its own first `property` events arrive after the first `done`: start-up
-//! syncs a second time, and the second `done` is the one after which the
-//! defaults are known.
+//! The defaults are the `"default.audio.sink"`/`"default.audio.source"` keys
+//! of the `"default"` metadata object, as `{"name": "<node.name>"}`. That
+//! object is bound when its `global` arrives, during the first burst, so its
+//! properties only arrive after a second sync.
 //!
-//! Three listeners are registered here — on the core, on the registry, and
-//! on the metadata object — and each one's `*_events` table is a `static`.
-//! `crate::abi::SpaHook` says why that is not a style choice: the hook keeps
-//! a pointer to the table, and an earlier version of this file built the
-//! tables on the stack and crashed inside `libpipewire-module-metadata` the
-//! first time the metadata object had something to say.
+//! The three listener tables are `static`: the hook keeps a pointer to them
+//! (`crate::abi::SpaHook`), and stack tables crashed in
+//! `libpipewire-module-metadata`.
 
 use core::ffi::{CStr, c_char, c_void};
 use core::ptr;
@@ -47,10 +32,7 @@ use crate::device::{Device, DeviceChoice, DeviceEvent, DeviceId, Direction, Pend
 use crate::status::Error;
 use crate::sys::{self, PwContext, PwCore, PwMetadata, PwProperties, PwRegistry, PwThreadLoop};
 
-/// How long a one-shot enumeration or a monitor's start-up waits for the
-/// registry's initial burst before giving up. PipeWire delivers it in one
-/// graph cycle on every machine this was tested against; a number in whole
-/// seconds is for a daemon that is not answering at all.
+/// How long start-up waits for the initial burst (normally one graph cycle).
 const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How many round trips start-up makes before reading anything: one for the
@@ -239,14 +221,9 @@ impl State {
 /// Pull a string field out of a small, flat JSON object —
 /// `{"name":"alsa_output...", ...}` — without a general JSON parser.
 ///
-/// The value this is used for is the one object the `"default"` metadata
-/// keeps per key, written by the session manager: one level deep, string
-/// values. A `node.name` PipeWire generated from a card or a Bluetooth
-/// address never needs escaping, but one a person gave a virtual device can
-/// hold a quote or a backslash, so the two escapes JSON has for those are
-/// read rather than taken as the end of the value; the rest of JSON's escapes
-/// are for text no node name contains, and a value that uses one is
-/// answered with `None` rather than guessed at.
+/// Enough for the `"default"` metadata values. `\"` and `\\` are decoded,
+/// since a user-named virtual device may contain them; any other escape
+/// yields `None` rather than a guess.
 fn json_string_field(json: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
     let after_key = json.find(&needle)? + needle.len();
@@ -446,10 +423,8 @@ unsafe extern "C" fn on_global_remove(data: *mut c_void, id: u32) {
     if slot.as_ref().is_some_and(|binding| binding.global == id)
         && let Some(binding) = slot.take()
     {
-        // The session manager restarting takes its metadata object with it.
-        // The proxy for it is dead weight from here, and its listener has to
-        // come off before the proxy goes; when the manager comes back, its
-        // new `"default"` global is bound afresh by `on_global`.
+        // A session manager restart removes the metadata object: unlink and
+        // drop the proxy; `on_global` binds the new one.
         //
         // SAFETY: on the loop's own thread; this proxy was bound by
         // `bind_default_metadata` and not yet destroyed.
@@ -459,11 +434,9 @@ unsafe extern "C" fn on_global_remove(data: *mut c_void, id: u32) {
 
 /// `pw_metadata_events.property`.
 ///
-/// Only subject `PW_ID_CORE` is the session's own. The `"default"` object
-/// also keeps keys under other nodes' ids — `target.object`, where a stream
-/// was moved to — and PipeWire 1.4 clears those, with a null key, when the
-/// node goes. Read as the session's, every moved stream that ended would
-/// have wiped both defaults.
+/// Only subject `PW_ID_CORE` is the session's. Other subjects hold
+/// per-stream keys that PipeWire 1.4 clears with a null key; reading those
+/// as the session's would wipe the defaults.
 unsafe extern "C" fn on_metadata_property(
     data: *mut c_void,
     subject: u32,
@@ -699,14 +672,10 @@ impl Connection {
     /// Undo whatever `open` got done, in the order that leaves PipeWire
     /// nothing of ours to call.
     ///
-    /// Listeners come off first, under the lock — the metadata object's,
-    /// the registry's and the core's — so that nothing can be emitted into a
-    /// hook this is about to free; then the core is disconnected, which
-    /// destroys the registry proxy with it; then the loop's thread is
-    /// stopped, outside the lock as `pipewire/thread-loop.h` requires, and
-    /// joined, so no callback is still running; and only then are the
-    /// context, the loop, and — when `self` drops — the hooks and the state
-    /// freed.
+    /// Listeners off under the lock; disconnect the core (destroying the
+    /// registry proxy); stop and join the loop thread outside the lock
+    /// (`pipewire/thread-loop.h`); only then free context, loop, hooks and
+    /// state.
     fn close(&mut self) {
         if self.closed {
             return;
@@ -761,10 +730,7 @@ impl Drop for Connection {
 
 /// Watches the graph's nodes and remembers what changed.
 ///
-/// A headset arriving or leaving is not an error and does not interrupt a
-/// stream running on another node; it is a fact the caller may want to act
-/// on, so it waits here until asked for. Dropping the monitor stops the
-/// watching.
+/// Changes wait here until polled. Dropping the monitor stops watching.
 pub struct DeviceMonitor(Connection);
 
 impl DeviceMonitor {
@@ -831,13 +797,10 @@ pub fn default_device(direction: Direction) -> Result<Option<DeviceId>, Error> {
 /// stream should name as its `target.object`, or `None` when the choice
 /// falls back to a session that has named no default.
 ///
-/// Every choice is looked up, the session's route included —
-/// [`DeviceChoice::resolve`] says why a stream is never left for the session
-/// manager to follow. A named node is looked up among this direction's
-/// rather than handed over as it is, because the session manager's answer
-/// to a `target.object` it cannot find is to link the stream to the default
-/// instead — right for a preference and wrong for a named device, which is
-/// "that node and nothing else".
+/// Every choice is resolved, the session route included (see
+/// [`DeviceChoice::resolve`]). A named node is checked here because the
+/// session manager would silently fall back to the default, which is wrong
+/// for a named device.
 ///
 /// # Errors
 /// [`Error::NoDevice`] for a named device the graph does not have in this
