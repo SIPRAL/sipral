@@ -3,46 +3,22 @@
 
 //! CoreAudio device I/O for macOS and iOS.
 //!
-//! Frames of mono sixteen-bit samples come out of the microphone and go into
-//! the speaker, at a size and a rate fixed when the stream opens. That is the
-//! whole of it. There is no codec here, no jitter buffer, no packet and no
-//! call: `docs/05-media.md` draws the line and this crate stays under it.
+//! Mono 16-bit frames in and out, at a size and rate fixed at open. No
+//! codec, jitter buffer or call (`docs/05-media.md`). Device enumeration,
+//! default changes and unplugs are handled here; an unplug is a polled
+//! [`DeviceEvent`], not an error.
 //!
-//! What is here, because the same document says it belongs here, is the
-//! platform work that eats the time on this kind of project: enumerating
-//! devices, noticing that the default one changed, and coping with a headset
-//! being unplugged in the middle of a call. That last one is not an error and
-//! is not reported as one — it arrives as a [`DeviceEvent`] the caller polls
-//! for, so that nothing above this crate has to know CoreAudio exists.
-//!
-//! The volume, the mute and the level meter are here too, and they are applied
-//! to the frames rather than to the device's own volume control — see
-//! [`Controls`] for why that is the only version of the feature a call can
-//! own. They are on a handle that can be moved to the thread drawing the
-//! window, because that is where a slider and a meter live.
-//!
+//! Volume, mute and metering are applied to the frames ([`Controls`]).
 //! The unit is `kAudioUnitSubType_VoiceProcessingIO`, which brings the
-//! system's own echo cancellation. `docs/05-media.md` says we attach an echo
-//! canceller rather than write one, and on Apple's platforms the best one is
-//! already in the operating system.
+//! system echo canceller. The render-to-capture delay is still reported
+//! (`Stream::latency`, `render_delay`) for an application canceller and for
+//! latency budgets; see [`Latency`].
 //!
-//! The render-to-capture delay is reported all the same, as `Stream::latency`
-//! and, for devices this crate did not open, `render_delay`. Apple's canceller
-//! sits below here and does not need to be told the number; what does need it
-//! is anything above that attaches a canceller of its own at the seam
-//! `docs/05-media.md` describes, and anyone counting the mouth-to-ear budget
-//! of a call. CoreAudio has no single property for it — see [`Latency`] for
-//! the four it does have.
+//! Off Apple platforms the portable types still compile, so code above can
+//! name them; nothing that links a framework is exported.
 //!
-//! On a target with no CoreAudio the crate still compiles, and still exports
-//! [`StreamFormat`], [`Device`], [`DeviceChoice`], [`DeviceEvent`],
-//! [`StreamEvent`], [`Controls`], [`Gain`], [`Level`], [`Counters`],
-//! [`Latency`], [`RenderDelay`] and [`Error`], so that portable code above can
-//! name what it will be handed. What it does not export there is anything that
-//! would need a framework to link against.
-//!
-//! Written from Apple's published headers and documented ABI; see
-//! `docs/02-clean-room.md` for why that matters.
+//! Written from Apple's published headers and documented ABI
+//! (`docs/02-clean-room.md`).
 //!
 //! # Getting a call's worth of audio
 //!
@@ -95,18 +71,8 @@ pub use latency::{Latency, RenderDelay};
 pub use level::{Controls, Gain, Level};
 pub use status::{Error, OsStatus};
 
-// Volume, mute and the meter are not about CoreAudio and were never written
-// here twice on purpose: `sipral-io-wasapi` had the same file. They live in
-// `sipral-io-common` now, and are re-exported so that a caller of this crate
-// sees the same names it always did.
 pub(crate) use sipral_io_common::level;
 
-// The ring and the gate used to be declared here under
-// `any(target_os = "macos", target_os = "ios", test)`, so that what they are
-// for — being right — was compiled and tested everywhere the workspace builds
-// and not only where the frameworks are. They are `sipral-io-common`'s now,
-// which compiles and tests them everywhere unconditionally, so this is left
-// naming only what actually reaches them.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) use sipral_io_common::{gate, ring};
 
@@ -126,8 +92,7 @@ mod realtime;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use realtime::{audio_period, run_as_audio};
 
-// The hardware abstraction layer is macOS only. iOS routes through
-// `AVAudioSession`, which is Objective-C and belongs to the application.
+// macOS only: iOS routes through `AVAudioSession`, owned by the application.
 #[cfg(target_os = "macos")]
 mod hal;
 
@@ -148,9 +113,6 @@ mod tests {
         Level, OsStatus, RenderDelay, StreamEvent, StreamFormat,
     };
 
-    /// Everything named here has to exist on every target the workspace
-    /// builds, or portable code a layer up cannot describe what it will be
-    /// given.
     #[test]
     fn the_portable_surface_is_portable() {
         let format = StreamFormat::narrowband();
@@ -176,8 +138,6 @@ mod tests {
         assert_eq!(Gain::default(), Gain::UNITY);
         assert_eq!(Level::default(), Level::SILENT);
         assert_eq!(Counters::default().captured, 0);
-        // a delay nobody has asked a device for is no delay, which is what a
-        // session that was never told one already assumes
         assert_eq!(RenderDelay::default().total(), core::time::Duration::ZERO);
         assert_eq!(RenderDelay::default().capture, Latency::default());
         assert_eq!(
@@ -200,18 +160,13 @@ mod tests {
 
         let config = StreamConfig::new(StreamFormat::narrowband());
         assert_eq!(config.format, StreamFormat::narrowband());
-        // a stream has to be able to live on the thread that does the media
         movable::<Stream>();
-        // and its controls on the one that draws the window
         shareable::<super::Controls>();
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[test]
     fn nothing_that_needs_a_framework_is_compiled_elsewhere() {
-        // The crate builds on Linux and on Windows with the platform module
-        // gated out entirely, which is what lets the workspace be built and
-        // linted on a machine that has never heard of CoreAudio.
         assert_eq!(StreamFormat::default(), StreamFormat::narrowband());
     }
 }

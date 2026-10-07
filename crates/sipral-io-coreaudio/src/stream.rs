@@ -4,23 +4,16 @@
 //! One duplex voice-processing unit: samples in from the microphone, samples
 //! out to the speaker, and nothing else.
 //!
-//! The unit is `kAudioUnitSubType_VoiceProcessingIO` on both platforms. That
-//! is not a preference. It brings the system's own echo canceller, and
-//! `docs/05-media.md` says in as many words that we attach an echo canceller
-//! rather than write one; on iOS it is also what makes the audio session
-//! behave the way a call should.
+//! `kAudioUnitSubType_VoiceProcessingIO` brings the system echo canceller
+//! (`docs/05-media.md`: attach one, do not write one), and on iOS it makes
+//! the audio session behave like a call.
 //!
-//! One unit is not one device. On macOS it plays to one device object and
-//! captures from another whenever the machine has them as two, which on a Mac
-//! is the usual case: the built-in speakers and the built-in microphone are
-//! separate objects, with separate rates, buffers and delays. The unit says
-//! which object each half is on, and the stream asks it for both rather than
-//! letting either stand for the other.
+//! One unit is not one device: on a Mac the built-in speaker and microphone
+//! are separate objects with their own rates and delays, so the stream asks
+//! the unit about each half.
 //!
-//! Two threads meet here. The framework's realtime thread runs [`play`] and
-//! [`record`]; everything else runs on whatever thread the caller is on. They
-//! share nothing but the two rings and the counters, and neither waits for the
-//! other.
+//! The realtime thread runs [`play`] and [`record`]; they share only the
+//! rings and counters with the caller's thread, and neither waits.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -48,32 +41,23 @@ use crate::sys;
 
 /// The most frames the unit is allowed to ask for at once.
 ///
-/// It is also how big the buffer the input callback renders into is, so it has
-/// to be decided before the stream opens rather than discovered. Apple's own
-/// advice for iOS is this number, because a smaller one starts failing when
-/// the screen locks.
+/// It sizes the input buffer, so it is fixed up front. Apple advises this
+/// value on iOS, where smaller ones fail with the screen locked.
 ///
-/// On macOS it is not free. The voice-processing unit takes it as the
-/// microphone's IO buffer: on an Intel MacBook Pro the built-in microphone
-/// went from 512 frames to 4,096 once a unit with this limit was initialised,
-/// and stayed at 512 under a limit of 512 or none, which is 81 ms more capture
-/// delay at 44.1 kHz. [`Stream::render_delay`] counts it, because the device
-/// reports it.
+/// On macOS VPIO adopts it as the microphone IO buffer (512 to 4,096 frames
+/// on an Intel MacBook Pro, +81 ms at 44.1 kHz); [`Stream::render_delay`]
+/// includes it.
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
 
-/// The slowest rate a device delivers at: a Bluetooth headset in its
-/// narrowband mode.
+/// A narrowband Bluetooth headset.
 const SLOWEST_DEVICE_RATE_HZ: u32 = 8_000;
 
 /// How many samples the input callback's buffer holds at `format`'s rate.
 ///
-/// Not [`MAX_FRAMES_PER_SLICE`]. The limit is counted at the device's rate,
-/// and the unit converts the device's slice to the stream's rate before the
-/// callback is told how many frames there are: a MacBook Air microphone on a
-/// 4,096-frame slice at 44.1 kHz asks a 48 kHz stream for 4,458. So the buffer
-/// holds one whole slice of the slowest device there is, converted up to this
-/// stream's rate, and a callback that still asks for more is refused rather
-/// than handed a buffer that is too small (see `Shared::record`).
+/// Not [`MAX_FRAMES_PER_SLICE`]: the limit is at the device rate and the
+/// callback sees it converted (4,096 at 44.1 kHz became 4,458 at 48 kHz). So
+/// this holds one slice of the slowest device at the stream rate; larger
+/// requests are refused (see `Shared::record`).
 fn capture_capacity(format: StreamFormat) -> usize {
     let slice = usize::try_from(MAX_FRAMES_PER_SLICE).unwrap_or(0);
     let ratio = format
@@ -83,28 +67,22 @@ fn capture_capacity(format: StreamFormat) -> usize {
     slice.saturating_mul(usize::try_from(ratio).unwrap_or(1))
 }
 
-/// Frames each ring holds unless the caller says otherwise: enough to ride out
-/// a scheduling hiccup, short enough that a stalled reader is heard as a gap
-/// rather than as a delay that never recovers.
+/// Enough for a scheduling hiccup; short enough that a stalled reader is a
+/// gap, not a permanent delay.
 const DEFAULT_DEPTH_FRAMES: usize = 16;
 
 /// Which unit a stream is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StreamKind {
-    /// The voice-processing unit: the microphone and the speaker together,
-    /// with the system's echo canceller between them. At most one is open in
-    /// a process at a time ([`voice_units_open`]), and the process makes it
-    /// once: a voice stream that closes leaves its unit, stopped and
-    /// uninitialised, for the next voice stream to configure again, because
-    /// opening a new one after an old one was taken down was seen to read
+    /// The voice-processing unit: microphone and speaker with the system echo
+    /// canceller. At most one per process ([`voice_units_open`]), created once
+    /// and reused, because a new unit after a torn-down one was seen to read
     /// freed memory inside the framework.
     #[default]
     Voice,
-    /// A plain output unit — the hardware output unit on macOS, the remote
-    /// I/O unit on iOS — that only plays: no microphone, no echo canceller,
-    /// and no claim on the voice-processing unit, so it opens beside a call's.
-    /// What a ring on a device of its own is played through. Reading from
-    /// one delivers nothing.
+    /// A plain output unit (HAL output on macOS, remote I/O on iOS): playback
+    /// only, no claim on the voice unit, so it opens beside a call. Used for a
+    /// ring on its own device. Reading delivers nothing.
     Playback,
 }
 
@@ -117,10 +95,8 @@ pub struct StreamConfig {
     pub kind: StreamKind,
     /// Which device the speaker is on, and what to do when it is not there.
     ///
-    /// macOS only, because naming a device is: on iOS the route is the audio
-    /// session's and the application's, and there is no property to set. The
-    /// field is absent there rather than ignored, so the request cannot be
-    /// written down at all.
+    /// macOS only: on iOS the route is the audio session's, so the field is
+    /// absent rather than silently ignored.
     #[cfg(target_os = "macos")]
     pub device: DeviceChoice,
     /// Which device the microphone is on, chosen apart from the speaker's
@@ -130,12 +106,9 @@ pub struct StreamConfig {
     pub capture_device: DeviceChoice,
     /// Frames of buffering between the device and the caller, per direction.
     pub depth_frames: usize,
-    /// Whether the voice-processing unit runs its processing — the echo
-    /// canceller, the gain control and the noise suppression — or is
-    /// opened with it bypassed: on by default. Read only by a
-    /// [`StreamKind::Voice`] stream; the unit and its single claim on the
-    /// process are the same either way, only the processing is out of the
-    /// path.
+    /// Whether the voice unit's processing (AEC, AGC, noise suppression)
+    /// runs or is bypassed; on by default. [`StreamKind::Voice`] only; the
+    /// unit and its process-wide claim are the same either way.
     pub voice_processing: bool,
 }
 
@@ -164,9 +137,8 @@ impl StreamConfig {
         }
     }
 
-    /// The same configuration with the microphone on a saved selection: the
-    /// device carrying that identity when the stream opens, and the system's
-    /// default input when the machine does not have it.
+    /// The microphone on the device with this UID, or the default input
+    /// when absent.
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn capturing_from(self, uid: impl Into<String>) -> Self {
@@ -176,12 +148,8 @@ impl StreamConfig {
         }
     }
 
-    /// A saved selection, at the given format: the device carrying that
-    /// identity when the stream opens, and the system's route when the machine
-    /// does not have it.
-    ///
-    /// The identity is [`Device::uid`](crate::Device::uid), which is the field
-    /// worth writing into a configuration file.
+    /// The speaker on the device with this UID, or the system route when
+    /// absent. The UID is [`Device::uid`](crate::Device::uid), the value to save.
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn preferring(uid: impl Into<String>, format: StreamFormat) -> Self {
@@ -200,13 +168,10 @@ impl Default for StreamConfig {
 
 /// Room for one voice-processing unit.
 ///
-/// Apple supports one such unit per process: a second one opened beside the
-/// first was seen to block inside the framework, and two with their
-/// microphones enabled hand the canceller two captures of one room. So the
-/// room is taken before a unit is created or taken from [`SPARE`], and given
-/// back only once it has been disposed of or put back there; a stream that
-/// was deliberately leaked keeps it for good, because its unit was never
-/// taken down either.
+/// One per process: a second unit was seen to block inside the framework,
+/// and two microphones confuse the canceller. Taken before a unit is created
+/// or taken from [`SPARE`], released once it is disposed of or spared; a
+/// deliberately leaked stream keeps it.
 struct Slot(AtomicBool);
 
 /// The room held, for as long as this lives.
@@ -240,36 +205,20 @@ static VOICE_UNIT: Slot = Slot::new();
 /// The voice-processing unit a closed voice stream left behind, uninitialised,
 /// for the next one to configure again rather than create.
 ///
-/// Opening a voice unit while an earlier one had been taken down — disposed
-/// of, or only stopped and uninitialised and left to leak — was seen to read
-/// freed memory on macOS, under the guard allocator and with a scribble on
-/// what is freed: one round of open and close passed, and an open in a later
-/// round faulted at `0xaaaaaaaaaaaaaaaa` on the thread the hardware layer
-/// calls property listeners on, inside the framework's own voice-processing
-/// code, looking a device up in a table of its own whose storage had been
-/// freed under it. The listener is the framework's, not this crate's, so
-/// there is nothing here to remove or keep alive; the order of stop,
-/// uninitialise and dispose made no difference, and nor did a second and a
-/// half between them. What made the difference was not making a second
-/// unit: one unit configured, initialised, started, stopped and uninitialised
-/// a hundred times over, its microphone changed between rounds, never
-/// faulted, where a new unit each time faulted within ten rounds in half the
-/// runs, with or without a second and a half between a close and the next
-/// open. So the
-/// process keeps the one voice unit it makes: a stream that closes puts its
-/// unit here instead of disposing of it, and the next voice stream takes it.
+/// Creating a voice unit after an earlier one was torn down faulted on
+/// macOS (guard allocator, `0xaaaaaaaaaaaaaaaa`) inside the framework's own
+/// property listener, within ten rounds in half the runs. Teardown order and
+/// delays made no difference; reusing one unit for a hundred rounds never
+/// faulted. So a closing voice stream parks its unit here for the next.
 ///
-/// Only a unit that came down cleanly is kept: one that would not
-/// uninitialise, or whose device was lost under it, is disposed of as before,
-/// and so is the unit under [`Stream::recover`], which is for a unit that has
-/// stopped answering.
+/// Only a cleanly uninitialised unit is kept; one with a lost device, or
+/// under [`Stream::recover`], is disposed of.
 static SPARE: Spare = Spare::new();
 
 /// Room for one unit put aside.
 struct Spare(Mutex<Option<Kept>>);
 
-/// A unit handle, which is a pointer the framework hands out and the type
-/// system cannot see is only ever used by one owner at a time.
+/// A unit handle with a single owner at a time.
 struct Kept(sys::Unit);
 
 // SAFETY: the handle is moved, never shared: whoever takes it out of the
@@ -300,9 +249,7 @@ impl Spare {
     }
 }
 
-/// Whether a teardown puts the unit aside rather than disposing of it: a
-/// voice unit, whose device was not lost, that the stream is allowed to
-/// keep, and that the framework uninitialised without complaint.
+/// Whether a teardown parks the unit in [`SPARE`] instead of disposing of it.
 fn spares(kind: StreamKind, lost: bool, allowed: bool, uninitialized: sys::Status) -> bool {
     kind == StreamKind::Voice && !lost && allowed && uninitialized == 0
 }
@@ -342,12 +289,8 @@ pub fn voice_units_open() -> usize {
     VOICE_UNIT.held()
 }
 
-/// What the realtime side has to say, in numbers because it cannot speak.
-///
-/// Every one of these is relaxed: nothing else depends on having seen them, a
-/// reader that is one increment behind is reading a number that was true a
-/// moment ago, and making them ordered would put a fence in the callback for
-/// the sake of a statistic.
+/// Realtime statistics. Relaxed: nothing depends on them, and a fence in the
+/// callback is not worth a statistic.
 #[derive(Default)]
 struct Meters {
     captured: AtomicU64,
@@ -381,23 +324,17 @@ impl Meters {
 /// where to find it, and freed only once the gate says no callback is in it.
 struct Shared {
     unit: sys::Unit,
-    /// Shut at the top of teardown, and waited on before anything below is
-    /// freed. See `gate.rs` for why this is built rather than assumed.
+    /// Closed at the start of teardown and drained before anything is freed.
     gate: Gate,
     capture: Ring,
     playback: Ring,
-    /// The most samples one output callback has asked for: the device's
-    /// slice at the stream's rate, which whoever writes has to keep queued.
+    /// The largest output request so far, which the writer must keep queued.
     burst: AtomicUsize,
-    /// Where the input callback renders to before the samples reach the ring.
-    /// The framework runs one input callback at a time for a unit, so the
-    /// exclusivity given up here is handed straight back by the framework.
+    /// The input callback's render target. The framework never runs two
+    /// input callbacks at once for a unit.
     scratch: UnsafeCell<Box<[i16]>>,
     meters: Meters,
-    /// The gain, the mute and the meter for each direction. Held behind an
-    /// `Arc` of their own rather than inline, so that a [`Controls`] handed to
-    /// the thread drawing the window survives the stream being reopened on
-    /// another device.
+    /// In their own `Arc` so a [`Controls`] survives a reopen.
     microphone: Arc<Channel>,
     speaker: Arc<Channel>,
 }
@@ -419,19 +356,13 @@ impl Shared {
         microphone: Arc<Channel>,
         speaker: Arc<Channel>,
     ) -> Self {
-        // Never smaller than one slice of the slowest device at this
-        // stream's rate, with two frames beside it: the unit converts the
-        // device's slice before either callback sees it, so a narrowband
-        // headset hands a 48 kHz stream half a second at a stroke, and a
-        // ring that cannot hold that, on top of what the reader has not come
-        // for yet, drops samples on every callback — and starves the speaker
-        // on every one of its own.
+        // At least one slowest-device slice plus two frames: a narrowband
+        // headset hands a 48 kHz stream half a second at once, and a smaller
+        // ring drops or starves on every callback.
         let frame = format.frame_samples();
         let samples = frame
             .saturating_mul(depth_frames.max(2))
             .max(capture_capacity(format).saturating_add(frame.saturating_mul(2)));
-        // the meters count in samples, so a stream reopened at another rate
-        // has to be told what a tenth of a second is now worth
         let window = window_samples(format.sample_rate_hz());
         microphone.set_window(window);
         speaker.set_window(window);
@@ -450,10 +381,8 @@ impl Shared {
 
     /// Fill the unit's buffer from the playback ring. Realtime thread.
     ///
-    /// Returns whether the silence flag may go on the way back, which is only
-    /// ever when every buffer in the list has just been zeroed: the header
-    /// calls the flag a hint, and holds whoever sets it to having made the
-    /// buffer silent.
+    /// Returns whether the silence flag may be set: only when every buffer
+    /// was zeroed, as the header requires.
     ///
     /// # Safety
     /// As [`silence`].
@@ -463,8 +392,7 @@ impl Shared {
             // SAFETY: as above; null is handled inside.
             return unsafe { silence(buffers) };
         };
-        // one channel interleaved is what the stream format asks for, so the
-        // unit hands back exactly one buffer; anything else is not our format
+        // mono interleaved: exactly one buffer, or not our format
         let Some(buffer) = list.buffers.first_mut() else {
             // SAFETY: the caller's list.
             return unsafe { silence(buffers) };
@@ -479,17 +407,13 @@ impl Shared {
             // SAFETY: the caller's list.
             return unsafe { silence(buffers) };
         }
-        // Relaxed: a number for the writer to pace by, ordering nothing
         self.burst.fetch_max(wanted, Ordering::Relaxed);
         // SAFETY: `wanted` samples fit in the octets the buffer declares, and
         // the unit hands over memory aligned for the format it was given.
         let out = unsafe { core::slice::from_raw_parts_mut(buffer.data.cast::<i16>(), wanted) };
         let taken = self.playback.read(out);
-        // The volume goes on here rather than where the caller wrote the
-        // frame, so that a mute is silent on this callback instead of on the
-        // one after the ring has drained. `wanted` rather than `taken`,
-        // because the silence a starved callback plays is time the meter's
-        // window has to count.
+        // applied here so a mute is heard at once; `wanted` so starved
+        // silence still advances the meter window
         if let Some(played) = out.get_mut(..taken) {
             self.speaker.apply(played, wanted);
         }
@@ -501,8 +425,7 @@ impl Shared {
         if taken > 0 {
             return false;
         }
-        // Only the frames asked for were zeroed above, and a buffer can
-        // declare more octets than that; the flag speaks for all of them.
+        // the buffer may be larger than what was zeroed above
         // SAFETY: the caller's list, and `out` is not used past this point.
         unsafe { silence(buffers) }
     }
@@ -521,12 +444,8 @@ impl Shared {
         if wanted == 0 {
             return;
         }
-        // The unit renders `frames` frames whatever the buffer list says:
-        // asking it for fewer, into a buffer sized for fewer, was seen to have
-        // the voice-processing unit copy past the end of its own buffers. So
-        // the render is for exactly what the callback was told, into a buffer
-        // that holds all of it at the format `configure` read back (mono,
-        // sixteen bits, two octets a frame) — or it is not made at all.
+        // Render exactly `frames` or nothing: asking VPIO for fewer was seen
+        // to make it write past its own buffers.
         if wanted > scratch.len() {
             Meters::add(&self.meters.capture_oversized, 1);
             return;
@@ -572,17 +491,11 @@ impl Shared {
         self.captured(samples);
     }
 
-    /// The volume, the meter and the ring, for what the microphone delivered.
-    ///
-    /// Split out of the callback above because everything before this point
-    /// needs a live unit to call into and everything in it is arithmetic,
-    /// which is the half that can be shown to be right without a device.
+    /// Gain, meter and ring for captured samples; split out so it can be
+    /// tested without a device.
     fn captured(&self, samples: &mut [i16]) {
         let delivered = samples.len();
-        // A muted microphone still fills the ring, with silence. Stopping the
-        // frames instead would mean unmuting replayed however much audio had
-        // piled up behind the mute, and would starve whatever above is pacing
-        // itself on frames arriving.
+        // a muted microphone still delivers silence, so nothing piles up
         self.microphone.apply(samples, delivered);
         let stored = self.capture.write(samples);
         Meters::add(&self.meters.captured, stored);
@@ -601,15 +514,12 @@ unsafe fn mark_silent(flags: *mut u32) {
     }
 }
 
-/// Zero every buffer the unit was going to play, and say whether that left
-/// nothing unzeroed — which is the only condition under which the silence flag
-/// may be set.
+/// Zero every buffer and return whether all were zeroed (the condition for
+/// the silence flag).
 ///
-/// Walked by the list's own count and by offset, not through the declared
-/// structure, because a list of more than one buffer is longer than that
-/// structure. A null list has no octets to zero and is silent; a buffer that
-/// declares octets behind a null pointer cannot be zeroed, and the answer is
-/// then no. Nothing here can panic, which is what lets the panic path use it.
+/// Walked by count and offset, since a multi-buffer list is longer than the
+/// declared struct. Octets behind a null pointer make the answer `false`.
+/// Cannot panic, so the panic path can use it.
 ///
 /// # Safety
 /// `buffers` is whatever the framework passed, so it may be null; when it is
@@ -648,10 +558,8 @@ unsafe fn silence(buffers: *mut abi::BufferList) -> bool {
 
 /// The render callback the unit calls when it wants something to play.
 ///
-/// A panic must not cross back into C — the same reasoning `docs/08-ffi.md`
-/// gives for the C ABI, and with more force here, because the frame after this
-/// one is due in a few milliseconds. So it is caught, counted, and turned into
-/// silence.
+/// A panic must not cross into C (`docs/08-ffi.md`): it is caught, counted
+/// and played as silence.
 unsafe extern "C" fn play(
     context: *mut c_void,
     flags: *mut u32,
@@ -702,8 +610,7 @@ unsafe extern "C" fn record(
     let Some(shared) = (unsafe { context.cast::<Shared>().as_ref() }) else {
         return 0;
     };
-    // teardown has begun: there is nothing to hand the samples to, and
-    // `AudioUnitRender` would be a call into a unit that is being taken down
+    // teardown has begun: do not render from a unit being taken down
     let Some(_inside) = shared.gate.enter() else {
         return 0;
     };
@@ -720,64 +627,40 @@ unsafe extern "C" fn record(
 
 /// An open duplex stream.
 ///
-/// Dropping it shuts the device down and waits for the callbacks to be out of
-/// its memory, so nothing here has to be closed by hand. [`Stream::close`] does
-/// the same thing and says what the framework thought of it.
+/// Dropping it shuts the device down and waits for the callbacks to leave
+/// its memory; [`Stream::close`] does the same and reports statuses.
 pub struct Stream {
     unit: sys::Unit,
     shared: Arc<Shared>,
     format: StreamFormat,
-    /// Kept so that [`Stream::recover`] can ask for the same thing again and
-    /// have the choice resolved against the machine as it is then.
+    /// Re-resolved by [`Stream::recover`].
     config: StreamConfig,
-    /// The two directions' controls, held here as well as in `shared` so that
-    /// a reopen carries the volume and the mute across rather than resetting
-    /// them under a caller who is mid-call.
+    /// Also held here so a reopen keeps volume and mute.
     microphone: Arc<Channel>,
     speaker: Arc<Channel>,
-    /// Which device each half of the unit settled on, read once at open.
-    /// Reading them later would be a call into a unit whose device may have
-    /// gone, and the answer is wanted precisely when that has happened. Empty
-    /// on iOS, where the route belongs to the audio session rather than to
-    /// this crate.
+    /// Read once at open: later the device may be gone, which is exactly
+    /// when it is wanted. Empty on iOS.
     route: Route,
-    /// What those two devices said about their own delay, read at the same
-    /// moment and for the same reason.
+    /// Read at open, for the same reason.
     delay: RenderDelay,
     health: Health,
     closed: bool,
-    /// Set when teardown could not prove the callbacks were out. Nothing is
-    /// then freed, ever.
+    /// Teardown could not prove the callbacks left; nothing is ever freed.
     leak: bool,
-    /// The process's room for a voice-processing unit, held by a
-    /// [`StreamKind::Voice`] stream until its unit has been disposed of or
-    /// put aside.
+    /// The voice-unit slot, held until the unit is disposed of or spared.
     claim: Option<Claim>,
-    /// Whether teardown may put a voice unit aside for the next stream
-    /// ([`SPARE`]) rather than dispose of it. Cleared where the next stream
-    /// has to be on a new unit.
+    /// Whether teardown may park a voice unit in [`SPARE`].
     spare: bool,
 }
 
-/// The device object under each half of a stream.
-///
-/// Two fields rather than one because the unit reports two, and on a Mac they
-/// are usually different objects. Either is `None` where the unit named no
-/// device for that half.
+/// The device under each half; on a Mac usually two objects.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Route {
-    /// The speaker's: what the unit reports on its output element.
     playback: Option<DeviceId>,
-    /// The microphone's: what the unit reports on its input element.
     capture: Option<DeviceId>,
 }
 
-/// Where the device under a stream is.
-///
-/// Three states rather than two flags, because the third one is not "stopped
-/// with a bit set": a stream that has lost its device stays here until
-/// [`Stream::recover`] puts another one underneath, and that is what makes the
-/// loss reported once rather than on every poll.
+/// `Lost` persists until [`Stream::recover`], so the loss is reported once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Health {
     /// Open, and not started.
@@ -796,10 +679,8 @@ unsafe impl Send for Stream {}
 impl Stream {
     /// Open the device, without starting it.
     ///
-    /// A [`StreamKind::Voice`] stream is one per process. A softphone has one
-    /// call's worth of audio at a time, and opening a second voice-processing
-    /// unit while the first is alive was observed to block inside the
-    /// framework rather than to fail, so it is refused here instead. A
+    /// One [`StreamKind::Voice`] stream per process: a second voice unit was
+    /// seen to block in the framework, so it is refused instead. A
     /// [`StreamKind::Playback`] stream opens beside it.
     ///
     /// # Errors
@@ -817,21 +698,17 @@ impl Stream {
         )
     }
 
-    /// The same, on controls that already exist, which is what makes a reopen
-    /// keep the volume and the mute the caller had set.
+    /// The same, on existing controls, so a reopen keeps volume and mute.
     fn open_with(
         config: StreamConfig,
         microphone: Arc<Channel>,
         speaker: Arc<Channel>,
     ) -> Result<Self, Error> {
-        // the room is taken before the unit exists, so that two threads
-        // opening at once cannot both get one
+        // claimed before the unit exists, so concurrent opens cannot both win
         let claim = match config.kind {
             StreamKind::Voice => Some(VOICE_UNIT.take().ok_or(Error::Busy)?),
             StreamKind::Playback => None,
         };
-        // the voice unit the last voice stream put aside, configured again
-        // from the top below rather than a new one made beside its remains
         let spare = match config.kind {
             StreamKind::Voice => SPARE.take(),
             StreamKind::Playback => None,
@@ -841,13 +718,9 @@ impl Stream {
             None => new_unit(config.kind)?,
         };
 
-        // The unit belongs to a `Stream` from here on, before anything is set
-        // on it. Configuration installs the callbacks partway through and can
-        // fail after that — at `AudioUnitInitialize` or at the format readback
-        // — so the way out of a failure has to be the same shut, stop, drain
-        // and only-then-dispose that any other teardown does. Handing it to a
-        // `Stream` first is what makes `?` below take that route, and means
-        // there is one shutdown sequence in this file rather than two.
+        // Owned by a `Stream` before configuring: configuration can fail after
+        // the callbacks are installed, and then the normal teardown (shut,
+        // stop, drain, dispose) must run.
         let mut stream = Self {
             unit,
             shared: Arc::new(Shared::new(
@@ -873,10 +746,8 @@ impl Stream {
             if spare.is_none() {
                 return Err(error);
             }
-            // A unit set aside can have gone bad since — the media services
-            // reset under it — and a new one is what answers that. So the
-            // one that refused goes, and the open is tried once more on a
-            // unit of its own; what that one refuses is the answer.
+            // a spared unit may have gone bad (media services reset): retry
+            // once on a fresh unit
             let config = stream.config.clone();
             let (microphone, speaker) =
                 (Arc::clone(&stream.microphone), Arc::clone(&stream.speaker));
@@ -889,17 +760,13 @@ impl Stream {
         }
         stream.route = route_of(unit);
         if stream.config.kind == StreamKind::Playback {
-            // no microphone half, so no device under one to watch or to
-            // count the delay of
             stream.route.capture = None;
         }
         stream.delay = stream.current_delay();
         Ok(stream)
     }
 
-    /// What the two devices the unit landed on say their halves cost: the
-    /// speaker's output side at the speaker's rate, and the microphone's
-    /// input side at the microphone's.
+    /// Each half's delay, at its own device's rate.
     #[cfg(target_os = "macos")]
     fn current_delay(&self) -> RenderDelay {
         let leg = |device: Option<DeviceId>, direction| {
@@ -913,9 +780,7 @@ impl Stream {
         }
     }
 
-    /// On iOS the numbers live in `AVAudioSession` — `inputLatency`,
-    /// `outputLatency` and `ioBufferDuration` — which is Objective-C and the
-    /// application's to read, so this crate has nothing to report.
+    /// On iOS the figures are `AVAudioSession`'s, for the application to read.
     #[cfg(target_os = "ios")]
     #[expect(
         clippy::unused_self,
@@ -927,10 +792,8 @@ impl Stream {
 
     /// Whether both devices the stream opened on are still attached.
     ///
-    /// Either one going is the stream's device going: a call that has lost
-    /// its microphone is as broken as one that has lost its speaker, and on a
-    /// Mac the two are usually different objects, so asking about one says
-    /// nothing about the other.
+    /// Losing either half is losing the stream; on a Mac they are usually
+    /// different objects.
     #[cfg(target_os = "macos")]
     fn device_present(&self) -> bool {
         [self.route.playback, self.route.capture]
@@ -939,15 +802,9 @@ impl Stream {
             .all(crate::hal::is_alive)
     }
 
-    /// Whether the unit is still running, which is what iOS lets this crate
-    /// see of the device being taken away.
-    ///
-    /// The route and its interruptions belong to `AVAudioSession` and are
-    /// delivered to the application, not here. What does reach the unit is
-    /// their effect: the system stops it when an interruption begins — a
-    /// cellular call, another application's session — and one whose media
-    /// services were reset no longer answers at all. Either way the unit is
-    /// not running while the stream still thinks it is.
+    /// Whether the unit still runs. Interruptions stop it and a media
+    /// services reset leaves it unresponsive; the session events themselves
+    /// go to the application.
     #[cfg(target_os = "ios")]
     fn device_present(&self) -> bool {
         unit_still_running(get::<u32>(
@@ -965,25 +822,14 @@ impl Stream {
         self.format
     }
 
-    /// How long a frame takes to get from [`Playback::write`] out of the
-    /// loudspeaker, across the room, and back in through [`Capture::read`].
+    /// Time from [`Playback::write`] through the room back to
+    /// [`Capture::read`]: what an echo canceller looks back by. Covers both
+    /// halves (the WASAPI equivalent is per endpoint), each at its device's
+    /// rate.
     ///
-    /// This is the number an echo canceller is told to look back by, and the
-    /// one line to write is the same on Windows: what
-    /// `sipral_io_wasapi::CaptureStream::latency` reports for its endpoint,
-    /// this reports for both halves at once, because the unit here is duplex
-    /// and a WASAPI client is not. Each half is asked of the device object
-    /// the unit reports for it, and converted at that device's own rate.
-    ///
-    /// Read once, when the stream opened. Asking the devices again later
-    /// would be a property read on hardware that may have gone, and the parts
-    /// that can move — the IO buffer another process resized — move by less
-    /// than the delay of asking. [`Stream::recover`] reads it again for the
-    /// devices it lands on.
-    ///
-    /// Zero on iOS, and zero from a device that answered nothing.
-    /// [`Stream::render_delay`] is the same number with the parts still
-    /// separate, and says which of them the device would not give.
+    /// Read once at open; [`Stream::recover`] reads it again. Zero on iOS
+    /// and for a device that reports nothing; [`Stream::render_delay`] gives
+    /// the parts.
     #[must_use]
     pub fn latency(&self) -> Duration {
         self.delay.total()
@@ -991,9 +837,8 @@ impl Stream {
 
     /// The same delay, part by part and direction by direction.
     ///
-    /// Worth reading when a canceller is not converging: a device that
-    /// answered for three parts out of four gives a delay that is a floor
-    /// rather than the truth, and [`RenderDelay::is_complete`] is what says so.
+    /// If a part is missing the total is only a floor; see
+    /// [`RenderDelay::is_complete`].
     #[must_use]
     pub const fn render_delay(&self) -> RenderDelay {
         self.delay
@@ -1036,9 +881,7 @@ impl Stream {
         // SAFETY: the unit is open and running.
         sys::check("AudioOutputUnitStop", unsafe { sys::stop_unit(self.unit) })?;
         self.health = Health::Stopped;
-        // The stop is synchronous off the I/O thread, so no callback is left
-        // to move these. A meter left where the last frame put it would read
-        // as a live signal for as long as the stream stayed stopped.
+        // stop is synchronous here; reset meters so they do not look live
         self.microphone.quiet();
         self.speaker.quiet();
         Ok(())
@@ -1052,10 +895,8 @@ impl Stream {
 
     /// The microphone's volume, mute and meter.
     ///
-    /// A handle, not a borrow: the slider and the bar are on the thread that
-    /// draws the window, the frames are on the thread that carries the call,
-    /// and the stream is borrowed by [`Stream::split`] for the length of it.
-    /// It survives [`Stream::recover`] with its settings intact.
+    /// A handle for the UI thread, independent of [`Stream::split`]'s
+    /// borrow. It survives [`Stream::recover`].
     #[must_use]
     pub fn capture_controls(&self) -> Controls {
         Controls::new(&self.microphone)
@@ -1070,32 +911,17 @@ impl Stream {
     /// Ask whether the device underneath is still there, and say so once when
     /// it is not.
     ///
-    /// What it proves differs by platform, and the difference is worth
-    /// knowing. On macOS the hardware layer is asked outright whether each of
-    /// the two device objects the stream opened — the speaker's and the
-    /// microphone's, which are often not the same object — is still alive, so
-    /// an unplugged headset or microphone is reported whether or not anything
-    /// was flowing through it, and losing either half is losing the stream.
-    /// On iOS the unit is asked whether it is still running: the system stops
-    /// it when an `AVAudioSession` interruption begins, and a unit whose media
-    /// services were reset does not answer, so both are reported here as the
-    /// device lost. A route change on iOS is not a loss — the unit follows the
-    /// session's route — and is the application's to hear about, from
-    /// `AVAudioSession`. [`Stream::recover`] builds a new unit, which is the
-    /// only thing that works after a reset; while an interruption lasts it
-    /// fails, and is tried again once the application's session is active.
+    /// On macOS each half's device is checked for being alive, so an unplug
+    /// is caught even when idle. On iOS the unit is checked for running: an
+    /// `AVAudioSession` interruption or a media services reset reads as a
+    /// loss, while a route change is not one. [`Stream::recover`] builds a new
+    /// unit; during an interruption it fails until the session is active.
     ///
-    /// A stream that has said [`StreamEvent::DeviceLost`] is stopped. What it
-    /// had already captured can still be read out; nothing further arrives,
-    /// and the speaker ring fills and takes no more. [`Stream::recover`] is
-    /// what puts a device back under it.
+    /// After [`StreamEvent::DeviceLost`] the stream is stopped: captured
+    /// samples can still be read, nothing more arrives.
     ///
-    /// The macOS answer costs two property reads and the iOS one a single
-    /// read of the unit, so it belongs beside `DeviceMonitor::poll` (macOS)
-    /// a few times a second rather than beside [`Controls::level`] on every
-    /// drawn frame. Once the loss has been reported it costs a comparison:
-    /// every answer after the first is `None`, because a device does not go
-    /// twice.
+    /// Costs one or two property reads; poll a few times a second, not per
+    /// UI frame. After the loss it returns `None` cheaply.
     pub fn poll(&mut self) -> Option<StreamEvent> {
         if !self.is_running() || self.device_present() {
             return None;
@@ -1110,46 +936,33 @@ impl Stream {
         // stopped on a device that has gone is not news: the device has gone.
         let _ = unsafe { sys::stop_unit(self.unit) };
         self.health = Health::Lost;
-        // a meter left where the last frame put it reads as a live signal
         self.microphone.quiet();
         self.speaker.quiet();
     }
 
     /// Open again, on whatever the stream's [`StreamConfig`] names now.
     ///
-    /// This is the answer to [`StreamEvent::DeviceLost`], and the reason a
-    /// saved selection is worth storing as
-    /// [`DeviceChoice::Preferred`](crate::DeviceChoice::Preferred): that
-    /// choice resolves to the saved device when it is back and to the system's
-    /// route when it is not, so recovering from an unplugged headset lands on
-    /// the machine's own speaker rather than failing.
-    /// [`DeviceChoice::Device`](crate::DeviceChoice::Device) names one device
-    /// and nothing else, so recovering onto one that has gone fails, and
-    /// says so.
+    /// The answer to [`StreamEvent::DeviceLost`].
+    /// [`DeviceChoice::Preferred`](crate::DeviceChoice::Preferred) falls back
+    /// to the system route; [`DeviceChoice::Device`](crate::DeviceChoice::Device)
+    /// fails if that device is gone.
     ///
-    /// The controls carry over: the gain and the mute a person set are still
-    /// set, and a [`Controls`] handed out earlier keeps working. Whatever was
-    /// in the rings does not — those samples were on their way to a device
-    /// that is not there. A stream that was running is started again.
+    /// Gain, mute and existing [`Controls`] carry over; ring contents do not.
+    /// A running stream is restarted.
     ///
     /// # Errors
-    /// [`Error::Draining`] when the old stream could not be shut down, in
-    /// which case nothing is reopened: a second voice-processing unit
-    /// alongside one that is wedged is how a process stops answering
-    /// altogether. Otherwise whatever [`Stream::open`] would have said about
-    /// the device it landed on.
+    /// [`Error::Draining`] when the old stream could not be shut down; then
+    /// nothing is reopened, since a second unit beside a wedged one hangs the
+    /// process. Otherwise what [`Stream::open`] would say.
     pub fn recover(mut self) -> Result<Self, Error> {
         let config = self.config.clone();
         let microphone = Arc::clone(&self.microphone);
         let speaker = Arc::clone(&self.speaker);
-        // `Lost` is only ever reached from `Running`, so a stream that was
-        // carrying a call when its device went is one to put back on the air.
+        // `Lost` is only reached from `Running`
         let running = !matches!(self.health, Health::Stopped);
-        // What the framework says about taking down a unit whose device has
-        // gone is not a reason to stop: that is the situation being recovered
-        // from. Failing to drain is another matter entirely.
-        // and the unit the stream comes back on is a new one: after a reset
-        // of the media services the old one no longer answers at all
+        // Teardown errors on a lost device are expected; only a failed drain
+        // stops recovery. Always a fresh unit: after a media services reset
+        // the old one no longer answers.
         self.spare = false;
         if let Err(error @ Error::Draining { .. }) = self.teardown() {
             return Err(error);
@@ -1165,10 +978,8 @@ impl Stream {
 
     /// Which device the speaker half of the stream actually landed on.
     ///
-    /// Worth asking after a [`DeviceEvent::DefaultChanged`] arrives: a stream
-    /// opened without naming a device follows the system route, and this is
-    /// how to find out where that went. The microphone half is
-    /// [`Stream::capture_device`], and on a Mac it is usually another device.
+    /// Useful after [`DeviceEvent::DefaultChanged`] for a stream following
+    /// the system route. The microphone half is [`Stream::capture_device`].
     ///
     /// [`DeviceEvent::DefaultChanged`]: crate::DeviceEvent::DefaultChanged
     ///
@@ -1192,9 +1003,8 @@ impl Stream {
     /// The two directions, so that a capture thread and a playback thread can
     /// each have one.
     ///
-    /// They borrow the stream rather than owning it, which is what keeps a
-    /// second pair from existing: one producer and one consumer per ring is
-    /// the whole basis of the lock-free discipline underneath.
+    /// They borrow the stream, so no second pair can exist: the rings
+    /// require one producer and one consumer.
     pub fn split(&mut self) -> (Capture<'_>, Playback<'_>) {
         let shared: &Shared = &self.shared;
         (Capture { shared }, Playback { shared })
@@ -1214,45 +1024,31 @@ impl Stream {
 
     /// Shut the device down and say what the framework made of it.
     ///
-    /// Dropping a stream does exactly this and has nowhere to report to, so
-    /// this exists for a caller who wants to know. Either way the device is
-    /// released; the difference is only whether the statuses are seen.
+    /// Same as dropping, but the statuses are returned.
     ///
     /// # Errors
-    /// [`Error::Draining`] when the callbacks could not be shown to be out of
-    /// the stream's memory within two seconds — in which case that memory and
-    /// the audio unit are deliberately never freed. Otherwise [`Error::Call`]
-    /// carrying the first of stop, uninitialise and dispose to complain; all
-    /// three are attempted regardless, except that a voice unit that came
-    /// down cleanly is put aside for the next voice stream rather than
-    /// disposed of (see `SPARE` in the source).
+    /// [`Error::Draining`] when the callbacks did not leave within two
+    /// seconds; the memory and unit are then deliberately leaked. Otherwise
+    /// [`Error::Call`] for the first of stop, uninitialise, dispose to fail;
+    /// all are attempted, except that a cleanly stopped voice unit is kept
+    /// for reuse (`SPARE` in the source).
     pub fn close(mut self) -> Result<(), Error> {
         self.teardown()
     }
 
     /// The shutdown sequence, safe to call twice.
     ///
-    /// The order is the argument, and each step is here for one reason:
+    /// 1. close the gate, so new callbacks turn back;
+    /// 2. stop the unit (synchronous off the I/O thread), so none begin;
+    /// 3. drain the gate, for callbacks already inside;
+    /// 4. only then uninitialise and dispose (or spare, [`SPARE`]).
     ///
-    /// 1. shut the gate, so a callback that has not started reading yet turns
-    ///    itself around;
-    /// 2. stop the unit, which is synchronous when it is not called from the
-    ///    I/O thread and is therefore what rules out a callback beginning
-    ///    after this point;
-    /// 3. wait for anything already inside to come out, which is the only
-    ///    thing that says so about a callback that was already running;
-    /// 4. only then take the unit apart and let the memory go — uninitialised,
-    ///    and then disposed of or, for a voice unit, put aside for the next
-    ///    voice stream ([`SPARE`]).
-    ///
-    /// Step 3 failing is not recoverable and not survivable by freeing
-    /// anyway, so it stops the sequence and marks the stream to be leaked.
+    /// If step 3 fails the stream is marked to leak and nothing is freed.
     fn teardown(&mut self) -> Result<(), Error> {
         self.shut_down(TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS)
     }
 
-    /// The same with the wait spelled out, so a test can ask for a deadline it
-    /// is willing to sit through.
+    /// With an explicit deadline, for tests.
     fn shut_down(&mut self, within: Duration, millis: u64) -> Result<(), Error> {
         if self.closed {
             return Ok(());
@@ -1277,14 +1073,10 @@ impl Stream {
         // reading the unit or anything reachable from it.
         let uninitialized = unsafe { sys::uninitialize_unit(self.unit) };
         let disposed = if spares(self.config.kind, lost, self.spare, uninitialized) {
-            // Set aside for the next voice stream, uninitialised and with no
-            // callback able to run, rather than disposed of: see `SPARE`.
-            // The callbacks it still names point into `shared`, which goes
-            // with this stream; the next stream installs its own before it
-            // initialises the unit again, and nothing calls them before then.
+            // The stale callbacks point into `shared`, which is freed; the
+            // next stream installs its own before initialising, and an
+            // uninitialised unit calls none.
             match SPARE.keep(self.unit) {
-                // there is only ever one voice unit, so there is never a
-                // second one to put aside; one would go the usual way
                 // SAFETY: as above, and nothing else holds it.
                 Some(other) => unsafe { sys::dispose_component(other) },
                 None => 0,
@@ -1293,8 +1085,6 @@ impl Stream {
             // SAFETY: as above.
             unsafe { sys::dispose_component(self.unit) }
         };
-        // the unit is gone or put aside, and with it the reason to keep the
-        // room
         self.claim = None;
 
         sys::check("AudioOutputUnitStop", stopped)?;
@@ -1305,16 +1095,11 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        // nothing to report a status to from here; the record a teardown that
-        // could not finish leaves behind is the leak below
         let _ = self.teardown();
         if self.leak {
-            // A realtime thread may still be reading this. A buffer that is
-            // never freed is a number in a memory graph; a buffer freed under
-            // a callback is a crash in the middle of somebody's call.
+            // a realtime thread may still read this: leak rather than crash
             core::mem::forget(Arc::clone(&self.shared));
-            // And a unit that was never disposed of is still the process's
-            // one voice-processing unit.
+            // the undisposed unit still occupies the voice slot
             core::mem::forget(self.claim.take());
         }
     }
@@ -1332,8 +1117,7 @@ impl Capture<'_> {
         self.shared.capture.read_frame(frame)
     }
 
-    /// Samples waiting to be read. A number that keeps growing is a reader
-    /// that is falling behind, and the drop counter is about to start moving.
+    /// Samples waiting. A growing number means the reader is falling behind.
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.shared.capture.filled()
@@ -1367,10 +1151,8 @@ impl Playback<'_> {
             .saturating_sub(self.shared.playback.free())
     }
 
-    /// The most samples the device has taken in one callback so far, at the
-    /// stream's rate. Under the voice unit a narrowband headset takes half a
-    /// second at a stroke; a writer that keeps less than this queued is heard
-    /// as a gap on every one of those callbacks.
+    /// The largest single pull so far, at the stream's rate (up to half a
+    /// second for a narrowband headset). Keep at least this much queued.
     #[must_use]
     pub fn burst(&self) -> usize {
         self.shared.burst.load(Ordering::Relaxed)
@@ -1379,13 +1161,10 @@ impl Playback<'_> {
 
 /// Everything between opening the instance and initialising it.
 ///
-/// The order is not free: enabling I/O comes before naming a device, naming a
-/// device comes before the formats, and initialising comes last, because the
-/// unit works out what it can do from what it has been told so far.
+/// Order matters: enable I/O, name devices, set formats, then initialise.
 fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Result<(), Error> {
     let voice = config.kind == StreamKind::Voice;
-    // the plain output unit plays and nothing else: its input stays off, so
-    // it asks nothing of the microphone and needs no permission for it
+    // input off for playback, so no microphone permission is needed
     let capture_enabled = u32::from(voice);
     let enabled: u32 = 1;
     set(
@@ -1431,15 +1210,9 @@ fn configure(unit: sys::Unit, config: &StreamConfig, shared: &Arc<Shared>) -> Re
     formats_and_callbacks(unit, config, shared, voice)
 }
 
-/// The device under each half, on the global scope and before initialising:
-/// the device is only settable while the unit is uninitialised, which is why
-/// a device cannot be changed under a running stream and why
-/// `Stream::recover` reopens. Element zero is the speaker's half and element
-/// one the microphone's. Naming the speaker's device on element zero was seen
-/// to leave element one on the system's default input, so the microphone's is
-/// named on element one separately, and what each half is on is read back
-/// from the unit once it is initialised rather than assumed from these
-/// choices.
+/// Settable only while uninitialised, hence `Stream::recover` reopens.
+/// Element 0 is the speaker, 1 the microphone; naming 0 leaves 1 on the
+/// default input, so each is set separately and read back after init.
 #[cfg(target_os = "macos")]
 fn name_devices(unit: sys::Unit, config: &StreamConfig, voice: bool) -> Result<(), Error> {
     {
@@ -1539,12 +1312,9 @@ fn formats_and_callbacks(
     // SAFETY: the unit is open and fully described.
     sys::check("AudioUnitInitialize", unsafe { sys::initialize_unit(unit) })?;
 
-    // Read the format back rather than assume it took. A unit that quietly
-    // settled on something else would not fail here, it would hand over
-    // samples at a rate nobody expects, and that arrives as a call that sounds
-    // wrong rather than as an error. The capture side is the one whose
-    // octets per frame `record` sizes its render by; a unit that only plays
-    // has only the other side.
+    // Read the format back: a unit that silently picked another one would
+    // sound wrong instead of failing. `record` sizes its render by the
+    // capture side; a playback unit has only the other.
     let (scope, bus) = if voice {
         (abi::SCOPE_OUTPUT, abi::BUS_INPUT)
     } else {
@@ -1572,14 +1342,9 @@ fn formats_and_callbacks(
     Ok(())
 }
 
-/// The device one element of the unit is on: element zero is the speaker's
-/// half and element one the microphone's, the same numbers the two buses
-/// carry.
-///
-/// The header documents the property on the global scope without saying what
-/// its elements are. The voice-processing unit answers on both, with the
-/// default output on element zero and the default input on element one when
-/// no device is named, which is what this relies on.
+/// The device of one element (0 speaker, 1 microphone). The header does not
+/// define the elements; VPIO answers with the default output on 0 and the
+/// default input on 1, which this relies on.
 #[cfg(target_os = "macos")]
 fn device_on(unit: sys::Unit, element: u32) -> Result<DeviceId, Error> {
     let id: u32 = get(
@@ -1607,10 +1372,8 @@ fn route_of(unit: sys::Unit) -> Route {
     }
 }
 
-/// What `kAudioOutputUnitProperty_IsRunning` read back says about a unit the
-/// stream started: running only on a non-zero answer. A read that failed is a
-/// unit that is not there to answer — the media services were reset under it —
-/// and that is not a running one either.
+/// Running only on a non-zero `IsRunning`; a failed read (media services
+/// reset) counts as not running.
 #[cfg(any(target_os = "ios", test))]
 fn unit_still_running(answer: Result<u32, Error>) -> bool {
     matches!(answer, Ok(running) if running != 0)
@@ -1697,12 +1460,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::device::{DeviceChoice, DeviceId};
 
-    /// Held by every test that opens or closes a real voice unit, the ignored
-    /// ones on real devices included. The unit a
-    /// voice stream leaves behind is the process's (`SPARE`), and the tests
-    /// run on threads of one process: a refused open closing its unit there
-    /// while another test reads what is put aside gave that test a unit it
-    /// never kept, one run in a few.
+    /// Held by every test that opens or closes a real voice unit: `SPARE` is
+    /// process-wide, and parallel tests otherwise took each other's unit.
     static VOICE_UNITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn voice_units() -> std::sync::MutexGuard<'static, ()> {
@@ -1918,9 +1677,7 @@ mod tests {
             Arc::clone(&microphone),
             Arc::clone(&speaker),
         );
-        // a tenth of a second at 48 kHz is 4800 samples, so the window has to
-        // have been moved on from the 800 the narrowband channels were built
-        // with — at 800 the peak below would have fallen off by now
+        // the window must have grown from 800 to 4800 samples
         let mut loud = [6_000i16; 4_000];
         let mut quiet = [0i16; 700];
         shared.microphone.apply(&mut loud, 4_000);
@@ -2046,9 +1803,7 @@ mod tests {
     fn the_speaker_volume_is_applied_where_the_device_takes_the_samples() {
         let shared = shared();
         assert!(shared.playback.write_frame(&[10_000, -10_000, 4, -4]));
-        // Set after the frame was queued, which is the whole point: the ring
-        // holds sixteen frames, and a volume applied on the way in would be
-        // heard a third of a second after the slider moved.
+        // set after queueing: the gain must apply on the way out
         shared.speaker.set_gain(Gain::from_ratio(0.5));
 
         let mut samples = [-1i16; 4];
@@ -2070,8 +1825,7 @@ mod tests {
         rendered(&shared, &mut samples);
 
         assert_eq!(samples, [0, 0, 0, 0]);
-        // the ring was drained rather than held back: unmuting has to be the
-        // room, not four seconds of what was said while nobody was listening
+        // drained while muted, so unmuting replays nothing
         assert_eq!(shared.playback.filled(), 0);
         assert_eq!(shared.meters.read().played, 4);
         assert_eq!(shared.speaker.level(), Level::SILENT);
@@ -2201,9 +1955,8 @@ mod tests {
             capture: Some(microphone),
         };
         let delay = stream.current_delay();
-        // The microphone's side of the microphone, at the microphone's rate.
-        // Asked of the speaker instead, a Mac answers for an input side the
-        // speaker does not have, at the speaker's rate.
+        // asked of the microphone; the speaker would answer for an input
+        // side it does not have
         assert_eq!(delay.capture, latency(microphone, Direction::Input));
         assert_eq!(delay.playback, latency(speaker, Direction::Output));
     }
@@ -2297,9 +2050,7 @@ mod tests {
         stream.health = Health::Running;
         stream.route = gone();
         assert_eq!(stream.poll(), Some(crate::device::StreamEvent::DeviceLost));
-        // what `recover` reads to decide whether to start what it opens: a
-        // device that went mid-call has to come back mid-call, and `Lost` is
-        // only ever reached from `Running`
+        // `recover` restarts a stream lost while running
         assert_ne!(stream.health, Health::Stopped);
     }
 
@@ -2558,11 +2309,8 @@ mod tests {
         config
     }
 
-    /// The default route end to end — the quiet device when this machine has
-    /// one, so that nothing sounds through its loudspeaker — everything in
-    /// the one function on purpose: a process has room for one
-    /// voice-processing unit, the test harness runs its tests on several
-    /// threads, and a second unit is refused while the first is open.
+    /// The default route end to end (on the quiet device when present). One
+    /// function, because a second voice unit is refused while one is open.
     #[test]
     #[ignore = "opens the real default device"]
     #[expect(
@@ -2589,9 +2337,7 @@ mod tests {
             assert_eq!(stream.format(), wanted);
             stream.start().expect("start");
             stream.stop().expect("stop");
-            // the explicit teardown, so that a drain that did not finish or a
-            // framework call that complained shows up here rather than being
-            // swallowed by a destructor
+            // explicit, so errors are not swallowed by the destructor
             stream.close().expect("close");
             println!("{wanted} opened and closed");
         }
@@ -2689,10 +2435,7 @@ mod tests {
         assert!(counters.played > 0, "nothing was taken for the speaker");
         assert_eq!(counters.panics, 0);
 
-        // Reopening is what a lost device is answered with, so it is worth
-        // doing here where a device is real: the unit goes back, another one
-        // comes up on the same choice, and the controls the caller is holding
-        // still work and still say what they were set to.
+        // a reopen on a real device keeps the caller's controls working
         let mut stream = stream.recover().expect("reopen on the system route");
         assert_eq!(stream.format(), format);
         assert!(!stream.is_running(), "a stopped stream comes back stopped");
@@ -2850,10 +2593,8 @@ mod tests {
 
     /// A stream around a null unit.
     ///
-    /// The framework refuses all three teardown calls on one with `paramErr`
-    /// and touches nothing, which is what makes the order, the idempotence and
-    /// the drain testable without a device — the part of teardown that is this
-    /// crate's, rather than the part that is CoreAudio's.
+    /// The framework refuses teardown calls on it with `paramErr`, so this
+    /// crate's own teardown logic is testable without a device.
     fn detached() -> Stream {
         let shared = shared();
         Stream {
@@ -2930,11 +2671,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_device_that_does_not_exist_is_refused_and_the_unit_goes_back() {
-        // No device carries this identifier, so setting it fails with
-        // kAudioUnitErr_InvalidPropertyValue and `open` has to unwind a unit
-        // it had already created. There is one way out of that and it is the
-        // teardown sequence; what this checks is that taking it neither hangs
-        // nor falls over.
+        // an unknown device fails after the unit exists; the unwind must
+        // neither hang nor crash
         let config = StreamConfig {
             device: DeviceChoice::Device(DeviceId::new(u32::MAX)),
             ..StreamConfig::default()
@@ -3169,12 +2907,8 @@ mod tests {
         );
     }
 
-    /// The teardown itself, on a real voice unit that was made and never
-    /// initialised, which needs no device: closing the stream puts the unit
-    /// aside for the next voice stream instead of disposing of it, and a
-    /// stream whose device was lost, or that is reopening onto a new unit,
-    /// disposes of it as before. One test, because the room it is put aside
-    /// in is the process's.
+    /// On a real, never-initialised voice unit: close spares it; a lost
+    /// device or a reopen disposes of it. One test, since `SPARE` is global.
     #[test]
     fn a_closed_voice_stream_leaves_its_unit_for_the_next_and_a_lost_one_does_not() {
         use super::{SPARE, StreamKind, new_unit};
@@ -3206,13 +2940,9 @@ mod tests {
         assert_eq!(SPARE.take(), None, "nor is one the stream may not keep");
     }
 
-    /// Voice streams opened and closed round after round on the quiet route,
-    /// the microphone on the system's default input and then named, which
-    /// is a reopen in the middle of each round as a person choosing a device
-    /// during a call makes: every stream after the first runs on the unit the
-    /// first one made, and each one moves frames. The sequence that, with a
-    /// new unit each time, read freed memory inside the framework within a
-    /// few rounds when run under the guard allocator:
+    /// Repeated open/close rounds with a mid-round microphone change, all on
+    /// one unit. With a new unit each time this read freed memory within a
+    /// few rounds under the guard allocator:
     ///
     ///   SIPRAL_AUDIO_ROUNDS=10 DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib \
     ///   MallocScribble=1 target/debug/deps/sipral_io_coreaudio-<hash> \

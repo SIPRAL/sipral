@@ -3,15 +3,10 @@
 
 //! A thread of the caller's run as audio: Mach's time-constraint policy.
 //!
-//! The device's own callbacks already run on a real-time thread the
-//! framework made; a thread that feeds them — a pump that encodes the
-//! microphone and mixes the calls once a frame — does not, and the
-//! scheduler takes the processor away from an ordinary thread whenever
-//! something busier wants it. A thread under the time-constraint policy is
-//! scheduled ahead of every ordinary one for the `computation` it declared in
-//! every `period`, and is let go back to an ordinary one by the kernel if it
-//! ever takes more than it said, so a promise that turns out wrong costs the
-//! thread its place and not the machine its responsiveness.
+//! For the pump thread that feeds the device callbacks. The policy puts it
+//! ahead of ordinary threads for its declared `computation` per `period`;
+//! the kernel demotes it if it overruns, so a wrong estimate cannot starve
+//! the machine.
 //!
 //! Written from `<mach/thread_policy.h>`, `<mach/mach_time.h>` and
 //! `<pthread.h>` as the SDK ships them.

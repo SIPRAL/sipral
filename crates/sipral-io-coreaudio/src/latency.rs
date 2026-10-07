@@ -3,21 +3,13 @@
 
 //! How long a sample takes to get out of the machine and back into it.
 //!
-//! An echo canceller is handed the frame that was leaving the loudspeaker
-//! while the microphone was open, and this is how far back that frame is.
-//! CoreAudio does not keep the number in one property the way WASAPI does.
-//! Apple's hardware layer reports four things per direction — what the device
-//! itself adds, how far ahead of or behind the hardware the IO has to stay,
-//! how many frames go in one IO buffer, and, on the stream object rather than
-//! the device, what the stream adds — and the header is explicit that the
-//! device's and the stream's are summed rather than one standing for the
-//! other. The loop is both directions of that.
+//! What an echo canceller looks back by. CoreAudio has no single property:
+//! per direction it reports device latency, safety offset, IO buffer size
+//! and, on the stream object, stream latency; the header says device and
+//! stream latency are summed.
 //!
-//! Nothing here is a measurement. It is what the device says about itself, and
-//! a device that will not answer for a part is reported as not having answered
-//! rather than as having said zero: three parts out of four is worth more than
-//! no number at all, and a caller that needs to know which it got has
-//! [`Latency::is_complete`].
+//! These are the device's own claims, not measurements. A part it does not
+//! report is left out, not taken as zero ([`Latency::is_complete`]).
 
 use core::fmt;
 use core::time::Duration;
@@ -27,18 +19,14 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 /// What one direction of one device adds, in frames, part by part.
 ///
-/// Each part is `None` when the device would not answer for it, which is not
-/// the same as zero — a headset that reports no latency of its own has said
-/// something, and one whose driver has no such property has not.
+/// `None` means the device did not answer, which differs from zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Latency {
     /// `kAudioDevicePropertyLatency` on this direction's scope: the frames the
     /// device itself adds.
     pub device_frames: Option<u32>,
-    /// `kAudioStreamPropertyLatency` on the first stream of this direction,
-    /// which the header says is added to the device's rather than replacing
-    /// it. The first stream is the one carrying channel one, and this crate is
-    /// mono.
+    /// `kAudioStreamPropertyLatency` on the first (mono) stream, added to
+    /// the device's.
     pub stream_frames: Option<u32>,
     /// `kAudioDevicePropertySafetyOffset`: how far ahead of the hardware
     /// position, for playback, or behind it, for capture, the IO has to stay.
@@ -47,9 +35,8 @@ pub struct Latency {
     /// of which passes between a frame being handed over and the hardware
     /// having it.
     pub buffer_frames: Option<u32>,
-    /// `kAudioDevicePropertyNominalSampleRate`, rounded to whole hertz. It is
-    /// what turns the frames above into a time, so without it there is no
-    /// duration to give.
+    /// `kAudioDevicePropertyNominalSampleRate`, rounded to whole hertz;
+    /// needed to turn frames into time.
     pub sample_rate_hz: Option<u32>,
 }
 
@@ -65,9 +52,7 @@ impl Latency {
 
     /// The same as a time, at the rate the device said it was running.
     ///
-    /// Zero when the device would not say what rate that is, because frames
-    /// without a rate are not a duration and inventing one would be a guess
-    /// arriving where a fact is expected.
+    /// Zero when the rate is unknown, rather than a guess.
     #[must_use]
     pub fn duration(&self) -> Duration {
         match self.sample_rate_hz {
@@ -114,9 +99,8 @@ impl fmt::Display for Latency {
 /// The whole loop: down to the loudspeaker, through the room, and back up from
 /// the microphone.
 ///
-/// This is the number an echo canceller wants, and the two halves are kept
-/// apart because they can be different devices and because a delay that is
-/// wrong is usually wrong on one side.
+/// The halves stay separate: they can be different devices, and an error is
+/// usually on one side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderDelay {
     /// From this crate to the loudspeaker.
@@ -129,10 +113,7 @@ impl RenderDelay {
     /// Both halves as one time, which is what an echo canceller is told to
     /// look back by.
     ///
-    /// A machine that answered nothing gives zero, which pairs a capture with
-    /// the frame handed to the loudspeaker immediately before it. That is the
-    /// same thing a caller who never asked would get, and it is the honest
-    /// answer rather than a number invented to look like one.
+    /// Zero when nothing answered, the same as never asking.
     #[must_use]
     pub fn total(&self) -> Duration {
         self.playback
@@ -253,8 +234,7 @@ mod tests {
             delay.total(),
             delay.playback.duration() + delay.capture.duration()
         );
-        // a bit over thirty milliseconds, which is what a Mac's own hardware
-        // costs and why the number is worth asking for rather than assuming
+        // a bit over 30 ms, typical for a Mac's built-in hardware
         assert!(delay.total() > Duration::from_millis(32));
         assert!(delay.total() < Duration::from_millis(33));
         assert!(delay.is_complete());

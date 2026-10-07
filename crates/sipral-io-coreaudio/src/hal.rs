@@ -4,11 +4,8 @@
 //! Asking the machine what audio hardware it has, and being told when that
 //! changes.
 //!
-//! macOS only. iOS answers the same questions through `AVAudioSession`, which
-//! is Objective-C and is the application's to configure — its category and its
-//! interruption policy depend on what the application is, not on what this
-//! crate does with the samples. The voice-processing unit behaves correctly
-//! once the session is set, which is why the stream side needs none of this.
+//! macOS only. On iOS `AVAudioSession` answers these, and it is the
+//! application's to configure.
 
 use core::ffi::{c_char, c_void};
 use core::time::Duration;
@@ -34,17 +31,12 @@ use crate::sys;
 
 /// Every device the machine has, at this instant.
 ///
-/// The answer is a snapshot and it goes stale — that is what
-/// [`DeviceMonitor`] is for, and why a device is named by
-/// [`DeviceId`] rather than by an index into this list.
+/// A snapshot; [`DeviceMonitor`] reports changes, and devices are named by
+/// [`DeviceId`], not index.
 ///
-/// It is the machine's devices as a person would pick from them, whether or
-/// not a voice-processing unit is open in this process. Such a unit makes a
-/// private aggregate device, visible to this process alone, which is left
-/// out; and it has the output devices hand what they play back in as an
-/// extra input stream, the reference its echo canceller listens for, which
-/// is not counted among a device's inputs — the loudspeaker does not become
-/// a microphone because a call is up.
+/// While a voice unit is open, its private aggregate device is left out, and
+/// the loopback reference stream it adds to outputs is not counted as an
+/// input.
 ///
 /// # Errors
 /// [`Error::Call`] when the hardware layer refuses to answer, which on a
@@ -100,9 +92,8 @@ pub fn default_device(direction: Direction) -> Result<Option<DeviceId>, Error> {
 
 /// The device carrying a saved identity, if the machine has it right now.
 ///
-/// The identity to save is [`Device::uid`], not [`Device::id`]: the number is
-/// handed back out to whatever is plugged in next, and a preference stored as
-/// one would eventually name somebody else's headset.
+/// Save [`Device::uid`], not [`Device::id`]: ids are reused for whatever is
+/// plugged in next.
 ///
 /// # Errors
 /// [`Error::Call`] when the hardware layer refuses to enumerate.
@@ -114,9 +105,7 @@ pub fn device_with_uid(uid: &str) -> Result<Option<Device>, Error> {
 
 /// Whether the hardware layer still has this device.
 ///
-/// A device object outlives the hardware behind it for a moment, which is what
-/// makes the question answerable at all: an object that has gone entirely
-/// refuses to answer, and that is the same answer.
+/// An object that no longer answers at all also counts as gone.
 #[must_use]
 pub fn is_alive(device: DeviceId) -> bool {
     let address = PropertyAddress::new(PROPERTY_DEVICE_IS_ALIVE, SCOPE_GLOBAL);
@@ -130,16 +119,10 @@ pub fn is_alive(device: DeviceId) -> bool {
 
 /// What a device says one direction of it costs, part by part.
 ///
-/// Never fails, and that is deliberate. Every part is separately optional in
-/// the hardware layer — a virtual device implements the properties its author
-/// thought of — so a refusal here would mean a caller with three quarters of a
-/// delay was handed nothing at all. What the device did not answer for comes
-/// back as [`None`] and [`Latency::is_complete`] says so.
-///
-/// The stream half is asked of the first stream on that side, which is the one
-/// carrying channel one, and this crate is mono. A device with several streams
-/// a side answers for each of them separately; the first is the one these
-/// samples travel on, so it is the one that counts.
+/// Never fails: each part is optional (virtual devices implement what they
+/// like), so missing parts are [`None`] and [`Latency::is_complete`] says
+/// so. The stream part comes from the first stream, which carries our mono
+/// channel.
 #[must_use]
 pub fn latency(device: DeviceId, direction: Direction) -> Latency {
     let object = device.get();
@@ -161,12 +144,8 @@ pub fn latency(device: DeviceId, direction: Direction) -> Latency {
 
 /// The whole loop: out of `playback` and back in through `capture`.
 ///
-/// Two devices rather than one, because on a Mac they usually are: the
-/// built-in microphone and the built-in speakers are two device objects, and
-/// so are the built-in microphone and a pair of headphones, each with its own
-/// rate and buffer size. A duplex device, such as a USB headset, is passed
-/// twice. [`Stream::render_delay`] is this, for the two objects the unit
-/// reports it is on.
+/// Two devices, since on a Mac they usually differ; pass a duplex device
+/// twice. [`Stream::render_delay`] is this for the stream's two devices.
 ///
 /// [`Stream::render_delay`]: crate::Stream::render_delay
 #[must_use]
@@ -186,8 +165,7 @@ fn frames(object: u32, selector: u32, scope: u32) -> Option<u32> {
 
 /// The rate the device says it is running at, in whole hertz.
 ///
-/// The property is a `Float64` because the hardware layer describes rates as
-/// ranges, not because a device runs at half a hertz.
+/// The property is a `Float64` only because rates are described as ranges.
 fn nominal_rate(device: u32) -> Option<u32> {
     let address = PropertyAddress::new(PROPERTY_NOMINAL_SAMPLE_RATE, SCOPE_GLOBAL);
     let hertz: f64 = property_value(
@@ -235,19 +213,15 @@ fn first_stream(device: u32, scope: u32) -> Option<u32> {
 
 /// Room for a property that is a list of object identifiers `bytes` long.
 ///
-/// Rounded up, never down: the size handed to the call alongside this buffer
-/// is what the layer is allowed to write, so the allocation has to cover it
-/// even when a driver reports a size that is not a whole number of
-/// identifiers. What such a size means is not this function's to guess; the
-/// callers read only the whole identifiers that came back.
+/// Rounded up: the layer may write the full reported size even if it is not
+/// a whole number of identifiers. Callers read only whole identifiers.
 fn identifiers(bytes: usize) -> Vec<u32> {
     vec![0; bytes.div_ceil(size_of::<u32>())]
 }
 
 /// The device a choice names, or `None` for the system route.
 ///
-/// A preference the machine does not have is not an error. That is the whole
-/// point of one: the headset is in a bag, the call still has to happen.
+/// A missing preferred device is not an error.
 pub(crate) fn choose(choice: &DeviceChoice) -> Result<Option<DeviceId>, Error> {
     match *choice {
         DeviceChoice::System => Ok(None),
@@ -265,17 +239,11 @@ struct Watch {
 
 /// Watches the machine's audio hardware and remembers what changed.
 ///
-/// A headset arriving or leaving is not an error and does not interrupt a
-/// stream that is running on another device; it is a fact the caller may want
-/// to act on, so it waits here until asked for. Dropping the monitor stops the
-/// watching.
+/// Changes wait here until polled. Dropping the monitor stops watching.
 pub struct DeviceMonitor {
     watch: Arc<Watch>,
-    /// The listeners that are installed right now, which is the state rather
-    /// than a flag describing it. Teardown empties it as it removes them, so
-    /// a second teardown — the one the destructor runs after
-    /// [`DeviceMonitor::close`] — has nothing to remove and cannot ask the
-    /// framework to remove anything twice.
+    /// Installed listeners. Emptied by teardown, so a second teardown removes
+    /// nothing twice.
     installed: Vec<PropertyAddress>,
     /// Set when removal could not be shown to have taken effect. Nothing is
     /// then freed.
@@ -345,16 +313,12 @@ impl DeviceMonitor {
         self.teardown()
     }
 
-    /// Same argument as the stream's, one step shorter because there is no
-    /// separate call that stops new listeners arriving: shutting the gate is
-    /// what turns a listener already on its way around, removal is what stops
-    /// further ones, and the drain is what says the ones in flight are out.
+    /// Close the gate, remove the listeners, then drain those in flight.
     fn teardown(&mut self) -> Result<(), Error> {
         self.shut_down(TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS)
     }
 
-    /// The same with the wait spelled out, so a test can ask for a deadline it
-    /// is willing to sit through.
+    /// With an explicit deadline, for tests.
     fn shut_down(&mut self, within: Duration, millis: u64) -> Result<(), Error> {
         if self.installed.is_empty() {
             // nothing is installed, so there is nothing to remove and nothing
@@ -404,9 +368,7 @@ impl Drop for DeviceMonitor {
 
 /// What the hardware layer calls when something it was asked about moved.
 ///
-/// It arrives on a thread the framework owns, not a realtime one, but a panic
-/// crossing back into C would still be undefined, so it is caught here and
-/// there is nothing left that could raise one.
+/// Runs on a framework thread; panics are caught so none crosses into C.
 unsafe extern "C" fn changed(
     _object: u32,
     count: u32,
@@ -493,11 +455,8 @@ fn facts(id: u32) -> Facts {
     }
 }
 
-/// The device a person picks from, or `None` for one that is not theirs to
-/// pick: the private aggregate a voice-processing unit makes. A device whose
-/// reference stream is on counts its inputs without it — the stream is
-/// appended after the device's own, and is the last one listed — so a
-/// loudspeaker shows no microphone and a duplex device shows the one it has.
+/// The device as listed, or `None` for a voice unit's private aggregate. The
+/// reference stream, listed last, is not counted as an input.
 fn listed(facts: Facts) -> Option<Device> {
     if facts.private_aggregate {
         return None;
@@ -902,10 +861,7 @@ mod tests {
                     Direction::Output => device.is_output(),
                 };
                 if carries {
-                    // A device with channels on this side has a stream on it,
-                    // and the buffer size and the rate belong to the device
-                    // rather than to a direction, so those three are answered
-                    // by anything the hardware layer enumerated.
+                    // stream, buffer size and rate exist for any listed device
                     assert!(
                         leg.stream_frames.is_some(),
                         "{device} has {direction} channels and no {direction} stream"
@@ -948,10 +904,8 @@ mod tests {
         assert_eq!(monitor.installed.len(), 3);
 
         assert_eq!(monitor.teardown(), Ok(()));
-        // the removal loop walks `installed`, so an empty one is the proof
-        // that a second pass asks the framework for nothing. Removing a
-        // listener that is not there returns zero on this platform, so a
-        // status could never have shown this.
+        // an empty `installed` proves a second pass removes nothing; the
+        // status could not show it, since removing a missing listener returns 0
         assert!(monitor.installed.is_empty());
         assert!(!monitor.leak);
 
@@ -1063,11 +1017,8 @@ mod tests {
         assert_eq!((device.input_channels, device.output_channels), (2, 2));
     }
 
-    /// The same on this machine: with a voice unit running on the quiet
-    /// route, the list has no device it did not have before, no device
-    /// that had no input before has one now, and every output is what it
-    /// was. A microphone the unit switches into its own mode may report
-    /// more channels while it is in it; that is the device's own answer.
+    /// On this machine, a running voice unit adds no device and no input to
+    /// an output. A microphone in voice mode may report more channels.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "opens the real devices"]
