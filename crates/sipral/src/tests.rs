@@ -12135,6 +12135,79 @@ fn a_new_association_that_is_never_finished_leaves_the_call_on_the_one_it_had() 
     assert!(after > 4_000, "the call did not stay on its keys: {after}");
 }
 
+#[cfg(feature = "dtls")]
+#[test]
+fn a_forged_client_hello_does_not_hold_back_the_far_end_s_own_new_association() {
+    // one ClientHello sent from the far end's address, by someone who never
+    // answers what comes back, begins a new association. The far end's own
+    // ClientHello, arriving while that one waits, must still be answered and
+    // finished rather than fed to the association nobody will complete. It
+    // is: this end answers a ClientHello with a stateless HelloVerifyRequest
+    // (RFC 6347 §4.2.1), so a sender who cannot read the cookie leaves the
+    // new association waiting for a first ClientHello, which the far end's
+    // own is. Only someone who reads the path can carry it further, and they
+    // can drop the far end's records anyway
+    let (mut pair, call, remote) = dtls_call();
+    pair.shake_hands(call, remote);
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .start_the_handshake_over(pair.now)
+    );
+    let (_, _, mut forged) = pair
+        .callee
+        .engine
+        .poll_transmit(pair.now)
+        .expect("a ClientHello");
+    {
+        let mut session = pair.caller.engine.session(call).expect("media");
+        assert_eq!(
+            session.receive(&mut forged, callee_media(), pair.now),
+            Arrival::Handshake
+        );
+    }
+    while pair.caller.engine.poll_transmit(pair.now).is_some() {}
+
+    // the far end now starts over for itself, with a ClientHello of its own
+    pair.now += Duration::from_millis(200);
+    assert!(
+        pair.callee
+            .engine
+            .session(remote)
+            .expect("media")
+            .start_the_handshake_over(pair.now)
+    );
+    cross_records(&mut pair, call, remote);
+    for _ in 0..8 {
+        pair.now += Duration::from_secs(1);
+        pair.caller.engine.handle_timeout(pair.now);
+        pair.callee.engine.handle_timeout(pair.now);
+        cross_records(&mut pair, call, remote);
+    }
+
+    let secured = |stack: &Stack| {
+        stack
+            .media_events()
+            .iter()
+            .filter(|event| matches!(event, MediaEvent::Secured { .. }))
+            .count()
+    };
+    assert_eq!(
+        secured(&pair.callee),
+        2,
+        "the far end's own new association was never finished"
+    );
+    assert_eq!(secured(&pair.caller), 2, "this end never took it");
+    assert_eq!(failures(&pair), []);
+    let after = tone_after(&mut pair, call, remote);
+    assert!(
+        after > 4_000,
+        "the two ends came out of the new association on different keys: {after}"
+    );
+}
+
 pub(crate) fn carol_sip() -> SocketAddr {
     "192.0.2.3:5060".parse().expect("an address")
 }
