@@ -13,11 +13,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// A local conference through this layer — the .NET counterpart of
-/// <c>bindings/python/tests/test_local_conference.py</c>: made on its own and
-/// asked about, recorded, refused at a rate it cannot mix, and, with three
-/// stacks on 127.0.0.1, two calls bridged so that what one far end says the
-/// other hears.
+/// Local conferences: queried, recorded, refused at an unmixable rate, and
+/// bridging two calls across three loopback stacks.
 /// </summary>
 public sealed class LocalConferenceTests : IDisposable
 {
@@ -43,10 +40,8 @@ public sealed class LocalConferenceTests : IDisposable
     private static short[] Square(int samples) =>
         Enumerable.Range(0, samples).Select(n => (short)((n / 8) % 2 == 0 ? 8000 : -8000)).ToArray();
 
-    /// <summary>Above this, a frame of <see cref="Square"/> that came
-    /// through PCMU whole: it decodes at 7900. A frame concealed in place of
-    /// one that never came fades from the last one heard and stays under
-    /// it, so it is not counted as heard.</summary>
+    /// <summary>A whole <see cref="Square"/> frame through PCMU decodes at
+    /// 7900; a concealed one fades below this.</summary>
     private const int WholeFrame = 7500;
 
     private static int Loudness(short[] frame) =>
@@ -164,14 +159,9 @@ public sealed class LocalConferenceTests : IDisposable
         }
         var loudest = await FirstMatchingAsync(carol.Media!.Frames, frame => Loudness(frame) > 2000);
         Assert.True(Loudness(loudest) > 2000, "Carol never heard Bob");
-        // and in full, ninety-five of Bob's hundred frames at least: a call
-        // whose own thread still carried frames beside the conference would
-        // have every other frame taken from under it, and a frame clock
-        // slower than the conference's overflows the buffers and drops them.
-        // Counted whenever they arrive rather than as an unbroken run: on a
-        // machine with more work than cores, the threads of all three stacks
-        // are held up together for a hundred milliseconds and more, Carol's
-        // buffer runs dry, and the frames play late but all play.
+        // at least 95 of 100 frames: a call still pumping its own frames
+        // would lose every other one. Counted whenever they arrive, since a
+        // loaded machine can stall all three stacks and play frames late.
         var whole = Loudness(loudest) > WholeFrame ? 1 : 0;
         try
         {

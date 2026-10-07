@@ -14,12 +14,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// What a call carries inside its audio, and how it is recorded, through
-/// this layer — the .NET counterpart of
-/// <c>bindings/python/tests/test_inband.py</c>: two stacks on 127.0.0.1
-/// that offer no telephone event, so a digit can only cross as its two
-/// tones; a caller told to listen for who answered; the beep that says a
-/// call is recorded; and the files a recording writes.
+/// In-band signals and recording: stacks without telephone-event, so digits
+/// cross as tones; answering-machine detection; the consent beep; and
+/// recording files.
 /// </summary>
 public sealed class InBandTests : IDisposable
 {

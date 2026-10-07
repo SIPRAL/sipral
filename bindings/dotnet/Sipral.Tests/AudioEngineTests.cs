@@ -15,31 +15,21 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// The library's own audio engine through <c>new SipralStack(audio: …)</c>
-/// and <see cref="SipralStack.Audio"/> — the .NET counterpart of
-/// <c>bindings/python/tests/test_audio.py</c>. Everything that touches a
-/// device stays on <see cref="SipralAudioActivation.Manual"/>, so no
-/// microphone is ever opened on the machine the gate runs on; where the
-/// build has no backend, the other half of the contract is checked instead.
-/// <see cref="ACallOnRealDevicesCarriesAudioBothWays"/> is the one that opens
-/// them, and runs only where <c>SIPRAL_AUDIO_DEVICES</c> says the machine has
-/// devices a test may use (the Windows lab's virtual cable).
+/// The audio engine through <see cref="SipralStack.Audio"/>. Tests stay on
+/// <see cref="SipralAudioActivation.Manual"/> so no microphone is opened;
+/// only the opt-in tests (<c>SIPRAL_AUDIO_DEVICES</c>) open real devices.
 /// </summary>
 public sealed class AudioEngineTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     private static readonly bool HasDevices = SipralStack.HasFeature(global::Sipral.Sipral.FeatureAudioDevice);
 
-    /// <summary>The virtual loopback device a test that opens the devices
-    /// plays and records on when the machine has one: it plays nowhere and
-    /// hands back what it was given, so that a run never sounds through the
-    /// machine's loudspeaker. Without it the test runs on the system's route,
-    /// as it always did.</summary>
+    /// <summary>A virtual loopback device, used when present so a run never
+    /// sounds through the speaker.</summary>
     internal const string QuietDeviceName = "BlackHole 2ch";
 
-    /// <summary>The device <paramref name="role"/> goes on in a test that
-    /// opens the devices: the quiet one when the machine has it and it serves
-    /// the role, and null otherwise.</summary>
+    /// <summary>The quiet device if present and suitable for
+    /// <paramref name="role"/>, else null.</summary>
     internal static SipralDeviceInfo? QuietDevice(
         System.Collections.Generic.IEnumerable<SipralDeviceInfo> devices, SipralAudioRole role) =>
         devices.FirstOrDefault(device => device.Present && device.Name == QuietDeviceName
@@ -74,8 +64,7 @@ public sealed class AudioEngineTests
         Assert.Equal(SipralAudio.Application, stack.AudioMode);
         var refused = Assert.Throws<SipralException>(() => stack.Audio.Devices());
         Assert.Equal(SipralStatus.WrongState, refused.Status);
-        // the library counts the trailing NUL in the length it reports; the
-        // message is the text before it, and ends in the library's words
+        // the reported length includes the NUL
         Assert.DoesNotContain('\0', refused.Message);
         Assert.EndsWith("pumps its own frames", refused.Message);
     }
@@ -94,9 +83,8 @@ public sealed class AudioEngineTests
     private static SipralStack Manual() =>
         new(audio: SipralAudio.Device, audioActivation: SipralAudioActivation.Manual);
 
-    /// <summary>ABI 1.1: the platform's echo cancellation switched on a
-    /// running stack is refused in application mode, and in device mode, the
-    /// devices closed, opens nothing and is read back from the
+    /// <summary>Switching echo cancellation is refused in application mode;
+    /// in device mode with devices closed it opens nothing and shows in the
     /// settings.</summary>
     [Fact]
     public void TheEchoCancellationSwitchIsReadBackAndRefusedInApplicationMode()
@@ -119,10 +107,8 @@ public sealed class AudioEngineTests
         Assert.True(stack.Settings().SystemEchoCancellation);
     }
 
-    /// <summary>The switch on open devices reopens them where they were,
-    /// with the gain and the mute, and <see cref="SipralAudioEngine.Info"/>
-    /// says what the platform did. Opt-in, as it opens the machine's devices:
-    /// <c>SIPRAL_AUDIO_DEVICES=1</c>.</summary>
+    /// <summary>On open devices the switch reopens them, keeping gain and
+    /// mute. Opt-in: <c>SIPRAL_AUDIO_DEVICES=1</c>.</summary>
     [Fact]
     public void TheEchoCancellationSwitchReopensTheOpenDevices()
     {
@@ -170,12 +156,11 @@ public sealed class AudioEngineTests
         {
             Assert.NotEqual(0u, device.Id);
             Assert.False(string.IsNullOrEmpty(device.Name));
-            // the library counts the name's trailing NUL, which is not the name's
+            // the reported length includes the NUL
             Assert.DoesNotContain('\0', device.Name);
             Assert.True(device.IsMicrophone || device.IsSpeaker, device.Name);
         });
-        // keyed by id: two devices may share a name (a dock's input and its
-        // output are both called after the dock), never an id
+        // keyed by id: names can repeat (a dock's input and output)
         var again = stack.Audio.Refresh();
         Assert.Equal(
             listed.ToDictionary(d => d.Id, d => d.Name),
@@ -285,10 +270,8 @@ public sealed class AudioEngineTests
         Assert.False(stack.Audio.Info().Active);
     }
 
-    /// <summary><c>audio_transmit_callback</c>, the way the engine calls it:
-    /// a packet naming a call and a destination leaves from that call's own
-    /// media socket. The record is built here, so this runs everywhere and
-    /// opens nothing.</summary>
+    /// <summary>A transmit callback packet leaves from its call's media
+    /// socket. Built by hand, so it opens no device.</summary>
     [Fact]
     public async Task APacketTheEngineEncodedGoesOutOnTheCallsSocket()
     {
@@ -326,8 +309,7 @@ public sealed class AudioEngineTests
 
                 var buffer = new byte[2048];
                 EndPoint sender = new IPEndPoint(IPAddress.Any, 0);
-                // a deadline, so that a packet that never comes fails the
-                // test instead of hanging it
+                // fail rather than hang
                 far.ReceiveTimeout = 5_000;
                 var read = await Task.Run(() => far.ReceiveFrom(buffer, ref sender));
                 Assert.Equal(payload, buffer[..read]);
@@ -382,10 +364,8 @@ public sealed class AudioEngineTests
         }
     }
 
-    /// <summary>A call's own gain and mute: held by the engine from the
-    /// moment its media starts — the devices left closed under manual
-    /// activation — to the moment it ends, beside the stack's own, and
-    /// refused outside that and in application mode.</summary>
+    /// <summary>Per-call gain and mute work while the call's media runs, and
+    /// are refused outside it and in application mode.</summary>
     [Fact]
     public async Task ACallsOwnGainAndMuteLastFromItsMediaToItsEnd()
     {
@@ -451,11 +431,9 @@ public sealed class AudioEngineTests
         }
     }
 
-    /// <summary>A call whose one end runs on the machine's real devices:
-    /// activated, the engine opens them, the far end's audio reaches the
-    /// loudspeaker's meter and the microphone's packets reach the far end.
-    /// Opt-in: <c>SIPRAL_AUDIO_DEVICES=1</c>, on a machine whose devices a
-    /// test may open (the Windows lab's virtual cable).</summary>
+    /// <summary>On real devices, audio flows both ways. Opt-in:
+    /// <c>SIPRAL_AUDIO_DEVICES=1</c> (the Windows lab's virtual
+    /// cable).</summary>
     [Fact]
     public async Task ACallOnRealDevicesCarriesAudioBothWays()
     {

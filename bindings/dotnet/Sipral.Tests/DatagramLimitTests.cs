@@ -16,24 +16,18 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// RFC 3261 §18.1.1 through <see cref="SipralStack"/>: a call whose answer
-/// to a challenge is too large for a datagram — the .NET counterpart of
-/// <c>bindings/python/tests/test_datagram_limit.py</c>. The PBX is this
-/// test's own, on loopback: a UDP socket that answers every INVITE without
-/// credentials with a 401 whose nonce takes the answer past 1300 bytes, and
-/// — when asked for — a TCP listener on the same port that answers the INVITE
-/// carrying credentials with a 486. With the listener there the stack opens
-/// the connection itself and the call carries on over it; with none, or with
-/// <c>streamFallback: false</c>, the call ends at once with a 513 naming the
-/// limit, never hanging.
+/// RFC 3261 §18.1.1: an authenticated INVITE too large for a datagram. The
+/// loopback PBX challenges with a nonce that pushes the retry past 1300
+/// bytes, optionally with a TCP listener answering 486. With TCP the call
+/// moves to it; without, or with <c>streamFallback: false</c>, it ends at
+/// once with a 513.
 /// </summary>
 public sealed class DatagramLimitTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(8);
 
-    /// <summary>RFC 3261 §7.3.3's compact names for the fields this PBX
-    /// reads: a request over the line is written compact before it is
-    /// weighed against it, and a server reads either form.</summary>
+    /// <summary>RFC 3261 §7.3.3 compact names: an oversized request is
+    /// compacted before it is measured.</summary>
     private static readonly Dictionary<string, string> Compact = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Via"] = "v", ["From"] = "f", ["To"] = "t", ["Call-ID"] = "i", ["Content-Length"] = "l",
@@ -81,16 +75,14 @@ public sealed class DatagramLimitTests
 
         public Pbx(bool tcp, bool apart = false)
         {
-            // a UDP socket disposed while a thread is blocked receiving on it
-            // can wait for that thread on this platform, so the thread
-            // wakes by itself and is let go of first
+            // disposing a UDP socket can wait for a blocked receiver here,
+            // so the receiver wakes on its own
             _udp.Client.ReceiveTimeout = 50;
             var port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             Address = $"127.0.0.1:{port}";
             if (tcp)
             {
-                // apart: TCP on a port of its own, as a PBX that takes UDP on
-                // 5060 and TCP on 5160 has it
+                // apart: TCP on its own port, like UDP 5060 and TCP 5160
                 _listener = new TcpListener(IPAddress.Loopback, apart ? 0 : port);
                 _listener.Start();
                 TcpAddress = $"127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}";
@@ -287,8 +279,7 @@ public sealed class DatagramLimitTests
         Assert.Single(invites);
         Assert.NotNull(Header("Authorization", invites[0]));
         Assert.StartsWith("SIP/2.0/TCP ", Header("Via", invites[0]));
-        // the dialog carries on over the connection: the 486 is acknowledged
-        // on it (RFC 3261 §17.1.1.3)
+        // the 486 is acknowledged on the connection (RFC 3261 §17.1.1.3)
         var clock = Stopwatch.StartNew();
         while (!pbx.OverTcp().Any(m => m.StartsWith("ACK ", StringComparison.Ordinal)) && clock.Elapsed < TimeSpan.FromSeconds(2))
         {
@@ -379,10 +370,8 @@ public sealed class DatagramLimitTests
     [Fact]
     public async Task AConnectionTheStackLetGoOfIsClosedHereToo()
     {
-        // RFC 5626 §4.4.1: the stack retires a stream that stopped answering
-        // keep-alives and says so with TransportFailed; the socket is this
-        // layer's, and one kept open would stand in for the new connection
-        // the stack asks for next time
+        // RFC 5626 §4.4.1: a retired stream's socket must be closed here, or
+        // it would stand in for the next connection
         using var pbx = new Pbx(tcp: true);
         using var stack = Stack();
         Place(stack, pbx);

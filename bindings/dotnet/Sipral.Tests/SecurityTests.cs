@@ -14,28 +14,19 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// STIR/SHAKEN, the SRTP policy per account and the encryption report,
-/// through this layer: two stacks on 127.0.0.1 with no registrar between
-/// them — the .NET counterpart of
-/// <c>bindings/python/tests/test_security.py</c>.
-///
-/// A valid signature is verified against the chain the C ABI's tests keep in
-/// <c>bindings/fixtures/stir-provider-709J</c>, whose signing certificate
-/// names a service provider code and no number. Beside that, what this
-/// proves is the plumbing every
-/// half of it runs through: the account's signing key and URL reach the
-/// INVITE, the verifying stack asks for the certificate by
-/// <see cref="SipralEventKind.CallerVerification"/>,
-/// <see cref="SipralStack.StirCertificate"/> answers it, and a strict account
-/// refuses what does not verify.
+/// STIR/SHAKEN, per-account SRTP and the encryption report between two
+/// loopback stacks. A valid signature is checked against
+/// <c>bindings/fixtures/stir-provider-709J</c>, whose certificate names an
+/// SPC and no number; the rest proves the plumbing: key and URL reach the
+/// INVITE, the certificate is requested and supplied, and a strict account
+/// refuses what fails.
 /// </summary>
 public sealed class SecurityTests : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
-    // short, and the stacks offer one codec: a signed INVITE is some five
-    // hundred octets longer than an unsigned one, and past RFC 3261 Section
-    // 18.1.1's 1300 it needs a stream transport this test does not open
+    // short URL and one codec: signing adds ~500 octets, and past 1300 (RFC
+    // 3261 §18.1.1) a stream transport would be needed
     private const string Url = "https://c.test/p";
 
     private readonly SipralStack _caller = new(audio: SipralAudio.Application, codecs: "PCMU");
@@ -50,8 +41,7 @@ public sealed class SecurityTests : IDisposable
     [Fact]
     public async Task ASignedCallAsksForItsCertificateAndAStrictAccountRefusesIt()
     {
-        // a P-256 private key as the bare scalar: any 32 octets below the
-        // group order are one, and these are nobody's
+        // any 32 octets below the P-256 group order are a key
         var key = Enumerable.Repeat((byte)0x2B, 32).ToArray();
         // a stack that only signs is given the time, and no anchors
         _caller.Stir(null);
@@ -139,10 +129,7 @@ public sealed class SecurityTests : IDisposable
     // a moment inside every certificate of the provider chain below
     private const ulong Within = 1_790_000_000;
 
-    /// <summary>One of the credentials <c>sipral_stir::testing</c> issues
-    /// for the service provider code 709J, checked against it by the C ABI's
-    /// own tests: a root, a chain whose signing certificate names that code
-    /// and no number, and its key.</summary>
+    /// <summary>A file of the SPC 709J test credentials.</summary>
     private static string Provider(string name, [CallerFilePath] string here = "") =>
         Path.Combine(Path.GetDirectoryName(here)!, "..", "..", "fixtures", "stir-provider-709J", name);
 

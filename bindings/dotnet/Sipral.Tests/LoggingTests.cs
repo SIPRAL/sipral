@@ -15,9 +15,7 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// The log, the state snapshot and the RTP port range, carried through
-/// <see cref="SipralStack"/> — the .NET counterpart of
-/// <c>bindings/python/tests/test_logging.py</c>.
+/// The log, the state snapshot and the RTP port range.
 /// </summary>
 public sealed class LoggingTests
 {
@@ -113,9 +111,8 @@ public sealed class LoggingTests
         Assert.Equal(TraceEventType.Warning, SipralStack.TraceEventTypeOf(SipralLogLevel.Warn));
     }
 
-    /// <summary>The state text once it holds <paramref name="expected"/>:
-    /// a stack the poll thread held when asked answers with the last
-    /// snapshot a poll kept.</summary>
+    /// <summary>Waits for <paramref name="expected"/>: while the poll holds
+    /// the stack, the answer is the last kept snapshot.</summary>
     private static string StateOnceSettled(SipralStack stack, string expected)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);

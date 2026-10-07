@@ -13,10 +13,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// The .NET layer's own SRV and NAPTR client against a DNS server that
-/// answers the way a test tells it to: only the reply RFC 5452 §9.1 matches
-/// is taken — from the server asked, with the query's id and its question —
-/// and a truncated one is asked again over TCP.
+/// The SRV/NAPTR client against a scripted DNS server: only a reply
+/// matching RFC 5452 §9.1 is taken, and a truncated one is retried over TCP.
 /// </summary>
 public sealed class DnsClientTests
 {
@@ -86,8 +84,7 @@ public sealed class DnsClientTests
                 foreach (var (fromStranger, reply) in _script(query))
                 {
                     (fromStranger ? _stranger : _udp).Send(reply, reply.Length, from!);
-                    // each reply well ahead of the next, so that the one a
-                    // test means to come first is the first to arrive
+                    // keep the replies in order
                     Thread.Sleep(100);
                 }
             }
@@ -246,9 +243,7 @@ public sealed class DnsClientTests
     [Fact]
     public void AReplyWhoseQuestionRunsPastItsEndIsIgnored()
     {
-        // the id, the response bit and one question, then a label longer
-        // than the bytes left: not an answer, and not a reason to stop
-        // waiting for the real one
+        // a header, then a label past the end: ignored, the wait goes on
         static byte[] Cut(byte[] query)
         {
             var cut = query[..14];

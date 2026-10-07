@@ -12,10 +12,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// ABI 0.35 through <see cref="SipralStack"/>: an account on a connection of
-/// its own beside one on the stack's UDP socket, each registered with its own
-/// loopback registrar and each placing a call through it; and the settings
-/// read back.
+/// An account on its own connection beside one on the stack's UDP socket,
+/// each registering and calling through its own loopback registrar.
 /// </summary>
 public sealed class AccountStreamTests
 {
@@ -47,8 +45,7 @@ public sealed class AccountStreamTests
         using var tlsRegistrar = new SignallingTests.Registrar(certificate);
         var pin = "sha256 Fingerprint=" + string.Join(":", SHA256.HashData(certificate.RawData).Select(b => b.ToString("X2")));
 
-        // streamFallback off: the account's own connection is opened all the
-        // same, since nothing outgrew a datagram
+        // the account's own connection opens even with streamFallback off
         using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1", streamFallback: false);
         var wanted = new ConcurrentQueue<SipralTransportWantedEventInfo>();
         stack.EventReceived += (_, args) =>

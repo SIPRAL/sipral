@@ -6,25 +6,14 @@ using System.Windows.Controls;
 using System.Windows.Threading;
 using Sipral;
 
-// A sibling of, not nested under, the `Sipral` namespace: that namespace
-// also holds a type literally named `Sipral` (bindings/dotnet/Sipral's own
-// static entry-point class), and an unqualified two-segment name starting
-// with `Sipral.` written from inside a namespace nested under it resolves
-// to that type before it resolves to further namespace nesting -- which is
-// exactly what WPF's own generated code does, unqualified. Nesting under
-// `Sipral` here would make every generated reference to this window fail
-// with "the type name '...' does not exist in the type 'Sipral'".
+// Not nested under `Sipral`: that namespace has a type named `Sipral`, and
+// WPF's generated code would resolve `Sipral.X` to the type and fail.
 namespace SipralSample.Wpf;
 
 /// <summary>
-/// A softphone window with no audio code of its own: the stack is created in
-/// device mode (the default on Windows), so the library opens the machine's
-/// microphone and loudspeaker and pumps every call through them. What is left
-/// here is what a person decides — which device does what, how loud, what is
-/// muted, whom to call — and what they are shown: the devices as Windows
-/// lists them, the caller as the network asserted them, a meter per
-/// direction, and the echo return loss those two meters read while the far
-/// end is talking.
+/// A softphone window with no audio code: in device mode the library drives
+/// the microphone and speaker. The window only picks devices, levels and
+/// whom to call, and shows meters and the echo return loss.
 /// </summary>
 public partial class MainWindow : Window
 {
@@ -33,8 +22,6 @@ public partial class MainWindow : Window
     private const uint Talking = 1000;
 
     private readonly SipralStack _stack;
-    /// <summary>This machine's address on its default route: where the
-    /// stack listens, and what goes in the Contact and the SDP.</summary>
     private readonly string _host;
     private readonly DispatcherTimer _meters;
     private Account? _account;
@@ -50,10 +37,7 @@ public partial class MainWindow : Window
         // RFC 5737 TEST-NET-3: never dialled, only asked which route it takes
         _host = RouteTo("203.0.113.1:80");
         _stack = new SipralStack(bindHost: _host);
-        // Fired on the stack's own poll thread (docs/08-ffi.md, "Events
-        // arrive on one callback"); WPF controls may only be touched from
-        // the dispatcher thread that owns them, so every event crosses back
-        // onto it before touching a control.
+        // raised on the poll thread; controls belong to the dispatcher
         _stack.EventReceived += (_, e) => Dispatcher.BeginInvoke(() => OnEvent(e));
         AudioModeText.Text = _stack.AudioMode == SipralAudio.Device
             ? "The library runs the devices."
@@ -66,10 +50,6 @@ public partial class MainWindow : Window
 
     private void Log(string line) => EventsList.Items.Insert(0, $"{DateTime.Now:HH:mm:ss} {line}");
 
-    // -- devices ------------------------------------------------------------
-
-    /// <summary>The device lists as the engine has them, each led by the
-    /// system's own route, with the current choice selected.</summary>
     private void FillDevices()
     {
         if (_stack.AudioMode != SipralAudio.Device)
@@ -153,9 +133,7 @@ public partial class MainWindow : Window
         _stack.Audio.SetMuted(SipralAudioDirection.Output, SpeakerMutedBox.IsChecked == true);
     }
 
-    /// <summary>The two meters, and — while the far end is loud enough to be
-    /// heard — how far below the loudspeaker its echo in the microphone
-    /// is.</summary>
+    // Echo return loss is shown only while the far end is loud enough.
     private void ReadMeters()
     {
         if (_stack.AudioMode != SipralAudio.Device)
@@ -202,16 +180,13 @@ public partial class MainWindow : Window
             $"render delay {info.RenderDelayMs} ms{sent})";
     }
 
-    // -- events -------------------------------------------------------------
-
     private void OnEvent(SipralEventArgs e)
     {
         switch (e.Kind)
         {
             case SipralEventKind.AudioDevicesChanged when e.Audio is { } audio:
                 Log($"audio: {audio.Change} ({audio.Origin})");
-                // a device arriving or leaving; a change the engine made is
-                // what was asked for, and choosing again on it would loop
+                // reselecting on an engine change would loop
                 if (audio.Origin == SipralAudioOrigin.System)
                 {
                     FillDevices();
@@ -236,8 +211,6 @@ public partial class MainWindow : Window
         }
         Log(e.KindName);
     }
-
-    // -- signalling ---------------------------------------------------------
 
     private void OnRegisterClick(object sender, RoutedEventArgs e)
     {
@@ -336,9 +309,7 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>The address of this machine a datagram to
-    /// <paramref name="address"/> leaves from. Connecting a datagram socket
-    /// sends nothing.</summary>
+    // Connecting a datagram socket sends nothing; it only picks the route.
     private static string RouteTo(string address)
     {
         var (host, port) = SipralStack.ParseAddress(address);

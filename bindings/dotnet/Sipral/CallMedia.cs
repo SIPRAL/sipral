@@ -15,24 +15,11 @@ using static Sipral.Interop.NativeText;
 namespace Sipral;
 
 /// <summary>
-/// One call's audio, paced at its own frame rate — the .NET counterpart
-/// of <c>bindings/python/sipral/media.py</c>'s <c>Media</c>.
-///
-/// A call's media has a handle of its own and never takes the stack's
-/// lock (<c>docs/08-ffi.md</c>, "A call's media has a handle of its
-/// own"), so it runs on a thread of its own too, reading and writing
-/// 16-bit mono PCM as <see cref="Span{T}"/>/<see cref="ReadOnlySpan{T}"/>
-/// at the two points this ABI actually carries a frame —
-/// <see cref="Playback"/> and <see cref="Capture"/> — the way an
-/// application that wants to drive its own frame pump (a real audio
-/// device callback, on a real thread with real timing) would call them
-/// directly instead of reading <see cref="Frames"/> and calling
-/// <see cref="SendAudio"/>, which this type's own background thread uses
-/// for exactly that pump when nothing else is driving one.
-///
-/// Not built directly: <see cref="Call"/> mints one from its own
-/// <see cref="SipralEventKind.MediaStarted"/> and hands it over as
-/// <see cref="Call.Media"/>.
+/// One call's audio, paced on its own thread at the frame rate. A media
+/// handle never takes the stack's lock. Frames are 16-bit mono PCM: either
+/// read <see cref="Frames"/> and call <see cref="SendAudio"/>, or drive
+/// <see cref="Playback"/> and <see cref="Capture"/> from your own audio
+/// callback. Obtained from <see cref="Call.Media"/>.
 /// </summary>
 public sealed class CallMedia : IDisposable
 {
@@ -40,11 +27,10 @@ public sealed class CallMedia : IDisposable
     private const int AddressBytes = 128;
 
     private readonly SipralStack _stack;
-    /// <summary>Replaced by <see cref="Rebind"/> under <see cref="_socketLock"/>.</summary>
+    // Replaced by Rebind under _socketLock.
     private volatile Socket _socket;
     private readonly object _socketLock = new();
-    /// <summary>This call's media socket, as <c>host:port</c>: the name of its
-    /// connection to a TURN server reached over TCP or TLS.</summary>
+    // Also names the socket's TURN connection.
     private volatile string _localAddress;
     private readonly MediaSafeHandle _handle = new();
     private readonly Thread _thread;
@@ -54,13 +40,8 @@ public sealed class CallMedia : IDisposable
     private readonly IntPtr _packetData = Marshal.AllocHGlobal(PacketBytes);
     private readonly IntPtr _packetDestination = Marshal.AllocHGlobal(AddressBytes);
 
-    /// <summary>The socket real-time text arrives on and leaves from, when
-    /// the call was built with one.</summary>
     private readonly Socket? _textSocket;
-    /// <summary>The two sockets a recording server's copies leave from —
-    /// this end's audio, then the far end's — while
-    /// <see cref="Call.RecordTo"/> records; swapped under
-    /// <see cref="_socketLock"/>.</summary>
+    // SIPREC copy sockets while recording; swapped under _socketLock.
     private (Socket ThisEnd, Socket FarEnd)? _recording;
 
     private bool _active = true;
@@ -69,49 +50,39 @@ public sealed class CallMedia : IDisposable
 
     internal ulong Handle => _handle.Value;
 
-    /// <summary>The rate the samples crossing this call's media are at:
-    /// the codec's, or the one <see cref="SetAppRate"/> chose.</summary>
+    /// <summary>The sample rate of frames crossing here: the codec's, or
+    /// the one <see cref="SetAppRate"/> chose.</summary>
     public uint SampleRate { get; private set; }
     /// <summary>Samples in one frame — what <see cref="Playback"/> fills
     /// and what <see cref="Capture"/> wants, at <see cref="SampleRate"/>.</summary>
     public int FrameSamples { get; private set; }
-    /// <summary>Held for one frame's playback and capture, and while
-    /// <see cref="SetAppRate"/> moves the frame's length under them.</summary>
+    // Held across one frame, and while SetAppRate changes the frame length.
     private readonly object _frameLock = new();
     private readonly double _frameSeconds;
 
-    /// <summary>Where the last datagram this call's media received came
-    /// from — the address the stack's own RTCP goodbye is sent to once
-    /// the call has ended. <see langword="null"/> until at least one
-    /// packet has arrived.</summary>
+    /// <summary>Source of the last received datagram, where the final RTCP
+    /// goodbye goes; <see langword="null"/> until a packet arrives.</summary>
     public string? RemoteAddress { get; private set; }
 
-    /// <summary>Decoded 16-bit mono PCM, one frame per item, as this
-    /// call's own background thread reads it off the wire.</summary>
+    /// <summary>Decoded 16-bit mono PCM, one frame per item.</summary>
     public IAsyncEnumerable<short[]> Frames => _frames.Reader.ReadAllAsync();
 
-    /// <summary>Fired synchronously, from this media's own background
-    /// thread, with every frame <see cref="Playback"/> produces — the
-    /// low-allocation path for an application that reads audio off a
-    /// hot loop instead of an <see langword="await foreach"/> on
-    /// <see cref="Frames"/>.</summary>
+    /// <summary>Fired on the media thread with every decoded frame; the
+    /// low-allocation alternative to <see cref="Frames"/>.</summary>
     public event FrameHandler? FrameDecoded;
 
     /// <summary>A decoded frame, valid for the length of this call
     /// only.</summary>
     public delegate void FrameHandler(ReadOnlySpan<short> samples);
 
-    /// <summary>The socket this media reads and sends on, as <c>host:port</c>
-    /// — a new one after <see cref="Call.Readdress"/>.</summary>
+    /// <summary>The media socket as <c>host:port</c>, new after
+    /// <see cref="Call.Readdress"/>.</summary>
     public string LocalAddress => _localAddress;
 
-    /// <summary>Whether the library's own audio engine pumps this call
-    /// (device mode): then no frame crosses here — <see cref="Frames"/> stays
-    /// empty, <see cref="FrameDecoded"/> never fires and
-    /// <see cref="SendAudio"/> throws — and this media's thread only reads
-    /// the socket and sends what RTCP and DTMF owe. Also true while the call
-    /// is a member of a <see cref="SipralLocalConference"/>, which carries
-    /// its frames.</summary>
+    /// <summary>Whether the library pumps this call's audio (device mode, or
+    /// membership in a <see cref="SipralLocalConference"/>). Then no frame
+    /// crosses here: <see cref="Frames"/> stays empty and
+    /// <see cref="SendAudio"/> throws.</summary>
     public bool Pumped
     {
         get => _pumped;
@@ -146,8 +117,6 @@ public sealed class CallMedia : IDisposable
         _thread.Start();
     }
 
-    // -- info -------------------------------------------------------------
-
     /// <summary><c>sipral_media_info</c>.</summary>
     public SipralMediaSnapshot Info()
     {
@@ -161,17 +130,12 @@ public sealed class CallMedia : IDisposable
             info.GenericNack != 0, info.ReducedSize != 0);
     }
 
-    // -- recording ----------------------------------------------------------
-
-    /// <summary><c>sipral_media_record_start_with</c>: record both
-    /// directions to <paramref name="path"/> — WAV, or Ogg Opus where the
-    /// build has Opus; one channel, or this end on the left and the far end
-    /// on the right; at <paramref name="sampleRate"/> (zero for the call's);
-    /// Ogg Opus at <paramref name="bitrate"/> (zero for libopus's choice);
-    /// made to survive a crash every <paramref name="checkpointMs"/> (zero
-    /// for five seconds). The file is finished by
-    /// <see cref="StopRecording"/>, by the call ending, or by the stack
-    /// going.</summary>
+    /// <summary><c>sipral_media_record_start_with</c>: record both directions
+    /// to <paramref name="path"/> as WAV or Ogg Opus, mixed or stereo (this
+    /// end left). Zero values take defaults; the file is made crash-safe
+    /// every <paramref name="checkpointMs"/> (5 s by default) and finished by
+    /// <see cref="StopRecording"/>, the call ending, or the stack
+    /// closing.</summary>
     public void Record(
         string path,
         SipralRecordingFormat format = SipralRecordingFormat.Wav,
@@ -200,8 +164,7 @@ public sealed class CallMedia : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_media_record_stop(Handle), "sipral_media_record_stop");
     }
 
-    /// <summary><c>sipral_media_record_state</c>: whether a recording is
-    /// running, and how many milliseconds of audio it has taken.</summary>
+    /// <summary><c>sipral_media_record_state</c>.</summary>
     public (bool Running, ulong RecordedMs) Recording
     {
         get
@@ -213,11 +176,8 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary><c>sipral_media_statistics</c>. Once the call has ended the
-    /// stream is gone and the library answers
-    /// <see cref="SipralStatus.WrongState"/>; from the moment the end-of-call
-    /// record has arrived this answers with that record
-    /// (<see cref="Call.FinalStatistics"/>) instead.</summary>
+    /// <summary><c>sipral_media_statistics</c>. After the call ends, returns
+    /// <see cref="Call.FinalStatistics"/> instead of failing.</summary>
     public SipralStreamStatistics Statistics()
     {
         var stats = SipralStreamStats.Sized();
@@ -234,15 +194,10 @@ public sealed class CallMedia : IDisposable
 
     private volatile SipralStreamStatistics? _finalStatistics;
 
-    /// <summary>The end-of-call record arrived: what <see cref="Statistics"/>
-    /// answers from now on, when the library no longer can.</summary>
     internal void EndedWith(SipralStreamStatistics record) => _finalStatistics = record;
 
-    /// <summary>Every path this call's ICE agent tried — the candidate
-    /// pairs its checklist held, then the relays it held — and what became
-    /// of each (<c>sipral_media_path_candidate_count</c>/<c>_at</c>; D5's
-    /// transport and NAT half, <c>docs/05-media.md</c>). Empty for a call
-    /// not using ICE.</summary>
+    /// <summary>Every path ICE tried (candidate pairs, then relays) and its
+    /// outcome. Empty without ICE.</summary>
     public IReadOnlyList<SipralPath> PathCandidates()
     {
         nuint count = 0;
@@ -275,13 +230,9 @@ public sealed class CallMedia : IDisposable
         return paths;
     }
 
-    /// <summary>The call's encryption report, now
-    /// (<c>sipral_media_encryption_count</c> and
-    /// <c>sipral_media_encryption_at</c>): per stream, whether it is
-    /// encrypted, how its keys were exchanged, the suite, and whether the
-    /// exchange authenticated the far end — SDES never does, a DTLS-SRTP
-    /// handshake whose certificate matched the signalled fingerprint
-    /// does.</summary>
+    /// <summary>Per-stream encryption. SDES never authenticates the far end;
+    /// DTLS-SRTP does when the certificate matched the signalled
+    /// fingerprint.</summary>
     public IReadOnlyList<SipralStreamProtection> Encryption()
     {
         nuint count = 0;
@@ -298,8 +249,6 @@ public sealed class CallMedia : IDisposable
         return streams;
     }
 
-    // -- real-time text and the copies for a recording server ---------------
-
     /// <summary><c>sipral_media_send_text</c>: see
     /// <see cref="Call.SendText"/>.</summary>
     public void SendText(string text)
@@ -308,10 +257,6 @@ public sealed class CallMedia : IDisposable
         SipralErrors.Check(NativeMethods.sipral_media_send_text(Handle, encoded, (nuint)encoded.Length), "sipral_media_send_text");
     }
 
-    /// <summary>Starts sending the recording server's copies from
-    /// <paramref name="thisEnd"/> and <paramref name="farEnd"/>: what
-    /// <see cref="Call.RecordTo"/> does once the recording session is
-    /// placed.</summary>
     internal void AttachRecording(Socket thisEnd, Socket farEnd)
     {
         thisEnd.Blocking = false;
@@ -322,8 +267,6 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>Closes the two sockets <see cref="AttachRecording"/> took, once
-    /// the recording stopped.</summary>
     internal void DetachRecording()
     {
         (Socket ThisEnd, Socket FarEnd)? taken;
@@ -339,9 +282,6 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>Every datagram waiting on the text socket to
-    /// <c>sipral_media_receive_text</c>, then every one
-    /// <c>sipral_media_poll_text</c> has due, sent from it.</summary>
     private void CarryText()
     {
         if (_textSocket is not { } socket)
@@ -385,9 +325,7 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>Every copy <c>sipral_media_poll_recording</c> has waiting,
-    /// each from the socket it names; what the server sends back to those
-    /// sockets — its own RTCP — is read and let go.</summary>
+    // The server's RTCP on the copy sockets is read and dropped.
     private void CarryRecording()
     {
         (Socket ThisEnd, Socket FarEnd)? sockets;
@@ -432,9 +370,7 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>One datagram out of <paramref name="socket"/>, to where
-    /// <paramref name="packet"/> says; best effort, like every send
-    /// here.</summary>
+    // Best effort, like every send here.
     private void SendFrom(Socket socket, SipralMediaPacket packet)
     {
         var payload = new byte[(int)packet.Len];
@@ -453,8 +389,6 @@ public sealed class CallMedia : IDisposable
         {
         }
     }
-
-    // -- the two frame-carrying calls, as Span/ReadOnlySpan ---------------
 
     /// <summary><c>sipral_media_playback</c>: the frame due for the
     /// earpiece, written into <paramref name="destination"/> (at least
@@ -477,10 +411,9 @@ public sealed class CallMedia : IDisposable
         return status;
     }
 
-    /// <summary><c>sipral_media_capture</c>: encodes exactly one frame
-    /// from <paramref name="samples"/> (exactly <see cref="FrameSamples"/>
-    /// long) and sends the packet it produces, if any, on this media's
-    /// own socket.</summary>
+    /// <summary><c>sipral_media_capture</c>: encode one frame of exactly
+    /// <see cref="FrameSamples"/> and send the resulting packet, if
+    /// any.</summary>
     public void Capture(ReadOnlySpan<short> samples)
     {
         var scratch = RentFrame();
@@ -498,17 +431,12 @@ public sealed class CallMedia : IDisposable
         SendPacket(packet);
     }
 
-    /// <summary><c>sipral_media_set_app_rate</c>: the rate
-    /// <see cref="Frames"/> hands out and <see cref="SendAudio"/> takes,
-    /// whatever rate the codec runs at — 8000, 16000, 24000 or 48000, or 0
-    /// for the codec's own, which is where every call starts. The library
-    /// converts both ways with its own resampler, and the frame keeps the
-    /// call's duration, so <see cref="SampleRate"/> and
-    /// <see cref="FrameSamples"/> say the new rate and its length from here
-    /// on. Audio queued with <see cref="SendAudio"/> and not yet sent was at
-    /// the old rate, and is dropped. Any other rate throws with
-    /// <see cref="SipralStatus.InvalidArgument"/>, and device mode with
-    /// <see cref="SipralStatus.WrongState"/>.</summary>
+    /// <summary><c>sipral_media_set_app_rate</c>: the application-side rate
+    /// (8000, 16000, 24000 or 48000; 0 for the codec's), resampled by the
+    /// library. The frame keeps its duration, so <see cref="SampleRate"/> and
+    /// <see cref="FrameSamples"/> change. Unsent queued audio is dropped.
+    /// Other rates throw with <see cref="SipralStatus.InvalidArgument"/>;
+    /// device mode with <see cref="SipralStatus.WrongState"/>.</summary>
     public void SetAppRate(uint hz)
     {
         lock (_frameLock)
@@ -524,12 +452,9 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>Queues 16-bit mono PCM to go out, one frame at a time, cut
-    /// to whatever <see cref="FrameSamples"/> this call negotiated as it
-    /// is sent rather than as it is queued. Thread-safe. Throws
-    /// <see cref="InvalidOperationException"/> in device mode
-    /// (<see cref="Pumped"/>), where the microphone is the call's audio and
-    /// nothing else is.</summary>
+    /// <summary>Queues 16-bit mono PCM, cut into frames as it is sent.
+    /// Thread-safe. Throws <see cref="InvalidOperationException"/> when
+    /// <see cref="Pumped"/>.</summary>
     public void SendAudio(ReadOnlySpan<short> samples)
     {
         if (Pumped)
@@ -541,9 +466,6 @@ public sealed class CallMedia : IDisposable
         _toSend.Enqueue(samples.ToArray());
     }
 
-    /// <summary>Carries this call's media on <paramref name="socket"/> from
-    /// now on and closes the one it had: what <see cref="Call.Readdress"/>
-    /// does once the call was offered at the new socket's address.</summary>
     internal void Rebind(Socket socket)
     {
         socket.Blocking = false;
@@ -557,17 +479,8 @@ public sealed class CallMedia : IDisposable
         old.Dispose();
     }
 
-    /// <summary>Writes straight to this call's own RTP socket — used by
-    /// <see cref="SipralStack"/> to send the RTCP goodbye
-    /// <c>sipral_stack_poll_farewell</c> hands back once the signalling
-    /// that owned it has already ended. Called from the stack's own poll
-    /// thread, never this media's own frame-rate thread, so it can
-    /// race an application thread's <see cref="Dispose"/> of this same
-    /// call — closing the socket out from under a send already in
-    /// flight is an ordinary shutdown race, not a caller bug, and is
-    /// swallowed the same best-effort way a send that fails for any
-    /// other reason already is: nothing here may throw, or the poll
-    /// thread that called it would never poll again.</summary>
+    // Also called from the poll thread for the farewell RTCP, racing
+    // Dispose. Must not throw, or the poll thread stops.
     internal void SendTo(byte[] payload, string address)
     {
         try
@@ -583,8 +496,6 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    // -- the frame-rate thread ---------------------------------------------
-
     private void Run()
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -595,8 +506,7 @@ public sealed class CallMedia : IDisposable
 
             if (_active && Pumped)
             {
-                // the engine plays and captures; this thread still carries
-                // what RTCP and DTMF owe, which are not frames
+                // the engine carries frames; RTCP and DTMF still go here
                 DrainPackets(NativeMethods.sipral_media_poll_rtcp);
                 DrainPackets(NativeMethods.sipral_media_poll_transmit);
                 CarryText();
@@ -628,19 +538,13 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>One frame each way: the far end's handed to every reader,
-    /// and the next one queued sent.</summary>
     private SipralStatus PlayAndCapture()
     {
         var status = PlaybackOnce(out var scratch, out var written, out _);
         if (status == SipralStatus.Ok && written > 0)
         {
             var frame = scratch.AsSpan(0, written).ToArray();
-            // Same guard as `SipralStack.EventReceived`: an unhandled
-            // exception on any .NET thread, background or not, ends the
-            // whole process, and this is this call's own frame-rate thread —
-            // one bad handler must not take every other call and stack down
-            // with it.
+            // an unhandled exception on any thread ends the process
             try
             {
                 FrameDecoded?.Invoke(frame);
@@ -706,9 +610,7 @@ public sealed class CallMedia : IDisposable
         }
     }
 
-    /// <summary>One packet out where it says: a datagram from this call's
-    /// socket, or — marked TCP or TLS — bytes on the socket's connection to
-    /// the TURN server, which the stack holds.</summary>
+    // A datagram, or bytes on the stack's TURN connection when marked TCP/TLS.
     private void SendPacket(SipralMediaPacket packet)
     {
         var payload = new byte[(int)packet.Len];
@@ -747,11 +649,8 @@ public sealed class CallMedia : IDisposable
 
     private short[] RentFrame() => new short[FrameSamples];
 
-    // -- lifetime -----------------------------------------------------------
-
-    /// <summary>Stops the frame-rate thread, <c>sipral_media_release</c>,
-    /// closes the socket. Called by <see cref="Call.Close"/>, not usually
-    /// by an application directly.</summary>
+    /// <summary>Stops the media thread, releases the handle and closes the
+    /// socket. <see cref="Call.Close"/> calls it.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

@@ -20,15 +20,11 @@ using static Sipral.Interop.NativeText;
 namespace Sipral;
 
 /// <summary>
-/// Which authorities a TLS connection to the SIP server trusts — the three
-/// answers <c>docs/22-tls.md</c> gives for every platform:
-/// <see cref="Platform"/> (the machine's own store, what a public server's
-/// certificate is checked against), <see cref="PrivateAuthority"/> (a
-/// private CA beside the platform's) and <see cref="OnlyAuthority"/> (that
-/// authority and no other: pinning it). None of them turns the check off;
-/// the name is checked by <see cref="SslStream"/> against the server name
-/// the stack was given. <see cref="Pinned"/> trusts one certificate by its
-/// SHA-256 fingerprint instead, for a PBX that signed its own.
+/// What a TLS connection to the SIP server trusts (<c>docs/22-tls.md</c>):
+/// <see cref="Platform"/>, <see cref="PrivateAuthority"/> (a private CA
+/// beside the platform's), <see cref="OnlyAuthority"/>, or
+/// <see cref="Pinned"/> (one certificate by fingerprint, for a self-signed
+/// PBX). None turns the check off; the name is always checked.
 /// </summary>
 public sealed class SipralTlsTrust
 {
@@ -43,23 +39,17 @@ public sealed class SipralTlsTrust
         _pin = pin;
     }
 
-    /// <summary>The one certificate whose SHA-256 fingerprint is
-    /// <paramref name="fingerprint"/>, and nothing else, written as
-    /// <c>openssl x509 -fingerprint -sha256</c> (<c>sha256 Fingerprint=</c>,
-    /// or <c>SHA256 Fingerprint=</c> before OpenSSL 3) or RFC 8122 prints it:
-    /// 64 hexadecimal digits, either case, colons and spaces between them
-    /// ignored, optionally after <c>sha-256 </c>, <c>SHA256=</c> or
-    /// <c>SHA256 Fingerprint=</c>, in any case; anything else throws
-    /// <see cref="ArgumentException"/> (<c>bindings/fixtures/pin-forms.txt</c>
-    /// lists what every layer takes). The fingerprint is the whole
-    /// verdict: no authority, host name or date is consulted, and a
-    /// certificate with any other fingerprint is refused as untrusted
-    /// (<c>docs/22-tls.md</c>). It is compared in constant time, over the DER
-    /// bytes of the certificate the server presented first.</summary>
+    /// <summary>Trust only the certificate with this SHA-256 fingerprint: 64
+    /// hex digits, any case, colons and spaces ignored, optionally after
+    /// <c>sha-256 </c>, <c>SHA256=</c> or <c>SHA256 Fingerprint=</c> (as
+    /// OpenSSL or RFC 8122 print it; see
+    /// <c>bindings/fixtures/pin-forms.txt</c>). Anything else throws
+    /// <see cref="ArgumentException"/>. No authority, name or date is
+    /// checked; the leaf's DER is compared in constant time.</summary>
     public static SipralTlsTrust Pinned(string fingerprint) =>
         new(new X509Certificate2Collection(), only: false, PinDigest(fingerprint));
 
-    /// <summary>The 32 bytes a fingerprint names, in any form
+    /// <summary>The 32 bytes of a fingerprint in any form
     /// <see cref="Pinned"/> takes.</summary>
     public static byte[] PinDigest(string fingerprint)
     {
@@ -79,7 +69,6 @@ public sealed class SipralTlsTrust
         return Convert.FromHexString(digits);
     }
 
-    /// <summary>The prefixes a fingerprint may come after.</summary>
     private static readonly string[] PinPrefixes = { "sha256 fingerprint=", "sha-256 ", "sha256=" };
 
     /// <summary>The platform's own trust anchors.</summary>
@@ -90,14 +79,11 @@ public sealed class SipralTlsTrust
     public static SipralTlsTrust PrivateAuthority(X509Certificate2 authority) =>
         new(new X509Certificate2Collection(authority), only: false);
 
-    /// <summary><paramref name="authority"/> and nothing else: a
-    /// certificate any other authority signed is refused, the platform's
-    /// included.</summary>
+    /// <summary>Only <paramref name="authority"/>; the platform's store is
+    /// not consulted.</summary>
     public static SipralTlsTrust OnlyAuthority(X509Certificate2 authority) =>
         new(new X509Certificate2Collection(authority), only: true);
 
-    /// <summary>What the handshake checks, and how the verdict is
-    /// kept.</summary>
     internal void Apply(SslClientAuthenticationOptions options, Verdict verdict)
     {
         if (_pin is { } pin)
@@ -117,10 +103,9 @@ public sealed class SipralTlsTrust
         }
         if (_only)
         {
-            // revocation as SslStream's own default leaves it, unchecked: a
-            // policy of one's own starts from Online instead, and a private
-            // authority publishes no revocation list, so on Linux every
-            // certificate it signed would read as a chain error
+            // Revocation off, as SslStream's default: a custom policy starts
+            // from Online, and a private CA publishes no revocation list, so
+            // on Linux every certificate it signed would fail the chain.
             var policy = new X509ChainPolicy
             {
                 TrustMode = X509ChainTrustMode.CustomRootTrust,
@@ -135,9 +120,8 @@ public sealed class SipralTlsTrust
             if (extra is { Count: > 0 } && errors.HasFlag(SslPolicyErrors.RemoteCertificateChainErrors)
                 && certificate is not null)
             {
-                // beside the platform's: the chain the platform refused is
-                // built again with the private authority among the roots,
-                // and whatever else the platform found still stands
+                // rebuild the refused chain with the private CA as a root;
+                // any other platform error still stands
                 using var again = new X509Chain();
                 again.ChainPolicy.ExtraStore.AddRange(extra);
                 again.ChainPolicy.CustomTrustStore.AddRange(extra);
@@ -157,8 +141,7 @@ public sealed class SipralTlsTrust
         };
     }
 
-    /// <summary>What the certificate check said, kept for the reason a
-    /// refused handshake is reported with.</summary>
+    // Kept to explain a refused handshake.
     internal sealed class Verdict
     {
         internal SslPolicyErrors? Errors { get; private set; }
@@ -184,31 +167,23 @@ public sealed class SipralTlsTrust
     }
 }
 
-/// <summary>How fast one address may ring a stack:
-/// <see cref="Burst"/> INVITEs at once, then one more every
-/// <see cref="EveryMs"/> (<c>sipral_stack_invite_limit</c>).
-/// <see cref="Default"/> is what every stack starts with — ten, then one
-/// every two seconds, past which a call is answered 480 —
-/// and <see cref="VoiceAgent"/> the preset for a headless service taking a
-/// trunk's calls, a hundred and twenty-eight at once and then twenty a
-/// second (<c>docs/08-ffi.md</c>, "How fast one address may ring this
-/// stack").</summary>
+/// <summary>How fast one address may ring a stack: <see cref="Burst"/>
+/// INVITEs at once, then one every <see cref="EveryMs"/>; beyond that, 480
+/// (<c>sipral_stack_invite_limit</c>).</summary>
 public readonly record struct SipralInviteLimit(uint Burst, ulong EveryMs)
 {
     /// <summary>Ten at once, then one every two seconds.</summary>
     public static SipralInviteLimit Default { get; } =
         new(global::Sipral.Sipral.InviteLimitBurst, global::Sipral.Sipral.InviteLimitEveryMs);
 
-    /// <summary>A hundred and twenty-eight at once, then one every fifty
-    /// milliseconds.</summary>
+    /// <summary>For a service taking a trunk's calls: 128 at once, then one
+    /// every 50 ms.</summary>
     public static SipralInviteLimit VoiceAgent { get; } =
         new(global::Sipral.Sipral.InviteLimitVoiceAgentBurst, global::Sipral.Sipral.InviteLimitVoiceAgentEveryMs);
 }
 
 /// <summary>What a <see cref="SipralEventKind.TransportFailed"/> event
-/// carries — the fields of <c>sipral_transport_failed_event_t</c>: which
-/// transport, what it spoke, what went wrong and, when TLS refused the
-/// connection, why, with the TLS library's own <see cref="Detail"/>.</summary>
+/// carries. <see cref="Detail"/> is the TLS library's own text.</summary>
 public sealed record SipralTransportFailedEventInfo(
     uint Transport,
     SipralTransport Protocol,
@@ -216,8 +191,6 @@ public sealed record SipralTransportFailedEventInfo(
     SipralTlsFailure Tls,
     string? Detail);
 
-/// <summary>A connection that could not be made, and what the stack is to
-/// call it.</summary>
 internal sealed class SignallingRefusedException : Exception
 {
     internal SignallingRefusedException(SipralTransportError error, SipralTlsFailure tls, string detail)
@@ -233,11 +206,9 @@ internal sealed class SignallingRefusedException : Exception
 
 public sealed partial class SipralStack
 {
-    /// <summary>How long one attempt at the signalling connection may take,
-    /// the TLS handshake included.</summary>
+    // Per attempt, TLS handshake included.
     private static readonly TimeSpan SignallingPatience = TimeSpan.FromSeconds(5);
-    /// <summary>The wait before the first attempt to connect again, doubled
-    /// after every one that fails, up to <see cref="ReconnectMost"/>.</summary>
+    // Doubled after each failure, up to ReconnectMost.
     private static readonly TimeSpan ReconnectFirst = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ReconnectMost = TimeSpan.FromSeconds(30);
 
@@ -249,9 +220,8 @@ public sealed partial class SipralStack
     private Link? _link;
     private int _reconnecting;
 
-    /// <summary>The signalling connection: the client, the stream every
-    /// message rides on and the lock every write holds, since one TLS session
-    /// written from two threads at once interleaves its records.</summary>
+    // Writes take the lock: one TLS session written from two threads
+    // interleaves its records.
     private sealed class Link
     {
         public required TcpClient Client { get; init; }
@@ -261,20 +231,16 @@ public sealed partial class SipralStack
         public object WriteLock { get; } = new();
     }
 
-    /// <summary>What SIP travels over: UDP, or one TCP or TLS connection to
-    /// the server.</summary>
+    /// <summary>What SIP travels over.</summary>
     public SipralTransport Signalling => _signalling;
 
-    /// <summary>Whether SIP can go out now: always over UDP, and over TCP or
-    /// TLS while the connection to the server stands.</summary>
+    /// <summary>Whether SIP can go out now: always over UDP, over TCP or TLS
+    /// while connected.</summary>
     public bool Connected => !Streamed || Volatile.Read(ref _link) is not null;
 
     private bool Streamed => _signalling is SipralTransport.Tcp or SipralTransport.Tls;
 
-    /// <summary>What goes after the address in a <c>Contact</c> this
-    /// package writes: <c>;transport=tcp</c> or <c>;transport=tls</c> for a
-    /// stack signalling over a connection (RFC 3261 §19.1.1), nothing over
-    /// UDP.</summary>
+    // The Contact's transport parameter (RFC 3261 §19.1.1).
     internal string ContactParameters => _signalling switch
     {
         SipralTransport.Tls => ";transport=tls",
@@ -282,9 +248,6 @@ public sealed partial class SipralStack
         _ => string.Empty,
     };
 
-    /// <summary>Checks and keeps the signalling settings, and makes the
-    /// first connection when they name one: the connection, or why there is
-    /// none.</summary>
     private (Link? Link, SignallingRefusedException? Refused) PrepareSignalling(
         SipralTransport signalling, string? bindHost, string? signallingServer, string? tlsServerName,
         SipralTlsTrust? tlsTrust)
@@ -318,8 +281,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>After the stack exists: the first connection bound, or its
-    /// failure told and the next attempt scheduled.</summary>
     private void StartSignalling(Link? link, SignallingRefusedException? refused)
     {
         if (link is not null)
@@ -333,9 +294,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>One connection to the signalling server; throws
-    /// <see cref="SignallingRefusedException"/> saying what refused
-    /// it.</summary>
     private Link Connect(string? bindHost)
     {
         var (host, port) = _server!.Value;
@@ -402,9 +360,8 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>A certificate the check refused is untrusted, expired or a
-    /// name mismatch by what the chain and the policy said; any other
-    /// failure of the handshake is a handshake refused.</summary>
+    // A refused certificate is untrusted, expired or a name mismatch; any
+    // other handshake failure is "handshake refused".
     internal static SignallingRefusedException Refused(SipralTlsTrust.Verdict verdict, Exception ex)
     {
         const X509ChainStatusFlags untrusted = X509ChainStatusFlags.UntrustedRoot
@@ -440,7 +397,6 @@ public sealed partial class SipralStack
         return new SignallingRefusedException(SipralTransportError.ConnectionReset, tls, Sentence(verdict.Detail));
     }
 
-    /// <summary>What a socket's error is, as the stack names it.</summary>
     internal static SignallingRefusedException Refused(SocketException socket)
     {
         var error = socket.SocketErrorCode switch
@@ -456,8 +412,7 @@ public sealed partial class SipralStack
         return new SignallingRefusedException(error, SipralTlsFailure.None, Sentence(socket.Message));
     }
 
-    /// <summary>One line of at most <c>SIPRAL_TRANSPORT_DETAIL_BYTES</c>
-    /// bytes of UTF-8.</summary>
+    // One line, at most SIPRAL_TRANSPORT_DETAIL_BYTES of UTF-8.
     private static string Sentence(string text)
     {
         var line = new string(text.Select(ch => char.IsControl(ch) ? ' ' : ch).ToArray()).Trim();
@@ -469,8 +424,6 @@ public sealed partial class SipralStack
         return line;
     }
 
-    /// <summary><c>sipral_stack_transport_failed_with</c>, from whichever thread
-    /// found out; never throwing on the way out.</summary>
     private void Report(SignallingRefusedException refused)
     {
         var detail = Encoding.UTF8.GetBytes(refused.Message);
@@ -496,8 +449,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Tells the stack the connection is open, naming both ends,
-    /// and starts reading it.</summary>
     private void Install(Link link)
     {
         var local = ToSBytes(link.Local);
@@ -521,10 +472,8 @@ public sealed partial class SipralStack
         new Thread(() => ReadLink(link)) { IsBackground = true, Name = "sipral-signalling" }.Start();
     }
 
-    /// <summary>What the connection carried, to
-    /// <c>sipral_stack_receive_stream</c>, every byte in order — a busy stack
-    /// is waited for rather than skipped, since a stream that loses a byte
-    /// never finds its place again — until it ends.</summary>
+    // A busy stack is waited for, not skipped: a stream that loses a byte
+    // never resyncs.
     private void ReadLink(Link link)
     {
         var buffer = new byte[TransmitBytes];
@@ -563,16 +512,14 @@ public sealed partial class SipralStack
             }
             if (status != SipralStatus.Ok && status != SipralStatus.Busy)
             {
-                // the framing is lost: the stack retired the transport and
-                // said so itself
+                // framing lost: the stack retired the transport itself
                 LoseLink(link, null, tell: false);
                 return;
             }
         }
     }
 
-    /// <summary>Writes one message on the connection, whole; a write that
-    /// fails loses it.</summary>
+    // A failed write loses the connection.
     private void WriteLink(byte[] payload)
     {
         var link = Volatile.Read(ref _link);
@@ -598,11 +545,8 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Closes <paramref name="link"/> if it is still the current
-    /// one, tells the stack how it ended — <c>sipral_stack_stream_closed</c>
-    /// for an orderly close (<paramref name="refused"/> null),
-    /// <c>sipral_stack_transport_failed_with</c> otherwise, nothing when
-    /// <paramref name="tell"/> is false — and connects again.</summary>
+    // Closes the link if still current, reports stream_closed (refused
+    // null) or transport_failed_with (unless !tell), and reconnects.
     private void LoseLink(Link link, SignallingRefusedException? refused, bool tell = true)
     {
         if (Interlocked.CompareExchange(ref _link, null, link) != link)
@@ -637,16 +581,11 @@ public sealed partial class SipralStack
         ReconnectLater();
     }
 
-    /// <summary>Whether the poll that just ran named the main transport of a
-    /// stack that signals over TCP or TLS: the stack retires a connection
-    /// that stopped answering keep-alives (RFC 5626 §4.4.1) with its socket
-    /// still open here, and sends nothing on it again until a new one is
-    /// bound. Read and written on the poll thread only.</summary>
+    // Set when the stack retired the main TCP/TLS transport for missed
+    // keep-alives (RFC 5626 §4.4.1) while the socket is still open here.
+    // Poll thread only.
     private bool _mainLetGo;
 
-    /// <summary>Closes the connection the stack let go of in the poll that
-    /// just ran, if it is still the one held here, and connects again: the
-    /// stack already knows, so nothing more is said to it.</summary>
     private void ActOnMainLetGo()
     {
         if (!_mainLetGo)
@@ -660,7 +599,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Starts the thread that connects again, unless one runs.</summary>
     private void ReconnectLater()
     {
         if (_closed.IsSet || Interlocked.Exchange(ref _reconnecting, 1) != 0)
@@ -670,9 +608,6 @@ public sealed partial class SipralStack
         new Thread(Reconnect) { IsBackground = true, Name = "sipral-reconnect" }.Start();
     }
 
-    /// <summary>Connects again, backing off, until it works or the stack
-    /// closes; then points every account at the new connection and
-    /// registers again the ones that were registering.</summary>
     private void Reconnect()
     {
         var delay = ReconnectFirst;
@@ -715,10 +650,8 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Every account added without a <c>Contact</c> of its own
-    /// moves to the new connection's address, and every one that was
-    /// registering registers again now rather than at its next
-    /// back-off.</summary>
+    // Accounts without their own Contact move to the new address; those
+    // registering register again now, not at their next back-off.
     private void AfterReconnect()
     {
         List<Account> accounts;
@@ -741,15 +674,13 @@ public sealed partial class SipralStack
             }
             catch (SipralException)
             {
-                // the next loss or refresh tries again
+                // the next loss or refresh retries
             }
         }
     }
 
-    /// <summary>The signalling connection made again from
-    /// <paramref name="host"/>, for <see cref="MoveTo"/>: the old one
-    /// belongs to a network this machine has left. When the new one cannot
-    /// be made the stack hears why and this class keeps trying.</summary>
+    // For MoveTo: the old connection belongs to a network we left. On
+    // failure the stack is told and reconnection continues.
     private void MoveLink(string host)
     {
         _bindHost = host;
@@ -774,7 +705,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Closes the connection for <see cref="Dispose"/>.</summary>
     private void CloseLink()
     {
         var link = Interlocked.Exchange(ref _link, null);

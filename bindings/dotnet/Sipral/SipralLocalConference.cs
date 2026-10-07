@@ -11,11 +11,9 @@ using Sipral.Interop;
 
 namespace Sipral;
 
-/// <summary>One member of a <see cref="SipralLocalConference"/>, as
-/// <c>sipral_local_conference_member_at</c> reads it: its handle — a call's,
-/// or <see cref="SipralLocalConference.Handle"/> for this end — whether it
-/// is talking, its two mutes and its two gains in the audio engine's steps
-/// (256 is unity).</summary>
+/// <summary>One member of a <see cref="SipralLocalConference"/>. The handle
+/// is a call's, or <see cref="SipralLocalConference.Handle"/> for this end;
+/// gains are in engine steps (256 is unity).</summary>
 public sealed record SipralConferenceMember(
     ulong Member,
     bool Talking,
@@ -25,20 +23,16 @@ public sealed record SipralConferenceMember(
     uint GainOutput);
 
 /// <summary>
-/// A local conference: any number of this stack's calls, each on its own
-/// codec and rate, mixed here so that every member hears everybody but
-/// itself — this end too, unless it was made without
-/// (<c>docs/08-ffi.md</c>, "A local conference").
+/// A local conference: this stack's calls, each on its own codec, mixed so
+/// every member hears everyone but itself (this end included, unless made
+/// without).
 ///
-/// A call added stops carrying its own frames — its <see cref="CallMedia"/>
-/// goes on reading the socket and sending RTCP — and the conference carries
-/// them instead: on a stack in device mode the library's audio engine does,
-/// and every packet leaves from the member's own socket through the stack's
-/// transmit path; in application mode a thread of this class's own ticks
-/// every twenty milliseconds — <see cref="SendAudio"/> is this end's
-/// microphone, <see cref="Frames"/> what it hears. What changes arrives on
-/// the stack's events as <see cref="SipralEventKind.LocalConferenceChanged"/>
-/// with <see cref="SipralEventArgs.LocalConference"/>.
+/// An added call stops carrying its own frames (its <see cref="CallMedia"/>
+/// still reads the socket and sends RTCP). In device mode the audio engine
+/// mixes; in application mode this class ticks every 20 ms, with
+/// <see cref="SendAudio"/> as this end's microphone and <see cref="Frames"/>
+/// what it hears. Changes arrive as
+/// <see cref="SipralEventKind.LocalConferenceChanged"/>.
 /// </summary>
 public sealed class SipralLocalConference : IDisposable
 {
@@ -56,9 +50,8 @@ public sealed class SipralLocalConference : IDisposable
     private readonly List<short> _pending = new();
     private int _disposed;
 
-    /// <summary>The conference's handle, which is also this end's name as a
-    /// member: in <see cref="Members"/>, <see cref="Talkers"/> and every
-    /// event.</summary>
+    /// <summary>The conference's handle, also this end's member
+    /// handle.</summary>
     public ulong Handle { get; }
 
     /// <summary>Whether this end takes part.</summary>
@@ -70,14 +63,13 @@ public sealed class SipralLocalConference : IDisposable
     /// <summary>Samples in one of this end's frames: twenty milliseconds.</summary>
     public int FrameSamples { get; }
 
-    /// <summary>What this end hears, one frame of 16-bit mono PCM each, in
-    /// application mode.</summary>
+    /// <summary>What this end hears, in application mode.</summary>
     public IAsyncEnumerable<short[]> Frames => _frames.Reader.ReadAllAsync();
 
-    /// <summary><c>sipral_local_conference_create</c>. <paramref name="maxMembers"/>
-    /// counts this end; <paramref name="sampleRate"/> is the rate of its
-    /// frames — 8000, 16000, 32000 or 48000 — in application mode. A rate
-    /// the conference cannot mix throws <see cref="SipralException"/> with
+    /// <summary><c>sipral_local_conference_create</c>.
+    /// <paramref name="maxMembers"/> counts this end;
+    /// <paramref name="sampleRate"/> (8000, 16000, 32000 or 48000) applies in
+    /// application mode. Other rates throw with
     /// <see cref="SipralStatus.ConferenceRefused"/>.</summary>
     public SipralLocalConference(SipralStack stack, uint maxMembers = 16, bool local = true, uint sampleRate = 16000)
     {
@@ -102,14 +94,12 @@ public sealed class SipralLocalConference : IDisposable
         }
     }
 
-    /// <summary><c>sipral_local_conference_add</c>: <paramref name="call"/>
-    /// takes part from the next tick, at its own codec's rate. A full
-    /// conference, a call already in one, or a codec it cannot mix throws
+    /// <summary><c>sipral_local_conference_add</c>, from the next tick. A
+    /// full conference, a call already in one, or an unmixable codec throws
     /// with <see cref="SipralStatus.ConferenceRefused"/>.</summary>
     public void Add(Call call)
     {
-        // the call's own thread stops carrying frames before the conference
-        // starts, so that no frame is taken twice
+        // stop the call's own pump first, so no frame is taken twice
         var was = call.Media?.Pumped;
         if (call.Media is { } media)
         {
@@ -132,8 +122,8 @@ public sealed class SipralLocalConference : IDisposable
         _members[call.Handle] = call;
     }
 
-    /// <summary><c>sipral_local_conference_remove</c>: <paramref name="call"/>
-    /// carries its own frames again from the next tick.</summary>
+    /// <summary><c>sipral_local_conference_remove</c>, from the next
+    /// tick.</summary>
     public void Remove(Call call)
     {
         SipralErrors.Call(
@@ -148,9 +138,8 @@ public sealed class SipralLocalConference : IDisposable
 
     private ulong MemberHandle(Call? member) => member?.Handle ?? Handle;
 
-    /// <summary>Mute or unmute one way of a member — <see langword="null"/>
-    /// for this end: <see cref="SipralAudioDirection.Input"/> is what it
-    /// says, <see cref="SipralAudioDirection.Output"/> what it hears.</summary>
+    /// <summary>Mutes one direction of a member (<see langword="null"/> for
+    /// this end). Input is what it says, output what it hears.</summary>
     public void SetMuted(Call? member, SipralAudioDirection direction, bool muted = true)
     {
         var named = MemberHandle(member);
@@ -159,8 +148,8 @@ public sealed class SipralLocalConference : IDisposable
             "sipral_local_conference_set_muted");
     }
 
-    /// <summary>The level of one way of a member, in the audio engine's
-    /// steps: 256 is unity, 1024 four times.</summary>
+    /// <summary>Sets a member's gain in engine steps (256 is unity, 1024 the
+    /// maximum).</summary>
     public void SetGain(Call? member, SipralAudioDirection direction, uint gain)
     {
         var named = MemberHandle(member);
@@ -198,8 +187,7 @@ public sealed class SipralLocalConference : IDisposable
         return found;
     }
 
-    /// <summary>Who was talking in the last tick, loudest first, by
-    /// handle.</summary>
+    /// <summary>Handles talking in the last tick, loudest first.</summary>
     public IReadOnlyList<ulong> Talkers()
     {
         var found = new List<ulong>();
@@ -215,9 +203,9 @@ public sealed class SipralLocalConference : IDisposable
         return found;
     }
 
-    /// <summary><c>sipral_local_conference_record_start</c>: the whole mix,
-    /// one channel, to <paramref name="path"/>, at the conference's rate
-    /// unless <paramref name="sampleRate"/> names another.</summary>
+    /// <summary><c>sipral_local_conference_record_start</c>: record the mix,
+    /// mono, at the conference's rate unless
+    /// <paramref name="sampleRate"/> is given.</summary>
     public void Record(string path, SipralRecordingFormat format = SipralRecordingFormat.Wav, uint sampleRate = 0)
     {
         var options = SipralRecordingOptions.Sized();
@@ -230,9 +218,8 @@ public sealed class SipralLocalConference : IDisposable
     /// the file.</summary>
     public void StopRecording() => global::Sipral.Sipral.LocalConferenceRecordStop(Handle);
 
-    /// <summary>What this end says, 16-bit mono PCM at
-    /// <see cref="SampleRate"/>, in any length: the conference's thread takes
-    /// a frame of it every tick. Thread-safe.</summary>
+    /// <summary>Queues this end's 16-bit mono PCM at
+    /// <see cref="SampleRate"/>, any length. Thread-safe.</summary>
     public void SendAudio(ReadOnlySpan<short> samples) => _toSend.Enqueue(samples.ToArray());
 
     private short[] NextChunk()
@@ -279,8 +266,6 @@ public sealed class SipralLocalConference : IDisposable
         }
     }
 
-    /// <summary>Every packet the tick left, out from its member's own
-    /// socket.</summary>
     private void SendWaiting()
     {
         while (true)
@@ -309,9 +294,8 @@ public sealed class SipralLocalConference : IDisposable
         }
     }
 
-    /// <summary><c>sipral_local_conference_destroy</c>: every call still in
-    /// it carries its own frames again, a recording running is finished,
-    /// and the handle is spent.</summary>
+    /// <summary><c>sipral_local_conference_destroy</c>: members carry their
+    /// own frames again and any recording is finished.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

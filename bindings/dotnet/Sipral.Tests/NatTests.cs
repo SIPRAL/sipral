@@ -16,32 +16,22 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// <c>nat: SipralNat.Stun</c> and <c>stunServer</c> on <see
-/// cref="SipralStack"/> — the .NET counterpart of
-/// <c>bindings/python/tests/test_nat.py</c>, whose own docstring explains
-/// what each test proves and why a unit test stops where it does for
-/// TURN. <see cref="FakeStunServer"/> is the same RFC 5389 Section 15.2
-/// responder that file's <c>_FakeStunServer</c> is.
+/// STUN, TURN and ICE through <see cref="SipralStack"/>, against a fake
+/// RFC 5389 §15.2 responder.
 /// </summary>
 public sealed class NatTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(8);
 
-    /// <summary>A UDP socket that answers every STUN Binding request it
-    /// reads with the same made-up public address.
+    /// <summary>Answers every STUN Binding request with the same made-up
+    /// public address.
     ///
-    /// Without <paramref name="credential"/>, every other message — a TURN
-    /// Allocate among them — is recorded in <see cref="OtherRequests"/> and
-    /// never answered, the way <c>AllocateRequestLeavesForTheConfiguredServer</c>
-    /// needs it. With one, it is a real, if fake, TURN server too: an
-    /// unauthenticated Allocate (RFC 8656 Section 7) gets the mandatory 401
-    /// with a REALM and a NONCE, a signed one is checked against the
-    /// long-term key and answered with a relay on <see cref="RelayHost"/>,
-    /// and a Refresh — among them the one with a lifetime of zero that
-    /// gives an allocation back — is recorded in <see cref="Requests"/> the
-    /// same way every request is, signed or not, answered or not
-    /// (<c>bindings/swift/Tests/SipralTests/NatTests.swift</c>'s own
-    /// <c>FakeStunServer</c> and <c>bindings/kotlin/.../NatCheck.kt</c>'s).</summary>
+    /// Without <paramref name="credential"/>, other messages (a TURN
+    /// Allocate) are recorded in <see cref="OtherRequests"/> and never
+    /// answered. With one, it also acts as TURN: an unsigned Allocate gets
+    /// 401 with REALM and NONCE (RFC 8656 §7), a signed one a relay on
+    /// <see cref="RelayHost"/>. Every request, Refreshes included, is
+    /// recorded in <see cref="Requests"/>.</summary>
     internal sealed class FakeStunServer : IDisposable
     {
         private const ushort BindingRequest = 0x0001;
@@ -370,10 +360,8 @@ public sealed class NatTests
         Assert.Equal("203.0.113.7:40000", evt.Nat.Mapped);
     }
 
-    /// <summary><c>stunFallbacks</c>: the first server named never answers,
-    /// and the signalling socket is asked of the next one once five and a
-    /// half seconds have gone by, with <see cref="SipralEventKind.StunServer"/>
-    /// saying so.</summary>
+    /// <summary>A silent first STUN server is replaced by the next after
+    /// 5.5 s, reported by <see cref="SipralEventKind.StunServer"/>.</summary>
     [Fact]
     public async Task ASilentFirstServerHandsTheSocketToTheNext()
     {
@@ -395,10 +383,9 @@ public sealed class NatTests
         Assert.Equal("203.0.113.7:40010", mapped.Nat!.Mapped);
     }
 
-    /// <summary>An account the STUN answer showed behind a NAT keeps its
-    /// registrar's flow open: a double CRLF, alone in a datagram, reaches
-    /// the registrar every <c>registrarKeepaliveMs</c>, and none does with
-    /// the keep-alive off (`docs/06-nat.md`, "Refresh").</summary>
+    /// <summary>Behind a NAT, a lone double CRLF reaches the registrar
+    /// every <c>registrarKeepaliveMs</c>, and none with the keep-alive
+    /// off.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -447,9 +434,8 @@ public sealed class NatTests
     }
 
     /// <summary><see cref="SipralStack.SetStunServers"/> on a stack created
-    /// with nobody to ask: the signalling socket is mapped at once, a call
-    /// placed afterwards is offered at the address the server handed out,
-    /// and an entry that is not an address is refused.</summary>
+    /// without STUN maps at once, later calls offer the mapped address, and
+    /// a non-address entry is refused.</summary>
     [Fact]
     public async Task AListNamedLaterMapsTheSignallingAndTheCalls()
     {
@@ -493,11 +479,8 @@ public sealed class NatTests
         var aliceCall = alice.PlaceCall(aliceAccount, $"sip:bob@{bob.BindAddress}");
         try
         {
-            // sipral_call_event_t's LocalSdp/RemoteSdp are only ever set
-            // on SessionChanged (a hold, a re-INVITE — neither happens
-            // here); the offer itself is read the way any SIP listener
-            // would, off the raw INVITE SipralEventKind.IncomingCall
-            // attaches as Message.
+            // the SDP fields are only set on SessionChanged; read the offer
+            // from the raw INVITE
             var incoming = await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
             var message = Encoding.UTF8.GetString(incoming.Message ?? Array.Empty<byte>());
             Assert.Contains("c=IN IP4 203.0.113.7", message);
@@ -517,13 +500,8 @@ public sealed class NatTests
             audio: SipralAudio.Application,nat: SipralNat.Stun, stunServer: server.Address,
             turnServer: server.Address, turnUsername: "labuser", turnPassword: "labpass");
 
-        // sipral_call_place refuses a socket named with
-        // sipral_stack_nat_map until both its NAT_MAPPING and NAT_RELAY
-        // have answered, and this fake server never answers the
-        // Allocate its own NAT_RELAY would need — so this reaches
-        // SipralStack.MapMediaSocket directly, on a thread of its own,
-        // with a short timeout. What it proves is that the Allocate
-        // left, not that a call could be placed on the socket.
+        // This fake never answers the Allocate, so no call could be placed;
+        // MapMediaSocket is driven directly to prove the Allocate left.
         var mediaSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         mediaSocket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         var mediaAddress = SipralStack.FormatAddress((IPEndPoint)mediaSocket.LocalEndPoint!);
@@ -558,20 +536,10 @@ public sealed class NatTests
         alice.Dispose();
     }
 
-    /// <summary>A call that allocated a TURN relay gives it back when it
-    /// ends: <c>SipralStack.DrainFarewells</c> must send what <c>sipral_stack_poll_farewell</c> hands out to the
-    /// destination it names -- the TURN server, for the Refresh with a
-    /// lifetime of zero that gives a relay back
-    /// (<c>crates/sipral/src/relay.rs</c>, "gives it back when the call
-    /// ends") -- and only fall back to the last address media was heard
-    /// from when it names none.
-    ///
-    /// <c>relay.rs</c> also says: "A call whose peer does no ICE never uses
-    /// it, and gives it back the same way" -- so this needs nothing more
-    /// than a call that reaches <c>bob</c>, an ordinary stack with no NAT
-    /// handling of its own, and is then closed. Were the destination
-    /// ignored in favour of the far end's own address, as it once was,
-    /// this fake TURN server would never see the Refresh at all.</summary>
+    /// <summary>An ended call gives its TURN relay back: the zero-lifetime
+    /// Refresh goes to the destination the farewell names (the TURN server),
+    /// not to the far end's media address. A peer without ICE is enough,
+    /// since the relay is allocated and released either way.</summary>
     [Fact]
     public async Task TurnAllocationIsGivenBackWhenTheCallEnds()
     {
@@ -582,11 +550,8 @@ public sealed class NatTests
         }
         const string password = "turn-secret-42";
         using var server = new FakeStunServer("203.0.113.9", 40002, ("alice-turn", password));
-        // codecs: "PCMU" keeps the offer short -- three ICE candidates
-        // (host, server-reflexive, relayed) on top of every codec this
-        // build has by default clears RFC 3261 Section 18.1.1's
-        // 1300-byte line, and this loopback pair has no stream transport
-        // open to fall back to.
+        // PCMU only: three candidates plus every codec would pass 1300
+        // bytes (RFC 3261 §18.1.1), with no stream to fall back to here
         var alice = new SipralStack(
             audio: SipralAudio.Application,bindHost: host, nat: SipralNat.Stun, ice: SipralIce.Offered, codecs: "PCMU",
             stunServer: server.Address, turnServer: server.Address,
@@ -605,18 +570,12 @@ public sealed class NatTests
             var incoming = await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall, Timeout);
             var bobCall = bob.AnswerCall(incoming, mediaHost: host);
 
-            // The session has to actually open -- and the relay actually
-            // become the call's -- before there is anything for a
-            // farewell to give back.
+            // the relay must belong to the call before it can be given back
             using var cts = new CancellationTokenSource(Timeout);
             Assert.NotNull(await aliceCall.WaitForMediaAsync(cts.Token));
 
-            // SipralStack.Dispose, not Call.Close: hanging up and
-            // forgetting the call right here would race the poll
-            // thread's own drain of the farewell it leaves behind
-            // (Dispose's own doc comment). Dispose hangs up, gives the
-            // poll thread a round to drain both queues while the call is
-            // still tracked, and only then forgets it.
+            // Dispose, not Call.Close: closing here would race the poll
+            // thread's drain of the farewell
             alice.Dispose();
             bobCall.Close();
 
@@ -669,9 +628,7 @@ public sealed class NatTests
             Assert.NotNull(await aliceCall.WaitForMediaAsync(cts.Token));
             Assert.NotNull(await bobCall.WaitForMediaAsync(cts.Token));
 
-            // MediaPathChosen is the agent's own nomination, on each side;
-            // reaching it, rather than MediaFailed, is what tells this
-            // from a call ICE never got to run on.
+            // MediaPathChosen, not MediaFailed: ICE actually ran
             await FirstMatchingAsync(aliceCall.Events, e => e.Kind == SipralEventKind.MediaPathChosen, Timeout);
             await FirstMatchingAsync(bobCall.Events, e => e.Kind == SipralEventKind.MediaPathChosen, Timeout);
 
@@ -688,8 +645,7 @@ public sealed class NatTests
             Assert.True(chosen[0].Priority > 0);
             Assert.False(string.IsNullOrEmpty(chosen[0].Remote));
 
-            // and a restart this end starts checks again under new
-            // credentials until a second path is chosen (RFC 8445 §9)
+            // a restart checks again under new credentials (RFC 8445 §9)
             aliceCall.RestartIce();
             await FirstMatchingAsync(aliceCall.Events, e => e.Kind == SipralEventKind.MediaPathChosen, Timeout);
         }
@@ -700,14 +656,9 @@ public sealed class NatTests
         }
     }
 
-    /// <summary>This host's own address on whatever interface its
-    /// default route uses, or <see langword="null"/> on a machine with
-    /// none to find. RFC 8445 Section 5.1.1.1 rules loopback out as a
-    /// host candidate, so ICE needs an address that is not
-    /// <c>127.0.0.1</c> even though both stacks stay on this one
-    /// machine. <see cref="Socket.Connect(string, int)"/> on a UDP
-    /// socket asks the kernel to pick a source address for a
-    /// destination without ever sending a packet.</summary>
+    /// <summary>This host's address on its default route, or
+    /// <see langword="null"/>. ICE excludes loopback candidates (RFC 8445
+    /// §5.1.1.1), so even two local stacks need a real address.</summary>
     internal static string? RoutableAddress()
     {
         try

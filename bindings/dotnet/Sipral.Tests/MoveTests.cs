@@ -11,10 +11,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// A call in progress moves with the network under it, and a call says which
-/// SRTP transform secures it — the .NET counterpart of
-/// <c>bindings/python/tests/test_move.py</c>. Alice starts on loopback and
-/// moves to this machine's own address on its default route.
+/// A call moves with the network, and reports its SRTP transform. Alice
+/// starts on loopback and moves to this machine's LAN address.
 /// </summary>
 public sealed class MoveTests
 {
@@ -53,8 +51,6 @@ public sealed class MoveTests
         throw new Xunit.Sdk.XunitException($"no {kind}");
     }
 
-    /// <summary>Whether <paramref name="media"/> decodes a frame with
-    /// something in it within a few seconds.</summary>
     private static async Task<bool> HearsAsync(CallMedia media)
     {
         var loud = 0;
@@ -85,10 +81,8 @@ public sealed class MoveTests
         }
     }
 
-    // a tone, not a constant: Opus rejects DC, so a constant comes out loud
-    // only for the few milliseconds of its onset, and a call whose buffer
-    // skipped those frames heard nothing loud at all. Forty samples a period
-    // is 200 Hz at 8 kHz and 1.2 kHz at 48 kHz
+    // a tone, not a constant: Opus rejects DC, so a constant is loud only at
+    // its onset
     private static void Speak(CallMedia media) =>
         media.SendAudio(Enumerable.Range(0, media.FrameSamples * 100)
             .Select(n => (short)(8000 * Math.Sin(2 * Math.PI * n / 40)))
@@ -98,17 +92,13 @@ public sealed class MoveTests
     public async Task TheCallIsOfferedAtTheNewAddressAndHeardBothWaysAfter()
     {
         var host = NatTests.RoutableAddress();
-        // Windows routes no datagram between a socket bound to loopback and
-        // one bound to the machine's own LAN address (WSAENETUNREACH one way,
-        // WSAEADDRNOTAVAIL the other), so a far end on loopback can never
-        // hear a call moved onto the LAN there; macOS and Linux both can
+        // Windows routes nothing between loopback and the LAN address
         if (host is null || host.StartsWith("127.", StringComparison.Ordinal) || OperatingSystem.IsWindows())
         {
             return;
         }
-        // bound at one address, which a move binds again at the next: a stack
-        // on every interface keeps advertising the route toward its server,
-        // loopback here, below
+        // bound to one address: a wildcard stack would keep advertising
+        // loopback after the move
         using var alice = new SipralStack("127.0.0.1", audio: SipralAudio.Application);
         using var bob = new SipralStack(audio: SipralAudio.Application);
         var (call, answered) = await ConnectAsync(alice, bob);
@@ -124,9 +114,8 @@ public sealed class MoveTests
             call.Readdress(host);
             Assert.NotEqual(before, call.MediaAddress);
             Assert.StartsWith($"{host}:", call.MediaAddress);
-            // the media reads and sends on the new socket, and the old one is
-            // gone: on a real network its address no longer exists, and a far
-            // end that latches onto where packets come from must not be led back
+            // the old socket must be gone: a far end latching onto the
+            // source must not be led back to it
             Assert.Equal(call.MediaAddress, call.Media!.LocalAddress);
             Assert.Throws<ObjectDisposedException>(() => old.LocalEndPoint);
             await UntilAsync(call, SipralEventKind.SessionChanged);
@@ -152,8 +141,6 @@ public sealed class MoveTests
         return ((System.Net.IPEndPoint)probe.LocalEndPoint!).Port;
     }
 
-    /// <summary>This machine's address on its default route, or a failure
-    /// naming why the port checks cannot run.</summary>
     private static string OtherAddress()
     {
         var host = NatTests.RoutableAddress();
@@ -225,11 +212,9 @@ public sealed class MoveTests
         Assert.True(stack.KeptSignallingPort);
     }
 
-    /// <summary>A stack bound on every interface keeps picking its own
-    /// address across a move: its socket stays where it was, on its port, and
-    /// what it advertises is the route toward each account's server again
-    /// rather than the address the move named, taken as fixed from then
-    /// on.</summary>
+    /// <summary>A wildcard stack keeps its socket and port across a move and
+    /// again advertises the route toward each server, not the named
+    /// address.</summary>
     [Fact]
     public void AStackOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove()
     {

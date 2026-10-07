@@ -15,10 +15,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// Who is calling, why a call ended, where it went, and what an account asks
-/// for — against a far end played by a plain UDP socket, so every header is
-/// the test's own. The .NET counterpart of
-/// <c>bindings/python/tests/test_identity.py</c>.
+/// Caller identity, end causes, redirection and account privacy, against a
+/// plain UDP far end that writes every header.
 /// </summary>
 public sealed class IdentityTests : IDisposable
 {

@@ -5,13 +5,9 @@ using System.Collections.Generic;
 
 namespace Sipral;
 
-/// <summary>What every call-shaped event carries — the fields of
-/// <c>sipral_call_event_t</c>, copied out while the callback that carried
-/// them was still live. Present when <see cref="SipralEvent.Kind"/> is one
-/// of the call kinds; <see langword="null"/> otherwise.
-/// <see cref="Identity"/> and <see cref="Answering"/> are what the INVITE
-/// of an incoming call said, repeated on every event of it;
-/// <see cref="Cause"/> is why the far end ended the call, on
+/// <summary>The fields of <c>sipral_call_event_t</c>, present on call
+/// events. <see cref="Identity"/> and <see cref="Answering"/> repeat what
+/// the incoming INVITE said; <see cref="Cause"/> is set on
 /// <see cref="SipralEventKind.CallEnded"/>.</summary>
 public sealed record SipralCallEventInfo(
     SipralCallState State,
@@ -32,18 +28,15 @@ public sealed record SipralCallEventInfo(
     SipralAnswering Answering,
     SipralEndCause? Cause);
 
-/// <summary>What an incoming INVITE said about who is calling, beyond its
-/// <c>From</c>. <see cref="AssertedUri"/>, <see cref="AssertedDisplay"/> and
-/// <see cref="Verstat"/> come only from a peer the account names in its
-/// trusted peers (RFC 3325 §8): <see cref="Trusted"/> says whether this call
-/// came from one. <see cref="Verification"/>, <see cref="Attestation"/> and
-/// <see cref="VerificationFailure"/> are this end's own STIR/SHAKEN verdict on
-/// the call's <c>Identity</c> (RFC 8224), when the account verifies. <see cref="Privacy"/> is the <c>Sipral.Privacy*</c> bits
-/// the caller's <c>Privacy</c> asked for. <see cref="DivertedFrom"/> and
-/// <see cref="DiversionReason"/> are the top-most <c>Diversion</c> (RFC
-/// 5806); the full lists, and every <c>History-Info</c> entry (RFC 7044),
-/// are read with <see cref="Call.Identity"/> or
-/// <see cref="SipralStack.CallIdentity"/>.</summary>
+/// <summary>Who is calling, beyond <c>From</c>. The asserted fields and
+/// <see cref="Verstat"/> come only from trusted peers (RFC 3325 §8, see
+/// <see cref="Trusted"/>). <see cref="Verification"/>,
+/// <see cref="Attestation"/> and <see cref="VerificationFailure"/> are this
+/// end's STIR/SHAKEN verdict (RFC 8224). <see cref="Privacy"/> is the
+/// <c>Sipral.Privacy*</c> bits the caller asked for.
+/// <see cref="DivertedFrom"/> and <see cref="DiversionReason"/> are the top
+/// <c>Diversion</c> (RFC 5806); full lists, and <c>History-Info</c> (RFC
+/// 7044), via <see cref="Call.Identity"/>.</summary>
 public sealed record SipralCallerIdentity(
     bool Trusted,
     string? AssertedUri,
@@ -76,14 +69,11 @@ public sealed record SipralAnswering(
 /// proxy saying another phone answered — not a missed call.</summary>
 public sealed record SipralEndCause(uint Sip, uint Q850, string? Text);
 
-/// <summary>What <see cref="SipralEventKind.AudioDevicesChanged"/> carries,
-/// in device mode: what changed and who changed it. An application notes a
-/// <see cref="SipralAudioOrigin.System"/> change — a headset plugged in, the
-/// default moved — and never answers an <see cref="SipralAudioOrigin.Engine"/>
-/// one by selecting again: that is the engine doing what was asked, or
-/// falling back after a loss, and re-applying a choice on it loops.
-/// <see cref="Device"/> is an id <see cref="SipralAudioEngine.Devices"/>
-/// lists, or <see langword="null"/>.</summary>
+/// <summary>What <see cref="SipralEventKind.AudioDevicesChanged"/> carries.
+/// Never answer an <see cref="SipralAudioOrigin.Engine"/> change by
+/// selecting again: it is the engine's own doing, and re-applying loops.
+/// <see cref="Device"/> is an id from <see cref="SipralAudioEngine.Devices"/>,
+/// or <see langword="null"/>.</summary>
 public sealed record SipralAudioEventInfo(
     SipralAudioChange Change,
     SipralAudioOrigin Origin,
@@ -91,9 +81,8 @@ public sealed record SipralAudioEventInfo(
     SipralAudioDirection? Direction,
     uint? Device);
 
-/// <summary>What every media-shaped event carries — the fields of
-/// <c>sipral_media_event_t</c>. Present when <see cref="SipralEvent.Kind"/>
-/// is one of the media kinds; <see langword="null"/> otherwise.</summary>
+/// <summary>The fields of <c>sipral_media_event_t</c>, present on media
+/// events.</summary>
 public sealed record SipralMediaEventInfo(
     SipralCodec Codec,
     SipralDirection Direction,
@@ -111,10 +100,8 @@ public sealed record SipralMediaEventInfo(
     bool Encrypted = false,
     bool Authenticated = false);
 
-/// <summary>How one stream of a call is protected: a
-/// <c>sipral_stream_encryption_t</c> read out
-/// (<see cref="CallMedia.Encryption"/>). <see cref="AwaitingKeys"/> is a
-/// stream that will be encrypted once its DTLS-SRTP handshake ends.</summary>
+/// <summary>How one stream is protected (<see cref="CallMedia.Encryption"/>).
+/// <see cref="AwaitingKeys"/>: encrypted once DTLS-SRTP completes.</summary>
 public sealed record SipralStreamProtection(
     SipralMediaKind Media,
     bool Encrypted,
@@ -123,14 +110,12 @@ public sealed record SipralStreamProtection(
     bool Authenticated,
     bool AwaitingKeys);
 
-/// <summary>What a <see cref="SipralEventKind.CallerVerification"/> event
-/// carries — the fields of <c>sipral_verification_event_t</c>. At
-/// <see cref="SipralVerificationStage.CertificateWanted"/> the application
-/// fetches <see cref="CertificateUrl"/> and hands the chain to
-/// <see cref="SipralStack.StirCertificate"/>; at
-/// <see cref="SipralVerificationStage.Verified"/> the rest is the verdict,
-/// announced just before the call it is about, which
-/// <see cref="Refused"/> says a strict account turned away with
+/// <summary>What <see cref="SipralEventKind.CallerVerification"/> carries.
+/// At <see cref="SipralVerificationStage.CertificateWanted"/>, fetch
+/// <see cref="CertificateUrl"/> and pass it to
+/// <see cref="SipralStack.StirCertificate"/>. At
+/// <see cref="SipralVerificationStage.Verified"/>, the verdict, just before
+/// the call; <see cref="Refused"/> when a strict account turned it away with
 /// <see cref="ResponseCode"/>.</summary>
 public sealed record SipralVerificationEventInfo(
     SipralVerificationStage Stage,
@@ -161,12 +146,10 @@ public sealed record SipralTransferEventInfo(
     bool Attended,
     string? Target);
 
-/// <summary>What a <see cref="SipralEventKind.Referral"/> event carries
-/// — the fields of <c>sipral_referral_event_t</c>: a REFER outside any
-/// dialog, with <see cref="StatusCode"/> zero, or the word that one lapsed,
-/// with the status the stack answered it with and nothing else.
-/// <see cref="ReferredBy"/> is what the sender wrote, never proof of who it
-/// is.</summary>
+/// <summary>What <see cref="SipralEventKind.Referral"/> carries: a new
+/// out-of-dialog REFER (<see cref="StatusCode"/> zero), or a lapsed one with
+/// the status it was answered with. <see cref="ReferredBy"/> is what the
+/// sender wrote, not proof.</summary>
 public sealed record SipralReferralEventInfo(
     uint StatusCode,
     bool Attended,
@@ -175,10 +158,7 @@ public sealed record SipralReferralEventInfo(
 
 /// <summary>What <see cref="SipralEventKind.SubscriptionChanged"/> and
 /// <see cref="SipralEventKind.Notified"/> carry — the fields of
-/// <c>sipral_subscription_event_t</c>: which subscription, where it is now
-/// and why it ended, the SIP status behind it, whether the NOTIFY's body was
-/// a dialog-info document, its lifetime and when the stack refreshes or
-/// retries it, and the subscription a fork of it came from.</summary>
+/// <c>sipral_subscription_event_t</c>.</summary>
 public sealed record SipralSubscriptionEventInfo(
     ulong Subscription,
     SipralSubscriptionState State,
@@ -190,10 +170,8 @@ public sealed record SipralSubscriptionEventInfo(
     ulong RetryInMs,
     ulong ForkedFrom);
 
-/// <summary>What <see cref="SipralEventKind.Recovery"/> carries — the fields
-/// of <c>sipral_recovery_event_t</c>: how the recovery settled, the rung it
-/// reached, why it gave up, and how many registrations it could not
-/// prove.</summary>
+/// <summary>What <see cref="SipralEventKind.Recovery"/> carries.
+/// <see cref="Unverified"/> counts registrations it could not prove.</summary>
 public sealed record SipralRecoveryEventInfo(
     SipralRecoveryOutcome State,
     SipralRecoveryRung Rung,
@@ -210,9 +188,7 @@ public sealed record SipralAnnounceEventInfo(
 /// <summary>What <see cref="SipralEventKind.MessageReceived"/>,
 /// <see cref="SipralEventKind.MessageSent"/> and
 /// <see cref="SipralEventKind.MessagesWaiting"/> carry — the fields of
-/// <c>sipral_message_event_t</c>: a MESSAGE's handle, body and type, the
-/// status its sender was answered with, and a message summary's
-/// counts.</summary>
+/// <c>sipral_message_event_t</c>.</summary>
 public sealed record SipralMessageEventInfo(
     ulong Message,
     ulong Subscription,
@@ -228,10 +204,8 @@ public sealed record SipralMessageEventInfo(
 
 /// <summary>What <see cref="SipralEventKind.LookupWanted"/>,
 /// <see cref="SipralEventKind.Located"/> and
-/// <see cref="SipralEventKind.LocateFailed"/> carry: the DNS query an
-/// account's server is located with, every address it was located at
-/// (<c>host:port</c> separated by commas, the one in use first), or why it
-/// was not and when it is asked again.</summary>
+/// <see cref="SipralEventKind.LocateFailed"/> carry. <see cref="Targets"/>
+/// is comma-separated <c>host:port</c>, the one in use first.</summary>
 public sealed record SipralLocateEventInfo(
     SipralDnsRecordType Record,
     SipralLocateFailure Failure,
@@ -267,10 +241,8 @@ public sealed record SipralNatRelayEventInfo(
     string? Mapped,
     string? Reason);
 
-/// <summary>One path a call's ICE agent tried — a candidate pair it
-/// checked, or a relay it held — and what became of it: a
-/// <c>sipral_path_candidate_t</c> with its two addresses read out
-/// (<see cref="CallMedia.PathCandidates"/>).</summary>
+/// <summary>One path ICE tried (a checked pair or a held relay) and its
+/// outcome (<see cref="CallMedia.PathCandidates"/>).</summary>
 public sealed record SipralPath(
     SipralPathKind Kind,
     SipralPathOutcome Outcome,
@@ -280,35 +252,30 @@ public sealed record SipralPath(
     ulong Priority,
     string Local,
     string Remote);
-/// <summary>What a <see cref="SipralEventKind.TurnStream"/> event carries —
-/// the fields of <c>sipral_turn_stream_event_t</c>: open a media socket's
-/// connection to a TURN server reached over TCP or TLS, or close it, which
-/// <see cref="SipralStack"/> does itself.</summary>
+/// <summary>What <see cref="SipralEventKind.TurnStream"/> carries: open or
+/// close a TURN TCP/TLS connection, which <see cref="SipralStack"/> does
+/// itself.</summary>
 public sealed record SipralTurnStreamEventInfo(
     SipralTurnStream State,
     SipralTransport Protocol,
     string? Local,
     string? Server);
 
-/// <summary>What a <see cref="SipralEventKind.StunServer"/> event carries —
-/// the fields of <c>sipral_stun_server_event_t</c>: the STUN server in use
-/// is <see cref="Server"/> now and was <see cref="Previous"/>, or every
-/// server in the list has failed and <see cref="Server"/> was the last
-/// one.</summary>
+/// <summary>What <see cref="SipralEventKind.StunServer"/> carries: the
+/// server in use moved from <see cref="Previous"/> to <see cref="Server"/>,
+/// or all failed and <see cref="Server"/> was the last.</summary>
 public sealed record SipralStunServerEventInfo(
     SipralStunServerState State,
     string? Server,
     string? Previous);
 
-/// <summary>What a <see cref="SipralEventKind.ProgressDetected"/> event
-/// carries — the fields of <c>sipral_progress_event_t</c>.
-/// <see cref="What"/> says which of the others mean anything: a tone of the
-/// network (<see cref="Tone"/>, <see cref="AtMs"/> from the first frame
-/// listened to), the special information tone (<see cref="SitHz"/> and
-/// <see cref="SitMs"/> measured), who answered (<see cref="Verdict"/>,
-/// <see cref="Reason"/>, <see cref="AtMs"/> after answer, and what it was
-/// decided from), or the machine's beep (<see cref="FrequencyHz"/>,
-/// <see cref="AtMs"/> when it ended after answer, <see cref="LengthMs"/>).
+/// <summary>What <see cref="SipralEventKind.ProgressDetected"/> carries.
+/// <see cref="What"/> says which fields apply: a network tone
+/// (<see cref="Tone"/>), a SIT (<see cref="SitHz"/>, <see cref="SitMs"/>),
+/// an answering verdict (<see cref="Verdict"/>, <see cref="Reason"/>), or a
+/// beep (<see cref="FrequencyHz"/>, <see cref="LengthMs"/>).
+/// <see cref="AtMs"/> counts from the first frame for tones, from answer
+/// otherwise.
 /// </summary>
 public sealed record SipralProgressEventInfo(
     SipralProgressKind What,
@@ -324,9 +291,7 @@ public sealed record SipralProgressEventInfo(
     IReadOnlyList<uint> SitHz,
     IReadOnlyList<uint> SitMs);
 
-/// <summary>How <see cref="Call.DetectProgress"/> listens: the network's
-/// tones, whether to decide who answered and whether to listen for the
-/// machine's beep, and every limit of <c>sipral_progress_config_t</c>, each
+/// <summary>Options for <see cref="Call.DetectProgress"/>. Every limit is
 /// zero for the library's default.</summary>
 public sealed record SipralProgressOptions
 {
@@ -362,14 +327,12 @@ public sealed record SipralProgressOptions
     public uint ToneCycles { get; init; }
 }
 
-/// <summary>A snapshot of <c>sipral_stream_stats_t</c>, copied field by
-/// field — never the library's own pointer, which is valid only for the
-/// callback that carried it. <see cref="FramesUnderrun"/> is
-/// <c>frames_underrun</c>: frames the earpiece played as nothing because
-/// the jitter buffer had run dry while the far end was still sending, which
-/// <see cref="LossRate"/>, <see cref="Score"/> and <see cref="Suffering"/>
-/// take in and no RTCP-XR figure does. <see cref="Feedback"/> is what RTP/AVPF
-/// did on the stream, <see langword="null"/> while it does not run it.</summary>
+/// <summary>A copy of <c>sipral_stream_stats_t</c>.
+/// <see cref="FramesUnderrun"/> counts frames played as silence because the
+/// jitter buffer ran dry while the far end was sending; it feeds
+/// <see cref="LossRate"/>, <see cref="Score"/> and <see cref="Suffering"/>,
+/// unlike any RTCP-XR figure. <see cref="Feedback"/> is
+/// <see langword="null"/> without RTP/AVPF.</summary>
 public sealed record SipralStreamStatistics(
     SipralCodec Codec,
     ulong? RoundTripUs,
@@ -391,12 +354,9 @@ public sealed record SipralStreamStatistics(
     ulong FramesUnderrun,
     SipralFeedbackStatistics? Feedback = null);
 
-/// <summary>What RTCP feedback (RFC 4585) did on one stream: the
-/// <c>trr-int</c> both ends agreed (zero for none), the Generic NACKs this
-/// end sent and the packets they asked for again, the ones the far end sent
-/// and the packets they asked this end for, the early RTCP packets this end
-/// sent, its reduced-size ones (RFC 5506), and the feedback it held back
-/// because the stream's RTCP bandwidth had none to spare.</summary>
+/// <summary>RTCP feedback counters for one stream (RFC 4585, RFC 5506).
+/// <see cref="FeedbackSuppressed"/> counts feedback held back for lack of
+/// RTCP bandwidth.</summary>
 public sealed record SipralFeedbackStatistics(
     uint TrrIntervalMs,
     ulong NacksSent,
@@ -408,12 +368,9 @@ public sealed record SipralFeedbackStatistics(
     ulong FeedbackSuppressed);
 
 /// <summary>What a <see cref="SipralEventKind.ConferenceChanged"/> event
-/// carries: which subscription, whether a document was merged into its
-/// picture (<see cref="SipralConferenceUpdate.Applied"/>) or the focus
-/// deleted the conference (<see cref="SipralConferenceUpdate.Ended"/>, after
-/// which the subscription is being given up), the version the picture is at
-/// and how many users it holds. <see cref="SipralSubscription.Conference"/>
-/// reads the picture itself.</summary>
+/// carries. After <see cref="SipralConferenceUpdate.Ended"/> the
+/// subscription is given up. <see cref="SipralSubscription.Conference"/>
+/// reads the state.</summary>
 public sealed record SipralConferenceEventInfo(
     ulong Subscription,
     SipralConferenceUpdate Update,
@@ -421,11 +378,8 @@ public sealed record SipralConferenceEventInfo(
     uint Users);
 
 /// <summary>What a <see cref="SipralEventKind.LocalConferenceChanged"/>
-/// event carries: which <see cref="SipralLocalConference"/>, what changed —
-/// a member joined or left and why, who is talking, a recording that stopped
-/// by itself — and how it stands now. <see cref="Member"/> and
-/// <see cref="Loudest"/> are call handles, or the conference's own handle
-/// for this end.</summary>
+/// event carries. <see cref="Member"/> and <see cref="Loudest"/> are call
+/// handles, or the conference's own handle for this end.</summary>
 public sealed record SipralLocalConferenceEventInfo(
     ulong Conference,
     SipralLocalConferenceChange Change,
@@ -435,21 +389,16 @@ public sealed record SipralLocalConferenceEventInfo(
     uint Talkers,
     ulong Loudest);
 
-/// <summary>What a <see cref="SipralEventKind.TextReceived"/> event carries:
-/// what the far end typed on the call's real-time text stream (RFC 4103), in
-/// order — an erasure of its last character as BACKSPACE (U+0008), a new line
-/// as LINE SEPARATOR (U+2028), a REPLACEMENT CHARACTER (U+FFFD) where a block
-/// of text was lost for good — and how many blocks were lost so.</summary>
+/// <summary>Text typed by the far end (RFC 4103): erasure as BACKSPACE
+/// (U+0008), new line as U+2028, lost blocks as U+FFFD, counted in
+/// <see cref="Missing"/>.</summary>
 public sealed record SipralTextEventInfo(string Text, uint Missing);
 
 /// <summary>What a <see cref="SipralEventKind.PresenceChanged"/> event
-/// carries. For <see cref="SipralPresenceKind.Watched"/>: the
-/// <see cref="Subscription"/> that was told, and what the PIDF document said —
-/// open or closed, the first RPID activity, the presentity and the first
-/// note. For <see cref="SipralPresenceKind.Publication"/>, about the event's
-/// <see cref="SipralEventArgs.Account"/>: what became of its published
-/// presence, why it failed, the SIP status the compositor answered with, the
-/// lifetime granted and when the stack refreshes it.</summary>
+/// carries. <see cref="SipralPresenceKind.Watched"/>: the PIDF document's
+/// basic status, first activity, entity and note.
+/// <see cref="SipralPresenceKind.Publication"/>: the state of the account's
+/// own published presence.</summary>
 public sealed record SipralPresenceEventInfo(
     SipralPresenceKind Kind,
     ulong Subscription,
@@ -464,28 +413,17 @@ public sealed record SipralPresenceEventInfo(
     ulong RefreshInMs);
 
 /// <summary>What <see cref="SipralEventKind.ChallengeDeclined"/> carries: a
-/// challenge an account's password was not given to, why, where the
-/// challenged request went (<c>host:port</c>), and every realm it was
-/// challenged for.</summary>
+/// challenge the password was withheld from, why, the server
+/// (<c>host:port</c>) and its realms.</summary>
 public sealed record SipralChallengeEventInfo(
     SipralChallengeRefusal Refusal,
     string? Server,
     IReadOnlyList<string> Realms);
 
-/// <summary>What <see cref="SipralEventKind.TokenRequired"/> carries: an
-/// account's server asking for an OAuth 2.0 access token (RFC 8898). Check
-/// <c>AuthzServer</c> against the authorization servers the application
-/// trusts before going near it, fetch a token for <c>Scope</c>, and hand it
-/// to <see cref="Account.SetAccessToken"/>. <c>Error</c> is
-/// <see cref="SipralTokenError.InvalidToken"/> for a token expired or
-/// revoked; <c>Proxy</c> is whether a proxy asked (407); <c>Server</c> is
-/// where the challenged request went (<c>host:port</c>).</summary>
-/// <summary>What <see cref="SipralEventKind.NetworkTest"/> carries: every
-/// part of one test <see cref="SipralStack.NetworkTest"/> started, and the
-/// verdict, the worst of the parts tested. <c>RoundTripMs</c> is
-/// <see langword="null"/> when RTCP brought none back; <c>Local</c> is the
-/// socket the STUN answer was about and <c>Mapped</c> where the server saw
-/// it.</summary>
+/// <summary>What <see cref="SipralEventKind.NetworkTest"/> carries: each
+/// part's result and the verdict, the worst of them. <c>RoundTripMs</c> is
+/// <see langword="null"/> without RTCP; <c>Mapped</c> is where STUN saw
+/// <c>Local</c>.</summary>
 public sealed record SipralNetworkTestEventInfo(
     uint Test,
     SipralNetworkVerdict Verdict,
@@ -505,6 +443,13 @@ public sealed record SipralNetworkTestEventInfo(
     string? Local,
     string? Mapped);
 
+/// <summary>What <see cref="SipralEventKind.TokenRequired"/> carries: a
+/// request for an OAuth 2.0 access token (RFC 8898). Check
+/// <c>AuthzServer</c> against the servers the application trusts before
+/// contacting it, fetch a token for <c>Scope</c>, and pass it to
+/// <see cref="Account.SetAccessToken"/>. <c>Error</c> is
+/// <see cref="SipralTokenError.InvalidToken"/> for an expired or revoked
+/// token; <c>Proxy</c> means a 407; <c>Server</c> is <c>host:port</c>.</summary>
 public sealed record SipralTokenEventInfo(
     SipralTokenError Error,
     string? ErrorCode,

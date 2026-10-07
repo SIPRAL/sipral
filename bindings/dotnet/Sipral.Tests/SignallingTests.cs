@@ -19,17 +19,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// SIP over TCP and TLS through <see cref="SipralStack"/>'s
-/// <c>signalling</c> — the .NET counterpart of
-/// <c>bindings/python/tests/test_signalling.py</c>. The registrar is this
-/// test's own, on loopback, and its certificates are made here, one of them
-/// expired before the run began: a stack registers over the one connection
-/// it opened; a certificate refused for each reason
-/// <see cref="SipralTlsFailure"/> names arrives as
-/// <see cref="SipralEventKind.TransportFailed"/> carrying that reason; a
-/// registrar that closes the connection is connected to again and the
-/// account registers again on the new one; and the INVITE rate floor's
-/// voice-agent preset lets through a burst the default answers 480.
+/// SIP over TCP and TLS against a loopback registrar with certificates made
+/// here: registration, each <see cref="SipralTlsFailure"/> reason,
+/// reconnection, and the INVITE rate presets.
 /// </summary>
 public sealed class SignallingTests
 {
@@ -56,9 +48,9 @@ public sealed class SignallingTests
 
     internal static X509Certificate2 Good() => Certificate(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
 
-    /// <summary>A registrar on a TCP port of this machine's loopback, over
-    /// TLS when given a certificate, answering every REGISTER 200, or one
-    /// that answers a TLS client in plain text.</summary>
+    /// <summary>A loopback registrar answering 200 to every REGISTER, over
+    /// TLS when given a certificate, or replying in plain text to a TLS
+    /// client.</summary>
     internal sealed class Registrar : IDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
@@ -95,8 +87,7 @@ public sealed class SignallingTests
             }
         }
 
-        /// <summary>Closes every connection from this end, the way a
-        /// registrar that restarted does.</summary>
+        /// <summary>Drops every connection, as a restart would.</summary>
         public void Drop()
         {
             List<TcpClient> open;
@@ -256,10 +247,8 @@ public sealed class SignallingTests
         Assert.Contains(stack.BindAddress, Header("Contact", register));
     }
 
-    /// <summary>A certificate a private authority signed, trusted with that
-    /// authority as the only one: no revocation list is published for it,
-    /// and none is asked for, as <see cref="SslStream"/> asks for none by
-    /// default.</summary>
+    /// <summary>A private CA as the only authority works without a
+    /// revocation list.</summary>
     [Fact]
     public async Task ACertificateAPinnedAuthoritySignedIsTrustedWithNoRevocationListToAsk()
     {
@@ -268,8 +257,7 @@ public sealed class SignallingTests
         authorityRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         authorityRequest.CertificateExtensions.Add(
             new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
-        // one instant for both: a leaf may not outlive its issuer, and a
-        // second clock read can land past the authority's own end
+        // one instant: a leaf may not outlive its issuer
         var now = DateTimeOffset.UtcNow;
         using var authority = authorityRequest.CreateSelfSigned(now.AddMinutes(-5), now.AddDays(1));
         using var leafKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -390,9 +378,9 @@ public sealed class SignallingTests
         Assert.Equal(SipralTlsFailure.NameMismatch, (await Refused(stack)).Tls);
     }
 
-    /// <summary>With a private authority beside the platform's, a certificate
-    /// it signed registers, and one it signed for another name is a name
-    /// mismatch: the platform's own chain error does not hide the name.</summary>
+    /// <summary>With a private CA beside the platform's, a wrong name is
+    /// still reported as a name mismatch, not hidden by the chain
+    /// error.</summary>
     [Fact]
     public async Task APrivateAuthorityBesideThePlatformsTrustsItsOwnAndStillChecksTheName()
     {
@@ -470,10 +458,8 @@ public sealed class SignallingTests
         Assert.Contains(";transport=tcp", Header("Contact", again!));
     }
 
-    /// <summary>The stack retires the main connection on its own when a
-    /// flow that answered keep-alives stops answering them (RFC 5626
-    /// §4.4.1), with the socket still open here; said here the way it says
-    /// it.</summary>
+    /// <summary>The stack retires the main connection when keep-alives stop
+    /// being answered (RFC 5626 §4.4.1).</summary>
     [Fact]
     public async Task AConnectionTheStackLetGoOfIsMadeAgain()
     {
@@ -501,9 +487,8 @@ public sealed class SignallingTests
         Assert.Contains(stack.BindAddress, Header("Contact", again!));
     }
 
-    /// <summary>Twenty INVITEs from one address at once: how many were
-    /// answered 480, each counted once however often its refusal is sent
-    /// again for want of an ACK.</summary>
+    /// <summary>Twenty simultaneous INVITEs: how many got 480, counting
+    /// retransmissions once.</summary>
     private static async Task<int> Rush(SipralInviteLimit? limit)
     {
         using var stack = new SipralStack(audio: SipralAudio.Application, inviteLimit: limit);

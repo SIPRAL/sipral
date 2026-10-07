@@ -6,12 +6,9 @@ using Sipral.Interop;
 namespace Sipral;
 
 /// <summary>
-/// The generated <see cref="Sipral"/> checks the ABI in its static
-/// constructor, which is a call into the native library; a caller whose
-/// first use of the library is that class, rather than a
-/// <see cref="SipralStack"/>, reached it before anything had told the
-/// runtime where the library is, and got a DllNotFoundException on a
-/// machine where it plainly exists.
+/// The generated <see cref="Sipral"/>'s static constructor calls into the
+/// library, so the resolver must be registered first, even when no
+/// <see cref="SipralStack"/> was made.
 /// </summary>
 public static partial class Sipral
 {

@@ -15,14 +15,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// A REFER outside any dialog, and ICE-lite, through this layer — the .NET
-/// counterpart of <c>bindings/python/tests/test_referral.py</c>.
-///
-/// The referrer is a plain UDP socket writing RFC 3515 §4.1's own REFER by
-/// hand: a switchboard asking Bob's line to ring Carol, a second stack that
-/// answers. The lite case is two stacks: Alice requires ICE, Bob is
-/// <see cref="SipralIce.Lite"/>, both take the one pair and audio crosses it
-/// both ways.
+/// Out-of-dialog REFER and ICE-lite. A hand-written REFER (RFC 3515 §4.1)
+/// asks Bob's line to ring Carol. For lite, Alice requires ICE and Bob is
+/// <see cref="SipralIce.Lite"/>; audio crosses the one pair both ways.
 /// </summary>
 public sealed class ReferralAndLiteTests : IDisposable
 {
@@ -185,9 +180,8 @@ public sealed class ReferralAndLiteTests : IDisposable
         }
     }
 
-    /// <summary>On this host's own routable address, never 127.0.0.1: RFC
-    /// 8445 §5.1.1.1 keeps a loopback address out of every candidate list,
-    /// and a lite end has one candidate to offer and nothing else.</summary>
+    /// <summary>On a routable address: loopback is never a candidate (RFC
+    /// 8445 §5.1.1.1).</summary>
     [Fact]
     public async Task ALiteStackAnsweringAFullOneCarriesAudioBothWaysOnThePairItNominated()
     {

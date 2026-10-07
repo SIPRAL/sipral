@@ -19,8 +19,8 @@ using static Sipral.Interop.NativeText;
 namespace Sipral;
 
 /// <summary>What <see cref="SipralEventKind.TransportWanted"/> carries: a
-/// request too large for a datagram (RFC 3261 §18.1.1), where it was going,
-/// and the two sizes that say why.</summary>
+/// request too large for a datagram (RFC 3261 §18.1.1), its destination and
+/// the two sizes.</summary>
 public sealed record SipralTransportWantedEventInfo(
     SipralTransport Protocol,
     string? Destination,
@@ -29,44 +29,31 @@ public sealed record SipralTransportWantedEventInfo(
 
 public sealed partial class SipralStack
 {
-    /// <summary>The first number a connection this class opens for
-    /// <see cref="SipralEventKind.TransportWanted"/> is bound at, one more for
-    /// each destination after it: well clear of <c>Sipral.TransportMain</c>
-    /// and of the small numbers an application driving the native layer itself
-    /// would pick.</summary>
+    // Transport ids for our connections start here, clear of TransportMain
+    // and of small ids an application might pick itself.
     internal const uint FirstStream = 1024;
 
     private bool _streamFallback = true;
 
-    /// <summary>Where such a connection goes, when not to the address asked
-    /// for (<c>streamServer</c>).</summary>
     private string? _streamServer;
 
-    /// <summary>Where <see cref="SipralEventKind.TransportWanted"/> asked for
-    /// a stream, during the poll that raised it, acted on right after that
-    /// poll.</summary>
+    // Both queues are filled during the poll and acted on right after it.
     private readonly ConcurrentQueue<SipralTransportWantedEventInfo> _streamsAsked = new();
 
-    /// <summary>The <c>tlsServerName</c> the application gave, which a TLS
-    /// connection of an account's own is opened under; <see langword="null"/>
-    /// for the address's host.</summary>
+    // null: the destination's host.
     private string? _givenTlsServerName;
 
-    /// <summary>The transport numbers <see cref="SipralEventKind.TransportFailed"/>
-    /// named during that same poll, acted on at the same moment.</summary>
     private readonly ConcurrentQueue<uint> _streamsLetGo = new();
 
-    /// <summary>Every connection opened for one, by the transport number it
-    /// is bound at, and the destinations one is being opened to, both under
-    /// <see cref="_streamLock"/>.</summary>
+    // Guards the connections by transport id and the destinations being
+    // connected to.
     private readonly object _streamLock = new();
     private readonly Dictionary<uint, SipStream> _sipStreams = new();
     private readonly HashSet<string> _streamsOpening = new();
     private uint _nextStream = FirstStream;
 
-    /// <summary>One TCP connection opened because a request was too large
-    /// for a datagram, or a TCP or TLS one an account on a connection of its
-    /// own asked for.</summary>
+    // A TCP connection for an oversized request, or an account's own
+    // TCP/TLS connection.
     private sealed class SipStream
     {
         public required uint Transport { get; init; }
@@ -76,9 +63,7 @@ public sealed partial class SipralStack
         public object WriteLock { get; } = new();
     }
 
-    /// <summary>Remembers a <see cref="SipralEventKind.TransportWanted"/> for
-    /// after the poll that raised it; nothing may call back into the stack
-    /// from inside its own callback here.</summary>
+    // Deferred: nothing may call into the stack from its own callback.
     private void NoteStreamWanted(SipralEventArgs args)
     {
         if (!Streamed && args.TransportWanted is { Destination: not null } wanted)
@@ -96,20 +81,13 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Remembers a transport the stack let go of, for after the poll
-    /// that said so: a connection this class opened that stopped answering
-    /// keep-alives (RFC 5626 §4.4.1) is retired by the stack while its socket
-    /// is still open here, and a connection kept open that the stack will
-    /// never write to again would stand in for the new one it asks
-    /// for.</summary>
+    // The stack retires a connection that missed keep-alives (RFC 5626
+    // §4.4.1) while our socket is still open; left open, it would stand in
+    // for the new one the stack asks for.
     internal void NoteStreamLetGo(uint transport) => _streamsLetGo.Enqueue(transport);
 
-    /// <summary>Answers what <see cref="SipralEventKind.TransportWanted"/>
-    /// asked for in the poll that just ran: a connection to each destination
-    /// not already connected or being connected to, opened on a thread of its
-    /// own, or — with <c>streamFallback</c> off — the word that none is
-    /// coming. First the connections the stack let go of in that
-    /// poll.</summary>
+    // One connecting thread per new destination, or with streamFallback off
+    // a report that none is coming. Retired connections are closed first.
     private void ActOnStreamsWanted()
     {
         while (_streamsLetGo.TryDequeue(out var letGo))
@@ -124,8 +102,8 @@ public sealed partial class SipralStack
             {
                 continue;
             }
-            // an account on a connection of its own asks with nothing
-            // outgrown; that one is opened whatever streamFallback says
+            // an account's own connection (no sizes) opens regardless of
+            // streamFallback
             var opens = _streamFallback || (wanted.RequestBytes == 0 && wanted.LimitBytes == 0);
             var over = wanted.Protocol == SipralTransport.Tls ? SipralTransport.Tls : SipralTransport.Tcp;
             uint transport;
@@ -156,9 +134,7 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>What a TLS connection to <paramref name="destination"/>
-    /// trusts: the pin of an account on a connection of its own to that
-    /// server when it has one, the stack's <c>tlsTrust</c> otherwise.</summary>
+    // The pin of an account on that server if it has one, else tlsTrust.
     private SipralTlsTrust StreamTrust(string destination)
     {
         Account? pinned;
@@ -170,13 +146,9 @@ public sealed partial class SipralStack
         return pinned?.TlsPin is { } pin ? SipralTlsTrust.Pinned(pin) : _tlsTrust;
     }
 
-    /// <summary>Connects over TCP — or TLS, for an account whose connection
-    /// speaks it — to <paramref name="destination"/>, or to
-    /// <c>streamServer</c> when one was given for TCP, binds the connection
-    /// at <paramref name="transport"/> as the stream to
-    /// <paramref name="destination"/> and reads it until it closes; a
-    /// connection that cannot be made is told to the stack on that same
-    /// number, which ends what was waiting for it.</summary>
+    // Connects (to streamServer instead, for TCP, when given), binds it as
+    // the stream to destination and reads it. A failure is reported on the
+    // same transport id, which ends whatever was waiting.
     private void OpenSipStream(uint transport, string destination, SipralTransport over = SipralTransport.Tcp)
     {
         SipStream stream;
@@ -273,9 +245,6 @@ public sealed partial class SipralStack
         ReadSipStream(stream);
     }
 
-    /// <summary>What the connection carried, to
-    /// <c>sipral_stack_receive_stream</c>, every byte and in order; the far
-    /// end closing it is <c>sipral_stack_stream_closed</c>.</summary>
     private void ReadSipStream(SipStream stream)
     {
         var buffer = new byte[TransmitBytes];
@@ -316,9 +285,7 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Writes one message on the connection bound at
-    /// <paramref name="transport"/>, whole; a write that fails loses the
-    /// connection.</summary>
+    // A failed write loses the connection.
     private void WriteSipStream(uint transport, byte[] payload)
     {
         SipStream? stream;
@@ -344,9 +311,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Closes the connection bound at <paramref name="transport"/>
-    /// and, when <paramref name="tell"/>, says so with
-    /// <c>sipral_stack_stream_closed</c>.</summary>
     private void LoseSipStream(uint transport, bool tell)
     {
         SipStream? stream;
@@ -377,11 +341,8 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary><c>sipral_stack_transport_failed_with</c> for a connection that
-    /// was not made; never throwing on the way out. <paramref name="what"/>
-    /// finishes a sentence that begins with the protocol, "TCP" or "TLS" —
-    /// where the connection was going and what became of it — carried to the
-    /// event's detail.</summary>
+    // what: the rest of a sentence starting with "TCP" or "TLS", for the
+    // event's detail.
     private void SayNoStream(uint transport, SipralTransportError error, string what,
         SipralTransport over = SipralTransport.Tcp, SipralTlsFailure tls = SipralTlsFailure.None)
     {
@@ -408,8 +369,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>What became of a connection, in the words a log line
-    /// reads.</summary>
     private static string Verdict(SipralTransportError error) => error switch
     {
         SipralTransportError.ConnectionRefused => "refused",
@@ -420,8 +379,6 @@ public sealed partial class SipralStack
         _ => "failed",
     };
 
-    /// <summary>Closes every connection opened for a request too large for a
-    /// datagram, for <see cref="Dispose"/>.</summary>
     private void CloseSipStreams()
     {
         List<uint> open;

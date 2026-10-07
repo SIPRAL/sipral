@@ -7,19 +7,15 @@ using System.Text;
 namespace Sipral;
 
 /// <summary>
-/// One INVITE as a <see cref="SipralStack.Screen"/> policy sees it, before it
-/// has had any effect: where it came from and its bytes, copied out of
-/// <c>sipral_screen_request_t</c> so they outlive the callback.
-/// <see cref="Source"/> is the far end of the bytes as <c>host:port</c>, or
-/// null for a stream bound without naming one.
+/// One INVITE as a <see cref="SipralStack.Screen"/> policy sees it, copied
+/// so it outlives the callback. <see cref="Source"/> is <c>host:port</c>, or
+/// null for a stream bound without one.
 /// </summary>
 public sealed record SipralInvite(string? Source, byte[] Message)
 {
-    /// <summary>Every line of header field <paramref name="name"/>, in the
-    /// order they arrived, read with <c>sipral_message_header</c>: a compact
-    /// form and its long form are one field, and case does not matter. Safe
-    /// inside a policy, since it reads these bytes and not the
-    /// stack.</summary>
+    /// <summary>Every value of header <paramref name="name"/>, in order.
+    /// Compact and long forms match, case-insensitively. Safe inside a
+    /// policy: it does not touch the stack.</summary>
     public IReadOnlyList<string> Headers(string name)
     {
         var count = global::Sipral.Sipral.MessageHeaderCount(Message, name);

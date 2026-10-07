@@ -16,13 +16,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// The protocols a call and an account carry beyond audio, through this
-/// layer — the .NET counterpart of
-/// <c>bindings/python/tests/test_protocols.py</c>: real-time text and RTCP
-/// feedback agreed between two stacks on 127.0.0.1, a focus named on an
-/// answer, L16 as the codec, and — against this test's own UDP or TCP peer
-/// writing RFC text by hand — a conference picture, presence published and
-/// watched, and a call recorded to a recording server.
+/// Protocols beyond audio: real-time text, RTCP feedback, focus and L16
+/// between two stacks; and, against a hand-written peer, conference state,
+/// presence and SIPREC recording.
 /// </summary>
 public sealed class ProtocolTests : IDisposable
 {
@@ -60,8 +56,6 @@ public sealed class ProtocolTests : IDisposable
         Assert.NotNull(await bobCall.WaitForMediaAsync(cts.Token));
         return (aliceCall, bobCall);
     }
-
-    // -- between two stacks --------------------------------------------------
 
     [Fact]
     public async Task RealTimeTextCrossesBothWays()
@@ -144,8 +138,6 @@ public sealed class ProtocolTests : IDisposable
         Assert.Equal(16_000u, info.ClockRate);
         Assert.Equal(SipralCodec.L16Wideband, bob.Media!.Info().Codec);
     }
-
-    // -- against a notifier and a compositor of this test's own ----------------
 
     private const string Room =
         "<?xml version=\"1.0\"?>\r\n" +
@@ -294,8 +286,6 @@ public sealed class ProtocolTests : IDisposable
         Assert.Equal("0", Peer.Header("Expires", ending));
     }
 
-    // -- a recording server ------------------------------------------------
-
     [Fact]
     public async Task ACallIsRecordedToARecordingServer()
     {
@@ -364,9 +354,6 @@ public sealed class ProtocolTests : IDisposable
         Assert.Equal(SipralStatus.WrongState, twice.Status);
     }
 
-    /// <summary>The recording session's offer for a call keyed with SDES
-    /// (RFC 4568), from an account that does or does not let its encrypted
-    /// calls be recorded in the clear.</summary>
     private async Task<string> RecordingOfferOfAnEncryptedCallAsync(bool recordingInClear)
     {
         var server = Own(new StreamPeer());
@@ -446,8 +433,6 @@ public sealed class ProtocolTests : IDisposable
         await FirstMatchingAsync(bob.Events, e => e.Kind == SipralEventKind.IncomingCall);
     }
 
-    // -- helpers -----------------------------------------------------------
-
     private static async Task<string> TypedAsync(IAsyncEnumerable<string> text, string expected)
     {
         using var cts = new CancellationTokenSource(Timeout);
@@ -488,9 +473,7 @@ public sealed class ProtocolTests : IDisposable
         throw new TimeoutException($"nothing matching arrived within {Timeout}");
     }
 
-    /// <summary>A UDP socket on loopback that reads SIP as text and writes
-    /// what a test hands it: a notifier, a compositor, or a far end's RTP
-    /// port.</summary>
+    /// <summary>A loopback UDP peer speaking SIP as text.</summary>
     private sealed class Peer : IDisposable
     {
         private readonly UdpClient _socket = new(new IPEndPoint(IPAddress.Loopback, 0));
@@ -557,9 +540,8 @@ public sealed class ProtocolTests : IDisposable
             return (await _socket.ReceiveAsync(cts.Token)).Buffer;
         }
 
-        /// <summary>The next request with <paramref name="method"/>, every
-        /// other datagram — the stack's answers to NOTIFYs among them —
-        /// passed over.</summary>
+        /// <summary>The next request with <paramref name="method"/>,
+        /// skipping everything else.</summary>
         public async Task<string> RequestAsync(string method)
         {
             while (true)
@@ -575,9 +557,8 @@ public sealed class ProtocolTests : IDisposable
         public void Dispose() => _socket.Dispose();
     }
 
-    /// <summary>A TCP listener on loopback that takes the one connection a
-    /// stack signalling over TCP opens, and reads and writes SIP on it,
-    /// framed by <c>Content-Length</c>.</summary>
+    /// <summary>A loopback TCP peer for one stack connection, framed by
+    /// <c>Content-Length</c>.</summary>
     private sealed class StreamPeer : IDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);

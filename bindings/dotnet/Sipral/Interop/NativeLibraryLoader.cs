@@ -11,40 +11,19 @@ using System.Threading;
 namespace Sipral.Interop;
 
 /// <summary>
-/// Points <c>NativeMethods.Library</c> ("sipral_ffi") at the actual shared
-/// library the Rust workspace builds, <c>libsipral_ffi.{dylib,so}</c> or
-/// <c>sipral_ffi.dll</c>, wherever it is.
-///
-/// The generated <c>SipralAbi.cs</c> names the library the way Cargo names
-/// the crate's own file, so a NuGet package that carries it under
-/// <c>runtimes/</c> loads with no help at all. What the runtime's own
-/// search does not know is a library that has not been packaged: one a
-/// test run or a lab container points at, or a checkout's own
-/// <c>target/</c>. A caller in that position would otherwise get a
-/// <see cref="DllNotFoundException"/> on a machine where the library
-/// plainly exists. <see cref="NativeLibrary.SetDllImportResolver"/>
-/// closes that gap the same way <c>bindings/python/sipral/_sipral_cffi.py</c>
-/// closes it for `cffi`: try <c>SIPRAL_LIBRARY</c> first, then a path next
-/// to this assembly, then a repository checkout's own <c>target/release</c>
-/// and <c>target/debug</c>, found by walking up from this assembly's
-/// directory rather than assuming a fixed depth, since a test runner's
-/// output directory and a published application's are not the same
-/// number of levels down.
+/// Finds the native library when it is not packaged under
+/// <c>runtimes/</c> (tests, lab containers, a checkout). A NuGet package
+/// loads without help; otherwise the runtime would throw
+/// <see cref="DllNotFoundException"/> although the library exists.
 /// </summary>
 internal static class NativeLibraryLoader
 {
     private static int _registered;
 
     /// <summary>
-    /// Registers the resolver once per process. Safe to call more than
-    /// once — every caller that is about to touch <c>NativeMethods</c>
-    /// calls this first. Not a <c>[ModuleInitializer]</c>: that attribute
-    /// runs for every consumer of this assembly whether or not it ever
-    /// touches <see cref="NativeMethods"/>, which is exactly the surprise
-    /// a library should not spring on an application that links it for
-    /// something else (.NET's own analyzer flags it, CA2255, for that
-    /// reason) — an explicit call at the one place that actually needs
-    /// the resolver registered is the narrower fix.
+    /// Registers the resolver once; safe to call repeatedly. Not a
+    /// <c>[ModuleInitializer]</c>, which would run for every consumer of the
+    /// assembly (CA2255).
     /// </summary>
     internal static void EnsureRegistered()
     {
@@ -78,7 +57,6 @@ internal static class NativeLibraryLoader
             "or set SIPRAL_LIBRARY to its path or its directory.");
     }
 
-    /// <summary>What the crate's <c>cdylib</c> is called on this platform.</summary>
     private static string PlatformLibraryFileName()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
@@ -101,14 +79,9 @@ internal static class NativeLibraryLoader
     }
 
     /// <summary>
-    /// Where the library might be, in the order it is looked for:
-    /// <c>SIPRAL_LIBRARY</c> (a file or a directory holding the file),
-    /// then beside this assembly, then a checkout's own
-    /// <c>target/release</c> and <c>target/debug</c>, found by walking
-    /// up from this assembly's directory looking for a sibling
-    /// <c>target</c> directory — the repository layout every build here
-    /// shares, whatever depth `dotnet build`/`dotnet test` happened to
-    /// put the assembly at.
+    /// In order: <c>SIPRAL_LIBRARY</c> (file or directory), beside this
+    /// assembly, then <c>target/release</c> and <c>target/debug</c> found by
+    /// walking up, since the output depth varies.
     /// </summary>
     private static IEnumerable<string> Candidates()
     {

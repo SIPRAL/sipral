@@ -14,13 +14,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// A server reached at one address whose answer names another in its
-/// <c>Contact</c> -- the lab's Asterisk, published on a mapped port and
-/// naming the port it listens on inside its container, or any registrar
-/// behind a NAT. The dialog's requests have to stay on the path the
-/// INVITE took: the ACK did all along, and the BYE has to follow it
-/// rather than go to an address nothing answers on. The .NET counterpart
-/// of <c>bindings/swift/Tests/SipralTests/DialogFlowTests.swift</c>.
+/// A server whose <c>Contact</c> names an address other than the one
+/// reached (a port-mapped Asterisk, a registrar behind NAT). The BYE must
+/// follow the INVITE's path, like the ACK, not the unreachable Contact.
 /// </summary>
 public sealed class DialogFlowTests : IDisposable
 {

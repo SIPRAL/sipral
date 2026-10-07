@@ -19,24 +19,17 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// <c>turnTransport</c> on <see cref="SipralStack"/>: the relay made over a
-/// TCP or TLS connection the stack opens itself, for a network that lets no
-/// UDP through to the TURN server (RFC 8656 §3.1) — the .NET counterpart of
-/// <c>bindings/python/tests/test_turn_stream.py</c>. The mapping of the
-/// media socket is still asked over UDP, of <see cref="NatTests.FakeStunServer"/>:
-/// it is the socket's own.
+/// TURN over TCP or TLS (RFC 8656 §3.1). The socket's own mapping is still
+/// asked over UDP, of <see cref="NatTests.FakeStunServer"/>.
 /// </summary>
 public sealed class TurnStreamTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     private const string ServerName = "turn.sipral.test";
 
-    /// <summary>A TURN server on a TCP port of this machine's loopback, over
-    /// TLS when given a certificate, and on nothing else: no datagram reaches
-    /// it. What arrives is framed as RFC 8656 §12.5 and RFC 8489 §6.2.2 say,
-    /// and every request is recorded with the connection it came on,
-    /// counting from one; an unauthenticated Allocate gets the 401, a signed
-    /// one a relay, and every other signed request its success.</summary>
+    /// <summary>A stream-only TURN server (TLS with a certificate), framed
+    /// per RFC 8656 §12.5 and RFC 8489 §6.2.2. Requests are recorded with
+    /// their connection number, from one.</summary>
     private sealed class FakeTurnOverStream : IDisposable
     {
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
@@ -229,9 +222,8 @@ public sealed class TurnStreamTests
         public void Dispose() => _listener.Stop();
     }
 
-    /// <summary>A key and a certificate for <see cref="ServerName"/>, made
-    /// here, with <c>extendedKeyUsage=serverAuth</c> as every platform's TLS
-    /// asks of a server's.</summary>
+    /// <summary>A self-signed server certificate, with the
+    /// <c>serverAuth</c> usage every platform requires.</summary>
     private static X509Certificate2 SelfSigned()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -273,10 +265,8 @@ public sealed class TurnStreamTests
         }
     }
 
-    /// <summary>Alice behind <paramref name="server"/>, reached as the
-    /// arguments say, calls Bob, who answers: what her relay event said,
-    /// with the call's media running. The call is closed and forgotten
-    /// afterwards with both stacks still running.</summary>
+    /// <summary>Alice calls Bob through the TURN server; returns her relay
+    /// event once media runs.</summary>
     private static async Task<SipralNatRelayEventInfo> CallThroughAsync(
         string host, NatTests.FakeStunServer stun, FakeTurnOverStream server, SipralTransport transport,
         X509Certificate2Collection? trusted, Func<SipralNatRelayEventInfo, Task> afterward)

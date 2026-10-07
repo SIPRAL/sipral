@@ -8,30 +8,19 @@ using System.Text;
 
 namespace Sipral;
 
-/// <summary>What <see cref="Account.CheckCertificate"/> found in the
-/// certificate the account pins: its dates, in seconds since 1970 (zero when
-/// its DER could not be read that far), and whether the clock is past or
-/// before them. Accepted either way; an expired one is worth a
-/// warning.</summary>
+/// <summary>The pinned certificate's dates (Unix seconds, zero when
+/// unreadable) and validity. It is accepted either way; warn on an expired
+/// one.</summary>
 public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter, bool Expired, bool NotYetValid);
 
-/// <summary>How an account names and keeps its server, beside the
-/// registrar's address: the ABI 0.34 members of
-/// <c>sipral_account_config_t</c>, and the address this layer chose for its
-/// <c>Contact</c>.</summary>
 internal sealed record AccountLocation(
     string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
     SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null);
 
 /// <summary>
-/// One <c>sipral_account_add</c> handle, and the entry points that take
-/// it.
-///
-/// Built through <see cref="SipralStack.AddAccount"/>, never directly: a
-/// handle only means something on the stack that minted it
-/// (<c>docs/08-ffi.md</c>, "A handle names something only on the stack
-/// that minted it"), so keeping the two together is what makes every
-/// method here safe to call with nothing further to pass.
+/// One <c>sipral_account_add</c> handle. Built through
+/// <see cref="SipralStack.AddAccount"/>, since a handle only means something
+/// on the stack that minted it.
 /// </summary>
 public sealed class Account
 {
@@ -41,30 +30,21 @@ public sealed class Account
     /// <summary>The address of record this account was added with.</summary>
     public string Aor { get; }
 
-    /// <summary>Where this account's requests go, <c>host:port</c>: the
-    /// registrar or the outbound proxy it was added with, or — for one added
-    /// with a <c>serverUri</c> — the address it was last located at, empty
-    /// until then.</summary>
+    /// <summary>Where requests go, <c>host:port</c>. With a <c>serverUri</c>,
+    /// the last located address, empty until then.</summary>
     public string RegistrarAddress { get; private set; }
 
     /// <summary>The server named by a URI RFC 3263 locates, or
     /// <see langword="null"/>.</summary>
     public string? ServerUri { get; }
 
-    /// <summary>The protocol of the connection of its own the account's
-    /// requests go over, <see cref="SipralTransport.Tcp"/> or
-    /// <see cref="SipralTransport.Tls"/>, or zero for the stack's own
-    /// transport (<see cref="SipralStack.AddAccount"/>'s
-    /// <c>streamProtocol</c>).</summary>
+    /// <summary>The account's own connection protocol (TCP or TLS), or zero
+    /// for the stack's transport.</summary>
     public SipralTransport StreamProtocol { get; }
 
-    /// <summary>The certificate pin it was added with, which a TLS connection
-    /// of its own is held to.</summary>
     internal string? TlsPin { get; }
 
-    /// <summary>What goes after the address in the <c>Contact</c> this layer
-    /// derives for it: the parameter naming its own connection's protocol
-    /// (RFC 3261 §19.1.1), or the stack's.</summary>
+    // The Contact's transport parameter (RFC 3261 §19.1.1).
     private static string ContactParametersOf(SipralStack stack, SipralTransport streamProtocol) => streamProtocol switch
     {
         SipralTransport.Tcp => ";transport=tcp",
@@ -80,10 +60,8 @@ public sealed class Account
     /// <see cref="SipralStack.MoveTo"/> then leaves to the application.</summary>
     public bool ContactGiven { get; }
 
-    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
-    /// <c>sipral.h</c> this class does not wrap, called through the
-    /// application's own P/Invoke declaration. Valid until
-    /// <see cref="Remove"/>.</summary>
+    /// <summary>The raw <c>sipral_handle_t</c>, for entry points this class
+    /// does not wrap. Valid until <see cref="Remove"/>.</summary>
     public ulong Handle => _handle.Value;
 
     private Account(
@@ -102,13 +80,8 @@ public sealed class Account
         Advertised = advertised;
     }
 
-    /// <summary>The account's server was located at
-    /// <paramref name="target"/>.</summary>
     internal void Located(string target) => RegistrarAddress = target;
 
-    /// <summary><c>sipral_account_rebind</c> toward <paramref name="remote"/>,
-    /// reached at <paramref name="advertised"/>, unless it is reached there
-    /// already.</summary>
     internal void Reach(string advertised, string remote)
     {
         if (advertised == (Advertised ?? _stack.BindAddress))
@@ -119,25 +92,19 @@ public sealed class Account
         Advertised = advertised;
     }
 
-    /// <summary><c>sipral_account_rebind</c> after a network change, reached
-    /// at <paramref name="advertised"/>, the route toward its server: always,
-    /// since the stack it is on has moved whether or not that route
-    /// did.</summary>
+    // Always rebinds: the stack moved even if the route did not.
     internal void Readvertise(string advertised)
     {
         Rebind(RegistrarAddress, DefaultContact(Aor, advertised, ContactParametersOf(_stack, StreamProtocol)));
         Advertised = advertised;
     }
 
-    /// <summary><c>sipral_account_check_certificate</c>: the verdict of this
-    /// account's <c>tlsPin</c> on <paramref name="certificate"/>, the DER bytes
-    /// of the leaf a TLS server presented, from inside the application's own
-    /// certificate check. The certificate's dates when it is the pinned one —
-    /// accept the handshake whoever signed it, an expired one included;
-    /// <see langword="null"/> when the account pins nothing and the
-    /// platform's own checks decide; <see cref="SipralException"/> with
-    /// <see cref="SipralStatus.CertificateRefused"/> when it pins
-    /// another.</summary>
+    /// <summary><c>sipral_account_check_certificate</c>: judge a server's leaf
+    /// certificate (DER) against <c>tlsPin</c>, from the application's own
+    /// TLS check. Returns its dates when it is the pinned one (accept it,
+    /// whoever signed it, even expired); <see langword="null"/> when nothing
+    /// is pinned and the platform decides; throws with
+    /// <see cref="SipralStatus.CertificateRefused"/> otherwise.</summary>
     public SipralPinnedCertificateInfo? CheckCertificate(byte[] certificate, ulong? unixSeconds = null)
     {
         var now = unixSeconds ?? (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -291,13 +258,10 @@ public sealed class Account
             location.Advertised, location.StreamProtocol, location.TlsPin);
     }
 
-    /// <summary><c>sipral_account_rebind</c>: points this account at
-    /// <paramref name="remote"/> (<c>host:port</c>; the address it was added
-    /// with when left out) and makes it reachable at
-    /// <paramref name="contact"/> (the AOR's user at the stack's current
-    /// address when left out). What a network change asks for; the next
-    /// REGISTER — sent at once when the stack is waiting for it — uses
-    /// both.</summary>
+    /// <summary><c>sipral_account_rebind</c> after a network change: point
+    /// the account at <paramref name="remote"/> (default: its original
+    /// address) and <paramref name="contact"/> (default: the AOR's user at
+    /// the stack's address). The next REGISTER uses both.</summary>
     public void Rebind(string? remote = null, string? contact = null)
     {
         var remoteBytes = Interop.NativeText.ToSBytes(remote ?? RegistrarAddress);
@@ -310,14 +274,9 @@ public sealed class Account
             "sipral_account_rebind");
     }
 
-    /// <summary>Where this account can actually be reached, for a caller
-    /// who gave no <c>Contact</c> of its own — the user part of the AOR,
-    /// kept, with the host replaced by the address this stack is
-    /// listening on. The AOR itself is never a usable default: it names
-    /// who this is, not a socket anything can write to. <paramref name="parameters"/>
-    /// follows the address: <c>;transport=tls</c> on a stack signalling over
-    /// TLS, since a server reaching this end names the transport it reaches
-    /// it over.</summary>
+    /// <summary>The default <c>Contact</c>: the AOR's user at this stack's
+    /// address. The AOR itself names who this is, not a reachable socket.
+    /// <paramref name="parameters"/> follows, e.g. <c>;transport=tls</c>.</summary>
     private static string DefaultContact(string aor, string bindAddress, string parameters)
     {
         var colon = aor.IndexOf(':');
@@ -331,16 +290,13 @@ public sealed class Account
         return at < 0 ? $"{scheme}:{bindAddress}{parameters}" : $"{scheme}:{rest[..at]}@{bindAddress}{parameters}";
     }
 
-    /// <summary>Whether it was asked to register and not to unregister
-    /// since: the accounts a stack signalling over TCP or TLS registers again
-    /// once its connection is made again.</summary>
+    /// <summary>Whether registration was asked for and not undone; such
+    /// accounts register again when a TCP/TLS stack reconnects.</summary>
     public bool WantsRegistration { get; private set; }
 
-    /// <summary><c>sipral_account_register</c>. A no-op account refuses
-    /// this. On a stack signalling over TCP or TLS whose connection is down
-    /// (<see cref="SipralStatus.TransportDown"/>, already raised as
-    /// <see cref="SipralEventKind.TransportFailed"/>) it is kept, and the
-    /// REGISTER goes the moment the connection is made again.</summary>
+    /// <summary><c>sipral_account_register</c>. Refused by an account with
+    /// no registrar. While a TCP/TLS connection is down, the request is kept
+    /// and sent on reconnect.</summary>
     public void Register()
     {
         WantsRegistration = true;
@@ -353,17 +309,13 @@ public sealed class Account
         }
     }
 
-    /// <summary><c>sipral_account_set_access_token</c>: the OAuth 2.0 access
-    /// token the account's server asked for (RFC 8898), in place of any it
-    /// had; <c>null</c> takes it away. The answer to
-    /// <see cref="SipralEventKind.TokenRequired"/>
-    /// (<see cref="SipralEventArgs.Token"/>), and the way a renewed token goes
-    /// in: from the next request on, the server's <c>Bearer</c> challenge is
-    /// answered with it. A registration that failed for want of one starts
-    /// again with <see cref="Register"/>. Throws
-    /// <see cref="SipralStatus.InvalidArgument"/> for a token that is not RFC
-    /// 6750's <c>b64token</c>, with nothing changed. The copy made to pass it
-    /// across is cleared afterwards.</summary>
+    /// <summary><c>sipral_account_set_access_token</c>: set or replace the
+    /// OAuth 2.0 token (RFC 8898), <c>null</c> to remove it. Answers
+    /// <see cref="SipralEventKind.TokenRequired"/> and installs renewals; the
+    /// next <c>Bearer</c> challenge uses it. A registration that failed for
+    /// want of a token restarts with <see cref="Register"/>. Throws
+    /// <see cref="SipralStatus.InvalidArgument"/> for a token that is not an
+    /// RFC 6750 <c>b64token</c>. The marshalled copy is cleared.</summary>
     public void SetAccessToken(string? token)
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(token ?? "");
@@ -380,14 +332,11 @@ public sealed class Account
         }
     }
 
-    /// <summary><c>sipral_account_refresh_binding</c>: refresh this account's
-    /// registration now rather than when its timer says (RFC 8599 §5.5) — for
-    /// the wake-up a push brings, or a network the application knows has come
-    /// back. A back-off earned by an earlier failure is dropped. Nothing is
-    /// sent while a REGISTER is already in flight, or after a refusal trying
-    /// again cannot fix, such as a wrong password. An account that never
-    /// registers has no binding to refresh, and is
-    /// <see cref="SipralStatus.InvalidArgument"/>.</summary>
+    /// <summary><c>sipral_account_refresh_binding</c>: refresh the
+    /// registration now (RFC 8599 §5.5), e.g. on a push wake-up, dropping
+    /// any back-off. Nothing is sent while a REGISTER is in flight or after
+    /// an unfixable refusal such as a wrong password. An account with no
+    /// registrar gets <see cref="SipralStatus.InvalidArgument"/>.</summary>
     public void RefreshBinding()
     {
         SipralErrors.Call(
@@ -397,11 +346,9 @@ public sealed class Account
 
     /// <summary><c>sipral_account_unregister</c>.</summary>
     /// <remarks>
-    /// Gives the binding up: a REGISTER with Expires: 0. The registration state
-    /// reads unregistered as soon as this returns, before the registrar answers;
-    /// the answer is the registration-changed event that follows. Wait for that
-    /// event before closing the stack, which otherwise cannot answer a challenge
-    /// to the un-REGISTER.
+    /// Sends REGISTER with Expires: 0. The state reads unregistered at once;
+    /// the registrar's answer arrives as a later event. Wait for it before
+    /// closing the stack, or a challenge to the un-REGISTER goes unanswered.
     /// </remarks>
     public void Unregister()
     {
@@ -418,15 +365,11 @@ public sealed class Account
     }
 
     /// <summary>
-    /// <c>sipral_account_subscribe</c>: watch <paramref name="target"/> (a SIP
-    /// URI) through the event package <paramref name="package"/> —
-    /// <c>presence</c>, <c>conference</c>, <c>dialog</c>… — sent where this
-    /// account sends, or to <paramref name="destination"/> (<c>host:port</c>).
-    /// <paramref name="accept"/> is the body type wanted when it is not the
-    /// package's default; <paramref name="expiresSeconds"/> is how long to ask
-    /// for, zero for an hour. Nothing has happened when this returns: the
-    /// SUBSCRIBE is on its way, and what the notifier says arrives as events
-    /// naming <see cref="SipralSubscription.Handle"/>.
+    /// <c>sipral_account_subscribe</c>: watch <paramref name="target"/>
+    /// through event <paramref name="package"/> (e.g. <c>dialog</c>),
+    /// optionally via <paramref name="destination"/>.
+    /// <paramref name="expiresSeconds"/> zero means an hour. Notifications
+    /// arrive as events naming <see cref="SipralSubscription.Handle"/>.
     /// </summary>
     public SipralSubscription Subscribe(string target, string package, string? accept = null, uint expiresSeconds = 0, string? destination = null)
     {
@@ -457,25 +400,18 @@ public sealed class Account
         return new SipralSubscription(_stack, subscription, package);
     }
 
-    /// <summary>Watch a presentity's presence (RFC 3856): <see cref="Subscribe"/>
-    /// to the <c>presence</c> package. Each document it sends arrives as
+    /// <summary>Watch a presentity (RFC 3856). Each document arrives as
     /// <see cref="SipralEventKind.PresenceChanged"/> with
-    /// <see cref="SipralPresenceKind.Watched"/>, open or closed, the activity,
-    /// the note and the entity decoded.</summary>
+    /// <see cref="SipralPresenceKind.Watched"/>.</summary>
     public SipralSubscription WatchPresence(string target, uint expiresSeconds = 0, string? destination = null) =>
         Subscribe(target, "presence", expiresSeconds: expiresSeconds, destination: destination);
 
     /// <summary>
-    /// <c>sipral_account_publish_presence</c>: publish this account's presence
-    /// (RFC 3903) — <paramref name="basic"/> open or closed (required), an RPID
-    /// <paramref name="activity"/> (<see cref="SipralActivity.None"/> publishes
-    /// no person; <see cref="SipralActivity.Other"/> is refused, having no name
-    /// to publish under) and a one-line <paramref name="note"/>. The first call
-    /// publishes and every later one modifies the same publication, which the
-    /// stack keeps refreshed until <see cref="UnpublishPresence"/>.
-    /// <see cref="SipralEventKind.PresenceChanged"/> with
-    /// <see cref="SipralPresenceKind.Publication"/> says what the compositor
-    /// did with it.
+    /// <c>sipral_account_publish_presence</c> (RFC 3903). Later calls modify
+    /// the same publication, refreshed until <see cref="UnpublishPresence"/>.
+    /// <see cref="SipralActivity.Other"/> is refused (it has no name).
+    /// Results arrive as <see cref="SipralEventKind.PresenceChanged"/> with
+    /// <see cref="SipralPresenceKind.Publication"/>.
     /// </summary>
     public void PublishPresence(SipralBasic basic, SipralActivity activity = SipralActivity.None, string? note = null)
     {
@@ -502,10 +438,8 @@ public sealed class Account
             "sipral_account_unpublish_presence");
     }
 
-    /// <summary><c>sipral_account_remove</c>. Every call this account
-    /// placed ends. Waits out <see cref="SipralStatus.Busy"/> like every
-    /// other call in this layer, and raises what is left of a refusal; the
-    /// account is forgotten only once the library has let it go.</summary>
+    /// <summary><c>sipral_account_remove</c>. The account's placed calls
+    /// end.</summary>
     public void Remove()
     {
         if (!_handle.IsClosed)
@@ -520,28 +454,21 @@ public sealed class Account
     private static Interop.PinnedBytes Pin(byte[]? bytes) => new(bytes);
 }
 
-/// <summary>What one account holds its calls to, and signs them with, beyond
-/// what the stack does: the <c>srtp</c> and <c>stir_*</c> members of
-/// <c>sipral_account_config_t</c>, given to
+/// <summary>Per-account SRTP and STIR/SHAKEN settings for
 /// <see cref="SipralStack.AddAccount"/>.
 ///
-/// <see cref="Srtp"/> is the account's own SRTP policy over the stack's
-/// (zero keeps the stack's); a call it places may
-/// ask for more and never less. <see cref="SrtpSuites"/> are the suites it
-/// runs, most preferred first, by their RFC 4568 and RFC 7714 names; RFC
-/// 7714's GCM ones only if named. <see cref="StirVerification"/> is what the
-/// account does with the <c>Identity</c> of the calls it receives, once
-/// <see cref="SipralStack.Stir"/> gave the stack trust anchors.
-/// <see cref="StirKey"/> (a P-256 key: the bare 32 bytes, or SEC1 or PKCS #8
-/// in DER or PEM) with <see cref="StirCertificateUrl"/> signs every call the
-/// account places (RFC 8224), as <see cref="StirOrig"/> or the number in the
-/// AOR, claiming <see cref="StirAttestation"/> (<see cref="SipralAttestation.None"/>
-/// is A) and <see cref="StirOrigid"/> (one drawn for the account when left
-/// out). A PASSporT carries the time, which <see cref="SipralStack.Stir"/>
-/// gives the stack: call it first, with no anchors on a stack that only
-/// signs. <see cref="RecordingInClear"/> lets the account's encrypted calls
-/// be recorded to a recording server as plain RTP; otherwise their copies go
-/// as SRTP or not at all (RFC 7866 §12.2).</summary>
+/// <see cref="Srtp"/> overrides the stack's policy (zero keeps it); a call
+/// may ask for more, never less. <see cref="SrtpSuites"/> are by RFC 4568 /
+/// RFC 7714 name, most preferred first; GCM suites only if named.
+/// <see cref="StirVerification"/> applies once <see cref="SipralStack.Stir"/>
+/// set anchors. <see cref="StirKey"/> (P-256: raw 32 bytes, SEC1 or PKCS #8,
+/// DER or PEM) with <see cref="StirCertificateUrl"/> signs placed calls (RFC
+/// 8224) as <see cref="StirOrig"/> or the AOR's number, with
+/// <see cref="StirAttestation"/> (<see cref="SipralAttestation.None"/> means
+/// A) and <see cref="StirOrigid"/> (generated if absent). Signing needs the
+/// clock <see cref="SipralStack.Stir"/> gives, so call it first.
+/// <see cref="RecordingInClear"/> lets encrypted calls be recorded as plain
+/// RTP; otherwise copies go as SRTP or not at all (RFC 7866 §12.2).</summary>
 public sealed record AccountSecurity(
     SipralSrtp Srtp = 0,
     IReadOnlyList<string>? SrtpSuites = null,

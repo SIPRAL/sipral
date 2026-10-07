@@ -3,11 +3,9 @@
 
 namespace Sipral;
 
-/// <summary>A copy of <c>sipral_media_info_t</c>. <see cref="HasText"/> says
-/// the call agreed a real-time text stream (RFC 4103); <see cref="Feedback"/>
-/// that its audio runs RTP/AVPF (RFC 4585), <see cref="GenericNack"/> that
-/// both ends agreed Generic NACKs and <see cref="ReducedSize"/> reduced-size
-/// RTCP (RFC 5506).</summary>
+/// <summary>A copy of <c>sipral_media_info_t</c>. <see cref="HasText"/>: RFC
+/// 4103 text; <see cref="Feedback"/>: RTP/AVPF (RFC 4585);
+/// <see cref="ReducedSize"/>: RFC 5506.</summary>
 public sealed record SipralMediaSnapshot(
     SipralCodec Codec,
     uint PayloadType,

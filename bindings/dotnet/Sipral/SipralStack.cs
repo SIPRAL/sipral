@@ -23,18 +23,11 @@ namespace Sipral;
 
 /// <summary>
 /// One <c>sipral_stack_create</c> handle, its UDP socket and the thread
-/// that drains <c>sipral_stack_poll</c> and the transport queues around
-/// it — the .NET counterpart of <c>bindings/python/sipral/stack.py</c>'s
-/// <c>Stack</c>, written by hand against <see cref="NativeMethods"/> the
-/// same way that file is written by hand against <c>_sipral_cffi.py</c>
-/// (<c>docs/08-ffi.md</c>, "The shape").
+/// that drains <c>sipral_stack_poll</c> and the transport queues.
 ///
-/// Built and torn down like the handle it wraps: <see cref="Dispose"/>
-/// calls <c>sipral_stack_destroy</c> exactly once, through
-/// <see cref="StackSafeHandle"/>, which also gives a stack an application
-/// never disposes a finalizer-backed release — a stack still bound to a
-/// socket is a port nothing else can use until the collector gets around
-/// to it, so <see cref="Dispose"/> is still the path to prefer.
+/// <see cref="Dispose"/> calls <c>sipral_stack_destroy</c> exactly once.
+/// A stack never disposed is released by a finalizer, but its port stays
+/// taken until the collector runs, so dispose it.
 /// </summary>
 public sealed partial class SipralStack : IDisposable
 {
@@ -42,19 +35,15 @@ public sealed partial class SipralStack : IDisposable
     private const int AddressBytes = 128;
 
     private readonly StackSafeHandle _handle;
-    /// <summary>The signalling socket: replaced by <see cref="MoveTo"/>, read
-    /// by the poll thread, which takes it afresh on every pass.</summary>
+    // Replaced by MoveTo; the poll thread reads it afresh on every pass.
     private volatile Socket? _socket;
     private readonly Stopwatch _origin = Stopwatch.StartNew();
     private readonly SipralEventCallback _callback;
-    /// <summary>Kept alive for as long as the stack, like
-    /// <see cref="_callback"/>: the audio engine calls it from its own
-    /// thread, once per packet, in device mode.</summary>
+    // Kept alive with the stack: the audio engine calls it per packet.
     private readonly SipralAudioTransmitCallback _audioTransmit;
     private readonly List<Account> _accounts = new();
-    /// <summary>Connections to the TURN server a write from the audio
-    /// engine's thread found broken, told to the stack from the poll thread:
-    /// the engine's thread must not call back into the stack.</summary>
+    // TURN connections the audio thread found broken. Reported from the
+    // poll thread, since the engine's thread must not call into the stack.
     private readonly ConcurrentQueue<string> _turnLost = new();
     private readonly Thread _pollThread;
     private readonly ManualResetEventSlim _closed = new(initialState: false);
@@ -73,39 +62,29 @@ public sealed partial class SipralStack : IDisposable
     private readonly byte[] _receiveBuffer = new byte[TransmitBytes];
     private readonly byte[] _stunReceiveBuffer = new byte[TransmitBytes];
 
-    /// <summary>Whether media sockets are asked where they appear from:
-    /// what the stack was created with, and then what
-    /// <see cref="SetStunServers"/> last named.</summary>
+    // Set at creation, then by SetStunServers.
     private volatile SipralNat _nat;
     private readonly bool _turn;
     private readonly object _natLock = new();
 
-    /// <summary>How the TURN server is reached, the name its certificate is
-    /// checked against over TLS, and the roots that check trusts.</summary>
     private readonly SipralTransport _turnTransport;
     private readonly string? _turnServerName;
     private readonly X509Certificate2Collection? _turnTrustedCertificates;
 
-    /// <summary>Every media socket's open connection to the TURN server,
-    /// by the socket's <c>host:port</c>.</summary>
+    // By the media socket's host:port.
     private readonly ConcurrentDictionary<string, TurnStream> _turnStreams = new();
 
-    /// <summary>What <see cref="SipralEventKind.TurnStream"/> asked for
-    /// during the poll that raised it — nothing may call back into the
-    /// stack from its own callback — acted on right after that poll.</summary>
+    // TurnStream requests, acted on after the poll that raised them: the
+    // callback must not call back into the stack.
     private readonly ConcurrentQueue<SipralTurnStreamEventInfo> _turnAsked = new();
 
-    /// <summary>Every call's media socket, by the call, for as long as the
-    /// socket's connection to the TURN server stands: a call's last farewell
-    /// — the Refresh that gives its relay back — can come after the
-    /// <see cref="Call"/> itself was closed and forgotten, and still goes on
-    /// that connection.</summary>
+    // A call's media socket, kept while its TURN connection stands: the
+    // Refresh that frees the relay can come after the Call was forgotten.
     private readonly ConcurrentDictionary<ulong, string> _turnSockets = new();
 
-    /// <summary>One media socket's TCP or TLS connection to the TURN server:
-    /// written by the poll thread and by the call's media thread, each write
-    /// whole under <see cref="WriteLock"/>, and read by a thread of its
-    /// own.</summary>
+    /// <summary>A media socket's TCP or TLS connection to the TURN server.
+    /// Written by the poll and media threads, each write whole under
+    /// <see cref="WriteLock"/>; read by its own thread.</summary>
     private sealed class TurnStream
     {
         public required TcpClient Client { get; init; }
@@ -113,29 +92,21 @@ public sealed partial class SipralStack : IDisposable
         public object WriteLock { get; } = new();
     }
 
-    /// <summary>Media sockets currently named with <c>sipral_stack_nat_map</c>,
-    /// keyed by their own <c>host:port</c> text — from
-    /// <see cref="MapMediaSocket"/> until either
-    /// <see cref="SipralEventKind.MediaStarted"/> hands the socket to
-    /// <see cref="CallMedia"/> (<see cref="ReleaseStunSocket"/>) or the
-    /// call gives up on it (<see cref="ForgetMediaSocket"/>). Read and
-    /// written from both the calling thread and the poll thread; <see
-    /// cref="_natLock"/> covers this and <see cref="_natWaiters"/>.</summary>
+    // Media sockets under sipral_stack_nat_map, by host:port, from
+    // MapMediaSocket until MediaStarted hands them to CallMedia or the call
+    // gives up. Used by the calling and poll threads; _natLock guards this
+    // and _natWaiters.
     private readonly Dictionary<string, Socket> _stunSockets = new();
 
-    /// <summary>Per socket, one wait handle for
-    /// <see cref="SipralEventKind.NatMapping"/> and one for
-    /// <see cref="SipralEventKind.NatRelay"/> — a stack built with
-    /// <c>turnServer</c> waits out both before a call may be placed or
-    /// answered on the socket, a stack without it only the first.</summary>
+    // Per socket, a wait for NatMapping and one for NatRelay. With a TURN
+    // server a call waits for both, without one only for the first.
     private readonly Dictionary<string, (ManualResetEventSlim Mapping, ManualResetEventSlim Relay)> _natWaiters = new();
 
     private int _disposed;
 
-    /// <summary>The address this stack listens on, <c>host:port</c> — a new
-    /// one after <see cref="MoveTo"/>. A stack created with no
-    /// <c>bindHost</c> listens on every interface, and this is the address it
-    /// advertises: the route toward its first account's server.</summary>
+    /// <summary>The address this stack listens on, <c>host:port</c>, new
+    /// after <see cref="MoveTo"/>. With no <c>bindHost</c> it is the
+    /// advertised address: the route toward the first account's server.</summary>
     public string BindAddress { get; private set; }
 
     /// <summary>Who pumps this stack's calls' audio: the library, from the
@@ -150,11 +121,9 @@ public sealed partial class SipralStack : IDisposable
     /// with <see cref="SipralStatus.WrongState"/>.</summary>
     public SipralAudioEngine Audio { get; }
 
-    /// <summary>What this build of the library has compiled in:
-    /// <c>sipral_capabilities_t::features</c>, the <c>Sipral.Feature*</c>
-    /// bits. <c>Sipral.FeatureAudioDevice</c> is set where the library can
-    /// open the platform's own audio devices (Windows, macOS, iOS) — where a
-    /// stack is created in device mode by default.</summary>
+    /// <summary>The <c>Sipral.Feature*</c> bits this build has compiled in.
+    /// <c>Sipral.FeatureAudioDevice</c> is set where the library can open the
+    /// platform's audio devices; stacks there default to device mode.</summary>
     public static uint Features()
     {
         NativeLibraryLoader.EnsureRegistered();
@@ -168,24 +137,15 @@ public sealed partial class SipralStack : IDisposable
     public static bool HasFeature(uint bit) => (Features() & bit) == bit;
 
     /// <summary>
-    /// Every event this stack raises, in order — the
-    /// <see cref="IAsyncEnumerable{T}"/> reader an application <c>await
-    /// foreach</c>s. Backed by an unbounded <see cref="Channel{T}"/> that
-    /// the poll thread is the only writer of; reading it never blocks
-    /// that thread.
+    /// Every event this stack raises, in order. Backed by an unbounded
+    /// channel, so a slow reader never blocks the poll thread.
     /// </summary>
     public IAsyncEnumerable<SipralEventArgs> Events => _events.Reader.ReadAllAsync();
 
     /// <summary>
-    /// Fired synchronously, on the poll thread, for every event this
-    /// stack raises — the same thread <c>docs/08-ffi.md</c> promises the
-    /// event callback runs on ("called from inside `sipral_stack_poll`,
-    /// on the thread that polled"), so a handler that itself calls back
-    /// into this stack is the re-entry that ABI section says is allowed.
-    /// Most applications want <see cref="Events"/> instead; this exists
-    /// for the caller that wants the ordinary C# event pattern and is
-    /// prepared to keep its own handler quick, the way any handler on a
-    /// library's own thread should be.
+    /// Fired synchronously on the poll thread for every event. A handler may
+    /// call back into the stack, but should be quick. Most applications want
+    /// <see cref="Events"/> instead.
     /// </summary>
     public event EventHandler<SipralEventArgs>? EventReceived;
 
@@ -193,64 +153,43 @@ public sealed partial class SipralStack : IDisposable
     /// starts the poll thread, which raises
     /// <see cref="SipralEventKind.Started"/> on its first pass.
     ///
-    /// <paramref name="ice"/> and <paramref name="nat"/> are
-    /// <c>0</c> for this build's own default (everything off — exactly
-    /// today's behaviour) or a <see cref="SipralIce"/>/<see
-    /// cref="SipralNat"/> value; <paramref name="nat"/> set to
+    /// <paramref name="ice"/> and <paramref name="nat"/> are <c>0</c> for off
+    /// or a <see cref="SipralIce"/>/<see cref="SipralNat"/> value.
     /// <see cref="SipralNat.Stun"/> needs <paramref name="stunServer"/>
-    /// as <c>host:port</c>, and <paramref name="turnServer"/> rides on it
-    /// with <paramref name="turnUsername"/>/<paramref name="turnPassword"/>
-    /// (`docs/06-nat.md`, `docs/08-ffi.md` "Behind a NAT"). Neither
-    /// credential is written to any log, event or exception this package
-    /// raises. <see cref="SipralIce.Lite"/> is for a server reachable at the
-    /// address it advertises, answering full ICE peers, and nothing else
-    /// (`docs/06-nat.md`, "ICE-lite").
+    /// (<c>host:port</c>); <paramref name="turnServer"/> with its credentials
+    /// builds on it (<c>docs/06-nat.md</c>). Credentials never reach a log,
+    /// event or exception. <see cref="SipralIce.Lite"/> is only for a server
+    /// reachable at the address it advertises.
     ///
-    /// <paramref name="referrals"/> set to <see langword="true"/> hands a
-    /// REFER outside any dialog — click-to-dial from a switchboard — to the
-    /// application as <see cref="SipralEventKind.Referral"/>, to take with
-    /// <see cref="AcceptReferral"/> or refuse with <see cref="RejectReferral"/>.
-    /// Off by default, when every one is refused 403: a peer that can make
-    /// a phone dial is a toll-fraud vector, so each one is the
-    /// application's decision.
+    /// <paramref name="referrals"/> <see langword="true"/> hands an
+    /// out-of-dialog REFER (click-to-dial) to the application as
+    /// <see cref="SipralEventKind.Referral"/>. Off by default, and each is
+    /// refused 403: a peer that can make a phone dial is a toll-fraud vector.
     ///
-    /// <paramref name="registrarKeepalive"/> keeps the registrar's flow
-    /// open behind a NAT: every account <paramref name="stunServer"/>
-    /// showed to be behind one sends its registrar a double CRLF every
-    /// <paramref name="registrarKeepaliveMs"/> (<c>0</c> for 25 seconds,
-    /// 1 000 to 120 000), so that a NAT filtering by address and port still
-    /// lets the registrar's INVITE in minutes after the REGISTER. On by
-    /// default; <see langword="false"/> turns it off, and an interval with
-    /// it off is refused. Nothing is sent while the stack is suspended.
+    /// <paramref name="registrarKeepalive"/> (on by default) has every account
+    /// STUN found behind a NAT send its registrar a double CRLF every
+    /// <paramref name="registrarKeepaliveMs"/> (<c>0</c> for 25 s, 1 000 to
+    /// 120 000), so the registrar's INVITE still gets in. An interval with it
+    /// off is refused. Nothing is sent while suspended.
     ///
-    /// <paramref name="turnTransport"/> is how every media socket reaches
-    /// <paramref name="turnServer"/> (RFC 8656 §3.1): <c>0</c> or
-    /// <see cref="SipralTransport.Udp"/>, <see cref="SipralTransport.Tcp"/>
-    /// for a network that lets no UDP out, <see cref="SipralTransport.Tls"/>
-    /// for one that lets one port out — 5349 is TURN's — or for an
-    /// application that wants the server checked. Over either the stack
-    /// opens a connection per media socket itself and carries everything
-    /// for the relay on it; over TLS that is an <see cref="SslStream"/>
-    /// whose certificate is checked against <paramref name="turnServerName"/>
-    /// — the host part of <paramref name="turnServer"/> when <c>null</c> —
-    /// with the platform's trust, or, when
-    /// <paramref name="turnTrustedCertificates"/> holds any, with those roots
-    /// and nothing else: how a private CA or a self-signed server is
-    /// trusted. Nothing here turns checking off.
+    /// <paramref name="turnTransport"/> is how media sockets reach
+    /// <paramref name="turnServer"/> (RFC 8656 §3.1): UDP (<c>0</c>), TCP
+    /// where no UDP gets out, or TLS (port 5349) where one port gets out or
+    /// the server must be checked. The stack opens one connection per media
+    /// socket. Over TLS the certificate is checked against
+    /// <paramref name="turnServerName"/> (default: the host of
+    /// <paramref name="turnServer"/>) with the platform's trust, or only with
+    /// <paramref name="turnTrustedCertificates"/> when given. Checking cannot
+    /// be turned off.
     ///
     /// <paramref name="audio"/> is who pumps the calls' audio.
-    /// <see cref="SipralAudio.Device"/> has the library open the platform's
-    /// own microphone and loudspeaker and run every call through them — the
-    /// application writes no audio code, and chooses devices, volume and
-    /// mute through <see cref="Audio"/> — while the packets it encodes still
-    /// leave from each call's own media socket, which this class sends for
-    /// it. <see cref="SipralAudio.Application"/> leaves the frames to
-    /// <see cref="CallMedia"/>: a voice agent, a recorder, a machine with no
-    /// sound device. Left <see langword="null"/>, it is device mode where
-    /// <see cref="Features"/> has <c>Sipral.FeatureAudioDevice</c> and
-    /// application mode elsewhere; <see cref="AudioMode"/> says which. Device
-    /// mode on a build without it throws with
-    /// <see cref="SipralStatus.NotSupported"/>.
+    /// <see cref="SipralAudio.Device"/>: the library runs every call through
+    /// the platform's microphone and speaker, controlled through
+    /// <see cref="Audio"/>; packets still leave from each call's media
+    /// socket. <see cref="SipralAudio.Application"/>: frames go through
+    /// <see cref="CallMedia"/>. <see langword="null"/> picks device mode where
+    /// <c>Sipral.FeatureAudioDevice</c> is set; device mode without it throws
+    /// with <see cref="SipralStatus.NotSupported"/>.
     /// <paramref name="audioActivation"/> is when device mode opens the
     /// devices: <see cref="SipralAudioActivation.Automatic"/> with the first
     /// call's media or the first ring, closed with the last;
@@ -272,143 +211,94 @@ public sealed partial class SipralStack : IDisposable
     /// <paramref name="diagnosticRecords"/> bound the diagnostic record:
     /// decisions kept per call (<c>0</c> for 64) and calls kept (<c>0</c>
     /// for 32).
-    /// <paramref name="stunFallbacks"/> are the STUN servers to turn to, in
-    /// order, when <paramref name="stunServer"/> does not answer in five and
-    /// a half seconds or answers without an address, each <c>host:port</c>:
-    /// every socket asking the one that failed moves to the next at once, the
-    /// one that failed is passed over for thirty seconds and twice as long
-    /// each time it fails again, up to ten minutes, and
-    /// <see cref="SipralEventKind.StunServer"/> says when the server in use
-    /// moves or every one has failed.
-    /// <paramref name="rtpPortMin"/> and <paramref name="rtpPortMax"/> are
-    /// the range a firewall in front of this machine was opened for: every
-    /// media socket this class opens without an explicit port then binds an
-    /// even port from it, reserved with <c>sipral_stack_rtp_port_reserve</c>,
-    /// with the odd one above kept for RTCP (RFC 3550 §11), and a call is
-    /// refused a port outside it. Both <c>0</c> — the default — leave the
-    /// ports to the operating system. Every pair taken throws with
-    /// <see cref="SipralStatus.Exhausted"/> rather than binding outside the
-    /// range.
+    /// <paramref name="stunFallbacks"/> (<c>host:port</c>) are tried in order
+    /// when <paramref name="stunServer"/> gives no address within 5.5 s. A
+    /// failed server is skipped for 30 s, doubling up to ten minutes;
+    /// <see cref="SipralEventKind.StunServer"/> reports each move.
+    /// <paramref name="rtpPortMin"/> and <paramref name="rtpPortMax"/> are a
+    /// firewall's open range: media sockets opened without a port bind an
+    /// even port from it, the odd one above kept for RTCP (RFC 3550 §11).
+    /// Both <c>0</c> (the default) leave ports to the OS. A full range throws
+    /// with <see cref="SipralStatus.Exhausted"/>.
     /// <paramref name="dtmfDetection"/> is when a call listens for keypad
     /// digits in the far end's audio: <see cref="SipralDtmfDetection.Auto"/>
     /// on the calls that negotiated no telephone event, <c>Always</c> or
     /// <c>Off</c>; <see cref="Call.SetDtmfDetection"/> changes it for one
     /// call.
     ///
-    /// <paramref name="signalling"/> is what SIP travels over:
-    /// <see cref="SipralTransport.Udp"/> (<c>0</c>, the default) on a socket
-    /// bound at <paramref name="bindHost"/>, or <see cref="SipralTransport.Tcp"/>
-    /// or <see cref="SipralTransport.Tls"/> on one connection to
-    /// <paramref name="signallingServer"/> (<c>host:port</c> — the registrar
-    /// or the outbound proxy, 5061 for TLS by convention), which every
-    /// account and every call on this stack then shares, and on which the
-    /// server's own requests arrive. Over TLS the server's certificate is
-    /// checked by <see cref="SslStream"/> against
-    /// <paramref name="tlsServerName"/> (the host part of
-    /// <paramref name="signallingServer"/> when <c>null</c>) with
-    /// <paramref name="tlsTrust"/>: the platform's authorities when
-    /// <c>null</c>, a private authority beside them, or only one authority
-    /// (<c>docs/22-tls.md</c>). Nothing here turns the check off.
+    /// <paramref name="signalling"/> is what SIP travels over: UDP (<c>0</c>)
+    /// on a socket at <paramref name="bindHost"/>, or TCP/TLS on one
+    /// connection to <paramref name="signallingServer"/> (<c>host:port</c>,
+    /// 5061 for TLS by convention) shared by every account and call. Over TLS
+    /// the certificate is checked against <paramref name="tlsServerName"/>
+    /// (default: the server's host) with <paramref name="tlsTrust"/>
+    /// (<c>docs/22-tls.md</c>); the check cannot be turned off.
     ///
-    /// The first connection is made here, before this returns. When it
-    /// fails, or later breaks, the stack is told why and raises
-    /// <see cref="SipralEventKind.TransportFailed"/>, whose
-    /// <see cref="SipralEventArgs.TransportFailed"/> says untrusted, a name
-    /// that does not match, expired, a handshake refused or a server that
-    /// refused the connection, with <see cref="SslStream"/>'s own words; and
-    /// this class connects again, one second after the loss and twice as long
-    /// after each attempt that fails, up to thirty seconds. Once connected
-    /// again every account is pointed at the new connection and registered
-    /// again if it was registering. <see cref="Account.Register"/> asked
-    /// while it is down is kept for then; a call placed meanwhile throws
-    /// with <see cref="SipralStatus.TransportDown"/>.
+    /// The first connection is made before this returns. When it fails or
+    /// breaks, <see cref="SipralEventKind.TransportFailed"/> says why, and
+    /// this class reconnects after 1 s, doubling up to 30 s. On reconnect
+    /// every account moves to the new connection and registers again if it
+    /// was registering. <see cref="Account.Register"/> while down is kept for
+    /// then; a call placed meanwhile throws with
+    /// <see cref="SipralStatus.TransportDown"/>.
     ///
     /// <paramref name="inviteLimit"/> is how fast one address may ring this
-    /// stack: <see cref="SipralInviteLimit.Default"/> (what every stack
-    /// starts with, ten INVITEs at once then one every two seconds, past
-    /// which a call is answered 480) or
-    /// <see cref="SipralInviteLimit.VoiceAgent"/> for a service taking a
-    /// trunk's calls.
+    /// stack: <see cref="SipralInviteLimit.Default"/> (ten at once, then one
+    /// every 2 s, else 480) or <see cref="SipralInviteLimit.VoiceAgent"/> for
+    /// a service taking a trunk's calls.
     ///
-    /// <paramref name="streamFallback"/> is what a stack signalling over UDP
-    /// does when a request is too large for a datagram — nearly always the
-    /// answer to a challenge, whose <c>Authorization</c> takes a call offering
-    /// two SRTP suites past RFC 3261 §18.1.1's 1300 bytes. On (the default),
-    /// <see cref="SipralEventKind.TransportWanted"/> is answered by opening a
-    /// TCP connection to the address it names — the registrar or proxy the
-    /// request was going to, on the same port — and binding it
-    /// (<c>sipral_stack_transport_bind</c>): the request the stack was holding
-    /// goes on it, and the call or registration carries on over it. When that
-    /// connection is refused or times out, or with <see langword="false"/>,
-    /// the stack is told at once (<c>sipral_stack_transport_failed_with</c>, whose
-    /// detail names where the connection was going and whether it was
-    /// refused, timed out or not tried), and
-    /// what was waiting ends rather than hanging: a call as unreachable, its
-    /// <see cref="SipralCallEventInfo.Cause"/> a SIP 513 whose text names the
-    /// size and the limit. The event reaches <see cref="Events"/>
-    /// either way. <paramref name="streamServer"/> (<c>host:port</c>) is
-    /// where that connection goes instead, for a server that takes TCP on
-    /// another port than UDP — a PBX on 5060 for one and 5160 for the other:
-    /// the connection stands for the address the event named, and everything
-    /// the stack sends there goes on it.
+    /// <paramref name="streamFallback"/> covers a UDP request too large for a
+    /// datagram, usually an authenticated INVITE offering two SRTP suites
+    /// (RFC 3261 §18.1.1). On (the default), each
+    /// <see cref="SipralEventKind.TransportWanted"/> opens a TCP connection to
+    /// the named address and binds it; the held request and its call carry on
+    /// over it. If that fails, or with <see langword="false"/>, the waiting
+    /// call ends as unreachable with a SIP 513 cause naming size and limit,
+    /// rather than hanging. <paramref name="streamServer"/> (<c>host:port</c>)
+    /// redirects that connection, for a server whose TCP port differs from
+    /// its UDP one.
     ///
-    /// <paramref name="bindHost"/> is the address the signalling socket is
-    /// bound at and advertises. Left <see langword="null"/>, the socket
-    /// listens on every interface and the stack advertises the address of the
-    /// operating system's route toward the server of its first account
-    /// (<c>sipral_advertised_address</c>): the address a PBX on the network
-    /// reaches this machine at, and <c>127.0.0.1</c> for one on this machine.
-    /// Each account is reached at the route toward its own server, and a
-    /// call's media socket, when <c>mediaHost</c> is <see langword="null"/>,
-    /// at the route toward the far end or the account's server. A loopback
-    /// address is never advertised to a peer elsewhere: the library refuses
-    /// that with <see cref="SipralStatus.UnreachableAddress"/>.
+    /// <paramref name="bindHost"/> is where the signalling socket binds and
+    /// what it advertises. With <see langword="null"/> it listens on every
+    /// interface and advertises the OS route toward each account's server,
+    /// and media sockets without <c>mediaHost</c> the route toward the far
+    /// end. A loopback address is never advertised to a remote peer
+    /// (<see cref="SipralStatus.UnreachableAddress"/>).
     ///
-    /// <paramref name="srtp"/> may be <see cref="SipralSrtp.BestEffort"/>:
-    /// SDES offered on plain <c>RTP/AVP</c>, the call encrypted when the
-    /// answer takes a key and plain when it takes none, for a PBX that
-    /// answers an <c>RTP/SAVP</c> offer with 488.
-    /// <paramref name="srtpSuites"/> are the SRTP suites every call offers and
-    /// accepts unless its account names its own, most preferred first, by
-    /// their RFC 4568 and RFC 7714 names.
+    /// <paramref name="srtp"/> <see cref="SipralSrtp.BestEffort"/> offers SDES
+    /// on plain <c>RTP/AVP</c>, for a PBX that answers <c>RTP/SAVP</c> with
+    /// 488; the call is encrypted only if the answer takes a key.
+    /// <paramref name="srtpSuites"/> are the default suites, most preferred
+    /// first, by their RFC 4568 / RFC 7714 names.
     ///
-    /// <paramref name="pathMtu"/> is the MTU of the path toward the server
-    /// when the deployment knows it (<c>0</c> for unknown, else 576 or more):
-    /// RFC 3261 §18.1.1 moves a request to a stream within 200 bytes of it.
-    /// <paramref name="datagramWithoutStreamBytes"/> is a deliberate deviation
-    /// from that section, for a server that takes SIP over UDP alone: once no
-    /// stream to it can be had, a request up to this many bytes goes over UDP
-    /// anyway (<c>0</c> for never, at most 65 507), and
-    /// <see cref="DiagnosticsJson"/> says so as <c>transport.kept.datagram</c>.
+    /// <paramref name="pathMtu"/> is the path MTU when known (<c>0</c>, or 576
+    /// or more); RFC 3261 §18.1.1 moves a request to a stream within 200
+    /// bytes of it. <paramref name="datagramWithoutStreamBytes"/> deviates
+    /// from that section on purpose, for a UDP-only server: when no stream
+    /// can be had, requests up to this size go over UDP anyway (<c>0</c> for
+    /// never, at most 65 507), reported as <c>transport.kept.datagram</c>.
     ///
-    /// <paramref name="pseudonymSalt"/> (16 bytes or more, kept by the
-    /// installation) keys the pseudonyms the log and <see cref="State"/>
-    /// write, so that two runs' traces compare line by line; it is a secret,
-    /// like a key. <paramref name="diagnosticTrace"/> writes whole SIP
-    /// messages at the trace level, peers included and credentials and keys
-    /// taken out, for a diagnosis; <see cref="SetDiagnosticTrace"/> turns it
-    /// on and off later.
+    /// <paramref name="pseudonymSalt"/> (16 bytes or more) keys the pseudonyms
+    /// in the log and <see cref="State"/>, so traces of two runs compare. Keep
+    /// it secret. <paramref name="diagnosticTrace"/> logs whole SIP messages
+    /// at trace level, with credentials and keys removed.
     ///
     /// <paramref name="systemEchoCancellation"/> <see langword="false"/>
-    /// opens the devices of a stack in device mode past the platform's echo
-    /// cancellation, gain control and noise suppression — on Windows a
-    /// communications stream opened raw — for a headset, which has no echo to
-    /// cancel, or an application that cancels it on each call itself;
+    /// opens devices without the platform's echo cancellation, gain control
+    /// and noise suppression, e.g. for a headset;
     /// <see cref="SipralAudioSnapshot.SystemEchoCancellation"/> says what the
     /// platform did.
     ///
-    /// <paramref name="heldAudio"/> is what a party this end holds is sent
-    /// while the hold lasts: <see cref="SipralHeldAudio.Default"/> and
-    /// <see cref="SipralHeldAudio.Silence"/> are silence in either mode,
-    /// since in application mode too the frames sent may be a microphone's;
-    /// <see cref="SipralHeldAudio.Application"/> sends the frames the
-    /// application sends — hold music, an announcement, a voice agent's own
-    /// speech.
+    /// <paramref name="heldAudio"/> is what a held party hears: silence for
+    /// <see cref="SipralHeldAudio.Default"/> and
+    /// <see cref="SipralHeldAudio.Silence"/> (even in application mode, where
+    /// frames may be a microphone's), or the application's frames for
+    /// <see cref="SipralHeldAudio.Application"/>.
     ///
     /// <paramref name="resolver"/> answers
-    /// <see cref="SipralEventKind.LookupWanted"/> for the accounts added with
-    /// <c>serverUri</c>, on a thread of its own per lookup;
-    /// <see cref="SipralDns.Platform"/> when <see langword="null"/>.</summary>
+    /// <see cref="SipralEventKind.LookupWanted"/> for accounts added with
+    /// <c>serverUri</c>, one thread per lookup; defaults to
+    /// <see cref="SipralDns.Platform"/>.</summary>
     public SipralStack(
         string? bindHost = null,
         int bindPort = 0,
@@ -486,21 +376,9 @@ public sealed partial class SipralStack : IDisposable
             BindAddress = bindHost is null ? $"{RouteHost(streamServer)}:{bound.Port}" : FormatAddress(bound);
         }
 
-        // Kept alive on this instance for as long as the stack lives: the
-        // native library calls through the function pointer derived from
-        // it until `sipral_stack_destroy`, and the generated
-        // `SipralEventCallback` delegate's own doc comment is explicit
-        // that the caller keeps it alive rather than reaching for
-        // `UnmanagedCallersOnly` — which needs a static target and would
-        // cost a `GCHandle`-keyed dispatch table to reach back to this
-        // instance for no benefit over a plain kept-alive delegate here.
-        // What actually keeps it reachable is not this field alone but
-        // the poll thread started at the end of this constructor: its
-        // `ThreadStart` closes over `this`, so the whole object graph —
-        // this field included — stays a GC root for as long as that
-        // thread runs, which is exactly until `Dispose` joins it.
-        // `SipralTests.EventCallbackSurvivesGc` forces a collection while
-        // a call is in flight to prove it.
+        // The native side calls through this delegate until
+        // sipral_stack_destroy. The poll thread closes over `this`, so the
+        // delegate stays rooted until Dispose joins that thread.
         _callback = OnEvent;
         _audioTransmit = OnAudioTransmit;
         AudioMode = audio ?? (HasFeature(global::Sipral.Sipral.FeatureAudioDevice) ? SipralAudio.Device : SipralAudio.Application);
@@ -601,8 +479,7 @@ public sealed partial class SipralStack : IDisposable
         }
         if (status != SipralStatus.Ok)
         {
-            // refused -- device mode on a build with no backend for this
-            // platform, say -- so the socket bound above serves nothing
+            // e.g. device mode with no backend here: free the socket
             _socket?.Dispose();
             firstLink?.Stream.Dispose();
             firstLink?.Client.Dispose();
@@ -622,16 +499,12 @@ public sealed partial class SipralStack : IDisposable
         _pollThread.Start();
     }
 
-    /// <summary>Elapsed milliseconds since this stack was created — the
-    /// figure every entry point below expects <c>now_ms</c> to be
-    /// (<c>sipral_stack_create</c> fixes its own origin at the same
-    /// moment).</summary>
+    /// <summary>Milliseconds since this stack was created: the <c>now_ms</c>
+    /// every entry point expects.</summary>
     public ulong NowMs => (ulong)_origin.ElapsedMilliseconds;
 
-    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
-    /// <c>sipral.h</c> this class does not wrap, called through the
-    /// application's own P/Invoke declaration. Valid until the
-    /// stack is disposed.</summary>
+    /// <summary>The raw <c>sipral_handle_t</c>, for entry points this class
+    /// does not wrap. Valid until the stack is disposed.</summary>
     public ulong Handle => _handle.Value;
 
     /// <summary>The RTP port range media sockets are bound in, or
@@ -639,11 +512,9 @@ public sealed partial class SipralStack : IDisposable
     public (ushort Min, ushort Max)? RtpPorts { get; }
 
     /// <summary>A non-blocking UDP socket for a call's media, bound at
-    /// <paramref name="host"/>: at <paramref name="port"/> when one is named,
-    /// otherwise — on a stack with an RTP range — at an even port reserved
-    /// from it (<c>sipral_stack_rtp_port_reserve</c>), where one another
-    /// process already holds is given back and the next tried, and
-    /// elsewhere wherever the operating system puts it. Throws with
+    /// <paramref name="host"/>: at <paramref name="port"/> when named, else at
+    /// an even port from the RTP range (one held by another process is given
+    /// back and the next tried), else where the OS puts it. Throws with
     /// <see cref="SipralStatus.Exhausted"/> once every pair is taken.</summary>
     public Socket OpenMediaSocket(string host, int port = 0)
     {
@@ -701,20 +572,17 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary>Every log callback handed to <c>sipral_stack_log</c>, kept
-    /// for the stack's life: one that was replaced may still be delivering a
-    /// batch on the poll thread after <see cref="SetLog"/> returned.</summary>
+    // Kept for the stack's life: a replaced callback may still be delivering
+    // a batch after SetLog returned.
     private readonly List<SipralLogCallback> _logCallbacks = new();
 
     /// <summary>Send this stack's log to <paramref name="handler"/> at
     /// <paramref name="level"/> and louder, or turn it off with
     /// <see cref="SipralLogLevel.Off"/> or a <see langword="null"/> handler
-    /// (<c>sipral_stack_log</c>). The handler runs on whichever thread has
-    /// just finished a call into the stack — the poll thread, usually — with
-    /// the stack let go, so it may call back into it. Every line is already
-    /// redacted: no user part, number, IP address or credential reaches it.
-    /// Its last argument counts the lines a flood had turned away before
-    /// this one.</summary>
+    /// (<c>sipral_stack_log</c>). The handler runs on the thread that just
+    /// called into the stack (usually the poll thread) and may call back into
+    /// it. Lines are redacted: no user part, number, IP or credential. The
+    /// last argument counts lines dropped by a flood before this one.</summary>
     public void SetLog(SipralLogLevel level, Action<SipralLogLevel, string, string, ulong>? handler)
     {
         if (handler is null || level == SipralLogLevel.Off)
@@ -742,10 +610,8 @@ public sealed partial class SipralStack : IDisposable
             "sipral_stack_log");
     }
 
-    /// <summary>Everything this stack is holding, as the redacted text
-    /// <c>sipral_stack_state_text</c> writes for a crash report: accounts, calls,
-    /// transports, media sessions, the last refused calls, the queues, the
-    /// RTP range and the counters. Safe from any thread, and never
+    /// <summary>The stack's state as redacted text for a crash report
+    /// (<c>sipral_stack_state_text</c>). Safe from any thread; never
     /// waits.</summary>
     public string State()
     {
@@ -758,29 +624,13 @@ public sealed partial class SipralStack : IDisposable
         return Encoding.UTF8.GetString(bytes, 0, (int)length - 1);
     }
 
-    /// <summary>Send this stack's log to a <see cref="TraceSource"/>, the
-    /// logging the base class library carries with no package to add. Each
-    /// line is traced with the part of the stack that wrote it in front —
-    /// <c>call: …</c>, <c>sip: …</c>, <c>api: …</c> — as event type
-    /// <see cref="TraceEventType.Error"/> for
-    /// <see cref="SipralLogLevel.Error"/>,
-    /// <see cref="TraceEventType.Warning"/> for
-    /// <see cref="SipralLogLevel.Warn"/>,
-    /// <see cref="TraceEventType.Information"/> for
-    /// <see cref="SipralLogLevel.Info"/>, and
-    /// <see cref="TraceEventType.Verbose"/> for
-    /// <see cref="SipralLogLevel.Debug"/> and
-    /// <see cref="SipralLogLevel.Trace"/>, with the level's number as the
-    /// event id; a line that follows a flood says how many lines were turned
-    /// away before it. <paramref name="level"/> left out follows the source's
-    /// switch as it is now — <see cref="SourceLevels.All"/> is
-    /// <see cref="SipralLogLevel.Trace"/>, <see cref="SourceLevels.Verbose"/>
-    /// is <see cref="SipralLogLevel.Debug"/> — so lines the source would drop
-    /// are never formatted. An application on
-    /// <c>Microsoft.Extensions.Logging</c> hands <see cref="SetLog"/> a
-    /// delegate that calls its <c>ILogger</c> instead
-    /// (<c>bindings/dotnet/README.md</c>). Replaces whatever
-    /// <see cref="SetLog"/> installed.</summary>
+    /// <summary>Send this stack's log to a <see cref="TraceSource"/>. Each
+    /// line is prefixed with its target (<c>sip: …</c>), traced at the type
+    /// <see cref="TraceEventTypeOf"/> gives, with the level's number as event
+    /// id. Without <paramref name="level"/>, the source's current switch
+    /// decides (<see cref="LogLevelFor"/>), so dropped lines are never
+    /// formatted. For <c>ILogger</c>, use <see cref="SetLog"/>. Replaces
+    /// whatever <see cref="SetLog"/> installed.</summary>
     public void LogTo(TraceSource source, SipralLogLevel? level = null)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -816,11 +666,9 @@ public sealed partial class SipralStack : IDisposable
     };
 
     /// <summary>This stack's health counters since it was created
-    /// (<c>sipral_stack_counters</c>): registrations, how calls ended, what
-    /// was screened, and — new in ABI 0.30 — requests and responses sent
-    /// again, transactions timed out and requests refused at a limit. One
-    /// struct copy, cheap enough to sample on a timer; every member only
-    /// grows except <see cref="SipralCounters.ActiveCalls"/>.</summary>
+    /// (<c>sipral_stack_counters</c>). Cheap enough to sample on a timer;
+    /// every member only grows except
+    /// <see cref="SipralCounters.ActiveCalls"/>.</summary>
     public SipralCounters Counters()
     {
         var counters = new SipralCounters { Size = (nuint)Marshal.SizeOf<SipralCounters>() };
@@ -831,20 +679,13 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary>Ask these STUN servers from now on, in order of preference,
-    /// each <c>host:port</c> — what <c>stunServer</c> and
-    /// <c>stunFallbacks</c> would have named — without creating the stack
-    /// again (<c>sipral_stack_stun_servers</c>). Every socket the stack keeps
-    /// mapped is asked again of the new list at once:
-    /// <see cref="SipralEventKind.StunServer"/> says the server in use moved
-    /// and <see cref="SipralEventKind.NatMapping"/> what the new one answers.
-    /// On a stack created without a STUN server the signalling socket starts
-    /// being kept mapped, and every media socket opened from then on is asked
-    /// where it appears from before its call is described. An empty list
-    /// asks nobody any more: accounts a STUN answer moved register their own
-    /// address again, and calls are described by their sockets' own
-    /// addresses. A stack with a TURN server keeps asking STUN, so an empty
-    /// list there throws with <see cref="SipralStatus.InvalidArgument"/>, as
-    /// does an entry that is not an address and a port.</summary>
+    /// each <c>host:port</c> (<c>sipral_stack_stun_servers</c>). Mapped
+    /// sockets ask the new list at once (<see cref="SipralEventKind.StunServer"/>,
+    /// <see cref="SipralEventKind.NatMapping"/>). On a stack created without
+    /// STUN, this turns mapping on. An empty list turns it off: accounts
+    /// register their own address again. With a TURN server an empty list
+    /// throws with <see cref="SipralStatus.InvalidArgument"/>, as does an
+    /// entry that is not <c>host:port</c>.</summary>
     public void SetStunServers(IReadOnlyList<string> servers)
     {
         ArgumentNullException.ThrowIfNull(servers);
@@ -856,17 +697,12 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary><c>sipral_stack_network_test</c>: test the network before a
-    /// call without placing one of its own, and return the test's number.
-    /// What it found arrives as <see cref="SipralEventKind.NetworkTest"/>
-    /// (<see cref="SipralEventArgs.NetworkTest"/>). <paramref name="account"/>
-    /// has its server asked with an <c>OPTIONS</c> on its own transport; on a
-    /// stack with a STUN server the answer the signalling socket was last
-    /// given stands for the STUN part. <paramref name="echoCall"/> is a call
-    /// this stack placed to an echo service: its audio is measured for
-    /// <paramref name="echoMs"/> (8000 by default) once its media starts,
-    /// and the test hangs it up. A part that has not answered within
-    /// <paramref name="timeoutMs"/> (30000 by default) counts as
-    /// failed.</summary>
+    /// call and return the test's number; results arrive as
+    /// <see cref="SipralEventKind.NetworkTest"/>. <paramref name="account"/>'s
+    /// server is sent an <c>OPTIONS</c>. <paramref name="echoCall"/>, a call
+    /// to an echo service, is measured for <paramref name="echoMs"/> (8000 by
+    /// default) and then hung up by the test. A part silent past
+    /// <paramref name="timeoutMs"/> (30000 by default) fails.</summary>
     public uint NetworkTest(Account? account = null, Call? echoCall = null, uint echoMs = 0, uint timeoutMs = 0)
     {
         var config = SipralNetworkTestConfig.Sized();
@@ -881,21 +717,17 @@ public sealed partial class SipralStack : IDisposable
         return test;
     }
 
-    /// <summary><c>sipral_stack_stir</c>: verify the callers of the calls
-    /// this stack's accounts receive against <paramref name="anchors"/> (PEM
-    /// or DER certificates, the STI-PA's roots in a SHAKEN deployment) from
-    /// now on (RFC 8224), replacing what an earlier call set.
-    /// <paramref name="unixSeconds"/> is the wall clock now, which a PASSporT
-    /// is signed and judged by, and defaults to this machine's; a stack whose
-    /// accounts only sign calls this too, with no anchors, before adding
-    /// them. The certificate a call names is asked for by
-    /// <see cref="SipralEventKind.CallerVerification"/> at
-    /// <see cref="SipralVerificationStage.CertificateWanted"/> and handed
-    /// over with <see cref="StirCertificate"/>.
-    /// <paramref name="acceptServiceProviderCodes"/> lets a certificate that
-    /// names a service provider code rather than numbers vouch for any
-    /// caller, as a SHAKEN deployment's do; off, a certificate covers only
-    /// the numbers it names.</summary>
+    /// <summary><c>sipral_stack_stir</c>: verify incoming callers against
+    /// <paramref name="anchors"/> (PEM or DER roots, RFC 8224), replacing any
+    /// earlier setting. <paramref name="unixSeconds"/> is the wall clock
+    /// PASSporTs are judged by (default: this machine's). A stack that only
+    /// signs calls this too, without anchors, before adding accounts. A
+    /// call's certificate is requested at
+    /// <see cref="SipralVerificationStage.CertificateWanted"/> and supplied
+    /// with <see cref="StirCertificate"/>.
+    /// <paramref name="acceptServiceProviderCodes"/> lets a certificate naming
+    /// a service provider code vouch for any caller, as in SHAKEN; otherwise
+    /// it covers only the numbers it names.</summary>
     public void Stir(byte[]? anchors, ulong freshnessSeconds = 0, ulong certificateWaitMs = 0, ulong? unixSeconds = null, bool acceptServiceProviderCodes = false)
     {
         using var pin = new Interop.PinnedBytes(anchors is { Length: > 0 } ? anchors : null);
@@ -912,12 +744,10 @@ public sealed partial class SipralStack : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_stack_stir(Handle, config, NowMs), "sipral_stack_stir");
     }
 
-    /// <summary><c>sipral_call_stir_certificate</c>: the chain the URL a
-    /// verification asked for yielded — PEM or DER, the signing certificate
-    /// first — or <see langword="null"/> for one that could not be had.
-    /// <paramref name="call"/> is the handle the event named: the call has
-    /// not been announced yet. Its verdict follows as
-    /// <see cref="SipralEventKind.CallerVerification"/> at
+    /// <summary><c>sipral_call_stir_certificate</c>: the fetched chain (PEM or
+    /// DER, signing certificate first), or <see langword="null"/> if it could
+    /// not be had. <paramref name="call"/> is the handle the event named; the
+    /// call is not announced yet. The verdict follows at
     /// <see cref="SipralVerificationStage.Verified"/>.</summary>
     public void StirCertificate(ulong call, byte[]? chain)
     {
@@ -927,8 +757,7 @@ public sealed partial class SipralStack : IDisposable
             "sipral_call_stir_certificate");
     }
 
-    /// <summary><c>host:port</c>, the text shape every address crosses
-    /// this ABI as.</summary>
+    /// <summary><c>host:port</c>, as addresses cross the ABI.</summary>
     public static string FormatAddress(IPEndPoint endpoint) => $"{endpoint.Address}:{endpoint.Port}";
 
     /// <summary>The inverse of <see cref="FormatAddress"/>.</summary>
@@ -938,68 +767,47 @@ public sealed partial class SipralStack : IDisposable
         return (text[..idx], int.Parse(text[(idx + 1)..]));
     }
 
-    // -- accounts and calls --------------------------------------------
-
-    /// <summary><c>sipral_account_add</c>. See <see cref="Account"/>.
-    /// <paramref name="registrar"/> left out makes an account that never
-    /// registers (<c>docs/08-ffi.md</c>, "An account with no registrar
-    /// never registers"), with <paramref name="registrarAddress"/> as the
-    /// outbound proxy every request it places still goes to.
+    /// <summary><c>sipral_account_add</c>. Without <paramref name="registrar"/>
+    /// the account never registers, and <paramref name="registrarAddress"/>
+    /// is its outbound proxy.
     ///
-    /// <paramref name="sessionTimer"/> is the account's session timer (RFC
-    /// 4028): the stack's default, <see cref="SipralSessionTimer.Off"/>, or
+    /// <paramref name="sessionTimer"/> (RFC 4028): the stack's default,
+    /// <see cref="SipralSessionTimer.Off"/>, or
     /// <see cref="SipralSessionTimer.Interval"/> with
-    /// <paramref name="sessionIntervalSeconds"/>, 90 or more.
+    /// <paramref name="sessionIntervalSeconds"/> of 90 or more.
     /// <paramref name="privacy"/> is the <c>Sipral.Privacy*</c> bits every
-    /// call this account places asks for (RFC 3323) —
-    /// <c>Sipral.PrivacyId</c> places them anonymous in <c>From</c>.
-    /// <paramref name="trustedPeers"/> are the addresses (IP literals) whose
-    /// <c>P-Asserted-Identity</c> this account believes and toward which
-    /// alone it asserts its own (RFC 3325): a call from anywhere else carries
-    /// no asserted identity, and <see cref="SipralCallerIdentity.Trusted"/>
-    /// says which it was. <paramref name="security"/> is the account's own
-    /// SRTP policy and suites, and its STIR/SHAKEN verification and signing
-    /// (<see cref="AccountSecurity"/>).
+    /// placed call asks for (RFC 3323); <c>Sipral.PrivacyId</c> makes
+    /// <c>From</c> anonymous. <paramref name="trustedPeers"/> (IP literals)
+    /// are the only peers whose <c>P-Asserted-Identity</c> is believed and to
+    /// whom this account asserts its own (RFC 3325);
+    /// <see cref="SipralCallerIdentity.Trusted"/> says which applied.
+    /// <paramref name="security"/>: SRTP and STIR/SHAKEN per account.
     ///
-    /// <paramref name="serverUri"/> names the server by a URI whose host RFC
-    /// 3263 locates — <c>sip:pbx.example.com</c>, <c>sips:example.com:5061</c>
-    /// — in place of <paramref name="registrarAddress"/>: exactly one of the
-    /// two is given. The lookups are the stack's <c>resolver</c>'s;
-    /// <see cref="SipralEventKind.Located"/> says where the server was found
-    /// and <see cref="SipralEventKind.LocateFailed"/> why not. A REGISTER
-    /// waits for the first answer, and a call placed before it with no
-    /// <c>destination</c> throws with <see cref="SipralStatus.WrongState"/>.
-    /// <paramref name="serverNaptr"/> asks the domain for NAPTR records before
-    /// SRV (RFC 3263 §4.1). <paramref name="keepaliveMs"/> keeps the
-    /// account's flow to its server open at that interval whatever STUN found
-    /// — a double CRLF on UDP, a ping on a stream — 1 000 to 120 000,
-    /// <c>0</c> for never. <paramref name="tlsPin"/> is the SHA-256
-    /// fingerprint of the one TLS certificate the account trusts, for an
-    /// application that runs the account's TLS itself:
-    /// <see cref="Account.CheckCertificate"/> is its verdict.
+    /// <paramref name="serverUri"/> (e.g. <c>sips:example.com:5061</c>) is
+    /// located by RFC 3263 instead of <paramref name="registrarAddress"/>;
+    /// give exactly one. <see cref="SipralEventKind.Located"/> and
+    /// <see cref="SipralEventKind.LocateFailed"/> report the lookup. REGISTER
+    /// waits for it; a call placed before it without <c>destination</c>
+    /// throws with <see cref="SipralStatus.WrongState"/>.
+    /// <paramref name="serverNaptr"/> asks NAPTR before SRV (RFC 3263 §4.1).
+    /// <paramref name="keepaliveMs"/> (1 000 to 120 000, <c>0</c> for never)
+    /// keeps the flow open regardless of STUN. <paramref name="tlsPin"/> is
+    /// the SHA-256 fingerprint of the one certificate trusted, for an
+    /// application running its own TLS; see <see cref="Account.CheckCertificate"/>.
     ///
-    /// <paramref name="streamProtocol"/> (<see cref="SipralTransport.Tcp"/> or
-    /// <see cref="SipralTransport.Tls"/>) puts the account on a connection of
-    /// its own to its server, beside accounts on this stack's UDP socket to
-    /// other servers, in one stack with one audio engine: the stack asks for
-    /// the connection (<see cref="SipralEventKind.TransportWanted"/>, nothing
-    /// outgrown), this class opens it to the account's server whatever
-    /// <c>streamFallback</c> says and binds it, and the REGISTER and every call
-    /// of the account go over it. A TLS one is held to
-    /// <paramref name="tlsPin"/> when the account has one, to the stack's
-    /// <c>tlsTrust</c> otherwise, under <c>tlsServerName</c> or the server's
-    /// host. One that closes is opened again. Until it is open a call the
-    /// account places throws with <see cref="SipralStatus.TransportDown"/>.
-    /// Only on a stack that signals over UDP.
+    /// <paramref name="streamProtocol"/> (TCP or TLS) gives the account its own
+    /// connection, beside UDP accounts in the same stack. This class opens it
+    /// on <see cref="SipralEventKind.TransportWanted"/> regardless of
+    /// <c>streamFallback</c>, and reopens it if it closes. TLS is checked
+    /// against <paramref name="tlsPin"/> if set, else the stack's
+    /// <c>tlsTrust</c>. Until open, placing a call throws with
+    /// <see cref="SipralStatus.TransportDown"/>. UDP stacks only.
     ///
     /// <paramref name="realms"/> are the realms the password answers (RFC
-    /// 3261 §22.1). Left out, the account answers the realm its server first
-    /// challenges it with and every realm its REGISTERs are challenged with,
-    /// and no other; an SBC or outbound proxy at the server's address that
-    /// challenges calls under a realm of its own needs both named. A
-    /// challenge the password is not for is not answered, and
-    /// <see cref="SipralEventKind.ChallengeDeclined"/> says who asked and why
-    /// (<see cref="SipralEventArgs.Challenge"/>).</summary>
+    /// 3261 §22.1). By default: the server's first challenge realm and every
+    /// REGISTER challenge realm. An SBC challenging calls under its own realm
+    /// needs both named. Other challenges go unanswered, reported as
+    /// <see cref="SipralEventKind.ChallengeDeclined"/>.</summary>
     public Account AddAccount(
         string aor,
         string? registrarAddress = null,
@@ -1052,13 +860,8 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary>
-    /// <c>sipral_call_place</c>, with this stack running the call's audio:
-    /// a media socket is opened before the INVITE goes out, and its
-    /// <c>host:port</c> is offered as <c>media_address</c>.
-    /// <paramref name="options"/> adds a real-time text stream on a socket of
-    /// its own, RTCP feedback, this end as a conference's focus, this call's
-    /// own codec order, or a 3xx followed to its targets
-    /// (<see cref="SipralCallOptions"/>).
+    /// <c>sipral_call_place</c>. A media socket is opened first and offered
+    /// as <c>media_address</c>. See <see cref="SipralCallOptions"/>.
     /// </summary>
     public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
     {
@@ -1123,14 +926,10 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary>
-    /// Opens a media socket for an incoming call and answers it there,
-    /// through <c>sipral_call_answer_media</c>. <paramref name="args"/>
-    /// is the <see cref="SipralEventKind.IncomingCall"/> event a listener
-    /// read off <see cref="Events"/>. With <paramref name="options"/> the
-    /// call is answered through <c>sipral_call_answer_with</c>: a text
-    /// socket opened for a real-time text stream the offer carried, RTCP
-    /// feedback, this end named the focus of a conference, or the codecs
-    /// this call accepts.
+    /// Answers an <see cref="SipralEventKind.IncomingCall"/> on a new media
+    /// socket (<c>sipral_call_answer_media</c>, or
+    /// <c>sipral_call_answer_with</c> when <paramref name="options"/> is
+    /// given).
     /// </summary>
     public Call AnswerCall(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralCallOptions? options = null)
     {
@@ -1167,10 +966,8 @@ public sealed partial class SipralStack : IDisposable
         return call;
     }
 
-    /// <summary>Closes a socket this stack opened with
-    /// <see cref="OpenMediaSocket"/> beside a call's media one — its text
-    /// socket, a recording server's two — and gives its port back to the
-    /// RTP range.</summary>
+    /// <summary>Closes an extra socket from <see cref="OpenMediaSocket"/>
+    /// and returns its port to the RTP range.</summary>
     internal void CloseSocket(Socket socket)
     {
         int port;
@@ -1186,35 +983,27 @@ public sealed partial class SipralStack : IDisposable
         GiveBackPort(port);
     }
 
-    /// <summary><c>sipral_call_reject</c> for an incoming call nothing has
-    /// answered, so no <see cref="Call"/> — and no media socket — was
-    /// ever needed.</summary>
+    /// <summary><c>sipral_call_reject</c> for an unanswered incoming
+    /// call.</summary>
     public void RejectCall(SipralEventArgs args, uint code = 486)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_reject(Handle, args.Call, code, NowMs), "sipral_call_reject");
     }
 
-    /// <summary>Says an incoming call nothing has answered yet is ringing:
-    /// <c>sipral_call_ring</c> with no description, a 180 Ringing. The call
-    /// is answered later with <see cref="AnswerCall"/>, or refused with
-    /// <see cref="RejectCall"/>, as before.</summary>
+    /// <summary>Sends 180 Ringing for an unanswered incoming call
+    /// (<c>sipral_call_ring</c>).</summary>
     public void RingCall(SipralEventArgs args)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_ring(Handle, args.Call, null!, 0, NowMs), "sipral_call_ring");
     }
 
     /// <summary>
-    /// Says an incoming call is ringing with this stack running its audio
-    /// before anybody answers: <c>sipral_call_ring_media</c>, a 183 Session
-    /// Progress whose answer is written against a media socket opened here.
-    /// <see cref="SipralEventKind.MediaStarted"/> follows, and what the
-    /// application sends on the returned call's <see cref="Call.Media"/> is
-    /// what the caller hears while it waits — a ringback, an announcement.
-    /// Answer it with that call's <see cref="Call.Answer"/>, which keeps the
-    /// session and description written here, never with
-    /// <see cref="AnswerCall"/>, which would open a second socket.
-    /// <paramref name="srtp"/> and <paramref name="codecs"/> are this call's
-    /// own, in place of the stack's; an INVITE that carried no offer is
+    /// Sends 183 Session Progress with early media on a new socket
+    /// (<c>sipral_call_ring_media</c>). <see cref="SipralEventKind.MediaStarted"/>
+    /// follows; what is sent on <see cref="Call.Media"/> is what the caller
+    /// hears while waiting. Answer with the returned call's
+    /// <see cref="Call.Answer"/>, not <see cref="AnswerCall"/>, which would
+    /// open a second socket. An INVITE without an offer is
     /// <see cref="SipralStatus.WrongState"/>, with nothing sent.
     /// </summary>
     public Call RingCallWithMedia(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralSrtp srtp = 0, string? codecs = null)
@@ -1252,26 +1041,18 @@ public sealed partial class SipralStack : IDisposable
         return call;
     }
 
-    /// <summary>Every screening callback handed to
-    /// <c>sipral_stack_screen</c>, kept for the stack's life: one replaced
-    /// may still be asking on a receive thread that entered before.</summary>
+    // Kept for the stack's life: a replaced callback may still be running.
     private readonly List<SipralScreenCallback> _screenCallbacks = new();
 
     /// <summary>
-    /// Installs <paramref name="policy"/> as this stack's screening policy
-    /// (<c>sipral_stack_screen</c>), or removes it with
-    /// <see langword="null"/>. Every INVITE is handed to it before it has any
-    /// effect — before ringing, before
-    /// <see cref="SipralEventKind.IncomingCall"/>, before a call handle
-    /// exists — as a <see cref="SipralInvite"/>. It answers
-    /// <see cref="Sipral.ScreenAccept"/> (200) to let the call arrive, or the
-    /// SIP status to refuse it with, 400 to 699; what it refuses is answered
-    /// and forgotten, with nothing for the application to clean up, and
-    /// counted in <see cref="SipralCounters.ScreenedRefusedByPolicy"/>.
-    /// It runs on the thread feeding the stack bytes, with the stack's lock
-    /// held, so it must not call into this stack — that is refused with
-    /// <see cref="SipralStatus.Busy"/>. A policy that throws refuses the
-    /// call: zero is never an acceptance.
+    /// Installs a screening policy (<c>sipral_stack_screen</c>), or removes
+    /// it with <see langword="null"/>. Every INVITE reaches it before any
+    /// effect, even before a call handle exists. Return
+    /// <see cref="Sipral.ScreenAccept"/> (200) to accept, or a 400 to 699
+    /// status to refuse; refused calls need no cleanup and are counted in
+    /// <see cref="SipralCounters.ScreenedRefusedByPolicy"/>. It runs with the
+    /// stack's lock held, so calling into the stack fails with
+    /// <see cref="SipralStatus.Busy"/>. A policy that throws refuses the call.
     /// </summary>
     public void Screen(Func<SipralInvite, uint>? policy)
     {
@@ -1309,19 +1090,14 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary>
-    /// Takes a REFER outside any dialog and places the call it asks for:
-    /// <c>sipral_call_accept_transfer</c> on the referral's handle.
-    /// <paramref name="args"/> is the <see cref="SipralEventKind.Referral"/>
-    /// event with a zero <see cref="SipralReferralEventInfo.StatusCode"/>, or
-    /// a <see cref="SipralEventKind.TransferRequested"/> — the far end of a
-    /// call asking this end to call somebody else — taken the same way.
-    /// The stack answers 202, reports on the call to whoever asked, and
-    /// places it from the account the event names, to the REFER's own
-    /// target; a media socket is opened for it here the way
-    /// <see cref="PlaceCall"/> opens one, and the <see cref="Call"/>
-    /// returned is that placed call. Whoever sent the REFER can make this
-    /// line dial anything, so this is never done on the application's
-    /// behalf.
+    /// Accepts a REFER and places the call it asks for
+    /// (<c>sipral_call_accept_transfer</c>). <paramref name="args"/> is a
+    /// <see cref="SipralEventKind.Referral"/> with a zero
+    /// <see cref="SipralReferralEventInfo.StatusCode"/>, or a
+    /// <see cref="SipralEventKind.TransferRequested"/>. The stack answers 202,
+    /// reports progress to the sender, and returns the placed call. The
+    /// sender can make this line dial anything, so this is always the
+    /// application's decision.
     /// </summary>
     public Call AcceptReferral(SipralEventArgs args, string? mediaHost = null, int mediaPort = 0, SipralSrtp srtp = 0, SipralIce ice = 0)
     {
@@ -1356,13 +1132,11 @@ public sealed partial class SipralStack : IDisposable
         return call;
     }
 
-    /// <summary>Takes the REFER of a
-    /// <see cref="SipralEventKind.TransferRequested"/> with a call this
-    /// application placed itself, <paramref name="placed"/>:
-    /// <c>sipral_call_accept_transfer_placed</c>. The REFER is answered 202
-    /// and the far end hears that call's progress in NOTIFYs, as though the
-    /// stack had placed it for the REFER; the call the REFER came in stays
-    /// as it is.</summary>
+    /// <summary>Accepts a <see cref="SipralEventKind.TransferRequested"/>
+    /// with a call the application placed itself
+    /// (<c>sipral_call_accept_transfer_placed</c>): 202, then NOTIFYs with
+    /// <paramref name="placed"/>'s progress. The original call is
+    /// untouched.</summary>
     public void AcceptTransferPlaced(SipralEventArgs args, Call placed)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_accept_transfer_placed(Handle, args.Call, placed.Handle, NowMs), "sipral_call_accept_transfer_placed");
@@ -1377,13 +1151,11 @@ public sealed partial class SipralStack : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_reject_transfer(Handle, args.Call, code, NowMs), "sipral_call_reject_transfer");
     }
 
-    /// <summary>Answers an incoming call nothing has answered with a
-    /// redirection (<c>sipral_call_redirect</c>): <paramref name="statusCode"/>
-    /// 300 to 399, 302 by default, with <paramref name="targets"/> (URIs) in
-    /// <c>Contact</c>. With <paramref name="reason"/> — RFC 5806's
-    /// <c>unconditional</c>, <c>user-busy</c>, <c>no-answer</c>… — a
-    /// <c>Diversion</c> names the address that was called, so the next phone
-    /// says the call was forwarded and why.</summary>
+    /// <summary>Redirects an unanswered incoming call
+    /// (<c>sipral_call_redirect</c>) with a 3xx (302 by default) listing
+    /// <paramref name="targets"/> in <c>Contact</c>. A
+    /// <paramref name="reason"/> (RFC 5806, e.g. <c>user-busy</c>) adds a
+    /// <c>Diversion</c> naming the called address.</summary>
     public void RedirectCall(SipralEventArgs args, IEnumerable<string> targets, uint statusCode = 302, string? reason = null)
     {
         var listed = ToSBytes(string.Join(", ", targets));
@@ -1394,13 +1166,10 @@ public sealed partial class SipralStack : IDisposable
             "sipral_call_redirect");
     }
 
-    /// <summary>Every entry of one identity list a call's INVITE carried —
-    /// every asserted party, every <c>Diversion</c> and its reason, every
-    /// <c>History-Info</c> target and index, every <c>Alert-Info</c> URI —
-    /// for a call named by its handle (<see cref="SipralEventArgs.Call"/> for
-    /// one no <see cref="Call"/> answered yet). <see cref="Call.Identity"/>
-    /// is the same for one that has. <see cref="SipralCallerIdentity"/> has
-    /// the first of each.</summary>
+    /// <summary>Every entry of one identity list from a call's INVITE
+    /// (asserted parties, <c>Diversion</c>, <c>History-Info</c>,
+    /// <c>Alert-Info</c>), by handle, for a call not yet answered.
+    /// <see cref="Call.Identity"/> does the same for an answered one.</summary>
     public IReadOnlyList<string> CallIdentity(ulong call, SipralIdentityText which)
     {
         nuint count = 0;
@@ -1424,28 +1193,22 @@ public sealed partial class SipralStack : IDisposable
         return texts;
     }
 
-    /// <summary>The network under this stack changed, and
-    /// <paramref name="host"/> is this machine's address on the new one.
+    /// <summary>The network changed; <paramref name="host"/> is this
+    /// machine's new address.
     ///
-    /// The signalling socket is bound again at <paramref name="host"/> —
-    /// over UDP on the port it had, <see cref="KeptSignallingPort"/> saying
-    /// when that port was taken there — and the main transport told (<c>sipral_stack_transport_bind</c>), the change
-    /// reported (<c>sipral_stack_network_changed</c>), and every account added
-    /// without a <c>Contact</c> of its own pointed at the new address
-    /// (<c>sipral_account_rebind</c>). On <see cref="SipralRecovery.Rebuild"/>
-    /// every call whose media was described at the old address gets
-    /// <see cref="SipralEventKind.CallAddressWanted"/>, which
-    /// <see cref="Call.Readdress"/> answers — the far end is still sending to
-    /// an address this machine no longer has. An account added with an
-    /// explicit <c>contact</c> is the application's to
-    /// <see cref="Account.Rebind"/>.
+    /// The signalling socket is rebound at <paramref name="host"/> (UDP keeps
+    /// its port if free, see <see cref="KeptSignallingPort"/>), the change is
+    /// reported (<c>sipral_stack_network_changed</c>), and accounts without
+    /// their own <c>contact</c> are rebound. On
+    /// <see cref="SipralRecovery.Rebuild"/>, calls described at the old
+    /// address get <see cref="SipralEventKind.CallAddressWanted"/>, answered
+    /// with <see cref="Call.Readdress"/>. Accounts with an explicit
+    /// <c>contact</c> are the application's to <see cref="Account.Rebind"/>.
     ///
-    /// A stack created with no <c>bindHost</c> keeps its socket on every
-    /// interface, and its port, and keeps picking its own address: it
-    /// advertises the route toward its first account's server again, as when
-    /// it was created — <paramref name="host"/> only when no account names a
-    /// server by its address — and each account is reached at the route
-    /// toward its own.</summary>
+    /// A stack without <c>bindHost</c> keeps its socket and port, and again
+    /// advertises the route toward each account's server
+    /// (<paramref name="host"/> only when no account names a server by
+    /// address).</summary>
     public SipralRecovery MoveTo(string host, SipralLink link = SipralLink.Wired)
     {
         var previous = ParseAddress(BindAddress).Host;
@@ -1478,8 +1241,6 @@ public sealed partial class SipralStack : IDisposable
         }
         foreach (var account in accounts.Where(a => !a.ContactGiven))
         {
-            // on a stack that picks its own address, each account is reached
-            // at the route toward its own server, as when it was added
             if (picks && IsAddress(account.RegistrarAddress))
             {
                 account.Readvertise(AdvertiseToward(account.RegistrarAddress));
@@ -1492,8 +1253,6 @@ public sealed partial class SipralStack : IDisposable
         return (SipralRecovery)recovery;
     }
 
-    /// <summary>The UDP signalling socket bound again at
-    /// <paramref name="host"/>, and the main transport told.</summary>
     private void MoveSocket(string host)
     {
         var socket = SignallingSocket(IPAddress.Parse(host));
@@ -1519,15 +1278,9 @@ public sealed partial class SipralStack : IDisposable
         old?.Dispose();
     }
 
-    /// <summary>The UDP signalling socket bound again at
-    /// <paramref name="host"/>, on the port chosen at creation or, when that
-    /// was 0, the port in use now; on a port the system picks only when that
-    /// one is held there by another socket, which
-    /// <see cref="KeptSignallingPort"/> then says. The old socket holds the
-    /// port itself when it is bound on every interface or at
-    /// <paramref name="host"/> already, so it is let go of — a send on it
-    /// meanwhile fails, as one on a replaced socket does — before the port is
-    /// tried a second time.</summary>
+    // Rebinds on the chosen port (or the current one), falling back to a
+    // system port only if another socket holds it. The old socket may hold
+    // the port itself, so it is closed before the second attempt.
     private Socket SignallingSocket(IPAddress host)
     {
         var inUse = (_socket?.LocalEndPoint as IPEndPoint)?.Port ?? 0;
@@ -1547,8 +1300,8 @@ public sealed partial class SipralStack : IDisposable
             }
         }
         var made = wanted == 0 ? null : On(wanted);
-        // the socket in use is let go of only for an address this machine
-        // has: a move to one it lacks throws below with that socket open
+        // Close the old socket only if the new address exists here; a move to
+        // one this machine lacks throws below with the old socket still open.
         if (made is null && wanted != 0 && inUse == wanted && On(0) is { } usable)
         {
             usable.Dispose();
@@ -1564,28 +1317,22 @@ public sealed partial class SipralStack : IDisposable
         return made;
     }
 
-    /// <summary>Whether the last <see cref="MoveTo"/> that bound the UDP
-    /// signalling socket again kept its port — <c>bindPort</c>, or the port
-    /// in use when that was 0. <c>false</c> when another socket held that
-    /// port at the new address and the system chose one instead, which
-    /// <see cref="BindAddress"/> then names: a peer or a firewall rule that
-    /// only knows the old port has to be told. <c>true</c> before any
+    /// <summary>Whether the last <see cref="MoveTo"/> kept the UDP signalling
+    /// port. <c>false</c> when it was taken at the new address and
+    /// <see cref="BindAddress"/> now names another; peers or firewall rules
+    /// that know the old port must be told. <c>true</c> before any
     /// move.</summary>
     public bool KeptSignallingPort { get; private set; } = true;
 
-    /// <summary>The port the application chose for the signalling socket,
-    /// 0 when it let the system choose: what <see cref="MoveTo"/> binds
-    /// again.</summary>
+    // 0 when the system chose.
     private readonly int _chosenPort;
 
     internal Call? CallFor(ulong handle) => _calls.TryGetValue(handle, out var call) ? call : null;
 
     internal void RegisterCall(Call call) => _calls[call.Handle] = call;
 
-    /// <summary>A call this stack runs the media of, and — with a TURN server
-    /// reached over TCP or TLS — the socket whose connection its last
-    /// farewell goes on, kept past the call itself until that connection
-    /// closes.</summary>
+    // With TURN over a stream, the socket is remembered past the call: its
+    // last farewell goes on that connection.
     private void Track(Call call, string mediaAddress)
     {
         RegisterCall(call);
@@ -1597,21 +1344,11 @@ public sealed partial class SipralStack : IDisposable
 
     internal void ForgetCall(ulong handle) => _calls.TryRemove(handle, out _);
 
-    // -- the poll thread --------------------------------------------------
-
-    /// <summary>
-    /// The C callback, on the poll thread. <see cref="SipralEventKind.ResolveNeeded"/>
-    /// is delivered and not answered here. A dialog keeps the flow its
-    /// INVITE went out on — the registrar or outbound proxy the account
-    /// names, the only path that survives a NAT — and the event only says
-    /// that the far end's <c>Contact</c> names some other address. This
-    /// package has no resolver to answer it with, and answering with that
-    /// <c>Contact</c> as a literal address moves the rest of the call onto
-    /// it: behind a registrar reached through a port mapping or a NAT, the
-    /// BYE then goes to an address nothing answers on. An application with
-    /// a real lookup answers the event itself, through
-    /// <c>sipral_stack_resolved</c>.
-    /// </summary>
+    // The C callback, on the poll thread. ResolveNeeded is delivered but not
+    // answered: the dialog keeps the flow its INVITE used, the only path
+    // through a NAT. Answering with the far end's Contact would move the BYE
+    // to an address nothing answers on. An application with a real lookup
+    // answers through sipral_stack_resolved.
     private void OnEvent(IntPtr rawEvent, IntPtr _)
     {
         Deliver(SipralEventArgs.Decode(rawEvent));
@@ -1619,12 +1356,9 @@ public sealed partial class SipralStack : IDisposable
 
     private void Deliver(SipralEventArgs args)
     {
-        // The call's own side effects (minting `Call.Media`, marking it
-        // ended) happen before `args` reaches any reader, the same
-        // ordering `bindings/python/sipral/stack.py`'s own `_deliver`
-        // keeps and for the same reason: a consumer of `Events` may look
-        // up `CallFor(args.Call)` the moment it wakes and read state that
-        // must already be current.
+        // Call side effects (Call.Media, ended state) happen before any
+        // reader sees the event, so a reader that looks up the call finds
+        // it current.
         if (args.TurnStream is { } asked)
         {
             _turnAsked.Enqueue(asked);
@@ -1649,21 +1383,8 @@ public sealed partial class SipralStack : IDisposable
         var call = args.Call != 0 ? CallFor(args.Call) : null;
         call?.Deliver(args);
 
-        // `EventReceived` runs synchronously on this thread, which is the
-        // one the native side is inside `sipral_stack_poll` on: what a
-        // handler throws must not unwind back into that native frame, the
-        // same "the callback does not unwind" contract `docs/08-ffi.md`
-        // states by name for the Kotlin listener, and for the same
-        // reason — undefined behaviour at best, and in practice the CLR's
-        // own fatal-exception handling for a reverse P/Invoke, which takes
-        // the whole process down over one subscriber's bug, every other
-        // stack and call included. Caught here, at the one place this
-        // thread crosses back into native code, exactly the way that
-        // Kotlin section says a thrown listener "goes to the uncaught
-        // exception handler of the thread it runs on ... never anywhere
-        // else in the application" — this poll thread's own handler is
-        // this catch, which lets it keep polling rather than let the whole
-        // application go down with it.
+        // We are inside sipral_stack_poll: an exception unwinding into the
+        // native frame would take the whole process down. Log and go on.
         try
         {
             EventReceived?.Invoke(this, args);
@@ -1675,14 +1396,9 @@ public sealed partial class SipralStack : IDisposable
         _events.Writer.TryWrite(args);
     }
 
-    /// <summary><c>audio_transmit_callback</c>, in device mode: one packet the
-    /// engine encoded from the microphone, sent from its call's media socket
-    /// — or, marked TCP or TLS, written on that socket's connection to the
-    /// TURN server. Runs on the engine's own thread, once per frame per call,
-    /// and calls nothing in the library: an entry point reached from here
-    /// could wait on the engine that is waiting on this callback. Nothing may
-    /// throw out of it either, back across the native frame that called
-    /// it.</summary>
+    // Device mode: one encoded packet, sent from the call's media socket or
+    // its TURN connection. Runs on the engine's thread and must not call the
+    // library (the engine is waiting on us) or throw into the native frame.
     internal void OnAudioTransmit(IntPtr raw, IntPtr userData)
     {
         try
@@ -1707,9 +1423,7 @@ public sealed partial class SipralStack : IDisposable
         catch (Exception ex) when (ex is SocketException or ObjectDisposedException or FormatException
                                        or ArgumentException)
         {
-            // a socket closed by a readdress or a hangup racing this send, or
-            // a destination that is not host:port: the packet is lost, which
-            // the far end's jitter buffer already knows how to hide
+            // socket closed by a racing hangup or readdress: one lost packet
         }
     }
 
@@ -1739,8 +1453,7 @@ public sealed partial class SipralStack : IDisposable
             var socket = _socket;
             if (socket is null)
             {
-                // one connection carries everything, whatever it names: the
-                // server it reaches is the outbound proxy
+                // stream signalling: the one connection is the outbound proxy
                 WriteLink(payload);
                 continue;
             }
@@ -1752,20 +1465,15 @@ public sealed partial class SipralStack : IDisposable
             }
             catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
             {
-                // Best effort, like the poll thread's Python counterpart:
-                // nothing here may throw, or this stack would never poll
-                // again. A socket `MoveTo` just replaced is one such.
+                // Best effort: a throw here would stop polling for good
+                // (e.g. a socket MoveTo just replaced).
             }
         }
     }
 
-    /// <summary><c>sipral_stack_poll_farewell</c>: what a call that just
-    /// ended still owes -- its RTCP BYE, and with a TURN server the
-    /// Refresh that gives its relay back -- sent through that call's own
-    /// media socket to the address the stack names. Under ICE that is the
-    /// path ICE chose or the TURN server, not necessarily the last address
-    /// media came from, which is only the fallback for a packet that names
-    /// none.</summary>
+    // An ended call's RTCP BYE and TURN Refresh, sent from its media socket
+    // to the address the stack names (under ICE, the chosen path); the last
+    // media source is only the fallback.
     private void DrainFarewells()
     {
         while (true)
@@ -1782,8 +1490,7 @@ public sealed partial class SipralStack : IDisposable
             }
             if (OverStream(packet.Protocol))
             {
-                // given back on the relay's connection, which is the
-                // stack's and not the call's, and outlives it
+                // the relay's connection outlives the call
                 if (_turnSockets.TryGetValue(endedCall, out var local))
                 {
                     var bytes = new byte[(int)packet.Len];
@@ -1810,29 +1517,11 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    // -- STUN/TURN on a media socket, before it has a call's media handle -
-
-    /// <summary><c>sipral_stack_nat_map</c>, and the wait its own doc
-    /// comment requires before a call may be described on <paramref
-    /// name="sock"/>.
-    ///
-    /// A no-op when this stack was not built with <c>nat:
-    /// SipralNat.Stun</c>: exactly today's behaviour for every other
-    /// stack. Otherwise <paramref name="sock"/> is tracked in <see
-    /// cref="_stunSockets"/> under <paramref name="address"/> —
-    /// <see cref="Run"/> then hands what arrives on it to
-    /// <c>sipral_stack_receive_stun</c> instead of treating it as
-    /// ordinary media, and <see cref="DrainStun"/> sends what
-    /// <c>sipral_stack_poll_stun</c> hands out for it — and this call
-    /// blocks the *calling* thread, never the poll thread, until <see
-    /// cref="SipralEventKind.NatMapping"/> names this socket (and, with
-    /// this stack's own <c>turnServer</c> set, until its <see
-    /// cref="SipralEventKind.NatRelay"/> too). <c>docs/06-nat.md</c> and
-    /// <c>docs/08-ffi.md</c> ("Behind a NAT") put the first within five
-    /// and a half seconds whatever the server does; <paramref
-    /// name="timeout"/> leaves comfortable room over that before raising
-    /// <see cref="TimeoutException"/>, which should not happen unless the
-    /// poll thread itself has stopped.</summary>
+    // sipral_stack_nat_map, then the wait required before a call may be
+    // described on the socket. No-op without STUN. Blocks the calling thread
+    // (never the poll thread) until NatMapping, and NatRelay with TURN. The
+    // stack answers within 5.5 s whatever the server does, so the 7 s
+    // timeout only fires if the poll thread has stopped.
     internal void MapMediaSocket(Socket sock, string address, TimeSpan? timeout = null)
     {
         if (_nat != SipralNat.Stun)
@@ -1863,10 +1552,8 @@ public sealed partial class SipralStack : IDisposable
             ReleaseStunSocket(address);
             throw new TimeoutException($"no NAT mapping answer for {address} within {wait}");
         }
-        // `turnServer` rides the same socket: `sipral_call_place` and
-        // `sipral_call_answer_media` both refuse a socket named here until
-        // its `SIPRAL_EVENT_KIND_NAT_RELAY` has arrived too, allocated or
-        // not (`docs/08-ffi.md`, "Behind a NAT").
+        // place/answer refuse the socket until its NAT_RELAY arrives,
+        // allocated or not
         if (_turn && !waiters.Relay.Wait(wait))
         {
             ReleaseStunSocket(address);
@@ -1874,11 +1561,7 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary>Stops treating <paramref name="address"/> as a
-    /// pre-media-handle STUN/TURN socket: called once <see
-    /// cref="SipralEventKind.MediaStarted"/> hands it to <see
-    /// cref="CallMedia"/> (which reads it from then on) or once a call
-    /// gives up on it before that ever happens.</summary>
+    // Once MediaStarted hands the socket to CallMedia, or the call gives up.
     internal void ReleaseStunSocket(string address)
     {
         lock (_natLock)
@@ -1888,14 +1571,8 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary><c>sipral_stack_nat_unmap</c> for a media socket named
-    /// with <c>sipral_stack_nat_map</c> that will carry no call after
-    /// all — <c>sipral_call_place</c> or <c>sipral_call_answer_media</c>
-    /// refused it, or <see cref="Dispose"/> is tearing the stack down
-    /// with it still named. A no-op for a socket this stack never
-    /// mapped (no <c>nat: SipralNat.Stun</c>, or the socket already
-    /// reached <see cref="SipralEventKind.MediaStarted"/> and belongs to
-    /// <see cref="CallMedia"/> now).</summary>
+    // sipral_stack_nat_unmap for a mapped socket that will carry no call
+    // (place/answer refused it, or Dispose). No-op for unmapped sockets.
     internal void ForgetMediaSocket(string address)
     {
         GiveBackPort(ParseAddress(address).Port);
@@ -1914,28 +1591,18 @@ public sealed partial class SipralStack : IDisposable
             SipralErrors.Call(
                 () => NativeMethods.sipral_stack_nat_unmap(Handle, localBytes, (nuint)localBytes.Length, NowMs),
                 "sipral_stack_nat_unmap");
-            // A relayed socket owes the server a Refresh with a lifetime
-            // of zero, waiting in `sipral_stack_poll_stun` now
-            // (`docs/08-ffi.md`, "sipral_stack_nat_unmap"); one drain
-            // sends it from the socket while it is still tracked and
-            // still open.
+            // send the zero-lifetime Refresh while the socket is still open
             DrainStun();
         }
         catch (SipralException)
         {
-            // Best effort on the way out, like the poll thread's Python
-            // counterpart.
+            // best effort on the way out
         }
         ReleaseStunSocket(address);
     }
 
-    /// <summary><c>sipral_stack_poll_stun</c>, until nothing is left to
-    /// send. <c>transmit.Source</c> names which media socket to send
-    /// from — exactly the point of this queue being separate from
-    /// <see cref="DrainTransmit"/>'s: a STUN request for one socket sent
-    /// from another would teach the server the wrong socket's mapping,
-    /// silently (<c>docs/08-ffi.md</c>, "Three entry points rather than a
-    /// second use of the two signalling ones").</summary>
+    // Each packet must leave from the socket transmit.Source names: sent from
+    // another, it would silently learn the wrong socket's mapping.
     private void DrainStun()
     {
         while (true)
@@ -1958,8 +1625,7 @@ public sealed partial class SipralStack : IDisposable
             var sourceText = Marshal.PtrToStringUTF8(_stunSource, (int)transmit.SourceLen) ?? string.Empty;
             if (OverStream(transmit.Protocol))
             {
-                // for the TURN server, on the socket's connection to it:
-                // never a datagram, which a network that blocks UDP drops
+                // on the TURN connection, never as a datagram
                 WriteTurn(sourceText, payload);
                 continue;
             }
@@ -1982,12 +1648,7 @@ public sealed partial class SipralStack : IDisposable
             }
             catch (ObjectDisposedException)
             {
-                // `sock` was still `_stunSockets[sourceText]` at the lock
-                // above, but `Call.Close`/`ForgetMediaSocket` on another
-                // thread can remove it from that dictionary and dispose
-                // it right after this thread let go of `_natLock` — the
-                // same race the `Run` loop's own catches guard against,
-                // one step later.
+                // disposed by Call.Close on another thread after the lock
             }
         }
     }
@@ -2001,9 +1662,7 @@ public sealed partial class SipralStack : IDisposable
             {
                 stunSnapshot = _stunSockets.Values.ToList();
             }
-            // this pass's signalling socket: `MoveTo` may replace it meanwhile,
-            // and over TCP or TLS there is none, the connection having a
-            // reader of its own
+            // MoveTo may replace it; null over TCP/TLS, read elsewhere
             var signalling = _socket;
             var checkRead = new List<Socket>(stunSnapshot.Count + 1);
             if (signalling is not null)
@@ -2028,14 +1687,8 @@ public sealed partial class SipralStack : IDisposable
             }
             catch (ObjectDisposedException)
             {
-                // A media socket in `stunSnapshot` was disposed by
-                // another thread — `Call.Close`/`ForgetMediaSocket`
-                // race with this select the way
-                // `bindings/python/sipral/stack.py`'s own `_run` can
-                // race a socket's `close()` too, caught there as an
-                // `OSError` on the next `recvfrom` instead. This poll
-                // just skips the sockets it cannot trust this pass;
-                // the next one reads `_stunSockets` fresh.
+                // a media socket closed by another thread; the next pass
+                // takes a fresh snapshot
                 checkRead.Clear();
             }
 
@@ -2048,12 +1701,8 @@ public sealed partial class SipralStack : IDisposable
                         EndPoint from = new IPEndPoint(IPAddress.Any, 0);
                         var count = signalling.ReceiveFrom(_receiveBuffer, ref from);
                         var fromText = ToSBytes(Encoding.UTF8.GetBytes(FormatAddress((IPEndPoint)from)));
-                        // `transport` here is a transport *id* (Sipral.TransportMain,
-                        // i.e. 0, for the one this stack was created with, or a
-                        // further one sipral_stack_transport_bind minted) — not a
-                        // SipralTransport *kind*. This stack never binds a second
-                        // transport, so every datagram it reads off its one UDP
-                        // socket belongs to the main one.
+                        // a transport id, not a SipralTransport kind: the UDP
+                        // socket is always the main transport
                         NativeMethods.sipral_stack_receive_datagram(
                             Handle, global::Sipral.Sipral.TransportMain, _receiveBuffer, (nuint)count,
                             fromText, (nuint)fromText.Length, null!, 0, NowMs);
@@ -2063,22 +1712,13 @@ public sealed partial class SipralStack : IDisposable
                     }
                     catch (ObjectDisposedException)
                     {
-                        // `MoveTo` closed this socket after the select
-                        // found it ready; the next pass reads the new one
+                        // MoveTo closed it after the select
                     }
                 }
                 else
                 {
-                    // A media socket `MapMediaSocket` named, still
-                    // waiting for its own mapping/relay or already
-                    // described but with no media handle yet: everything
-                    // arriving on it still goes to
-                    // `sipral_stack_receive_stun` (`docs/08-ffi.md`,
-                    // "Behind a NAT" — "Until the call's media handle
-                    // exists, everything arriving on its socket still
-                    // goes to sipral_stack_receive_stun") until
-                    // `Call.Deliver` releases it on
-                    // `SIPRAL_EVENT_KIND_MEDIA_STARTED`.
+                    // Until the call's media handle exists, everything on a
+                    // mapped socket goes to sipral_stack_receive_stun.
                     string? address;
                     lock (_natLock)
                     {
@@ -2103,18 +1743,8 @@ public sealed partial class SipralStack : IDisposable
                     }
                     catch (ObjectDisposedException)
                     {
-                        // `sock` was still in `checkRead` because
-                        // `Socket.Select` found it ready before this loop
-                        // began, but `Call.Close`/`SipralStack.Dispose` can
-                        // dispose the very same media socket from an
-                        // application thread with no lock between that
-                        // return and this `ReceiveFrom` — the same race
-                        // the `ObjectDisposedException` catch around
-                        // `Socket.Select` above guards, one step later.
-                        // `_stunSockets`/`_natWaiters` are already cleared
-                        // for it by then (`ReleaseStunSocket` runs before
-                        // the socket is disposed), so there is nothing
-                        // left here to clean up.
+                        // closed by another thread after the select; its
+                        // entries were released first, nothing to clean
                     }
                 }
             }
@@ -2139,20 +1769,11 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    // -- a TURN server reached over TCP or TLS ------------------------------
-
-    /// <summary>Whether a <c>SipralTransport</c> number marks bytes for a
-    /// TURN server's connection rather than a datagram.</summary>
     internal static bool OverStream(uint protocol) =>
         protocol == (uint)SipralTransport.Tcp || protocol == (uint)SipralTransport.Tls;
 
-    /// <summary>Writes <paramref name="payload"/> on media socket
-    /// <paramref name="local"/>'s connection to the TURN server, whole: what
-    /// <c>sipral_stack_poll_stun</c>, <c>sipral_stack_poll_farewell</c> and
-    /// a call's media hand out marked TCP or TLS. Thread-safe; a connection
-    /// that fails here is closed and the stack told, which loses the relay
-    /// on it — told from the poll thread when the write came from the audio
-    /// engine's (<paramref name="fromEngine"/>).</summary>
+    // Thread-safe. A failed connection is closed and the stack told (from
+    // the poll thread when the write came from the audio engine).
     internal void WriteTurn(string local, byte[] payload, bool fromEngine = false)
     {
         if (!_turnStreams.TryGetValue(local, out var stream))
@@ -2178,9 +1799,6 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary>Opens or closes what <see cref="SipralEventKind.TurnStream"/>
-    /// asked for in the poll that just ran, after this round's queues were
-    /// written.</summary>
     private void ActOnTurnStreams()
     {
         while (_turnAsked.TryDequeue(out var asked))
@@ -2212,10 +1830,6 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary>Connects to the TURN server for media socket
-    /// <paramref name="local"/> — over TLS, the certificate checked against
-    /// the configured name, when <paramref name="protocol"/> says so — says
-    /// how that went, and reads the connection until it closes.</summary>
     private void OpenTurnStream(string local, string server, SipralTransport protocol)
     {
         TurnStream stream;
@@ -2235,9 +1849,8 @@ public sealed partial class SipralStack : IDisposable
                 var options = new SslClientAuthenticationOptions { TargetHost = _turnServerName };
                 if (_turnTrustedCertificates is { Count: > 0 } roots)
                 {
-                    // revocation unchecked, as SslStream's own default: a
-                    // policy of one's own starts from Online, and a
-                    // private authority publishes no revocation list
+                    // SslStream's default; a custom policy would start from
+                    // Online, and a private CA publishes no revocation list
                     var policy = new X509ChainPolicy
                     {
                         TrustMode = X509ChainTrustMode.CustomRootTrust,
@@ -2291,9 +1904,6 @@ public sealed partial class SipralStack : IDisposable
         }
     }
 
-    /// <summary><c>sipral_stack_turn_connected</c> or
-    /// <c>sipral_stack_turn_closed</c>, from whichever thread knows; never
-    /// throwing on the way out.</summary>
     private void SayTurn(string local, bool closed)
     {
         var localBytes = ToSBytes(local);
@@ -2307,15 +1917,12 @@ public sealed partial class SipralStack : IDisposable
         }
         catch (Exception ex) when (ex is SipralException or ObjectDisposedException)
         {
-            // the stack is going away, and with it everything on `local`
+            // the stack is going away
         }
     }
 
-    /// <summary>What a connection carried, to
-    /// <c>sipral_stack_turn_receive</c>: every byte, in order, since a stream
-    /// that loses one never finds its place again, so a busy stack is waited
-    /// for rather than skipped. False for a connection the stack found
-    /// broken.</summary>
+    // A stream that loses a byte never resyncs, so a busy stack is waited
+    // for, not skipped. False when the stack found the stream broken.
     private bool TurnReceived(string local, byte[] buffer, int count)
     {
         var localBytes = ToSBytes(local);
@@ -2334,10 +1941,7 @@ public sealed partial class SipralStack : IDisposable
         return true;
     }
 
-    /// <summary>Closes media socket <paramref name="local"/>'s connection,
-    /// and when <paramref name="tell"/>, says so with
-    /// <c>sipral_stack_turn_closed</c> — not for one the stack itself asked
-    /// to close or found broken.</summary>
+    // tell: false when the stack itself closed it or found it broken.
     private void LoseTurnStream(string local, bool tell)
     {
         if (!_turnStreams.TryRemove(local, out var stream))
@@ -2356,14 +1960,9 @@ public sealed partial class SipralStack : IDisposable
     }
 
     /// <summary>
-    /// Hangs up whatever calls are still open, gives the poll thread one
-    /// more round to send the BYEs that queues and the RTCP goodbyes
-    /// <see cref="DrainFarewells"/> then owes, and only then destroys the
-    /// stack — the same ordering
-    /// <c>bindings/python/sipral/stack.py</c>'s own <c>close</c> uses and
-    /// for the same reason: closing each call's media first would forget
-    /// it and close its socket before that farewell has anywhere left to
-    /// go.
+    /// Hangs up open calls, lets the poll thread send the BYEs and RTCP
+    /// goodbyes, then destroys the stack. Closing media first would leave
+    /// the farewells nowhere to go.
     /// </summary>
     public void Dispose()
     {
@@ -2394,13 +1993,8 @@ public sealed partial class SipralStack : IDisposable
             call.Close();
         }
 
-        // Every media socket still named with `sipral_stack_nat_map` and
-        // never reached by a call's own media handle —
-        // `sipral_stack_destroy` sends nothing, and a relay left
-        // allocated stays on the server until its lifetime runs out
-        // (`docs/08-ffi.md`, "sipral_stack_nat_unmap"). Each call above
-        // already did this for a socket it still owned; this catches one
-        // mapped and then abandoned before any call was ever placed on it.
+        // Sockets mapped but never used by a call: destroy sends nothing,
+        // and a relay left allocated stays on the server until it expires.
         List<string> leftover;
         lock (_natLock)
         {
@@ -2416,8 +2010,6 @@ public sealed partial class SipralStack : IDisposable
         {
             _pollThread.Join(TimeSpan.FromSeconds(5));
         }
-        // and every connection to the TURN server still open: what it
-        // carried was given back through it above, or lapses with it
         foreach (var local in _turnStreams.Keys.ToList())
         {
             LoseTurnStream(local, tell: false);

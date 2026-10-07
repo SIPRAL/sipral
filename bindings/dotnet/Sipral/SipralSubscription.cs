@@ -8,31 +8,18 @@ using Sipral.Interop;
 namespace Sipral;
 
 /// <summary>
-/// One subscription: something at the far end this stack watches (RFC
-/// 6665) — a presentity's <c>presence</c> (RFC 3856), a focus's
-/// <c>conference</c> (RFC 4575), or any other package named to
-/// <see cref="Account.Subscribe"/>.
-///
-/// Made by <see cref="Account.Subscribe"/>, <see cref="Account.WatchPresence"/>
-/// and <see cref="Call.SubscribeConference"/>. The stack refreshes it for as
-/// long as it is live; what the notifier says arrives as events naming
-/// <see cref="Handle"/>: <see cref="SipralEventKind.PresenceChanged"/> with
-/// <see cref="SipralEventArgs.Presence"/> for a presentity, and
-/// <see cref="SipralEventKind.ConferenceChanged"/> with
-/// <see cref="SipralEventArgs.Conference"/> for a conference, whose whole
-/// picture <see cref="Conference"/> then reads.
+/// One subscription (RFC 6665), e.g. presence (RFC 3856) or conference (RFC
+/// 4575). The stack refreshes it while live; notifications arrive as events
+/// naming <see cref="Handle"/>.
 /// </summary>
 public sealed class SipralSubscription
 {
     private readonly SipralStack _stack;
 
-    /// <summary>The raw <c>sipral_handle_t</c>: what
-    /// <see cref="SipralPresenceEventInfo.Subscription"/> and
-    /// <see cref="SipralConferenceEventInfo.Subscription"/> name.</summary>
+    /// <summary>The raw <c>sipral_handle_t</c> events name.</summary>
     public ulong Handle { get; }
 
-    /// <summary>The event package, as it went out: <c>presence</c>,
-    /// <c>conference</c>, <c>dialog</c>…</summary>
+    /// <summary>The event package.</summary>
     public string Package { get; }
 
     internal SipralSubscription(SipralStack stack, ulong handle, string package)
@@ -57,9 +44,8 @@ public sealed class SipralSubscription
         }
     }
 
-    /// <summary><c>sipral_subscription_end</c>: an unsubscribe goes out, and
-    /// the subscription is over once the notifier's closing notification
-    /// is answered.</summary>
+    /// <summary><c>sipral_subscription_end</c>: unsubscribe; it is over once
+    /// the closing NOTIFY is answered.</summary>
     public void End()
     {
         SipralErrors.Call(
@@ -68,14 +54,9 @@ public sealed class SipralSubscription
     }
 
     /// <summary>
-    /// The conference as this subscription holds it now
-    /// (<c>sipral_subscription_conference</c>, then each user with
-    /// <c>sipral_subscription_conference_user_at</c> and their text with
-    /// <c>sipral_subscription_conference_text</c>), or
-    /// <see langword="null"/> when it holds none: a subscription to another
-    /// package, one no document has reached yet, or one that ended.
-    /// Read it again after every <see cref="SipralEventKind.ConferenceChanged"/>
-    /// naming <see cref="Handle"/>.
+    /// The conference state held now, or <see langword="null"/> (another
+    /// package, no document yet, or ended). Read again after each
+    /// <see cref="SipralEventKind.ConferenceChanged"/>.
     /// </summary>
     public SipralConferencePicture? Conference()
     {
@@ -127,8 +108,6 @@ public sealed class SipralSubscription
         _ => null,
     };
 
-    /// <summary>One piece of the conference's text, <see langword="null"/>
-    /// for one the focus did not send.</summary>
     private string? Text(SipralConferenceText which, nuint index)
     {
         var text = SipralText.Read(
@@ -144,11 +123,9 @@ public sealed class SipralSubscription
 }
 
 /// <summary>
-/// Copies a piece of text out the way every <c>*_text</c> entry point of
-/// this ABI copies one: into the caller's buffer with its NUL, answering
-/// <see cref="SipralStatus.BufferTooSmall"/> and the bytes it needs when
-/// that buffer is short, so a second try with exactly that many always
-/// fits.
+/// Reads a <c>*_text</c> entry point: on
+/// <see cref="SipralStatus.BufferTooSmall"/> it retries once with the size
+/// asked for, which always fits.
 /// </summary>
 internal static class SipralText
 {
@@ -172,12 +149,9 @@ internal static class SipralText
     }
 }
 
-/// <summary>A conference as a <c>conference</c> subscription holds it
-/// (RFC 4575 §5): the version of the last document merged, the
-/// conference's own URI, subject and display text, what
-/// <c>conference-state</c> said — <see cref="UserCount"/> may differ from
-/// <see cref="Users"/>' length, since a focus need not list everyone — and
-/// every user listed, in the order the focus first named them.</summary>
+/// <summary>A conference's state (RFC 4575 §5). <see cref="UserCount"/> may
+/// exceed <see cref="Users"/>' length: a focus need not list everyone.
+/// Users are in the order the focus first named them.</summary>
 public sealed record SipralConferencePicture(
     uint Version,
     string? Entity,
@@ -188,10 +162,8 @@ public sealed record SipralConferencePicture(
     bool? Locked,
     IReadOnlyList<SipralConferenceParticipant> Users);
 
-/// <summary>One user of a conference: the address of record it takes part
-/// as, its display text, the device its first endpoint is on and where
-/// that endpoint is (RFC 4575 §5.7.2), how many endpoints it is in from,
-/// and how many media streams the first of them has.</summary>
+/// <summary>One conference user (RFC 4575 §5.7.2); the device and media
+/// fields describe its first endpoint.</summary>
 public sealed record SipralConferenceParticipant(
     string? Entity,
     string? DisplayText,

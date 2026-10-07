@@ -6,18 +6,11 @@ using System.Linq;
 
 namespace Sipral;
 
-/// <summary>What a stack runs with, every default filled in
-/// (<c>sipral_stack_settings</c>, <see cref="SipralStack.Settings"/>): what a
-/// settings screen or a support report shows, rather than what was passed.
-/// <see cref="RtpPorts"/> is <see langword="null"/> for no range,
-/// <see cref="MediaStallMs"/> and <see cref="RegistrarKeepaliveMs"/> zero
-/// with that watchdog or keep-alive off. The last four are ABI 0.35:
-/// <see cref="SrtpSuites"/> the suites the stack's calls offer and accept
-/// unless their account names its own, in order; whether a pseudonym salt
-/// was given (the salt itself is never read back); whether the diagnostic
-/// trace is whole now; and whether the platform's echo cancellation is
-/// asked for — <see cref="SipralAudioSnapshot.SystemEchoCancellation"/> says
-/// what the platform did.</summary>
+/// <summary>A stack's effective settings, defaults filled in
+/// (<c>sipral_stack_settings</c>), for a settings screen or support report.
+/// <see cref="RtpPorts"/> is <see langword="null"/> for no range; zero
+/// <see cref="MediaStallMs"/> or <see cref="RegistrarKeepaliveMs"/> means
+/// off. The pseudonym salt itself is never read back.</summary>
 public sealed record SipralSettings(
     SipralTransport Transport,
     bool Retransmits,

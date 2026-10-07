@@ -13,11 +13,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// Transfer, ringing, screening, a registration refreshed on demand and a
-/// call's own codec order, through <see cref="SipralStack"/>,
-/// <see cref="Call"/> and <see cref="Account"/>: stacks on loopback talking
-/// directly, each account pointed at another stack as its outbound proxy,
-/// the way <see cref="TwoStacksTalkDirectlyTests"/> sets them up.
+/// Transfer, ringing, screening, on-demand refresh and per-call codecs,
+/// between loopback stacks as in <see cref="TwoStacksTalkDirectlyTests"/>.
 /// </summary>
 public sealed class CallControlTests : IDisposable
 {
@@ -86,8 +83,6 @@ public sealed class CallControlTests : IDisposable
         await ConfirmedAsync(placed);
         return (placed, answered);
     }
-
-    // -- transfer ---------------------------------------------------------
 
     [Fact]
     public async Task ABlindTransferRingsTheTargetAndReportsSuccessToWhoAskedForIt()
@@ -190,12 +185,9 @@ public sealed class CallControlTests : IDisposable
         }
     }
 
-    /// <summary>Bob is asked for an attended transfer and takes it; his
-    /// INVITE carries the <c>Replaces</c> naming Alice's consultation with
-    /// Carol. Carol's end takes a <c>Replaces</c> only from the far end of
-    /// the call it names (RFC 3891 §3), and on loopback without a proxy Bob
-    /// is not Alice, so she refuses it 403 — which is what Alice's transfer
-    /// reports, through Bob's NOTIFY.</summary>
+    /// <summary>Bob's INVITE carries <c>Replaces</c> for Alice's call with
+    /// Carol. Carol accepts it only from that call's far end (RFC 3891 §3),
+    /// so she answers 403, which Alice's transfer reports.</summary>
     [Fact]
     public async Task AnAttendedTransferNamesTheConsultationAndReportsHowItWent()
     {
@@ -204,8 +196,7 @@ public sealed class CallControlTests : IDisposable
         var carol = Stack();
         var aliceToBob = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: bob.BindAddress);
         var aliceToCarol = alice.AddAccount("sip:alice@sipral.invalid", registrarAddress: carol.BindAddress);
-        // Bob's line goes out through Carol's address, so the INVITE the
-        // transfer places reaches her rather than coming back to Alice
+        // route Bob's transfer INVITE to Carol, not back to Alice
         bob.AddAccount("sip:bob@sipral.invalid", registrarAddress: carol.BindAddress);
         carol.AddAccount("sip:carol@sipral.invalid", registrarAddress: alice.BindAddress);
 
@@ -237,8 +228,6 @@ public sealed class CallControlTests : IDisposable
             toBob.Close();
         }
     }
-
-    // -- ringing -----------------------------------------------------------
 
     [Fact]
     public async Task RingingAnIncomingCallTellsTheCallerBeforeItIsAnswered()
@@ -313,8 +302,6 @@ public sealed class CallControlTests : IDisposable
         }
     }
 
-    // -- screening ---------------------------------------------------------
-
     [Fact]
     public async Task AScreeningPolicyRefusesAnInviteBeforeAnyCallExistsAndRemovingItLetsThemIn()
     {
@@ -352,8 +339,6 @@ public sealed class CallControlTests : IDisposable
         Assert.Single(seen);
     }
 
-    // -- refresh -------------------------------------------------------------
-
     [Fact]
     public async Task RefreshingABindingSendsAnotherRegisterNowAndAnAccountThatNeverRegistersHasNone()
     {
@@ -364,8 +349,7 @@ public sealed class CallControlTests : IDisposable
         await Until(() => account.RegistrationState() == SipralRegistrationState.Registered);
         Assert.Single(registrar.Registers);
 
-        // asked again while the first REGISTER's transaction still lingers,
-        // a refresh sends nothing, so it is asked until one goes
+        // nothing is sent while the first REGISTER lingers, so retry
         Assert.True(await Until(() =>
         {
             account.RefreshBinding();
@@ -387,8 +371,6 @@ public sealed class CallControlTests : IDisposable
         }
         return what();
     }
-
-    // -- a call's own codecs --------------------------------------------------
 
     /// <summary>Alice's stack offers only PCMU; this call offers PCMA first,
     /// and Bob, who takes both, answers in the offer's order.</summary>

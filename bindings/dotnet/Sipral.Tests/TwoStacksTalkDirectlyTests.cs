@@ -12,20 +12,13 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// Two stacks on 127.0.0.1, talking directly, with no registrar between
-/// them — the .NET counterpart of
-/// <c>bindings/python/tests/test_call.py</c>. Each account is given the
-/// other stack's own <see cref="SipralStack.BindAddress"/> as its
-/// outbound proxy (<c>registrarAddress</c>) and no registrar, so nothing
-/// here needs a SIP server: it proves this layer against the real ABI on
-/// loopback, the same proof <c>bindings/python</c>'s own tests are.
+/// Two stacks on 127.0.0.1 talking directly: each account uses the other
+/// stack's address as its outbound proxy, with no registrar, so no SIP
+/// server is needed.
 /// </summary>
 public sealed class TwoStacksTalkDirectlyTests : IDisposable
 {
-    // Generous rather than tight: this machine can be shared with several
-    // other heavy builds at once, and a SIP round trip (an INVITE or a
-    // re-INVITE, answered, ACKed) is a few scheduler hops long even before
-    // counting how late any one of them might run under that kind of load.
+    // generous: the machine may be shared with other heavy builds
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
 
     private readonly SipralStack _alice = new(audio: SipralAudio.Application);
@@ -103,10 +96,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
-    /// <summary><see cref="CallMedia.SetAppRate"/>: both ends at 24 kHz
-    /// hand out and take 480-sample frames whatever the codec, a rate
-    /// outside the four is refused and changes nothing, and 0 is the
-    /// codec's own again.</summary>
+    /// <summary>At 24 kHz both ends use 480-sample frames whatever the
+    /// codec; an unsupported rate is refused; 0 restores the codec's.</summary>
     [Fact]
     public async Task FramesCrossAtTheRateTheApplicationChose()
     {
@@ -162,8 +153,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
             var stats = aliceCall.Media.Statistics();
             Assert.True(stats.PacketsSent > 0);
 
-            // the record copies frames_underrun, not a neighbour of it: the
-            // library's own count, read either side, brackets it
+            // the library's own count, read either side, brackets the copy
             var before = SipralStreamStats.Sized();
             Assert.Equal(SipralStatus.Ok,
                 NativeMethods.sipral_media_statistics(aliceCall.Media.Handle, 0, ref before));
@@ -180,9 +170,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
-    /// <summary>The record <see cref="SipralEventKind.MediaStatistics"/>
-    /// carries is kept on the call, and is what the media answers once the
-    /// library has nothing left and says <c>WRONG_STATE</c>.</summary>
+    /// <summary>The final statistics record is kept and served after the
+    /// library answers <c>WRONG_STATE</c>.</summary>
     [Fact]
     public async Task TheEndOfCallRecordIsKeptAndStillReadable()
     {
@@ -219,10 +208,9 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
-    /// <summary>The end-of-call record a MEDIA_STATISTICS event carries
-    /// copies <c>frames_underrun</c> into
-    /// <see cref="SipralStreamStatistics.FramesUnderrun"/>, the member
-    /// beside it untouched.</summary>
+    /// <summary>MEDIA_STATISTICS copies <c>frames_underrun</c> into
+    /// <see cref="SipralStreamStatistics.FramesUnderrun"/>, not a neighbouring
+    /// field.</summary>
     [Fact]
     public void AnUnderRunCountCrossesIntoTheEventsRecord()
     {
@@ -266,9 +254,6 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
-    /// <summary>The loudest sample a held party hears of a tone sent on a
-    /// call held from the other end, on stacks whose <c>heldAudio</c> is
-    /// <paramref name="heldAudio"/>.</summary>
     private static async Task<int> LoudestHeardOnHoldAsync(SipralHeldAudio heldAudio)
     {
         using var alice = new SipralStack(audio: SipralAudio.Application, heldAudio: heldAudio);
@@ -316,10 +301,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
         }
     }
 
-    /// <summary>A party this end holds hears silence by default, in
-    /// application mode too, where the frames sent may be a microphone's;
-    /// it hears what the application sends — hold music, an announcement, a
-    /// voice agent — on a stack told
+    /// <summary>A held party hears silence by default, even in application
+    /// mode, and the application's frames with
     /// <see cref="SipralHeldAudio.Application"/>.</summary>
     [Fact]
     public async Task AHeldPartyHearsSilenceUnlessTheStackSaysTheApplication()
@@ -330,9 +313,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
             "the held party did not hear what the application sent");
     }
 
-    /// <summary>The realms a password answers reach the stack one per line:
-    /// a realm with a comma of its own is one realm, and one with a control
-    /// byte is refused there.</summary>
+    /// <summary>Realms cross one per line: a comma stays inside a realm, a
+    /// control byte is refused.</summary>
     [Fact]
     public void TheRealmsAPasswordAnswersReachTheStackOnePerLine()
     {
@@ -355,9 +337,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// <c>docs/08-ffi.md</c>: "called from inside `sipral_stack_poll`, on
-    /// the thread that polled" — proved here by comparing the managed
-    /// thread id a handler observes against the test's own.
+    /// The event callback runs on the polling thread, not the test's.
     /// </summary>
     [Fact]
     public async Task EventsAreDeliveredOnThePollThreadNotTheCallersThread()
@@ -377,26 +357,12 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// Hammers a signalling entry point from many threads at once, so
-    /// that at least one collides with the stack's own poll thread and
-    /// is answered <see cref="SipralStatus.Busy"/> rather than made to
-    /// wait — <c>docs/08-ffi.md</c>: "Every entry point that names a
-    /// stack takes its lock without blocking; one that finds it taken
-    /// answers SIPRAL_STATUS_BUSY and does nothing." Calls
-    /// <see cref="NativeMethods"/> directly, bypassing
-    /// <c>SipralErrors.Call</c>'s own retry, since the retry is exactly
-    /// what would hide the status this test exists to observe.
-    ///
-    /// The stack's own poll thread holds the lock only for the brief
-    /// span of one <c>sipral_stack_poll</c> call and otherwise sleeps in
-    /// a 50 ms socket wait (<see cref="SipralStack"/>'s own poll loop),
-    /// so a fixed, short burst of calls can miss that span by chance on
-    /// a loaded machine. Registering the account first gives every poll
-    /// pass real retransmit-timer work to do, widening the span; and
-    /// dedicated threads spin for a bounded wall-clock stretch, not a
-    /// fixed call count, stopping the moment both a <c>BUSY</c> and an
-    /// <c>OK</c> have actually been seen rather than waiting out the
-    /// full budget every time.
+    /// A call colliding with the poll thread gets
+    /// <see cref="SipralStatus.Busy"/> instead of waiting. Calls
+    /// <see cref="NativeMethods"/> directly, since the binding's retry would
+    /// hide it. The poll holds the lock only briefly, so the account
+    /// registers first (giving each poll timer work) and threads spin for a
+    /// bounded time until both BUSY and OK were seen.
     /// </summary>
     [Fact]
     public void BusyIsSurfacedRatherThanBlockedOn()
@@ -408,11 +374,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
 
         var sawBusy = 0;
         var sawOk = 0;
-        // Three threads and a five-second cap, not every core for ten
-        // seconds: this machine can be shared with other heavy work at
-        // once, and pegging it harder or longer than it takes to find one
-        // collision would just make every neighbouring test's own
-        // timing-sensitive wait flakier.
+        // modest: harder load would make neighbouring timing tests flaky
         var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var workers = new List<Thread>();
         for (var i = 0; i < 3; i++)
@@ -450,11 +412,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// Forces a full garbage collection with a call in flight, proving
-    /// the kept-alive <c>SipralEventCallback</c> delegate
-    /// <see cref="SipralStack"/> hands the native side is not collected
-    /// while it is still registered — see that field's own doc comment
-    /// for why keeping it on the instance is enough.
+    /// A full GC with a call in flight does not collect the event callback
+    /// delegate.
     /// </summary>
     [Fact]
     public async Task EventCallbackSurvivesGarbageCollectionPressure()
@@ -478,14 +437,8 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// Disposes both stacks while a call is up and nothing has drained
-    /// either stack's <see cref="SipralStack.Events"/>, so events are
-    /// still queued behind the channel's writer at the moment
-    /// <see cref="SipralStack.Dispose"/> runs. Passing proves there is no
-    /// use-after-free on the handles those queued events still carry —
-    /// <see cref="SipralStack.Dispose"/> joins the poll thread and
-    /// destroys the stack only after every call has been hung up and
-    /// closed, never while one might still be delivering.
+    /// Disposing with a call up and events still queued causes no
+    /// use-after-free.
     /// </summary>
     [Fact]
     public async Task DisposeWhileEventsArePendingDoesNotUseAfterFree()
@@ -503,17 +456,9 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// A handler on <see cref="SipralStack.EventReceived"/> that throws
-    /// must not unwind back into the native poll call it runs inside of
-    /// (<c>docs/08-ffi.md</c>'s "the callback does not unwind", stated by
-    /// name for the Kotlin listener and no less true here) — before this
-    /// was guarded, this exact scenario took the whole test process down
-    /// rather than failing the one test (confirmed with a throwaway
-    /// console repro outside xunit, since a crash here would abort the
-    /// run instead of reporting a failure). Proves both that the poll
-    /// thread survives a throwing handler and that it keeps delivering
-    /// events afterwards — a swallowed exception that quietly stopped the
-    /// poll thread would hang this test's own second wait forever.
+    /// A throwing <see cref="SipralStack.EventReceived"/> handler does not
+    /// unwind into the native poll, and events keep coming afterwards. A
+    /// stopped poll thread would hang the second wait.
     /// </summary>
     [Fact]
     public async Task ExceptionFromAnEventHandlerDoesNotCrashTheProcessAndPollingContinues()
@@ -538,10 +483,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
     }
 
     /// <summary>
-    /// Same guard, for <see cref="CallMedia.FrameDecoded"/> on the media's
-    /// own frame-rate thread: an unhandled exception on any .NET thread
-    /// ends the whole process by default, so a throwing handler there must
-    /// not either, and the media pump must keep running afterwards.
+    /// Same for <see cref="CallMedia.FrameDecoded"/> on the media thread.
     /// </summary>
     [Fact]
     public async Task ExceptionFromFrameDecodedDoesNotCrashTheProcessAndPlaybackContinues()
@@ -560,11 +502,7 @@ public sealed class TwoStacksTalkDirectlyTests : IDisposable
                 throw new InvalidOperationException("deliberate failure from a test frame handler");
             };
 
-            // The media thread was already decoding silence before this
-            // subscription (it starts the moment `Media` is minted), so
-            // the first throw can land before this test ever reads a
-            // frame off `Frames` — wait for the throw on its own terms
-            // rather than tying it to a particular frame's arrival.
+            // the media thread may throw before any frame is read here
             var deadline = DateTime.UtcNow + Timeout;
             while (Volatile.Read(ref threw) == 0 && DateTime.UtcNow < deadline)
             {

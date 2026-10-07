@@ -7,22 +7,10 @@ using System.Runtime.InteropServices;
 namespace Sipral.Interop;
 
 /// <summary>
-/// A short-lived pin on a managed byte array, handed to the native side
-/// as an <see cref="IntPtr"/> for a versioned struct's own text/byte
-/// member (<c>IntPtr</c> in every generated struct, per
-/// <c>docs/08-ffi.md</c>'s "The conventions are load-bearing now") —
-/// distinct from an entry point that takes text directly as
-/// <c>sbyte[]</c>/<c>byte[]</c>, which the P/Invoke marshaller already
-/// pins for the length of that one call and needs no help from this.
-///
-/// Every struct here is read once, inside the call that takes it, and
-/// never touched again (<c>docs/08-ffi.md</c> calls a struct like this
-/// "versioned" for exactly that reason), so a pin scoped to one
-/// constructor or method — released the moment the call returns, via
-/// <see langword="using"/> — is enough; nothing here has to outlive it.
-/// <see langword="null"/> or an empty array pins nothing and hands over
-/// <see cref="IntPtr.Zero"/>, which is what every optional member here
-/// reads as "not given".
+/// Pins a byte array for a struct's pointer member. The library reads a
+/// struct only during the call that takes it, so a <see langword="using"/>
+/// scope is enough. <see langword="null"/> or empty gives
+/// <see cref="IntPtr.Zero"/>, read as "not given".
 /// </summary>
 internal readonly struct PinnedBytes : IDisposable
 {

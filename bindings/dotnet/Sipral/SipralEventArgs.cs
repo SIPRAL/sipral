@@ -8,30 +8,17 @@ using System.Text;
 namespace Sipral;
 
 /// <summary>
-/// One event, decoded whole out of the library's own <c>sipral_event_t</c>
-/// while it was still live.
+/// One event, copied out of <c>sipral_event_t</c> while it was live.
+/// (<c>SipralEvent</c> is already the raw struct's name.)
 ///
-/// Named <c>SipralEventArgs</c> rather than <c>SipralEvent</c> — the
-/// idiomatic name the raw C struct already has in
-/// <c>Sipral.SipralEvent</c>, printed by <c>tools/abi-gen</c> and not
-/// this layer's to rename — and shaped as .NET names an object an
-/// <see langword="event"/> hands a listener, since that is exactly what
-/// this is used as on <see cref="SipralStack.EventReceived"/> and
-/// <see cref="Call.EventReceived"/> as well as read off
-/// <see cref="SipralStack.Events"/>, the <c>IAsyncEnumerable</c> reader.
-///
-/// <see cref="Kind"/> is always the raw <c>sipral_event_kind_t</c> — never
-/// refused for a value this build's enum has no member for, since a kind
-/// spent by a later task must still come through a binding compiled
-/// against an older header (<c>docs/08-ffi.md</c>, "A binding that meets
-/// a kind it does not know must ignore that event rather than refuse
-/// it"). <see cref="KindName"/> is <c>sipral_event_kind_name</c>'s own
-/// answer, which the library keeps current even when this binding's enum
-/// has not been regenerated.
+/// <see cref="Kind"/> may hold a value this build's enum lacks: a newer
+/// library's kinds still come through, and callers should ignore what they
+/// do not know. <see cref="KindName"/> comes from the library and is always
+/// current.
 /// </summary>
 public sealed class SipralEventArgs : EventArgs
 {
-    /// <summary>What this event is — the raw <c>sipral_event_kind_t</c>.</summary>
+    /// <summary>The raw <c>sipral_event_kind_t</c>.</summary>
     public SipralEventKind Kind { get; }
     /// <summary><c>sipral_event_kind_name</c>'s own answer for <see cref="Kind"/>.</summary>
     public string KindName { get; }
@@ -155,13 +142,8 @@ public sealed class SipralEventArgs : EventArgs
     };
 
     /// <summary>
-    /// Copies one <c>sipral_event_t*</c> out into a standalone
-    /// <see cref="SipralEventArgs"/>. Called from inside the unmanaged
-    /// callback and nowhere else: <paramref name="raw"/> points at memory
-    /// the callback's caller owns and every field this reads is read
-    /// before this method returns, exactly as
-    /// <c>bindings/python/sipral/events.py</c>'s own <c>decode</c> reads
-    /// its <c>cffi</c> pointer.
+    /// Called only inside the native callback: <paramref name="raw"/> is the
+    /// library's memory, so every field is copied before returning.
     /// </summary>
     internal static SipralEventArgs Decode(IntPtr raw)
     {
@@ -445,8 +427,6 @@ public sealed class SipralEventArgs : EventArgs
         return Statistics(Marshal.PtrToStructure<SipralStreamStats>(ptr));
     }
 
-    /// <summary>One <c>sipral_stream_stats_t</c>, copied out: what an event
-    /// carries and what <see cref="CallMedia.Statistics"/> reads.</summary>
     internal static SipralStreamStatistics Statistics(in SipralStreamStats s) =>
         new(
             (SipralCodec)s.Codec, s.HasRoundTrip != 0 ? s.RoundTripUs : null, s.PacketsSent, s.OctetsSent,

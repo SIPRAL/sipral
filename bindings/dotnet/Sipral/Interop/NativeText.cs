@@ -7,13 +7,9 @@ using System.Text;
 namespace Sipral.Interop;
 
 /// <summary>
-/// UTF-8 to/from <see cref="sbyte"/>/<see cref="byte"/> array conversions for
-/// the entry points the generator printed to take text as <c>sbyte[]</c>
-/// (every string in this ABI) or <c>byte[]</c> (the few members that are
-/// bytes without being necessarily UTF-8, such as a SIP message or SDP).
-/// The generator's own array-marshalling rule
-/// (<c>docs/08-ffi.md</c>, "The conventions are load-bearing now") pins
-/// and frees these for the length of one call; nothing here has to.
+/// UTF-8 conversions for entry points taking <c>sbyte[]</c> (text) or
+/// <c>byte[]</c> (raw bytes such as a SIP message). The marshaller pins them
+/// for the call.
 /// </summary>
 internal static class NativeText
 {

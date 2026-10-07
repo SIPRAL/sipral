@@ -23,8 +23,7 @@ public class EventDecodingTests
         nameof(SipralEventArgs.Account), nameof(SipralEventArgs.Call), nameof(SipralEventArgs.Message),
     };
 
-    /// <summary>The library is found the way a stack finds it: decoding
-    /// asks it for each kind's name, and here no stack came first.</summary>
+    // decoding asks the library for kind names, and no stack loaded it
     public EventDecodingTests() => NativeLibraryLoader.EnsureRegistered();
 
     /// <summary>Decodes <paramref name="evt"/> the way the callback does,
@@ -71,9 +70,8 @@ public class EventDecodingTests
         Assert.Empty(unread);
     }
 
-    /// <summary>A challenge an account's password was not given to says why,
-    /// who asked, and every realm it was asked for, one per line in
-    /// C.</summary>
+    /// <summary>A declined challenge carries the reason, server and
+    /// realms.</summary>
     [Fact]
     public void ADeclinedChallengeCarriesWhoAskedAndForWhat()
     {
@@ -160,9 +158,8 @@ public class EventDecodingTests
         }
     }
 
-    /// <summary>An account's server asking for an OAuth access token says
-    /// where one comes from, for what scope, and why the last was
-    /// refused.</summary>
+    /// <summary>A token request carries the authorization server, scope and
+    /// error.</summary>
     [Fact]
     public void ATokenRequiredCarriesTheAuthorizationServerAndTheError()
     {

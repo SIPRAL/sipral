@@ -17,13 +17,9 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// Where a stack is reached and where its server is, through
-/// <see cref="SipralStack"/>: the address advertised when the application
-/// names none, a server named by a URI and located by RFC 3263 — with this
-/// layer's own SRV query read against a DNS server on loopback — the
-/// account's keep-alive, a certificate trusted by its fingerprint, and the
-/// diagnostic trace. The .NET counterpart of
-/// <c>bindings/python/tests/test_reachability.py</c>.
+/// The advertised address, RFC 3263 location against a loopback DNS
+/// server, the account keep-alive, certificate pinning and the diagnostic
+/// trace.
 /// </summary>
 public sealed class ReachabilityTests
 {
@@ -34,9 +30,8 @@ public sealed class ReachabilityTests
             .FirstOrDefault(line => line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
             ?.Split(':', 2)[1].Trim();
 
-    /// <summary>A registrar on a loopback UDP port: every REGISTER is
-    /// answered 200, and every datagram is kept as text, keep-alives
-    /// included.</summary>
+    /// <summary>A loopback registrar answering 200 and keeping every
+    /// datagram.</summary>
     internal sealed class Registrar : IDisposable
     {
         private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
@@ -101,10 +96,8 @@ public sealed class ReachabilityTests
         }
     }
 
-    /// <summary>A DNS server on a loopback UDP port that answers one SRV
-    /// question with one record whose target is written as a compression
-    /// pointer back into the question (RFC 1035 §4.1.4), and anything else
-    /// with NXDOMAIN.</summary>
+    /// <summary>Answers one SRV question with a target compressed into the
+    /// question (RFC 1035 §4.1.4); anything else is NXDOMAIN.</summary>
     private sealed class DnsServer : IDisposable
     {
         private readonly UdpClient _udp = new(new IPEndPoint(IPAddress.Loopback, 0));
@@ -203,8 +196,6 @@ public sealed class ReachabilityTests
         return what();
     }
 
-    // -- the address a stack advertises --------------------------------
-
     [Fact]
     public void TheAddressOfAWildcardSocketIsTheRouteTowardThePeer()
     {
@@ -264,8 +255,6 @@ public sealed class ReachabilityTests
         call.Close();
         answered.Close();
     }
-
-    // -- a server named by a URI -----------------------------------------
 
     [Fact]
     public async Task AHostWithAPortIsAskedForItsAddressesAndRegisteredWith()
@@ -348,8 +337,6 @@ public sealed class ReachabilityTests
             () => stack.AddAccount("sip:alice@example.com", "127.0.0.1:5060", serverUri: "sip:a.test"));
     }
 
-    // -- the account's keep-alive --------------------------------------------
-
     [Fact]
     public async Task ADoubleCrlfGoesToTheRegistrarAtTheInterval()
     {
@@ -371,8 +358,6 @@ public sealed class ReachabilityTests
         Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
     }
 
-    // -- a certificate trusted by its fingerprint -------------------------
-
     [Fact]
     public void TheAccountsPinDecidesOnTheCertificateAServerPresented()
     {
@@ -390,8 +375,6 @@ public sealed class ReachabilityTests
         Assert.Null(unpinned.CheckCertificate(certificate));
         Assert.Throws<SipralException>(() => stack.AddAccount("sip:carol@example.com", "127.0.0.1:5060", tlsPin: "00"));
     }
-
-    // -- the stack's new options -------------------------------------------
 
     [Fact]
     public void ASuiteTheLibraryDoesNotRunAndAShortSaltAreRefused()

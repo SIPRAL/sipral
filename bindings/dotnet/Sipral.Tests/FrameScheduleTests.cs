@@ -10,10 +10,8 @@ using Xunit;
 namespace Sipral.Tests;
 
 /// <summary>
-/// A call's frame clock in application mode keeps fifty frames a second
-/// whatever its waits cost: <see cref="FrameSchedule"/>, driven by a clock of
-/// the test's own through several seconds of waits that end late, and then by
-/// the real clock and this machine's own waits.
+/// <see cref="FrameSchedule"/> keeps fifty frames a second despite late
+/// waits, on a simulated clock and on the real one.
 /// </summary>
 public sealed class FrameScheduleTests
 {
@@ -91,13 +89,9 @@ public sealed class FrameScheduleTests
                 never.Wait(wait);
             }
         }
-        // the wake that ended the loop is held to the schedule as the
-        // thread's next frame would hold it: on a busy machine it can end a
-        // tenth of a second past its due time, which is the machine's too
+        // count the last wake too: on a busy machine it can end 100 ms late
         schedule.Next();
-        // a machine busy enough to hold the thread up past a whole frame makes
-        // the schedule start over, on purpose; what that gave up is the
-        // machine's, and every frame of the rest must be there
+        // a restart drops lag on purpose; every other frame must be there
         var givenUp = (int)Math.Floor(schedule.SecondsGivenUp / Frame);
         Assert.True(
             frames + givenUp >= 149,

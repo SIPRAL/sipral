@@ -16,21 +16,15 @@ using static Sipral.Interop.NativeText;
 namespace Sipral;
 
 /// <summary>
-/// One call handle, its events and, once media starts, its audio — the
-/// .NET counterpart of <c>bindings/python/sipral/call.py</c>'s <c>Call</c>.
-///
-/// Built by <see cref="SipralStack.PlaceCall"/> for one this stack
-/// placed, and by <see cref="SipralStack.AnswerCall"/> for one that came
-/// in; either way it is registered with its stack before the caller ever
-/// sees it, so <see cref="Deliver"/> always has somewhere to put an event
-/// that names this call.
+/// One call handle, its events and, once media starts, its audio. Built by
+/// <see cref="SipralStack.PlaceCall"/> or <see cref="SipralStack.AnswerCall"/>,
+/// and registered with the stack before the caller sees it.
 /// </summary>
 public sealed class Call : IDisposable
 {
     private readonly SipralStack _stack;
     private readonly CallSafeHandle _handle = new();
-    /// <summary>Replaced by <see cref="Readdress"/>; read from the audio
-    /// engine's thread in device mode.</summary>
+    // Replaced by Readdress; read from the audio engine's thread.
     private volatile Socket _mediaSocket;
     private volatile string _mediaAddress;
     private SipralSrtpSuite? _suite;
@@ -40,17 +34,13 @@ public sealed class Call : IDisposable
         Channel.CreateUnbounded<char>(new UnboundedChannelOptions { SingleWriter = true });
     private readonly Channel<string> _text =
         Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleWriter = true });
-    /// <summary>The socket real-time text arrives on, when the call was
-    /// placed or answered with <see cref="SipralCallOptions.Text"/>; handed
-    /// to <see cref="CallMedia"/> once media starts.</summary>
+    // Handed to CallMedia once media starts.
     private readonly Socket? _textSocket;
 
     private int _disposed;
 
-    /// <summary>The raw <c>sipral_handle_t</c>, for an entry point of
-    /// <c>sipral.h</c> this class does not wrap, called through the
-    /// application's own P/Invoke declaration. Valid while the
-    /// call is.</summary>
+    /// <summary>The raw <c>sipral_handle_t</c>, for entry points this class
+    /// does not wrap. Valid while the call is.</summary>
     public ulong Handle => _handle.Value;
 
     /// <summary>Set once <see cref="SipralEventKind.MediaStarted"/>
@@ -61,35 +51,27 @@ public sealed class Call : IDisposable
     /// delivered.</summary>
     public bool Ended { get; private set; }
 
-    /// <summary>What the call's media cost in the end: the record
-    /// <see cref="SipralEventKind.MediaStatistics"/> carries, kept from the
-    /// moment it arrives — right after <see cref="SipralEventKind.CallEnded"/>
-    /// — and <see langword="null"/> before that or for a call whose media
-    /// never started. <see cref="CallMedia.Statistics"/> answers with it too
-    /// once the stream is gone.</summary>
+    /// <summary>The final <see cref="SipralEventKind.MediaStatistics"/>
+    /// record, which arrives right after
+    /// <see cref="SipralEventKind.CallEnded"/>; <see langword="null"/> before
+    /// that or when media never started.</summary>
     public SipralStreamStatistics? FinalStatistics { get; private set; }
 
     /// <summary>Every event this call's handle names, decoded whole, in
     /// order.</summary>
     public IAsyncEnumerable<SipralEventArgs> Events => _events.Reader.ReadAllAsync();
 
-    /// <summary>Just the digits: <see cref="SipralEventKind.DigitReceived"/>'s
-    /// and <see cref="SipralEventKind.InBandDigit"/>'s own character, so a
-    /// voice agent that only cares about DTMF does not have to filter
-    /// <see cref="Events"/> itself, nor care which way a key was
-    /// sent.</summary>
+    /// <summary>Received digits, from both
+    /// <see cref="SipralEventKind.DigitReceived"/> and
+    /// <see cref="SipralEventKind.InBandDigit"/>.</summary>
     public IAsyncEnumerable<char> Dtmf => _dtmf.Reader.ReadAllAsync();
 
-    /// <summary>Just the real-time text (RFC 4103): each
-    /// <see cref="SipralEventKind.TextReceived"/>'s own text, in the order the
-    /// far end typed it, with the control characters
-    /// <see cref="SipralTextEventInfo"/> names left in.</summary>
+    /// <summary>Received real-time text (RFC 4103) in typing order, control
+    /// characters included (see <see cref="SipralTextEventInfo"/>).</summary>
     public IAsyncEnumerable<string> Text => _text.Reader.ReadAllAsync();
 
-    /// <summary>The socket this call's real-time text arrives on, as
-    /// <c>host:port</c>, when it was placed or answered with
-    /// <see cref="SipralCallOptions.Text"/>; <see langword="null"/>
-    /// otherwise.</summary>
+    /// <summary>The real-time text socket as <c>host:port</c>, or
+    /// <see langword="null"/> without <see cref="SipralCallOptions.Text"/>.</summary>
     public string? TextAddress { get; }
 
     /// <summary>The recording session <see cref="RecordTo"/> placed, while it
@@ -97,10 +79,8 @@ public sealed class Call : IDisposable
     /// <see cref="SipralStack.Events"/>.</summary>
     public ulong? RecordingSession { get; private set; }
 
-    /// <summary>Fired synchronously, on the stack's poll thread, for
-    /// every event this call's handle names — see
-    /// <see cref="SipralStack.EventReceived"/> for the same shape and the
-    /// same reason.</summary>
+    /// <summary>Fired synchronously on the poll thread for every event of
+    /// this call; see <see cref="SipralStack.EventReceived"/>.</summary>
     public event EventHandler<SipralEventArgs>? EventReceived;
 
     internal Call(SipralStack stack, ulong handle, Socket mediaSocket, string mediaAddress, Socket? textSocket = null)
@@ -113,24 +93,13 @@ public sealed class Call : IDisposable
         TextAddress = textSocket is null ? null : SipralStack.FormatAddress((IPEndPoint)textSocket.LocalEndPoint!);
     }
 
-    /// <summary>Called by <see cref="SipralStack"/> on its own poll
-    /// thread. Every side effect below — minting <see cref="Media"/>,
-    /// marking <see cref="Ended"/> — happens before <paramref
-    /// name="args"/> is handed to any reader, the same ordering
-    /// <c>bindings/python/sipral/call.py</c>'s own <c>deliver</c>
-    /// keeps and for the same reason: a consumer of <see cref="Events"/>
-    /// that wakes because this call posted to <see cref="Media"/> must
-    /// already see it set.</summary>
+    // On the poll thread. Side effects happen before any reader sees the
+    // event, so a woken reader already finds Media set.
     internal void Deliver(SipralEventArgs args)
     {
         if (args.Kind == SipralEventKind.MediaStarted && Media is null)
         {
-            // From here the socket is `CallMedia`'s own to read
-            // (`docs/08-ffi.md`, "From the media handle on, the socket's
-            // datagrams go to sipral_media_receive and nowhere else") —
-            // `SipralStack` stops treating it as a pre-media-handle
-            // STUN/TURN socket first, so the two never race to read the
-            // same socket.
+            // release from STUN first so the two readers never race
             _stack.ReleaseStunSocket(_mediaAddress);
             Media = new CallMedia(_stack, Handle, _mediaSocket, pumped: _stack.AudioMode == SipralAudio.Device, textSocket: _textSocket);
         }
@@ -148,11 +117,7 @@ public sealed class Call : IDisposable
             Media?.EndedWith(record);
         }
 
-        // Same guard as `SipralStack.EventReceived`, and for the same
-        // reason: this runs on the stack's own poll thread, one frame
-        // above the native call that thread is inside, so a handler's
-        // exception must stop here rather than unwind back across it and
-        // take the whole process down with it.
+        // must not unwind into the native poll frame
         try
         {
             EventReceived?.Invoke(this, args);
@@ -174,11 +139,8 @@ public sealed class Call : IDisposable
         }
     }
 
-    // -- state --------------------------------------------------------
-
-    /// <summary><c>sipral_call_state</c>, read fresh — not cached from
-    /// the last event, which a status query between events would
-    /// otherwise miss.</summary>
+    /// <summary><c>sipral_call_state</c>, read fresh rather than cached
+    /// from the last event.</summary>
     public SipralCallState State
     {
         get
@@ -189,23 +151,15 @@ public sealed class Call : IDisposable
         }
     }
 
-    // -- actions --------------------------------------------------------
-
-    /// <summary><c>sipral_call_answer_media</c>: accept, with this stack
-    /// running the audio through the media socket this call already
-    /// opened.</summary>
+    /// <summary><c>sipral_call_answer_media</c>: accept on this call's media
+    /// socket.</summary>
     public void Answer()
     {
         var address = ToSBytes(_mediaAddress);
         SipralErrors.Call(() => NativeMethods.sipral_call_answer_media(_stack.Handle, Handle, address, (nuint)address.Length, _stack.NowMs), "sipral_call_answer_media");
     }
 
-    /// <summary><c>sipral_call_answer_with</c>: accept as
-    /// <see cref="Answer"/> does, with a real-time text stream, RTCP feedback,
-    /// this end named the conference's focus or this call's own codecs as
-    /// <paramref name="options"/> say. Text needs the call to have been
-    /// built with a text socket, which <see cref="SipralStack.AnswerCall"/>
-    /// opens when its options ask for text.</summary>
+    // Text needs the text socket AnswerCall opens when options ask for it.
     internal void AnswerWith(SipralCallOptions options)
     {
         var address = Encoding.UTF8.GetBytes(_mediaAddress);
@@ -251,23 +205,19 @@ public sealed class Call : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_resume(_stack.Handle, Handle, _stack.NowMs), "sipral_call_resume");
     }
 
-    /// <summary><c>sipral_call_restart_ice</c>: offer the call again with
-    /// new ICE credentials (RFC 8445 §9) and check every pair again once
-    /// the far end answers, while the path it has carries the audio. The
-    /// new path arrives as another
-    /// <see cref="SipralEventKind.MediaPathChosen"/>.</summary>
+    /// <summary><c>sipral_call_restart_ice</c>: re-offer with new ICE
+    /// credentials (RFC 8445 §9); audio stays on the current path until a
+    /// new <see cref="SipralEventKind.MediaPathChosen"/>.</summary>
     public void RestartIce()
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_restart_ice(_stack.Handle, Handle, _stack.NowMs), "sipral_call_restart_ice");
     }
 
-    /// <summary><c>sipral_call_transfer</c>: ask the far end to call
-    /// <paramref name="target"/> instead, a blind transfer (RFC 3515). This
-    /// end stays in the call until the far end reports the new call up;
-    /// <see cref="SipralEventKind.TransferProgress"/> and then
-    /// <see cref="SipralEventKind.TransferDone"/> arrive on
-    /// <see cref="Events"/> with <see cref="SipralEventArgs.Transfer"/> set,
-    /// and <see cref="WaitForTransferAsync"/> waits for the last.</summary>
+    /// <summary><c>sipral_call_transfer</c>: blind transfer to
+    /// <paramref name="target"/> (RFC 3515). This end stays in the call until
+    /// the new call is up; <see cref="SipralEventKind.TransferProgress"/> and
+    /// <see cref="SipralEventKind.TransferDone"/> report it (see
+    /// <see cref="WaitForTransferAsync"/>).</summary>
     public void Transfer(string target)
     {
         var bytes = ToSBytes(target);
@@ -276,13 +226,11 @@ public sealed class Call : IDisposable
             "sipral_call_transfer");
     }
 
-    /// <summary><c>sipral_call_transfer_to</c>: hand this call to the far
-    /// end of <paramref name="other"/>, the attended half of a transfer (RFC
-    /// 3891). <paramref name="other"/> is normally a consultation call this
-    /// end placed to the target and is up; the party there replaces it with
-    /// this one rather than answering a second call. Progress arrives as
-    /// <see cref="Transfer"/>'s does. Putting this call on hold first is the
-    /// application's choice.</summary>
+    /// <summary><c>sipral_call_transfer_to</c>: attended transfer (RFC 3891)
+    /// to the far end of <paramref name="other"/>, usually a consultation
+    /// call, which that party replaces with this one. Progress arrives as for
+    /// <see cref="Transfer"/>. Holding this call first is up to the
+    /// application.</summary>
     public void TransferTo(Call other) => TransferTo(other.Handle);
 
     /// <summary><see cref="TransferTo(Call)"/> for a call named by its
@@ -294,11 +242,9 @@ public sealed class Call : IDisposable
             "sipral_call_transfer_to");
     }
 
-    /// <summary>Waits for the <see cref="SipralEventKind.TransferDone"/> a
-    /// <see cref="Transfer"/> or <see cref="TransferTo(Call)"/> ends with and
-    /// returns what it carries — a 2xx <see cref="SipralTransferEventInfo.StatusCode"/>
-    /// when the new call came up — or null when this call ends
-    /// first.</summary>
+    /// <summary>Waits for <see cref="SipralEventKind.TransferDone"/> (a 2xx
+    /// <see cref="SipralTransferEventInfo.StatusCode"/> means success), or
+    /// null when this call ends first.</summary>
     public async Task<SipralTransferEventInfo?> WaitForTransferAsync(CancellationToken cancellationToken = default)
     {
         await foreach (var args in Events.WithCancellation(cancellationToken))
@@ -315,31 +261,22 @@ public sealed class Call : IDisposable
         return null;
     }
 
-    /// <summary>This call's media socket: where device mode's encoded packets
-    /// leave from, and what <see cref="Readdress"/> replaces.</summary>
     internal Socket MediaSocket => _mediaSocket;
 
-    /// <summary>This call's media socket as <c>host:port</c>: the address its
-    /// audio was described at, and the name of its connection to a TURN
-    /// server reached over TCP or TLS.</summary>
+    /// <summary>The media socket as <c>host:port</c>, as described in the
+    /// SDP.</summary>
     public string MediaAddress => _mediaAddress;
 
-    /// <summary>The SRTP transform a DTLS-SRTP handshake settled this call's
-    /// media on, as the last <see cref="SipralEventKind.MediaSecured"/> said —
-    /// from <see cref="SipralSrtpSuite.AesCm80"/> to RFC 7714's
-    /// <see cref="SipralSrtpSuite.AeadAes256Gcm"/>, which two ends of this
-    /// stack agree on — or <see langword="null"/> before the handshake and
-    /// for a call not keyed by one. A call keyed by SDES agreed its suite in
-    /// the SDP and raises no such event; <see cref="SipralMediaSnapshot"/>'s
-    /// <c>Secured</c> says it is encrypted.</summary>
+    /// <summary>The SRTP suite DTLS-SRTP settled on, from the last
+    /// <see cref="SipralEventKind.MediaSecured"/>; <see langword="null"/>
+    /// before the handshake or for SDES-keyed calls, which raise no such
+    /// event (see <see cref="SipralMediaSnapshot"/>).</summary>
     public SipralSrtpSuite? SrtpSuite => _suite;
 
-    /// <summary><c>sipral_call_hangup_for</c>: ends the call saying why, as a
-    /// <c>Reason</c> (RFC 3326) on the BYE or the CANCEL —
-    /// <paramref name="sipCause"/> a SIP status, <paramref name="q850Cause"/>
-    /// a Q.850 cause (16 is normal clearing), either or both, with
-    /// <paramref name="text"/> beside them. The refusal of an incoming call
-    /// nothing answered carries only the Q.850 value (RFC 6432).</summary>
+    /// <summary><c>sipral_call_hangup_for</c>: hang up with a <c>Reason</c>
+    /// (RFC 3326): a SIP status, a Q.850 cause (16 is normal clearing), or
+    /// both, plus <paramref name="text"/>. Refusing an unanswered incoming
+    /// call carries only the Q.850 value (RFC 6432).</summary>
     public void HangupFor(uint sipCause = 0, uint q850Cause = 0, string? text = null)
     {
         var said = text is null ? null : ToSBytes(text);
@@ -354,22 +291,17 @@ public sealed class Call : IDisposable
     public IReadOnlyList<string> Identity(SipralIdentityText which) => _stack.CallIdentity(Handle, which);
 
     /// <summary>
-    /// Moves this call's audio to a new network: what
-    /// <see cref="SipralEventKind.CallAddressWanted"/> asks for once
-    /// <see cref="SipralStack.MoveTo"/> changed the stack's address.
+    /// Moves this call's audio to a new network, answering
+    /// <see cref="SipralEventKind.CallAddressWanted"/>.
     ///
-    /// A media socket is bound at <paramref name="mediaHost"/>:<paramref name="mediaPort"/>
-    /// and the call offered at it (<c>sipral_call_media_readdress</c>): a
-    /// re-INVITE with the call's last description, only <c>c=</c> and the
-    /// <c>m=</c> port moved, and <paramref name="publicAddress"/>
-    /// (<c>host:port</c>) in their place when the socket sits behind a NAT
-    /// whose mapping the application knows. The new socket is the call's
-    /// from here, whatever the far end answers —
-    /// <see cref="SipralEventKind.SessionChanged"/> or
-    /// <see cref="SipralEventKind.SessionChangeFailed"/> — and the old one is
-    /// closed. <see cref="SipralStatus.WrongState"/> for a call running ICE,
-    /// which <see cref="RestartIce"/> moves instead, or one with a change
-    /// already on its way.
+    /// Binds a new socket and sends a re-INVITE with only <c>c=</c> and the
+    /// <c>m=</c> port changed (<c>sipral_call_media_readdress</c>), or
+    /// <paramref name="publicAddress"/> when a known NAT mapping applies. The
+    /// new socket is kept whatever the answer
+    /// (<see cref="SipralEventKind.SessionChanged"/> or
+    /// <see cref="SipralEventKind.SessionChangeFailed"/>); the old one is
+    /// closed. <see cref="SipralStatus.WrongState"/> under ICE (use
+    /// <see cref="RestartIce"/>) or with a change already pending.
     /// </summary>
     public void Readdress(string mediaHost, int mediaPort = 0, string? publicAddress = null)
     {
@@ -415,22 +347,17 @@ public sealed class Call : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_send_dtmf(_stack.Handle, Handle, encoded, (nuint)encoded.Length, (uint)via, durationMs, _stack.NowMs), "sipral_call_send_dtmf");
     }
 
-    /// <summary><c>sipral_call_dtmf_detection</c>: when this call listens
-    /// for digits in the far end's audio. One heard there is a
-    /// <see cref="SipralEventKind.InBandDigit"/>, and reaches
-    /// <see cref="Dtmf"/> like any other.</summary>
+    /// <summary><c>sipral_call_dtmf_detection</c>: when to listen for digits
+    /// in the far end's audio (<see cref="SipralEventKind.InBandDigit"/>).</summary>
     public void SetDtmfDetection(SipralDtmfDetection mode)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_dtmf_detection(_stack.Handle, Handle, (uint)mode), "sipral_call_dtmf_detection");
     }
 
-    /// <summary><c>sipral_call_detect_progress</c>: listen for the network's
-    /// tones, decide who answered and listen for the machine's beep, as
-    /// <paramref name="options"/> say (<see langword="null"/> for every
-    /// default). Call it straight after <see cref="SipralStack.PlaceCall"/>,
-    /// before the far end answers; each thing heard is a
-    /// <see cref="SipralEventKind.ProgressDetected"/> with
-    /// <see cref="SipralEventArgs.Progress"/> set.</summary>
+    /// <summary><c>sipral_call_detect_progress</c>: detect call-progress
+    /// tones, answering machines and beeps. Call it right after
+    /// <see cref="SipralStack.PlaceCall"/>, before the answer; results arrive
+    /// as <see cref="SipralEventKind.ProgressDetected"/>.</summary>
     public void DetectProgress(SipralProgressOptions? options = null)
     {
         var o = options ?? new SipralProgressOptions();
@@ -468,10 +395,9 @@ public sealed class Call : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_detect_progress(_stack.Handle, Handle, config), "sipral_call_detect_progress");
     }
 
-    /// <summary><c>sipral_call_consent_tone</c>: beep while this call is
-    /// recorded, every value left at zero the library's default (1400 Hz,
-    /// 18 dB below 0 dBm0, 200 ms every fifteen seconds);
-    /// <paramref name="local"/> has this end hear it too.</summary>
+    /// <summary><c>sipral_call_consent_tone</c>: beep while recording. Zero
+    /// means the default (1400 Hz, -18 dBm0, 200 ms every 15 s);
+    /// <paramref name="local"/> plays it here too.</summary>
     public void SetConsentTone(uint frequencyHz = 0, uint attenuationDb = 0, uint lengthMs = 0, uint intervalMs = 0, bool local = true)
     {
         Consent(SipralToggle.On, frequencyHz, attenuationDb, lengthMs, intervalMs, local);
@@ -495,11 +421,8 @@ public sealed class Call : IDisposable
         SipralErrors.Call(() => NativeMethods.sipral_call_consent_tone(_stack.Handle, Handle, tone), "sipral_call_consent_tone");
     }
 
-    // -- real-time text ---------------------------------------------------
-
-    /// <summary><c>sipral_media_send_text</c>: queue text the user typed for
-    /// the far end (RFC 4103). It goes in the next 300 ms interval; a line
-    /// break goes as a new line and BACKSPACE (U+0008) erases the far end's
+    /// <summary><c>sipral_media_send_text</c>: queue typed text (RFC 4103)
+    /// for the next 300 ms interval; BACKSPACE (U+0008) erases the far end's
     /// last character. <see cref="SipralStatus.NotNegotiated"/> on a call
     /// that agreed no text stream, <see cref="SipralStatus.Exhausted"/> when
     /// more is waiting unsent than a stream holds, and
@@ -510,22 +433,17 @@ public sealed class Call : IDisposable
         media.SendText(text);
     }
 
-    // -- conferences --------------------------------------------------------
-
-    /// <summary><c>sipral_call_set_focus</c>: say, or stop saying, that this
-    /// end is the focus of a conference the call belongs to (RFC 4579):
-    /// <c>isfocus</c> goes on the <c>Contact</c> of everything the call sends
-    /// from here on — the answer, or the next re-INVITE for a call that is
-    /// up.</summary>
+    /// <summary><c>sipral_call_set_focus</c>: mark this end as conference
+    /// focus (RFC 4579), adding <c>isfocus</c> to the <c>Contact</c> from the
+    /// next answer or re-INVITE.</summary>
     public void SetFocus(bool focus)
     {
         SipralErrors.Call(() => NativeMethods.sipral_call_set_focus(_stack.Handle, Handle, focus ? 1u : 0u), "sipral_call_set_focus");
     }
 
-    /// <summary><c>sipral_call_conference_uri</c>: the URI of the conference
-    /// this call belongs to, when its far end said it is a focus
-    /// (<c>isfocus</c>, RFC 4579 §4.2), or <see langword="null"/> when it did
-    /// not.</summary>
+    /// <summary><c>sipral_call_conference_uri</c>: the conference URI when
+    /// the far end is a focus (RFC 4579 §4.2), else
+    /// <see langword="null"/>.</summary>
     public string? ConferenceUri
     {
         get
@@ -548,11 +466,9 @@ public sealed class Call : IDisposable
         }
     }
 
-    /// <summary><c>sipral_call_subscribe_conference</c>: watch the
-    /// conference of this call's focus (RFC 4579 §3.4) from the call's own
-    /// account. The subscription outlives the call;
-    /// <see cref="SipralEventKind.ConferenceChanged"/> says what it learns
-    /// and <see cref="SipralSubscription.Conference"/> reads the picture.
+    /// <summary><c>sipral_call_subscribe_conference</c>: watch the focus's
+    /// conference (RFC 4579 §3.4). The subscription outlives the call;
+    /// <see cref="SipralEventKind.ConferenceChanged"/> reports changes.
     /// <see cref="SipralStatus.NotAFocus"/> when the far end is not a
     /// focus.</summary>
     public SipralSubscription SubscribeConference()
@@ -564,23 +480,15 @@ public sealed class Call : IDisposable
         return new SipralSubscription(_stack, subscription, "conference");
     }
 
-    // -- recording to a server (SIPREC) ------------------------------------
-
     /// <summary>
-    /// <c>sipral_call_record_to</c>: record this call to a recording server
-    /// (RFC 7866). Two sockets are opened beside the call's media socket —
-    /// one the copy of what this end sends leaves from, labelled <c>1</c>,
-    /// and one for the far end's audio, labelled <c>2</c> — and a recording
-    /// session is placed to <paramref name="server"/> (its URI) from the
-    /// call's account, where the account sends or at
-    /// <paramref name="destination"/> (<c>host:port</c>), with the metadata
-    /// beside the offer. That INVITE is too large for a datagram, so the
-    /// stack must reach the server over a stream: a stack signalling over
-    /// TCP or TLS to it. Once the server answers, the copies leave from the
-    /// two sockets as this call's media runs. Needs media started;
-    /// <see cref="SipralStatus.WrongState"/> before that and while a
-    /// recording already runs. Returns the recording session's handle, as
-    /// <see cref="RecordingSession"/> keeps it.
+    /// <c>sipral_call_record_to</c>: record this call to a SIPREC server (RFC
+    /// 7866). Two sockets are opened, labelled <c>1</c> (this end) and
+    /// <c>2</c> (far end), and a recording session is placed to
+    /// <paramref name="server"/>, optionally via
+    /// <paramref name="destination"/>. The INVITE is too large for a
+    /// datagram, so the stack must signal over TCP or TLS.
+    /// <see cref="SipralStatus.WrongState"/> before media starts or while
+    /// already recording. Returns the session handle.
     /// </summary>
     public ulong RecordTo(string server, string? destination = null)
     {
@@ -623,10 +531,9 @@ public sealed class Call : IDisposable
         return recording;
     }
 
-    /// <summary><c>sipral_call_stop_recording_to</c>: the copies stop at
-    /// once, the recording session is hung up and its two sockets closed.
-    /// <see cref="SipralStatus.WrongState"/> when nothing records the
-    /// call.</summary>
+    /// <summary><c>sipral_call_stop_recording_to</c>: stop at once, hang up
+    /// the session and close its sockets. <see cref="SipralStatus.WrongState"/>
+    /// when not recording.</summary>
     public void StopRecordingTo()
     {
         SipralErrors.Call(
@@ -637,12 +544,8 @@ public sealed class Call : IDisposable
     }
 
     /// <summary>
-    /// Waits for this call to reach <see cref="SipralCallState.Confirmed"/>
-    /// or to end trying, whichever comes first — the ABI completes this
-    /// asynchronously, through <see cref="SipralEventKind.CallConfirmed"/>
-    /// and <see cref="SipralEventKind.CallEnded"/> on <see cref="Events"/>,
-    /// so this is the <see cref="Task"/>-returning helper over it rather
-    /// than a caller polling <see cref="State"/> in a loop.
+    /// True when the call reaches <see cref="SipralCallState.Confirmed"/>,
+    /// false when it ends first.
     /// </summary>
     public async Task<bool> WaitForConfirmedAsync(CancellationToken cancellationToken = default)
     {
@@ -660,9 +563,8 @@ public sealed class Call : IDisposable
         return false;
     }
 
-    /// <summary>Waits until <see cref="Media"/> is set — the
-    /// <see cref="SipralEventKind.MediaStarted"/> event has been
-    /// delivered — or this call ends first.</summary>
+    /// <summary>Waits for <see cref="Media"/>, or null when the call ends
+    /// first.</summary>
     public async Task<CallMedia?> WaitForMediaAsync(CancellationToken cancellationToken = default)
     {
         if (Media is { } already)
@@ -708,11 +610,7 @@ public sealed class Call : IDisposable
         }
         else
         {
-            // Never reached `SIPRAL_EVENT_KIND_MEDIA_STARTED`: refused,
-            // failed before answer, or hung up while still ringing. A
-            // socket `SipralStack.MapMediaSocket` named for it
-            // (`nat: SipralNat.Stun`) is still the stack's to give back
-            // (`sipral_stack_nat_unmap`) before the socket closes under it.
+            // no media ever started: unmap before closing the socket
             _stack.ForgetMediaSocket(_mediaAddress);
             _mediaSocket.Dispose();
             if (_textSocket is not null)
@@ -734,33 +632,23 @@ public sealed class Call : IDisposable
 /// <summary>What a call carries beyond its audio, for
 /// <see cref="SipralStack.PlaceCall"/> and <see cref="SipralStack.AnswerCall"/>.
 ///
-/// <see cref="Text"/> opens a second socket beside the audio one and offers
-/// (or accepts) a real-time text stream on it (RFC 4103): T.140 with its
-/// redundancy, which <see cref="Call.SendText"/> writes to and
-/// <see cref="Call.Text"/> reads. It is not offered on a call keyed by SRTP
-/// or gathering ICE: the text stream has no key or candidates of its own.
-/// <see cref="Feedback"/> offers RTP/AVPF (RFC 4585) with Generic NACKs and
-/// reduced-size RTCP (RFC 5506); off by default, since a far end that knows
-/// only RTP/AVP refuses the profile, and an offer that asks for it is
-/// answered in kind whatever this says. <see cref="Focus"/> says this end is
-/// the focus of a conference (RFC 4579): <c>isfocus</c> on its
-/// <c>Contact</c>. <see cref="Codecs"/> is this call's codec order in place
-/// of the stack's (<c>sipral_call_config_t::codecs</c>).</summary>
+/// <see cref="Text"/> adds a real-time text stream (RFC 4103) on its own
+/// socket; not offered with SRTP or ICE, since the text stream has no key or
+/// candidates of its own. <see cref="Feedback"/> offers RTP/AVPF (RFC 4585)
+/// with NACKs and reduced-size RTCP (RFC 5506); off by default because
+/// RTP/AVP-only peers refuse it, and an AVPF offer is answered in kind
+/// anyway. <see cref="Focus"/> marks this end as conference focus (RFC
+/// 4579).</summary>
 public sealed record SipralCallOptions(bool Text = false, bool Feedback = false, bool Focus = false)
 {
-    /// <summary>The codecs this call offers, or accepts when answering, as
-    /// <c>sipral_codec_info_t::name</c> spells them, separated by commas —
-    /// <c>"PCMA,PCMU"</c> — in place of the stack's own order; null keeps the
-    /// stack's. An answer lists what it takes in the offer's order (RFC 3264
-    /// §6.1), so answering, this chooses which codecs rather than which comes
-    /// first. A name this build has no encoder for is refused with
-    /// <see cref="SipralStatus.InvalidArgument"/>.</summary>
+    /// <summary>This call's codecs, e.g. <c>"PCMA,PCMU"</c>; null keeps the
+    /// stack's. An answer keeps the offer's order (RFC 3264 §6.1), so when
+    /// answering this picks which codecs, not which first. An unknown name
+    /// is <see cref="SipralStatus.InvalidArgument"/>.</summary>
     public string? Codecs { get; init; }
 
-    /// <summary>Placing a call, send it on to the targets a 3xx names (RFC
-    /// 3261 §8.1.3.4), most preferred first, the next tried when one
-    /// refuses. Off by default: a 3xx then ends the call with its status,
-    /// and the <c>Contact</c> it named is the application's to act on. Read
-    /// only by <see cref="SipralStack.PlaceCall"/>.</summary>
+    /// <summary>Follow a 3xx to its targets in preference order (RFC 3261
+    /// §8.1.3.4). Off by default: a 3xx ends the call and its
+    /// <c>Contact</c> is left to the application. Placing only.</summary>
     public bool FollowRedirects { get; init; }
 }

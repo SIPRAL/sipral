@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// A headless voice agent: answers, listens, echoes, hangs up on "#".
-//
-// The .NET counterpart of bindings/python/examples/agent.py, over this same
-// layer's public surface (Sipral.SipralStack, Sipral.Account, Sipral.Call):
-// registers if SIPRAL_REGISTRAR is given, answers whatever calls arrive,
-// echoes audio back a frame at a time, prints each DTMF digit and hangs up
-// once "#" is heard, then prints what the call cost.
+// A headless voice agent: registers if SIPRAL_REGISTRAR is set, answers,
+// echoes audio, prints DTMF digits, hangs up on "#", then prints the call's
+// statistics.
 //
 //   SIPRAL_AOR=sip:agent@example.invalid \
 //   SIPRAL_REGISTRAR=sip:example.invalid \
@@ -15,41 +11,28 @@
 //   SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \
 //   dotnet run --project bindings/dotnet/samples/Sipral.Sample.Agent
 //
-// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
-// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
-// signals on it, and over TLS checks the server's certificate against
-// SIPRAL_TLS_SERVER_NAME (the address's host when unset) with SIPRAL_TLS_CA
-// as the only authority it trusts (the platform's when unset). A connection
-// that fails is printed as "transport failed error=<...> tls=<...>" with
-// SslStream's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
-// takes a trunk's rush of calls the default rate floor would answer 480.
+// SIPRAL_SIGNALLING is udp (default), tcp or tls: one connection to
+// SIPRAL_REGISTRAR_ADDRESS. TLS checks SIPRAL_TLS_SERVER_NAME (default: the
+// address's host) against SIPRAL_TLS_CA as the only authority (default: the
+// platform's). Failures print "transport failed error=<...> tls=<...>" and
+// are retried. SIPRAL_INVITE_LIMIT=voice-agent accepts a trunk's burst of
+// calls that the default limit would answer 480.
 //
-// SIPRAL_TEXT=1 answers every call with a real-time text stream beside the
-// audio (RFC 4103) where the caller offered one, and types back whatever the
-// caller types. SIPRAL_PRESENCE=1 publishes the agent as open, "Agent
-// ready", once it starts (RFC 3903), and prints what the compositor made of
-// it.
+// SIPRAL_TEXT=1 answers with real-time text (RFC 4103) when offered and
+// echoes what the caller types. SIPRAL_PRESENCE=1 publishes "Agent ready"
+// (RFC 3903).
 //
-// Doubles as the sample apps' shared, non-UI core: the same register/place
-// or answer/hold/resume/DTMF calls the WPF sample's UI makes, run here
-// without one, which is what scripts/lab.sh runs headless in a container
-// on the lab network as labuser-agent-csharp.
-//
-// The one sample that handles frames itself, because a voice agent's frames
-// are its whole job: its stack is created with audio: SipralAudio.Application,
-// which is also what a machine with no sound device runs. The WPF sample lets
-// the library open the devices instead and has no audio code at all.
+// scripts/lab.sh runs this headless as labuser-agent-csharp. It uses
+// application audio mode, since handling frames is a voice agent's job; the
+// WPF sample lets the library drive the devices instead.
 
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using Sipral;
 
-// Which of this host's addresses a datagram to `address` leaves from. That
-// address goes in the Contact and in every answer's SDP, so it has to be
-// one the far end can send to: connecting a datagram socket sends nothing,
-// it only asks the system which route it would take — the same trick
-// bindings/python/examples/agent.py's own route_to plays.
+// This host's address toward `address`, for the Contact and the SDP.
+// Connecting a datagram socket sends nothing; it only picks the route.
 static string RouteTo(string address)
 {
     var (host, port) = SipralStack.ParseAddress(address);
@@ -93,15 +76,9 @@ async Task RunCallAsync(Call call, int tag)
         }
     });
 
-    // Kept fresh at a steady interval, not read once after the call is seen
-    // to have ended: once the far end's BYE is answered the stack tears
-    // this call's media down on its own poll thread, so by the time either
-    // task below notices the call is over, a statistics call can already
-    // answer with the ABI's WRONG_STATE (bindings/c/include/sipral.h:
-    // sipral_media_statistics's end-of-call record "arrives instead as
-    // SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream is
-    // gone"). A read that lands mid-teardown is skipped, not fatal --
-    // `stats` just keeps its last good reading, at most one interval stale.
+    // Polled while the call runs: once the far end's BYE is answered the
+    // media is torn down and statistics answer WRONG_STATE. A read during
+    // teardown is skipped; `stats` keeps the last good one.
     var polling = Task.Run(async () =>
     {
         try
@@ -149,8 +126,7 @@ async Task RunCallAsync(Call call, int tag)
             Console.WriteLine($"dtmf {digit}");
             if (digit == '#')
             {
-                // One last read while the call is still certainly up, for
-                // the freshest number this path can give.
+                // last read while the call is surely up
                 try
                 {
                     stats = media.Statistics();
@@ -185,15 +161,10 @@ async Task RunCallAsync(Call call, int tag)
         $"packets_sent={stats?.PacketsSent ?? 0}");
 }
 
-// Talk for the life of one call this end placed against a peer with
-// nothing of its own that would ever hang up first (the lab's own
-// two-NAT pair, scripts/lab.sh's ice_turn_flow, where the far end is the
-// harness's own iceanswer role rather than a server): patienceMs is how
-// long this end waits for media at all, so a call under SipralIce.Required
-// with every path blocked is given up on rather than waited on forever,
-// and dwellMs is how long it talks before hanging up on its own once
-// media has started. false when it ended before media ever started, which
-// RunDirectCallAsync needs to tell apart from an ordinary hangup.
+// For a placed call whose peer never hangs up (lab ice_turn_flow).
+// patienceMs bounds the wait for media, so a blocked ICE call gives up;
+// dwellMs is how long to talk before hanging up. false when media never
+// started.
 async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
 {
     Console.WriteLine("answered");
@@ -276,8 +247,7 @@ async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
     await Task.WhenAny(dwelling, endingRemotely);
     if (!call.Ended)
     {
-        // one last read while the call is still certainly up, for the
-        // freshest number this path can give
+        // last read while the call is surely up
         try
         {
             stats = media.Statistics();
@@ -292,17 +262,12 @@ async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
         catch (SipralException)
         {
         }
-        // the relayed call's farewell -- the TURN Refresh that gives its
-        // allocation back, not only the RTCP BYE -- is queued once the far
-        // end's 200 to this end's own BYE is read on the poll thread, so
-        // this waits for it rather than closing right behind Hangup()
+        // the TURN Refresh is queued only after the 200 to our BYE, so wait
         await Task.WhenAny(endingRemotely, Task.Delay(5000));
     }
     stop.Cancel();
     await Task.WhenAll(talking, polling, endingRemotely).ContinueWith(_ => { });
-    // the same short wait bindings/python/examples/agent.py's own
-    // hang_up_after_dwell gives, so a relayed call's farewell has had its
-    // own turn on the poll thread before the stack tears the socket down
+    // let the relayed call's farewell go out before the socket closes
     await Task.Delay(200);
 
     call.Close();
@@ -311,25 +276,16 @@ async Task<bool> RunCallDirectAsync(Call call, int patienceMs, int dwellMs)
     return true;
 }
 
-// Dial a peer straight at its address, no registrar between them --
-// scripts/lab.sh's own ice_turn_flow, where the far end is the harness's
-// own iceanswer role rather than a server. SIPRAL_PEER_HOST/
-// SIPRAL_PEER_PORT name it, and the account this end adds is one whose
-// registrarAddress is just the routing destination for: registrar is
-// left null, so nothing is ever registered.
+// Dial SIPRAL_PEER_HOST:SIPRAL_PEER_PORT directly, never registering (lab
+// ice_turn_flow).
 //
-// SIPRAL_STUN_SERVER turns on STUN the same way SipralStack's constructor
-// already offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
-// SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT is udp, tcp or
-// tls (RFC 8656 §3.1); over TLS the server's certificate is checked
-// against SIPRAL_TURN_NAME and trusted if it chains to the PEM file
-// SIPRAL_TURN_CA names, the platform's roots otherwise -- the lab's own
-// coturn presents a certificate made for the run, and this is how the run
-// tells the agent to trust it. SIPRAL_ICE=required asks
-// SipralIce.Required of the stack, which is what makes a call that
-// cannot find a path fail outright rather than fall back to the address
-// this end bound to -- the one thing that would let a run through a
-// blocked NAT pair pass by accident.
+// SIPRAL_STUN_SERVER enables STUN; SIPRAL_TURN_SERVER/USER/PASSWORD add
+// TURN over SIPRAL_TURN_TRANSPORT (udp, tcp or tls, RFC 8656 §3.1). Over
+// TLS the certificate is checked against SIPRAL_TURN_NAME and trusted via
+// the PEM in SIPRAL_TURN_CA (the lab's coturn uses a per-run certificate).
+// SIPRAL_ICE=required makes a call with no path fail outright instead of
+// falling back to the bound address, which would let a blocked NAT run
+// pass by accident.
 async Task<bool> RunDirectCallAsync()
 {
     var peerHost = Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST")
@@ -342,9 +298,8 @@ async Task<bool> RunDirectCallAsync()
     var stunServer = Environment.GetEnvironmentVariable("SIPRAL_STUN_SERVER");
     var turnServer = Environment.GetEnvironmentVariable("SIPRAL_TURN_SERVER");
     var ice = Environment.GetEnvironmentVariable("SIPRAL_ICE") == "required" ? SipralIce.Required : (SipralIce?)null;
-    // left unset without SIPRAL_TURN_TRANSPORT: the stack refuses a TURN
-    // transport named with no TURN server to use it on, and the lab's call
-    // that must find no path without TURN has to be placed to prove it
+    // left unset without TURN: the stack refuses a TURN transport with no
+    // server, and the lab's no-TURN call must still be placed
     var over = Environment.GetEnvironmentVariable("SIPRAL_TURN_TRANSPORT");
     var turnTransport = over switch
     {
@@ -395,10 +350,7 @@ async Task<bool> RunDirectCallAsync()
     return ok;
 }
 
-// The lab's own NAT-pair flow (ice_turn_flow) runs this mode instead of
-// the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells the
-// two apart, since a real registrar address never doubles as one -- the
-// same tell bindings/python/examples/agent.py's own main reads.
+// SIPRAL_PEER_HOST selects the direct-dial mode over register-and-listen.
 if (Environment.GetEnvironmentVariable("SIPRAL_PEER_HOST") is not null)
 {
     if (!await RunDirectCallAsync())
@@ -449,10 +401,7 @@ var text = Environment.GetEnvironmentVariable("SIPRAL_TEXT") == "1";
 
 Console.WriteLine($"listening on {stack.BindAddress}");
 
-// Kept only so a call's own failure is reported rather than lost the way an
-// exception in a task nobody awaits otherwise is; each removes itself the
-// moment it finishes; the same shape bindings/python/examples/agent.py's
-// own `calls` set and `report_failure` are, for the same reason.
+// Kept so a call's failure is reported, not lost in an unawaited task.
 var calls = new HashSet<Task>();
 var nextTag = 0;
 await foreach (var e in stack.Events)

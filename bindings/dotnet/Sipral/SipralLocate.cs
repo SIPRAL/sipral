@@ -16,12 +16,9 @@ using Sipral.Interop;
 
 namespace Sipral;
 
-/// <summary>What a resolver said to one lookup: a
-/// <see cref="SipralDnsAnswer"/>, and with <see cref="SipralDnsAnswer.Records"/>
-/// the records of the kind asked for, each its time-to-live in seconds and
-/// then its data as a zone file writes it — <c>300 192.0.2.40</c>,
-/// <c>300 10 60 5060 sip1.example.com</c>
-/// (<c>sipral_account_looked_up</c>).</summary>
+/// <summary>A resolver's answer to one lookup. Each record is its TTL in
+/// seconds, then its data in zone-file form, e.g.
+/// <c>300 10 60 5060 sip1.example.com</c>.</summary>
 public sealed record SipralLookup(SipralDnsAnswer Answer, IReadOnlyList<string> Records)
 {
     /// <summary>The name has no record of that kind, or does not
@@ -32,29 +29,20 @@ public sealed record SipralLookup(SipralDnsAnswer Answer, IReadOnlyList<string> 
     public static SipralLookup Failed { get; } = new(SipralDnsAnswer.Failed, Array.Empty<string>());
 }
 
-/// <summary>Answers <see cref="SipralEventKind.LookupWanted"/> for the
-/// accounts a stack added with <c>serverUri</c>: the name, the kind of
-/// record, and what the DNS said. Called on a thread of its own, one per
-/// lookup, and may block.</summary>
+/// <summary>Answers <see cref="SipralEventKind.LookupWanted"/> for accounts
+/// added with <c>serverUri</c>. Runs on its own thread per lookup and may
+/// block.</summary>
 public delegate SipralLookup SipralResolver(string name, SipralDnsRecordType record);
 
 /// <summary>
-/// The resolver a <see cref="SipralStack"/> uses when it is given none.
-///
-/// .NET asks the platform for addresses only (<see cref="Dns"/>), so
-/// addresses come from <see cref="Dns.GetHostAddresses(string)"/> — the
-/// hosts file included — with a time-to-live of <see cref="AddressTtl"/>,
-/// the platform not saying what the zone's was; and SRV and NAPTR are asked
-/// by this class itself, one UDP query to each of the machine's DNS servers
-/// in turn (<see cref="Servers"/>) until one answers, within
-/// <see cref="Patience"/> each. Only a reply from the server asked, with the
-/// query's id and its question echoed, is taken (RFC 5452 §9.1), and a
-/// truncated one is asked again over TCP.
+/// The default resolver. .NET only resolves addresses, so those come from
+/// <see cref="Dns.GetHostAddresses(string)"/> with TTL
+/// <see cref="AddressTtl"/> (the real one is not exposed). SRV and NAPTR are
+/// queried here, to each of <see cref="Servers"/> in turn.
 /// </summary>
 public static class SipralDns
 {
-    /// <summary>The time-to-live given an address the platform found, in
-    /// seconds: how soon a moved server is looked up again.</summary>
+    /// <summary>TTL, in seconds, given to platform-resolved addresses.</summary>
     public const uint AddressTtl = 60;
 
     /// <summary>How long one DNS server may take to answer.</summary>
@@ -63,9 +51,7 @@ public static class SipralDns
     private const ushort TypeSrv = 33;
     private const ushort TypeNaptr = 35;
 
-    /// <summary>The platform's resolver: <see cref="Dns"/> for addresses,
-    /// <see cref="Query"/> to <see cref="Servers"/> for SRV and
-    /// NAPTR.</summary>
+    /// <summary>The platform resolver described above.</summary>
     public static SipralResolver Platform { get; } = (name, record) => record switch
     {
         SipralDnsRecordType.A => Addresses(name, AddressFamily.InterNetwork),
@@ -97,8 +83,8 @@ public static class SipralDns
         return records.Count == 0 ? SipralLookup.Nothing : new SipralLookup(SipralDnsAnswer.Records, records);
     }
 
-    /// <summary>The DNS servers this machine's interfaces name, and on a
-    /// Unix without them <c>/etc/resolv.conf</c>'s.</summary>
+    /// <summary>The DNS servers the interfaces name, else those in
+    /// <c>/etc/resolv.conf</c>.</summary>
     public static IReadOnlyList<IPEndPoint> Servers()
     {
         var found = new List<IPAddress>();
@@ -130,16 +116,11 @@ public static class SipralDns
         return found.Distinct().Select(one => new IPEndPoint(one, 53)).ToList();
     }
 
-    /// <summary>One SRV or NAPTR query for <paramref name="name"/>, to each of
-    /// <paramref name="servers"/> in turn until one answers.
-    ///
-    /// A reply is taken only as RFC 5452 §9.1 asks: from the address and port
-    /// the query went to, with the query's id, as a response, and with the
-    /// question it was asked echoed back — name (in any case), type and
-    /// class. Anything else arriving on the socket is ignored and the wait
-    /// goes on. A reply with the TC bit set is asked again over TCP, to the
-    /// same server (RFC 1035 §4.2.2, RFC 7766), and checked the same
-    /// way.</summary>
+    /// <summary>One SRV or NAPTR query, to each of
+    /// <paramref name="servers"/> in turn until one answers. A reply counts
+    /// only if it matches source, id and question (RFC 5452 §9.1); anything
+    /// else is ignored. A truncated reply is retried over TCP (RFC 1035
+    /// §4.2.2, RFC 7766).</summary>
     public static SipralLookup Query(string name, SipralDnsRecordType record, IReadOnlyList<IPEndPoint> servers)
     {
         var type = record == SipralDnsRecordType.Srv ? TypeSrv : TypeNaptr;
@@ -161,17 +142,12 @@ public static class SipralDns
             }
             catch (Exception ex) when (ex is SocketException or IOException or AggregateException)
             {
-                // silent, unreachable, or refusing the TCP a truncated reply
-                // asks for: the next server
+                // next server
             }
         }
         return SipralLookup.Failed;
     }
 
-    /// <summary>The reply <paramref name="server"/> sends to
-    /// <paramref name="question"/> over UDP, or <see langword="null"/> when
-    /// none that <see cref="Answers"/> it came within
-    /// <see cref="Patience"/>.</summary>
     private static byte[]? OverUdp(IPEndPoint server, byte[] question, ushort id, string name, ushort type)
     {
         using var socket = new UdpClient(server.AddressFamily);
@@ -202,10 +178,7 @@ public static class SipralDns
         }
     }
 
-    /// <summary>The reply <paramref name="server"/> sends to
-    /// <paramref name="question"/> over TCP, each message after its two-byte
-    /// length (RFC 1035 §4.2.2), or <see langword="null"/> when it does not
-    /// <see cref="Answers"/> it.</summary>
+    // Length-prefixed messages (RFC 1035 §4.2.2).
     private static byte[]? OverTcp(IPEndPoint server, byte[] question, ushort id, string name, ushort type)
     {
         using var client = new TcpClient(server.AddressFamily);
@@ -233,10 +206,7 @@ public static class SipralDns
         && (from.Address.Equals(server.Address)
             || (from.Address.IsIPv4MappedToIPv6 && from.Address.MapToIPv4().Equals(server.Address)));
 
-    /// <summary>Whether <paramref name="reply"/> is the response to the query
-    /// <paramref name="id"/> asked: that id, the QR bit, one question, and
-    /// that question <paramref name="name"/>, <paramref name="type"/>, class
-    /// IN (RFC 5452 §9.1).</summary>
+    // RFC 5452 §9.1: same id, QR set, one question echoing name, type, IN.
     internal static bool Answers(byte[] reply, ushort id, string name, ushort type)
     {
         if (reply.Length < 12 || (reply[0] << 8 | reply[1]) != id || (reply[2] & 0x80) == 0
@@ -260,8 +230,7 @@ public static class SipralDns
         }
     }
 
-    /// <summary>A recursive query for one name and type (RFC 1035
-    /// §4.1).</summary>
+    // RFC 1035 §4.1, recursion desired.
     private static byte[] Question(ushort id, string name, ushort type)
     {
         var message = new List<byte> { (byte)(id >> 8), (byte)id, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0 };
@@ -275,9 +244,7 @@ public static class SipralDns
         return message.ToArray();
     }
 
-    /// <summary>The records of <paramref name="type"/> an answer holds, as
-    /// zone-file text; a name that does not exist is nothing, and a server
-    /// failure or a refusal is a failure.</summary>
+    // NXDOMAIN is Nothing; SERVFAIL or REFUSED is Failed.
     internal static SipralLookup Answer(byte[] reply, ushort type, SipralDnsRecordType record)
     {
         var code = reply[3] & 0x0F;
@@ -332,8 +299,7 @@ public static class SipralDns
         return $"{ttl} {priority} {weight} {port} {Name(reply, ref at)}";
     }
 
-    /// <summary>Order, preference, flags, service and replacement; the
-    /// regular expression is left out, since RFC 3263 follows none.</summary>
+    // The regexp field is dropped: RFC 3263 uses none.
     private static string Naptr(byte[] reply, int at, uint ttl)
     {
         var order = reply[at] << 8 | reply[at + 1];
@@ -353,8 +319,7 @@ public static class SipralDns
         return text;
     }
 
-    /// <summary>A name, following compression pointers (RFC 1035 §4.1.4);
-    /// <c>.</c> for the root.</summary>
+    // Follows compression pointers (RFC 1035 §4.1.4); "." for the root.
     private static string Name(byte[] reply, ref int at)
     {
         var labels = new List<string>();
@@ -390,30 +355,23 @@ public static class SipralDns
 
 public sealed partial class SipralStack
 {
-    /// <summary>Whether this stack picks the address peers reach it at — it
-    /// was given no <c>bindHost</c>, and keeps picking across every
-    /// <see cref="MoveTo"/> — and whether it has picked it yet: the route
-    /// toward the first server an account names, since it was created or
-    /// since the network last moved it.</summary>
+    // No bindHost: the advertised address is the route toward the first
+    // account's server, picked again after every move.
     private bool _routes;
     private bool _routeChosen;
     private readonly object _routeLock = new();
     private SipralResolver _resolver = SipralDns.Platform;
 
-    /// <summary>What <see cref="SipralEventKind.LookupWanted"/> asked, and
-    /// what <see cref="SipralEventKind.Located"/> found, during the poll that
-    /// raised them, acted on right after it.</summary>
+    // Queued during the poll, acted on right after it.
     private readonly ConcurrentQueue<(ulong Account, string Name, SipralDnsRecordType Record)> _lookupsAsked = new();
     private readonly ConcurrentQueue<(ulong Account, string Target)> _located = new();
 
-    /// <summary><c>sipral_advertised_address</c>: the <c>host:port</c> to
-    /// advertise for a socket bound at <paramref name="bound"/> whose traffic
-    /// goes to <paramref name="peer"/>. A wildcard bind (<c>0.0.0.0:5060</c>)
-    /// gives the address of the route toward <paramref name="peer"/>; a
-    /// loopback bind toward a peer that is not throws with
-    /// <see cref="SipralStatus.UnreachableAddress"/>, and no route at all
-    /// with <see cref="SipralStatus.TransportDown"/>. Both are addresses, not
-    /// names.</summary>
+    /// <summary><c>sipral_advertised_address</c>: what to advertise for a
+    /// socket at <paramref name="bound"/> talking to <paramref name="peer"/>
+    /// (both addresses, not names). A wildcard bind gives the route toward
+    /// the peer. Loopback toward a remote peer throws with
+    /// <see cref="SipralStatus.UnreachableAddress"/>; no route, with
+    /// <see cref="SipralStatus.TransportDown"/>.</summary>
     public static string AdvertisedAddress(string bound, string peer)
     {
         NativeLibraryLoader.EnsureRegistered();
@@ -422,12 +380,9 @@ public sealed partial class SipralStack
         return NativeText.FromSBytes(buffer, (int)needed - 1);
     }
 
-    /// <summary>The address of this machine's route toward
-    /// <paramref name="peer"/> (<c>host:port</c>), the one a socket bound on
-    /// every interface is reached at from there; <c>127.0.0.1</c> when there
-    /// is no peer, it is a name rather than an address, or no route reaches
-    /// it — the address that works for a peer on this machine and that the
-    /// library refuses to advertise to any other.</summary>
+    /// <summary>This machine's address on the route toward
+    /// <paramref name="peer"/>; <c>127.0.0.1</c> when there is no peer, it
+    /// is a name, or no route reaches it.</summary>
     public static string RouteHost(string? peer)
     {
         if (peer is null || !IsAddress(peer))
@@ -444,8 +399,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Whether <paramref name="text"/> is <c>host:port</c> with an IP
-    /// address for its host.</summary>
     internal static bool IsAddress(string text)
     {
         var colon = text.LastIndexOf(':');
@@ -453,11 +406,8 @@ public sealed partial class SipralStack
             && IPAddress.TryParse(text[..colon].Trim('[', ']'), out _);
     }
 
-    /// <summary>The <c>host:port</c> an account whose server is
-    /// <paramref name="peer"/> is reached at, on a stack that picks its own
-    /// address: the route toward the server, on this stack's port. The first
-    /// server named also becomes the address the stack's <c>Via</c>
-    /// carries.</summary>
+    // The route toward the server on this stack's port. The first server
+    // named also sets the Via address.
     internal string AdvertiseToward(string peer)
     {
         var address = $"{RouteHost(peer)}:{ParseAddress(BindAddress).Port}";
@@ -474,9 +424,6 @@ public sealed partial class SipralStack
         return address;
     }
 
-    /// <summary>The UDP transport the stack writes in its <c>Via</c> named
-    /// <paramref name="address"/> from now on, on a stack that picks its own
-    /// address.</summary>
     private void AdvertiseMain(string address)
     {
         var local = NativeText.ToSBytes(address);
@@ -488,13 +435,9 @@ public sealed partial class SipralStack
         BindAddress = address;
     }
 
-    /// <summary>What a stack bound on every interface advertises after a
-    /// move, chosen again as it was at creation: the route toward its first
-    /// account's server, or with no server to route toward,
-    /// <paramref name="host"/> — the new network's own address — on the same
-    /// port. The socket on every interface already receives there, on the
-    /// port it had, and stays; an address this machine lacks throws, as
-    /// binding the socket there would.</summary>
+    // After a move: the route toward the first account's server, else host,
+    // on the same port. The wildcard socket stays; an address this machine
+    // lacks throws, as binding there would.
     private void AdvertiseAgain(string host)
     {
         var address = IPAddress.Parse(host);
@@ -524,8 +467,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Whether an account added now, with no <c>Contact</c> of its
-    /// own, is reached at the route toward its server.</summary>
     internal bool PicksAddress
     {
         get
@@ -537,10 +478,8 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Where a call's media socket is bound:
-    /// <paramref name="mediaHost"/> when one was given, else the route toward
-    /// where the media will come from — <paramref name="destination"/>, the
-    /// account's server, or the address this stack is reached at.</summary>
+    // mediaHost, else the route toward the destination, the account's
+    // server, or the stack's own address.
     private string MediaHostFor(string? mediaHost, Account? account, string? destination)
     {
         if (mediaHost is not null)
@@ -565,8 +504,6 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>The poll thread's half: what the events asked, kept for
-    /// right after the poll.</summary>
     private void NoteLocate(SipralEventArgs args)
     {
         if (args.Locate is not { } locate)
@@ -583,13 +520,9 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Answer what <see cref="SipralEventKind.LookupWanted"/> asked
-    /// in the poll that just ran, each lookup on a thread of its own — a
-    /// resolver may take seconds, and the poll thread may not wait for it —
-    /// and act on what <see cref="SipralEventKind.Located"/> found: an account
-    /// located at an address it has not been told of is pointed at it and, on
-    /// a stack that picks its own address, reached at the route toward
-    /// it.</summary>
+    // Each lookup gets its own thread: a resolver may take seconds and the
+    // poll thread must not wait. A newly located account is pointed at its
+    // server and, when the stack picks addresses, rerouted.
     private void ActOnLookups()
     {
         while (_lookupsAsked.TryDequeue(out var asked))
@@ -615,8 +548,7 @@ public sealed partial class SipralStack
             }
             catch (SipralException)
             {
-                // the account was removed meanwhile: the next location says
-                // it again, or nothing needs it
+                // account removed meanwhile
             }
         }
     }
@@ -629,14 +561,11 @@ public sealed partial class SipralStack
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // the resolver's failure is an answer: the procedure waits for
-            // every one
+            // a failure is still an answer; the stack waits for every one
             return SipralLookup.Failed;
         }
     }
 
-    /// <summary><c>sipral_account_looked_up</c>, for one answer; an account
-    /// removed while the resolver ran is let go of quietly.</summary>
     private void LookedUp(ulong account, string name, SipralDnsRecordType record, SipralLookup answer)
     {
         if (_closed.IsSet)
@@ -659,11 +588,10 @@ public sealed partial class SipralStack
         }
     }
 
-    /// <summary>Turns the diagnostic trace on or off while the stack runs
-    /// (<c>sipral_stack_diagnostic_trace</c>): whether the trace level writes
-    /// every SIP message whole, with its peer, from now on — credentials and
-    /// keys taken out either way — or pseudonymised, as by default. Nothing
-    /// is written unless the log is at <see cref="SipralLogLevel.Trace"/>.</summary>
+    /// <summary><c>sipral_stack_diagnostic_trace</c>: log whole SIP messages
+    /// with peers, instead of pseudonymised, at
+    /// <see cref="SipralLogLevel.Trace"/>. Credentials and keys are removed
+    /// either way.</summary>
     public void SetDiagnosticTrace(bool on)
     {
         SipralErrors.Call(
@@ -685,11 +613,8 @@ public sealed partial class SipralStack
         return SipralSettings.Of(raw, suites);
     }
 
-    /// <summary>The diagnostic record of every call the stack keeps, as JSON
-    /// (<c>sipral_stack_diagnostics_json</c>): each decision the stack made
-    /// and why — <c>transport.kept.datagram</c> among them for a request that
-    /// went over UDP past RFC 3261 §18.1.1's line because
-    /// <c>datagramWithoutStreamBytes</c> let it.</summary>
+    /// <summary>The per-call diagnostic record as JSON
+    /// (<c>sipral_stack_diagnostics_json</c>): each decision and why.</summary>
     public string DiagnosticsJson()
     {
         var capacity = 4096;
