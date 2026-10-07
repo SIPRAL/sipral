@@ -3,76 +3,44 @@
 
 //! Keeping a registration reachable through a NAT, over UDP.
 //!
-//! A registrar reaches this end at the address its REGISTER came from, and
-//! behind a NAT that is a mapping the NAT made for the flow between this
-//! socket and the registrar. RFC 4787 §5 lets a NAT filter what comes back
-//! into a mapping by the address and port it was sent to — "Address and
-//! Port-Dependent Filtering" — and most do: an INVITE the registrar forwards
-//! gets in only while the NAT still remembers this end sending to the
-//! registrar's own address and port. A STUN request every twenty-five
-//! seconds, which is what keeps the signalling socket's *mapping* alive
-//! (`sipral::Mappings`), goes to the STUN server and so says nothing for
-//! that filter; the REGISTER refresh does, but once an hour, and a NAT
-//! forgets a UDP flow in minutes. In the lab a call 330 seconds after the
-//! REGISTER was dropped at exactly that filter.
+//! Most NATs filter inbound traffic by the address and port it was sent to
+//! (RFC 4787 §5, "Address and Port-Dependent Filtering"). The STUN refresh
+//! goes to the STUN server, so it does not keep the registrar's flow open,
+//! and the hourly REGISTER refresh is too rare: in the lab a call 330 s after
+//! the REGISTER was dropped at that filter.
 //!
-//! So each account that STUN showed to be behind a NAT sends something to its
-//! registrar's flow every
-//! [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE), which is what
-//! RFC 5626 §3.5 calls a keep-alive. That RFC names the two ways to write one:
-//! a double CRLF for a connection-oriented flow (§3.5.1) and a STUN Binding
-//! request for a datagram one (§3.5.2, §4.4.2), the latter so that the pong
-//! also tells the client whether its mapping moved. Neither is answered by the
-//! registrars this is deployed against on UDP — Asterisk answers no STUN on its
-//! SIP port, and no registrar pongs a CRLF on a datagram — so a STUN request
-//! here would buy nothing a CRLF does not, and would ask a registrar to parse a
-//! protocol it never agreed to. What is sent is the widely deployed double CRLF
-//! on its own, as a datagram: RFC 3261 §7.5 has a receiver ignore CRLFs ahead
-//! of a start line, a datagram holding nothing else is no message at all, and a
-//! registrar drops it — while the NAT on the way out has seen this end send to
-//! the registrar's address and port, which is the whole of what the filter asks
-//! (RFC 4787 §4.3, REQ-6: a mapping is refreshed by outbound traffic). The
-//! mapping itself moving is still caught by the STUN refresh, which does get an
-//! answer.
+//! So each account behind a NAT sends a keep-alive (RFC 5626 §3.5) to its
+//! registrar every [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE).
+//! It is a bare double CRLF datagram, not a STUN request: deployed registrars
+//! answer neither on UDP (Asterisk answers no STUN on its SIP port), and a
+//! receiver ignores CRLFs before a start line (RFC 3261 §7.5). Outbound
+//! traffic is all the NAT needs (RFC 4787 §4.3, REQ-6). A moved mapping is
+//! still caught by the STUN refresh.
 //!
-//! **When.** Only for an account whose `Contact` a STUN answer moved
-//! ([`UserAgent::readdress`]) onto an address that is not the socket's own
-//! — the one fact that says the account is behind a NAT — on a datagram
-//! transport, with a registrar, while its registration holds a binding or
-//! is getting one. A stream has the endpoint's own CRLF keep-alive (RFC 5626
-//! §4.4.1), a trunk has no binding to keep, and an account whose address
-//! STUN found to be its own has no NAT to keep open.
+//! **When.** For an account whose `Contact` a STUN answer moved
+//! ([`UserAgent::readdress`]) to an address that is not the socket's own, on
+//! a datagram transport, with a registrar, while it holds or is getting a
+//! binding. A stream has the endpoint's own CRLF keep-alive (RFC 5626
+//! §4.4.1); a trunk has no binding to keep.
 //!
-//! **Or when the application says so.** An account given an interval of its
-//! own ([`Account::keepalive`](crate::Account::keepalive)) is kept open at it
-//! whatever STUN found — or with no STUN at all, which is the case the rule
-//! above cannot see: a NAT with a short UDP timeout in front of a stack that
-//! was never given a STUN server loses every call between two REGISTERs. It
-//! applies on any transport: a datagram flow gets the double CRLF above from
-//! this agent, and a stream is pinged by the endpoint at the account's
-//! interval instead of its own, RFC 5626 §4.4.1's ping and pong. An account
-//! with no registrar is kept open toward its outbound proxy while the agent
-//! runs, since a trunk behind a NAT loses its calls the same way.
+//! **Or when the application says so.** An account with its own interval
+//! ([`Account::keepalive`](crate::Account::keepalive)) is kept open whatever
+//! STUN found, or with no STUN at all, on any transport: a datagram flow gets
+//! the CRLF from this agent, a stream is pinged by the endpoint at that
+//! interval. With no registrar it is kept open toward its outbound proxy
+//! while the agent runs.
 //!
-//! **How often.** Every
-//! [`DEFAULT_KEEPALIVE`](crate::keepalive::DEFAULT_KEEPALIVE) unless set
-//! otherwise ([`UserAgent::keep_registrar_flows_alive`]), each interval drawn
-//! between 80% and 100% of that — the spread RFC 5626 §4.4 asks for around a
-//! server's own figure — so that a registrar does not hear every client in the
-//! same instant. Twenty-five seconds sits inside RFC 5626 §4.4.2's "random
-//! number between 24 and 29 seconds" for UDP, chosen there because "many NATs
-//! have UDP timeouts as low as 30 seconds" — which RFC 4787 REQ-5 forbids and
-//! which is deployed all the same. Longer than
-//! [`MAX_KEEPALIVE`](crate::keepalive::MAX_KEEPALIVE) is refused: REQ-5's two
-//! minutes is the shortest a conforming NAT may forget a flow in, so a longer
-//! interval keeps nothing open that the REGISTER refresh would not.
+//! **How often.** Each interval is drawn between 80% and 100% of the setting
+//! (RFC 5626 §4.4), so clients do not all fire at once. 25 s sits inside RFC
+//! 5626 §4.4.2's 24 to 29 s, chosen because many NATs time UDP out at 30 s.
+//! Over [`MAX_KEEPALIVE`](crate::keepalive::MAX_KEEPALIVE) is refused: RFC
+//! 4787 REQ-5's two minutes is the shortest a conforming NAT may forget a
+//! flow in.
 //!
-//! **Not while suspended.** A process the operating system is about to stop
-//! has nothing scheduled ([`UserAgent::suspending`]), and a phone that
-//! sleeps is woken by a push (RFC 8599), not by holding a NAT open from a
-//! process that is not running. They start again with the REGISTER that
-//! proves the binding again after [`UserAgent::resumed`], and stop while
-//! there is no interface or the recovery gave up.
+//! **Not while suspended** ([`UserAgent::suspending`]): a sleeping phone is
+//! woken by a push (RFC 8599). Pings start again with the REGISTER after
+//! [`UserAgent::resumed`], and stop while there is no interface or recovery
+//! gave up.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -97,8 +65,7 @@ pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(25);
 /// than two minutes".
 pub const MAX_KEEPALIVE: Duration = Duration::from_secs(120);
 
-/// The shortest it takes. Anything under a second is a registrar flooded
-/// for no NAT that exists.
+/// The shortest it takes.
 pub const MIN_KEEPALIVE: Duration = Duration::from_secs(1);
 
 /// What goes out: a double CRLF, RFC 5626 §3.5.1's ping, alone in a datagram.
@@ -194,9 +161,8 @@ impl UserAgent {
         }
     }
 
-    /// The account is gone, and nothing is kept for it. A stream it had
-    /// asked for is handed back to the endpoint's own interval at the end of
-    /// the next round of work.
+    /// The account is gone. Its stream returns to the endpoint's own
+    /// interval at the next settle.
     pub(crate) fn forget_keepalive(&mut self, account: AccountId) {
         self.keepalives.behind.remove(&account);
         self.keepalives.due.remove(&account);
@@ -240,13 +206,11 @@ impl UserAgent {
     }
 
     /// Start keeping alive what now qualifies, and stop what no longer does.
-    /// Run at the end of every round of work, so that a registration won or
-    /// lost, a suspend or a wake, an account added or moved is followed at
-    /// once.
+    /// Runs at the end of every round of work.
     ///
-    /// A datagram flow is this agent's to ping; a stream is the endpoint's,
-    /// which is asked to ping it at the shortest interval any account on it
-    /// wants, and handed back to its own interval when none does.
+    /// A datagram flow is pinged here; a stream is pinged by the endpoint at
+    /// the shortest interval any account on it wants, and handed back to its
+    /// own interval when none does.
     pub(crate) fn settle_keepalives(&mut self, now: Instant) {
         let accounts: Vec<AccountId> = self.accounts.keys().copied().collect();
         let mut streams: HashMap<TransportId, Duration> = HashMap::new();
@@ -309,13 +273,10 @@ impl UserAgent {
     /// The interval this account's flow is to be kept open at right now, or
     /// `None` when it is not one to keep open.
     ///
-    /// An account with an interval of its own ([`Account::keepalive`]) is
-    /// kept open on any transport, STUN or no STUN, while its registration
-    /// holds a binding or is getting one — or, with no registrar, while the
-    /// agent runs. Any other is kept open only when a STUN answer showed it
-    /// behind a NAT, over UDP, at the agent's interval, while it registers.
-    /// The transport's protocol is [`UserAgent::settle_keepalives`]'s to
-    /// weigh.
+    /// An account with its own interval ([`Account::keepalive`]) is kept
+    /// open on any transport while it registers, or always with no
+    /// registrar. Any other only when behind a NAT, over UDP, while it
+    /// registers.
     ///
     /// [`Account::keepalive`]: crate::Account::keepalive
     fn wanted_keepalive(&self, account: AccountId) -> Option<Duration> {

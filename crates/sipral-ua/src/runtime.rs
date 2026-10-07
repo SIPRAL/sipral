@@ -3,43 +3,21 @@
 
 //! The reference loop: sockets, a thread each, and the five calls.
 //!
-//! Nothing else in this tree opens a socket, and that is the design rather
-//! than an omission — a stack that owns its I/O imposes its runtime on
-//! everyone who embeds it. What is here is the plainest thing that closes the
-//! gap: `std::net`, blocking reads, one thread per socket feeding a channel,
-//! and a loop that does what [`crate::UserAgent`] asks. It exists so that the
-//! first call anyone makes with Sipral takes twenty lines, and so that the
-//! bindings have something to mirror.
+//! The only place that opens sockets: `std::net`, blocking reads, one thread
+//! per socket feeding a channel. It makes a first call take twenty lines and
+//! gives the bindings something to mirror. Behind a feature flag, off by
+//! default, because a real deployment needs what it lacks:
 //!
-//! It is behind a feature flag and off by default, because two things it does
-//! not do are things a real deployment needs.
-//!
-//! **NAPTR and SRV.** `std::net` resolves a name to addresses and nothing
-//! else, so [`Event::ResolveNeeded`] is answered with what
-//! `ToSocketAddrs` gives back and the RFC 3263 ordering never happens. A
-//! deployment that reaches a carrier through SRV supplies its own resolver —
-//! every platform has one, and on a phone it is the only one allowed to answer
-//! while the radio is asleep. A lookup the resolver cannot answer is not
-//! dropped: the loop hands the event on to the application with the name that
-//! did not resolve, and when a registrar's own name no longer resolves either
-//! it tells the agent
-//! [`UserAgent::name_resolution_lost`](crate::UserAgent::name_resolution_lost),
-//! whose registrations then say so. One name a far end made up is not a
-//! resolver that has gone.
-//!
-//! **TLS.** No implementation is linked here and none will be.
-//! `TransportProtocol::Tls` describes a transport the caller has already
-//! secured; this loop opens plain TCP and plain UDP, and stops there. A
-//! plain WebSocket is TCP to this loop: it opens the connection, and the
-//! agent does the rest ([`crate::websocket`]).
-//!
-//! One more thing it does not do, and this one is `std::net`'s fault: a
-//! datagram socket cannot say which of several local addresses a packet
-//! arrived on without `IP_PKTINFO`, which the standard library does not
-//! expose. RFC 3581 §4 needs that address to answer from the right one, so
-//! this loop binds to an address you name rather than to a wildcard. A stack
-//! listening on every interface writes its own loop, which is a dozen lines
-//! over a real socket API.
+//! - **NAPTR and SRV.** `std::net` only resolves A records, so RFC 3263
+//!   ordering never happens; bring your own resolver. A failed lookup is
+//!   handed to the application with the name, and when a registrar's own
+//!   name fails too the agent is told
+//!   [`UserAgent::name_resolution_lost`](crate::UserAgent::name_resolution_lost).
+//!   One bad name from a far end does not count.
+//! - **TLS.** None is linked. This loop opens plain UDP and TCP; a plain
+//!   WebSocket is TCP here and the agent does the rest ([`crate::websocket`]).
+//! - **Wildcard binds.** Without `IP_PKTINFO` a datagram's local address is
+//!   unknown, and RFC 3581 §4 needs it, so bind to a named address.
 
 use std::collections::HashMap;
 use std::io;
@@ -58,21 +36,13 @@ use sipral_core::msg::HostRef;
 use crate::agent::UserAgent;
 use crate::event::UaEvent;
 
-/// The largest datagram worth reading. A SIP message over UDP that does not
-/// fit has already been moved to a stream by §18.1.1.
 const DATAGRAM: usize = 65_535;
-/// How much of a stream to take at once. Messages are found by
-/// `Content-Length` further down, so the size here is only a buffer.
+/// Read buffer only; messages are framed by `Content-Length` further down.
 const CHUNK: usize = 8_192;
-/// How long to sit in a read when nothing has a deadline, so that
-/// [`Handler::on_tick`] still runs on a quiet line.
+/// Read timeout with no deadline, so [`Handler::on_tick`] still runs.
 const IDLE: Duration = Duration::from_millis(200);
 
-/// How long one turn may sit in a read.
-///
-/// `None` means until a deadline or a packet, and on a stack with no call and
-/// nothing scheduled that is for ever. Separated out so that the arithmetic —
-/// which is all this decision is — can be tested without waiting for any of it.
+/// How long one turn may sit in a read. `None` means until a packet.
 fn sleep_for(deadline: Option<Instant>, cap: Option<Duration>, now: Instant) -> Option<Duration> {
     let until = deadline.map(|at| at.saturating_duration_since(now));
     match (until, cap) {
@@ -92,29 +62,24 @@ pub enum Control {
 
 /// What an application does with what happens.
 pub trait Handler {
-    /// Something happened. The agent is here too, because the answer to an
-    /// event is usually to tell it something: answer the call, hang up, hold.
+    /// Something happened; the agent is passed so the handler can react.
     fn on_event(&mut self, agent: &mut UserAgent, event: UaEvent, now: Instant);
 
-    /// Called once round every loop, whether or not anything arrived. This is
-    /// where an application does what nothing prompted it to do — place a
-    /// call, and decide when it has had enough.
+    /// Called once per turn, whether or not anything arrived: place calls,
+    /// decide when to stop.
     fn on_tick(&mut self, agent: &mut UserAgent, now: Instant) -> Control {
         let _ = (agent, now);
         Control::Continue
     }
 }
 
-/// One socket the loop owns.
 #[derive(Debug)]
 enum Link {
-    /// A datagram socket, with the address it was bound to.
+    /// With the address it was bound to.
     Datagram(Arc<UdpSocket>, SocketAddr),
-    /// One connection.
     Stream(Arc<TcpStream>),
 }
 
-/// What a reader thread found.
 #[derive(Debug)]
 enum Arrival {
     Datagram {
@@ -148,13 +113,13 @@ pub struct Runtime {
 impl Runtime {
     /// Bind a UDP socket and put a user agent on it.
     ///
-    /// `local` is an address, not a wildcard: see the note at the top of this
-    /// module. `seed` is the endpoint's thirty-two bytes of entropy.
+    /// `local` must not be a wildcard (see the module docs). `seed` is the
+    /// endpoint's 32 bytes of entropy.
     ///
     /// # Errors
     /// Whatever binding the socket returns, and
-    /// [`io::ErrorKind::InvalidInput`] when a timer in `config` cannot be armed —
-    /// see [`UserAgent::new`].
+    /// [`io::ErrorKind::InvalidInput`] when a timer in `config` cannot be
+    /// armed (see [`UserAgent::new`]).
     pub fn bind(config: EndpointConfig, seed: [u8; 32], local: SocketAddr) -> io::Result<Self> {
         let socket = Arc::new(UdpSocket::bind(local)?);
         let local = socket.local_addr()?;
@@ -187,19 +152,19 @@ impl Runtime {
         Ok(runtime)
     }
 
-    /// The UDP transport, which is what an account is configured with.
+    /// The UDP transport, to configure accounts with.
     #[must_use]
     pub const fn transport(&self) -> TransportId {
         self.udp
     }
 
-    /// The address it ended up on, which matters when port zero was asked for.
+    /// The bound address, with the real port when zero was asked for.
     #[must_use]
     pub const fn local(&self) -> SocketAddr {
         self.local
     }
 
-    /// The agent underneath: accounts, calls, everything.
+    /// The agent underneath.
     #[must_use]
     pub const fn agent(&mut self) -> &mut UserAgent {
         &mut self.agent
@@ -207,18 +172,11 @@ impl Runtime {
 
     /// The longest one turn may wait when nothing has a deadline.
     ///
-    /// Two hundred milliseconds by default, so that [`Handler::on_tick`] runs
-    /// often enough for an application to do what nothing prompted it to do.
-    /// That is five wake-ups a second on a line where nothing is happening,
-    /// which is the wrong trade on a phone in somebody's pocket: `None`
-    /// removes the cap, and a turn then waits for a deadline or for a packet.
-    /// On a stack with no call and nothing scheduled — which is what
-    /// [`UserAgent::idle`] answers — there is neither, so the turn waits
-    /// indefinitely and the process costs nothing until something arrives.
-    ///
-    /// An application that removes the cap has to make sure something will
-    /// arrive, because [`Runtime::run`] cannot come out of a turn that is
-    /// waiting for ever. See `docs/16-lifecycle.md`.
+    /// 200 ms by default, so [`Handler::on_tick`] runs often. On a phone
+    /// that is five wake-ups a second for nothing: `None` removes the cap,
+    /// and an [`UserAgent::idle`] stack then sleeps until a packet arrives.
+    /// Without a cap, [`Runtime::run`] cannot return from a turn until
+    /// something arrives. See `docs/16-lifecycle.md`.
     pub const fn idle_cap(&mut self, cap: Option<Duration>) {
         self.cap = cap;
     }
@@ -226,31 +184,23 @@ impl Runtime {
     /// Round the loop until the handler says to stop.
     ///
     /// # Errors
-    /// Always `Ok`. A transmit that a socket refuses is not this loop's to
-    /// stop over: see [`Runtime::turn`].
+    /// Always `Ok` (see [`Runtime::turn`]).
     pub fn run(&mut self, handler: &mut impl Handler) -> io::Result<()> {
         while self.turn(handler, Instant::now())? == Control::Continue {}
         Ok(())
     }
 
     /// One pass: write what is waiting, report what arrived, wait for the
-    /// next thing or for a timer.
-    ///
-    /// Separate from [`Runtime::run`] so that a test can drive it a step at a
-    /// time and say what the clock reads.
+    /// next packet or timer. Lets a test drive the loop with its own clock.
     ///
     /// # Errors
-    /// Always `Ok`. A datagram one destination refuses is not the socket's
-    /// fault and does not end the loop; a stream that fails closes itself,
-    /// reported the same way a read that found nothing on the wire is.
-    /// Kept as a `Result` so a caller already matching on one need not change.
+    /// Always `Ok`. A refused datagram is dropped; a failed stream closes
+    /// itself as if the peer had closed it.
     pub fn turn(&mut self, handler: &mut impl Handler, now: Instant) -> io::Result<Control> {
         self.flush()?;
         self.report(handler, now);
         let control = handler.on_tick(&mut self.agent, now);
-        // before the answer, not after: a handler that stops has usually just
-        // hung up, and a BYE that is still in the queue when the loop ends is
-        // a call the far end keeps for as long as it runs
+        // a handler that stops has usually just hung up: send the BYE first
         self.flush()?;
         if control == Control::Stop {
             return Ok(Control::Stop);
@@ -263,11 +213,6 @@ impl Runtime {
 // -- what goes out -----------------------------------------------------------
 
 impl Runtime {
-    // no transmit failure reaches a caller from here any more: a datagram
-    // is swallowed and a stream closes itself through the ordinary
-    // `Input::StreamClosed` path, so nothing is left for `Result` to carry.
-    // `Runtime::turn` and `Runtime::run` keep their `io::Result` regardless,
-    // so that nobody who already matches on it has to change
     #[expect(
         clippy::unnecessary_wraps,
         reason = "the Result stays so turn/run's public signature does not have to move"
@@ -275,23 +220,16 @@ impl Runtime {
     fn flush(&mut self) -> io::Result<()> {
         while let Some(transmit) = self.agent.poll_transmit() {
             let Some(link) = self.links.get(&transmit.transport) else {
-                // a transport that has gone. §17 has the transaction find out
-                // by timing out, which is what happens if nothing is said
+                // gone transport: the transaction times out (§17)
                 continue;
             };
             match *link {
-                // one destination refusing a datagram says nothing about the
-                // others sharing this socket -- a broadcast that needs a
-                // permission this process was never given, or a route that
-                // does not exist for one peer, does not make the socket
-                // itself bad. Silence and a transaction's own §17 timeout is
-                // how the failure is noticed, same as the missing link above
+                // one refused destination does not make the shared socket
+                // bad; the transaction's own §17 timeout notices
                 Link::Datagram(ref socket, _) => {
                     socket.send_to(&transmit.payload, transmit.destination).ok();
                 }
-                // a stream is one connection to one peer, so a write that
-                // fails means that connection, and nothing else, is over --
-                // the same ending a closed read reports through `arrived`
+                // a stream is one peer: a failed write ends only it
                 Link::Stream(ref socket) => {
                     if io::Write::write_all(&mut socket.as_ref(), &transmit.payload).is_err() {
                         let transport = transmit.transport;
@@ -305,8 +243,7 @@ impl Runtime {
     }
 
     fn tell(&mut self, input: Input<'_>) {
-        // a datagram that will not parse is not an error the loop can do
-        // anything about, and the far end is not going to hear about it either
+        // nothing to do about an unparsable datagram
         self.agent.receive(input, Instant::now()).ok();
     }
 }
@@ -329,11 +266,8 @@ impl Runtime {
                             self.agent.endpoint().resolved(dialog, &addresses, protocol);
                         }
                     } else {
-                        // the application hears the name that did not
-                        // resolve rather than nothing at all; the bindings
-                        // whose registrar was a name stop being trusted only
-                        // when it is the resolver that failed, not one name
-                        // a far end wrote
+                        // the application hears the name; registrations are
+                        // distrusted only if the resolver itself is gone
                         if self.resolver_is_gone(&host) {
                             self.agent.name_resolution_lost(now);
                         }
@@ -349,17 +283,13 @@ impl Runtime {
                         );
                     }
                 }
-                // RFC 3263 for an account that names its server: the
-                // addresses from the system resolver, and nothing for NAPTR
-                // and SRV, which `std::net` cannot ask — the locator then
-                // uses the host's own addresses at the transport's port
+                // RFC 3263: no NAPTR/SRV here, so the locator falls back to
+                // the host's addresses at the transport's port
                 UaEvent::LookupWanted { account, query } => {
                     let answer = self.answer_lookup(&query);
                     let _ = self.agent.looked_up(account, &query, answer, now);
                 }
-                // opened here, and reported anyway: the two sizes on it are
-                // the only place the application ever sees how large the
-                // request that did not fit was
+                // reported anyway: only here does the application see the sizes
                 UaEvent::Unclaimed(Event::TransportWanted {
                     protocol,
                     destination,
@@ -378,9 +308,7 @@ impl Runtime {
                         now,
                     );
                 }
-                // RFC 5626 §4.4.1 called the flow dead. The endpoint has
-                // already forgotten it; the socket is this loop's, and dropping
-                // the last handle to it is what closes it
+                // RFC 5626 §4.4.1: dead flow; dropping the link closes it
                 UaEvent::Unclaimed(Event::FlowFailed { transport }) => {
                     self.links.remove(&transport);
                     handler.on_event(
@@ -394,7 +322,6 @@ impl Runtime {
         }
     }
 
-    /// Wait for something to arrive, or for the next deadline.
     fn wait(&mut self, now: Instant) {
         let arrived = match sleep_for(self.agent.poll_timeout(), self.cap, now) {
             Some(until) => self.inbox.recv_timeout(until).ok(),
@@ -403,17 +330,12 @@ impl Runtime {
         match arrived {
             Some(arrival) => {
                 self.arrived(arrival);
-                // a socket that always has something waiting is what a UDP
-                // port on the open internet looks like, and `arrived` never
-                // runs a timer -- a deadline already due when this turn
-                // started otherwise never fires as long as datagrams keep
-                // coming
+                // a public UDP port always has something waiting; without
+                // this a due timer would never fire under steady traffic
                 if self.agent.poll_timeout().is_some_and(|due| due <= now) {
                     self.agent.handle_timeout(now);
                 }
             }
-            // nothing came, or every reader thread is gone. Either way the
-            // timers still have to run: that is how a transaction finds out
             None => self.agent.handle_timeout(Instant::now()),
         }
     }
@@ -448,8 +370,7 @@ impl Runtime {
         }
     }
 
-    /// The address a datagram transport is bound to, which is what §18.2.1
-    /// makes the address a response has to leave from.
+    /// Where responses must leave from (§18.2.1).
     fn local_of(&self, transport: TransportId) -> Option<SocketAddr> {
         match self.links.get(&transport) {
             Some(&Link::Datagram(_, local)) => Some(local),
@@ -457,14 +378,11 @@ impl Runtime {
         }
     }
 
-    /// §18.1.1's switch: a message too large for a datagram needs a stream,
-    /// and opening one is the caller's. Also an account's connection of its
-    /// own, a WebSocket among them: the TCP connection is opened here and
-    /// bound with its far end named, and the agent does the handshake on it
+    /// Opens a TCP stream: for §18.1.1 (too large for a datagram) or an
+    /// account's own connection. A WebSocket handshake is the agent's
     /// ([`crate::websocket`]).
     fn open(&mut self, protocol: TransportProtocol, destination: SocketAddr) {
-        // TLS, and a WebSocket on TLS, are transports the caller secures;
-        // this loop does not link one
+        // no TLS here
         if !matches!(protocol, TransportProtocol::Tcp | TransportProtocol::Ws) {
             return;
         }
@@ -530,16 +448,10 @@ impl Runtime {
 }
 
 impl Runtime {
-    /// Whether a lookup of `failed` failed because names stopped resolving,
-    /// rather than because this one name does not exist.
-    ///
-    /// `std::net` gives the same error for both, and a far end can write any
-    /// name it likes in a `Contact`, so one failure proves nothing about the
-    /// resolver. The names that matter are the registrars': a registrar's own
-    /// name failing is the loss itself, and any other name failing is asked
-    /// about again with a registrar's name, which only a gone resolver fails
-    /// too. An agent with no registrar written as a name has nothing a
-    /// resolver vouched for, and so nothing to stop trusting.
+    /// Whether the resolver is gone, not just one name unknown. `std::net`
+    /// gives the same error for both, so a registrar's name is the probe:
+    /// it failing too means the resolver is gone. No registrar by name means
+    /// nothing to distrust.
     fn resolver_is_gone(&self, failed: &Host) -> bool {
         let registrars: Vec<(Host, Option<u16>)> = self
             .agent
@@ -565,9 +477,7 @@ impl Runtime {
 }
 
 impl Runtime {
-    /// The system resolver's answer to one RFC 3263 query. It gives no
-    /// time-to-live, so every address is held for the shortest the locator
-    /// allows, [`crate::locate::MIN_TTL`].
+    /// The system resolver has no TTL, so [`crate::locate::MIN_TTL`] is used.
     fn answer_lookup(&self, query: &Query) -> Answer {
         let family = match query.record {
             RecordType::A => AddressFamily::Ipv4,
@@ -596,18 +506,13 @@ impl Runtime {
     }
 }
 
-/// How a name becomes addresses: [`look_up`], unless a test says otherwise.
+/// [`look_up`], replaceable in tests.
 type Resolver = fn(&Host, Option<u16>, Option<TransportProtocol>) -> io::Result<Vec<SocketAddr>>;
 
-/// The addresses a name stands for.
-///
-/// An A lookup and nothing else: the ordering RFC 3263 asks for needs SRV,
-/// which `std::net` cannot ask for. A host that is already an address needs no
-/// answer at all, and gets none.
+/// A/AAAA only, no SRV. An IP host returns nothing.
 ///
 /// # Errors
-/// Whatever the system resolver says when it cannot answer: a name it does
-/// not know, or no resolver to ask.
+/// The system resolver's error: unknown name or no resolver.
 fn look_up(
     host: &Host,
     port: Option<u16>,
@@ -652,10 +557,7 @@ mod tests {
 
     #[test]
     fn the_application_hears_the_two_sizes_even_though_the_loop_answers_the_event() {
-        // this loop opens the connection itself, and an event it swallowed
-        // would take the only two numbers that explain the failure with it
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
-        // discard, and nothing is listening on it here either
         let peer: SocketAddr = "127.0.0.1:9".parse().expect("a peer address");
         let mut runtime =
             Runtime::bind(EndpointConfig::default(), [11; 32], local).expect("a loopback socket");
@@ -680,9 +582,7 @@ mod tests {
             "1400 bytes of Subject does not go in a datagram"
         );
 
-        // the endpoint is asked directly here, so nothing has yet moved its
-        // events up into the user agent's own queue; a turn of the loop would
-        // do it after waiting out an idle read
+        // the endpoint was called directly: move its events up first
         let now = Instant::now();
         runtime.agent().handle_timeout(now);
 
@@ -712,7 +612,6 @@ mod tests {
             sleep_for(Some(soon), None, t0),
             Some(Duration::from_millis(20))
         );
-        // a deadline already past does not become a wait
         let overdue = t0.checked_sub(Duration::from_secs(1)).expect("a past time");
         assert_eq!(
             sleep_for(Some(overdue), Some(IDLE), t0),
@@ -722,7 +621,6 @@ mod tests {
 
     #[test]
     fn a_stack_with_nothing_scheduled_and_no_cap_waits_for_a_packet() {
-        // C5: the whole cost of an idle turn, and there is none
         let t0 = Instant::now();
         assert_eq!(sleep_for(None, None, t0), None);
         assert_eq!(sleep_for(None, Some(IDLE), t0), Some(IDLE));
@@ -740,7 +638,6 @@ mod tests {
         assert_eq!(runtime.cap, Some(Duration::from_secs(5)));
     }
 
-    /// A handler that keeps the loop going and does nothing else.
     #[derive(Debug)]
     struct Busy;
 
@@ -753,9 +650,6 @@ mod tests {
 
     #[test]
     fn timers_still_run_while_datagrams_keep_arriving() {
-        // one datagram waiting on every turn is what a UDP port on the public
-        // internet looks like, and `wait` ran the timers only when nothing
-        // came
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
         let peer: SocketAddr = "127.0.0.1:9".parse().expect("a peer address");
         let mut runtime =
@@ -804,10 +698,6 @@ mod tests {
 
     #[test]
     fn a_send_that_failed_does_not_end_the_loop() {
-        // `flush` used `?`, so one datagram the kernel refused came out of
-        // `run` as an io::Error with every call, registration and
-        // subscription frozen behind it -- and the datagram it had already
-        // taken off the queue was gone
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
         let mut runtime =
             Runtime::bind(EndpointConfig::default(), [15; 32], local).expect("a loopback socket");
@@ -838,11 +728,6 @@ mod tests {
 
     #[test]
     fn a_stream_that_will_not_take_a_write_is_the_one_thing_that_ends() {
-        // the other half of the same repair, and the half that is not
-        // symmetric with it: a datagram socket serves every peer, so one
-        // refusal says nothing about the rest, but a stream is one connection
-        // to one peer. A write that fails means that connection is over and
-        // nothing else is
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
         let peer = listener.local_addr().expect("its address");
         let local: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
@@ -858,11 +743,8 @@ mod tests {
             .map(|(transport, _)| *transport)
             .expect("the stream was linked");
 
-        // only this end's write half, and the peer is deliberately kept
-        // alive: shutting the whole socket would have the reader thread see
-        // the end of the stream and report it, and then this test would pass
-        // on the read path while the write path it names went untested. It
-        // did, the first time it was written.
+        // only the write half: a full shutdown would end the stream on the
+        // read path and leave the write path untested
         if let Some(Link::Stream(socket)) = runtime.links.get(&stream) {
             socket
                 .shutdown(std::net::Shutdown::Write)
@@ -896,7 +778,6 @@ mod tests {
         );
     }
 
-    /// What a machine whose resolver has gone answers every name with.
     fn no_resolver(
         _host: &sipral_core::endpoint::Host,
         _port: Option<u16>,
@@ -905,7 +786,6 @@ mod tests {
         Err(std::io::Error::other("no resolver to ask"))
     }
 
-    /// The value of `name` in `message`, as written.
     fn field(message: &str, name: &str) -> String {
         message
             .lines()
@@ -914,8 +794,7 @@ mod tests {
             .to_owned()
     }
 
-    /// What a machine whose resolver works answers: the registrar's name, and
-    /// no other, since `callee.invalid` exists nowhere (RFC 2606).
+    /// Knows only the registrar; `callee.invalid` exists nowhere (RFC 2606).
     fn knows_the_registrar(
         host: &sipral_core::endpoint::Host,
         _port: Option<u16>,
@@ -929,10 +808,8 @@ mod tests {
         }
     }
 
-    /// A loop whose account registers with a registrar written as a name,
-    /// looking names up with `resolver`, after a call it placed was answered
-    /// with a `Contact` naming `callee.invalid`: turned until that name has
-    /// been asked for, with what the application heard.
+    /// A call answered with `Contact: <sip:bob@callee.invalid>`, turned until
+    /// that name was looked up with `resolver`.
     fn answered_by_a_name(resolver: super::Resolver) -> (Runtime, Recorder) {
         let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a far end");
         far.set_read_timeout(Some(Duration::from_secs(2)))
@@ -968,7 +845,6 @@ mod tests {
         let mut recorder = Recorder::default();
         runtime.turn(&mut recorder, t0).expect("a turn");
 
-        // the far end answers, and its Contact is a name
         let mut buffer = [0_u8; 4_096];
         let (read, _) = far.recv_from(&mut buffer).expect("the INVITE arrives");
         let request = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default()).into_owned();
@@ -993,8 +869,7 @@ mod tests {
             {
                 break;
             }
-            // the recorder stops every turn before its wait, so the wait
-            // that takes the answer in is run here
+            // the recorder stops before the wait, so wait here
             at += Duration::from_millis(10);
             runtime.wait(at);
             runtime.turn(&mut recorder, at).expect("a turn");
@@ -1012,9 +887,6 @@ mod tests {
         (runtime, recorder)
     }
 
-    /// A registrar given by name: the loop answers the account's lookups with
-    /// the system resolver — nothing for SRV, the addresses for the host —
-    /// and the REGISTER reaches the address the name stands for.
     #[test]
     fn a_registrar_given_by_name_is_located_and_registered_with() {
         let far = std::net::UdpSocket::bind("127.0.0.1:0").expect("a registrar");
@@ -1055,11 +927,6 @@ mod tests {
         );
     }
 
-    /// Registered, then the resolver goes: the loop that asked for a name
-    /// and got nothing back used to drop the question, and the stack went on
-    /// believing every address it had learned from one. Now the agent is
-    /// told its names stopped resolving, and the application hears which
-    /// name it was.
     #[test]
     fn a_name_the_resolver_cannot_answer_is_reported_and_not_dropped() {
         let (mut runtime, recorder) = answered_by_a_name(no_resolver);
@@ -1081,10 +948,7 @@ mod tests {
         );
     }
 
-    /// One name a far end wrote that exists nowhere is not the resolver
-    /// going away: the application still hears the name, and the bindings
-    /// the resolver vouched for stay trusted, where a single made-up
-    /// `Contact` used to put the whole agent into recovery.
+    /// One unknown name from a far end is not a lost resolver.
     #[test]
     fn a_name_that_does_not_exist_leaves_the_registrations_trusted() {
         let (mut runtime, recorder) = answered_by_a_name(knows_the_registrar);

@@ -4,24 +4,13 @@
 //! What this layer sends inside a dialog by itself, when RFC 3261 §18.1.1
 //! will not let it out over a datagram.
 //!
-//! A request the application asks for is refused back to it exactly as the
-//! first send is: [`UaError::Send`] carrying `NeedsStreamTransport`, nothing
-//! changed, and the same call works once the application has bound the stream
-//! the endpoint asked for. What this layer sends on its own has nobody to hand
-//! that refusal to — the ACK to a 2xx, the PRACK for a provisional response
-//! with nothing to answer, the NOTIFY that tells a referrer how the transfer
-//! went, the BYE after a 2xx nobody acknowledged or a session that ran out,
-//! the hangup this layer decides on, a change offered again after a 491, and a
-//! subscription's refresh. Each of those was dropped without a word, or
-//! reported as a failure in the same breath as the request for a connection.
-//! They wait here instead and go when a transport is bound, which is what a
-//! challenged request whose credentials made it too large already does.
+//! An application request gets [`UaError::Send`] with `NeedsStreamTransport`
+//! and can retry once the stream is bound. What this layer sends on its own
+//! (ACK, PRACK, transfer NOTIFY, BYE, hangup, 491 retry, subscription
+//! refresh) has nobody to retry it, so it waits here and goes when a
+//! transport is bound. A dialog that ends drops what waits in it.
 //!
-//! Every one names its dialog, so a dialog that ends takes along whatever was
-//! waiting to be sent in it.
-//!
-//! The session timer's refresh is not here: one that cannot go is tried again
-//! by the timer itself.
+//! The session timer retries its own refresh.
 
 use std::time::Instant;
 
@@ -88,16 +77,9 @@ impl Parked {
         }
     }
 
-    /// Whether the two are the same request, so that one asked for twice
-    /// waits once.
-    ///
-    /// A 2xx retransmitted while its ACK waits would otherwise queue a second
-    /// ACK behind the first. Two notifications about one REFER are the same
-    /// report at two moments: RFC 3515 §2.4.5 makes each body "a complete
-    /// statement of the status of the referred action" with no deltas, and
-    /// the far end of the referred call decides how many provisional
-    /// responses, and so how many reports, there are. A report on another
-    /// REFER in the same dialog is another subscription (§2.4.6).
+    /// Whether the two are the same request, so it waits once. Two NOTIFYs
+    /// for one REFER count as one: each body is a complete status (RFC 3515
+    /// §2.4.5). Another REFER is another subscription (§2.4.6).
     fn repeats(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -162,9 +144,7 @@ const fn prack_needs_a_stream(error: &PrackError) -> bool {
 impl UserAgent {
     /// Hold one back until a transport is bound, once.
     ///
-    /// What is already waiting stays, except a report on a transfer: the
-    /// later one takes the earlier one's place in the queue, because it says
-    /// everything the earlier one would have and more.
+    /// A newer transfer report replaces the waiting one.
     pub(crate) fn park(&mut self, parked: Parked) {
         if let Some(held) = self.parked.iter_mut().find(|held| held.repeats(&parked)) {
             if matches!(*held, Parked::Notify { .. }) {
@@ -192,11 +172,8 @@ impl UserAgent {
 
     /// Send what §18.1.1 held back, now that a transport has been bound.
     ///
-    /// Everything is tried, not only what the new transport could carry:
-    /// which stream a request needs is the endpoint's to decide. What still
-    /// will not go waits again. What is now refused for another reason — the
-    /// dialog is gone, or what the request was for has already happened — is
-    /// dropped, because a later attempt would be refused the same way.
+    /// Everything is tried; the endpoint decides which stream each needs.
+    /// What still needs a stream waits again; any other refusal drops it.
     pub(crate) fn resume_parked_sends(&mut self, now: Instant) {
         for parked in core::mem::take(&mut self.parked) {
             match parked {
@@ -227,8 +204,7 @@ impl UserAgent {
 
     /// Acknowledge a 2xx to a call placed with an offer (§13.2.2.4).
     ///
-    /// `true` when the ACK went or is waiting for a stream, which either way
-    /// leaves the application nothing to acknowledge.
+    /// `true` when the ACK went or is waiting for a stream.
     pub(crate) fn ack_by_itself(&mut self, dialog: DialogId, now: Instant) -> bool {
         match self.endpoint.ack_2xx(dialog, None, now) {
             Ok(()) => true,

@@ -3,21 +3,13 @@
 
 //! Why a request was sent: the `Reason` header field (RFC 3326).
 //!
-//! A status code says why a request failed; nothing in RFC 3261 says why a
-//! BYE or a CANCEL was sent. `Reason` does, and two of its uses matter to a
-//! phone. A forking proxy that has had one branch answer cancels the others
-//! with `Reason: SIP ;cause=200 ;text="Call completed elsewhere"` (§3.1),
-//! which is what lets the phones that lost say "answered elsewhere" rather
-//! than list a missed call. And a gateway ending a call from the telephone
-//! network says why in Q.850's terms — `Q.850 ;cause=16` is a normal
-//! clearing, `17` a busy line — which is the only place that information
-//! survives the crossing. RFC 6432 lets a Q.850 value ride on any response
-//! too, and gateways put one on their refusals.
+//! Two uses matter: a forking proxy cancels losing branches with
+//! `SIP ;cause=200` (§3.1), so they show "answered elsewhere" rather than a
+//! missed call; and gateways carry the Q.850 cause (16 normal, 17 busy), also
+//! on responses (RFC 6432).
 //!
-//! "Clients and servers are free to ignore this header field. It has no
-//! impact on protocol processing" (§2): nothing here changes what the stack
-//! does. It is read, typed, and handed up on the call's end, and written
-//! where this end knows why it is ending something.
+//! It never changes protocol processing (§2): it is read, handed up with the
+//! call's end, and written where this end knows why it ends something.
 
 use sipral_core::msg::{HeaderName, Params, RawMessage, trim};
 
@@ -129,11 +121,8 @@ impl Reason {
 
     /// Every reason-value a message carries, in the order written.
     ///
-    /// §2: "all of them MUST have different protocol values". One that
-    /// repeats a protocol already read is a sender's mistake, and the first
-    /// of the two is the one kept; one that cannot be read at all is
-    /// skipped, as "an implementation is free to ignore Reason values that
-    /// it does not understand".
+    /// A repeated protocol keeps the first (§2); unreadable values are
+    /// skipped.
     #[must_use]
     pub fn all_in(message: &RawMessage<'_>) -> Box<[Self]> {
         let mut read: Vec<Self> = Vec::new();
@@ -150,9 +139,8 @@ impl Reason {
     /// The reason-value as it goes on the wire:
     /// `SIP;cause=200;text="Call completed elsewhere"`.
     ///
-    /// The text is quoted with `"` and `\` escaped (RFC 3261 §25.1), and any
-    /// byte that would end the header field or could not stand in a
-    /// quoted-string is left out rather than written.
+    /// The text is quoted (RFC 3261 §25.1); bytes not allowed in a
+    /// quoted-string are dropped.
     #[must_use]
     pub fn to_value(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(48);
@@ -212,9 +200,8 @@ impl core::fmt::Display for Reason {
     }
 }
 
-/// `headers` with a `Reason` field carrying `reasons` in place of any the
-/// application wrote itself: the typed values are the ones asked for.
-/// `headers` alone when `reasons` is empty.
+/// `headers` with `reasons` replacing any `Reason` the application wrote;
+/// unchanged when `reasons` is empty.
 pub(crate) fn with_reason(headers: &[Extra], reasons: &[Reason]) -> Vec<Extra> {
     let mut out = headers.to_vec();
     if let Some(value) = Reason::field(reasons) {

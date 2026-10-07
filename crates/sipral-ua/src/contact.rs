@@ -16,12 +16,9 @@ use sipral_core::msg::{Uri, UriScheme};
 /// needs, for a call that arrived for no account and so has no configured
 /// `Contact` of its own.
 ///
-/// §12.1.1 has a UAS put a `Contact` on every response that establishes a
-/// dialog, and §8.1.1.8 gives it one shape: a SIP URI at which this end can
-/// be reached. The address the INVITE arrived on is the one such address this
-/// end is sure of. A `transport` parameter says how, since a far end that
-/// reached this one over TCP or TLS would otherwise send its next request
-/// over UDP (§19.1.2 makes UDP the default for `sip:`).
+/// §12.1.1 requires a `Contact` on dialog-creating responses; the arrival
+/// address is the only one this end is sure of. Without `transport`, a far
+/// end on TCP or TLS would fall back to UDP (§19.1.2).
 pub(crate) fn contact_for_arrival(address: SocketAddr, protocol: TransportProtocol) -> Box<[u8]> {
     // the `transport-param` tokens are the `Via` ones in lower case: `tcp`
     // and `tls` in §25.1, `ws` and `wss` in RFC 7118 §5.2
@@ -38,10 +35,8 @@ pub(crate) fn contact_for_arrival(address: SocketAddr, protocol: TransportProtoc
 /// `contact` with its host and port replaced by `address`, or `None` for a
 /// URI that is not `sip:` or `sips:`.
 ///
-/// The user part, the parameters and the headers stay exactly as written: an
-/// instance identifier or a `transport` parameter is as true of the public
-/// address as of the private one. An IPv6 address is bracketed, as RFC 3261
-/// §25.1's `hostport` requires.
+/// User part, parameters and headers stay as written. IPv6 is bracketed
+/// (RFC 3261 §25.1 `hostport`).
 pub(crate) fn contact_at(contact: &Uri, address: SocketAddr) -> Option<Uri> {
     let text = contact.as_str();
     let (start, end) = hostport_span(text)?;
@@ -89,8 +84,8 @@ pub(crate) fn contact_on_name(
 /// or no port where `address` has the one RFC 3261 §19.1.2 makes the default
 /// for the scheme.
 ///
-/// A contact written with a name, or with another address, is one the
-/// application chose on purpose, and nothing here rewrites it.
+/// A contact with a name or another address was chosen on purpose and is
+/// never rewritten.
 pub(crate) fn contact_names(contact: &Uri, address: SocketAddr) -> bool {
     let Some(sip) = contact.sip() else {
         return false;
@@ -119,9 +114,7 @@ pub(crate) fn contact_names(contact: &Uri, address: SocketAddr) -> bool {
 
 /// Where the `hostport` of a `sip:` or `sips:` URI begins and ends, in bytes.
 ///
-/// The same cuts the parser makes (RFC 3261 §19.1.1): the user part ends at
-/// the first `@`, the headers begin at the first `?` and the parameters at
-/// the first `;` before them.
+/// Same cuts as the parser (RFC 3261 §19.1.1).
 fn hostport_span(text: &str) -> Option<(usize, usize)> {
     let colon = text.find(':')?;
     let scheme = text.get(..colon)?;

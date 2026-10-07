@@ -3,58 +3,25 @@
 
 //! Subscriptions: asking to be told, and staying told (RFC 6665).
 //!
-//! A subscription is a standing question. It is asked with a SUBSCRIBE, it is
-//! answered with NOTIFY requests for as long as it lasts, and the whole of the
-//! difficulty is that it lasts — an hour at a time, thirty of them at once, on
-//! a phone that gets suspended, moved between networks and pointed at a PBX
-//! that reboots. Everything here exists because one of those happens.
+//! **The dialog is opened by the NOTIFY, not by the 200** (§4.4.1): the route
+//! set comes from the NOTIFY, and opening on the 2xx would send refreshes past
+//! a record-routing proxy. The NOTIFY may also arrive before the 2xx
+//! (§4.1.2.4), so a subscription is matched only on `Call-ID`, our `From` tag
+//! and the `Event`, all known when the SUBSCRIBE leaves. That is why the tag
+//! is chosen here, not by the endpoint.
 //!
-//! **The dialog is opened by the NOTIFY, not by the 200.** §4.4.1 is explicit:
-//! "the dialog usage is established by the NOTIFY request, the route set at
-//! the subscriber is taken from the NOTIFY request itself, as opposed to the
-//! route set present in the 200-class response to the SUBSCRIBE request". A
-//! stack that opens the dialog on the 2xx has the wrong route set, and sends
-//! its refresh past the proxy that record-routed itself. So the SUBSCRIBE goes
-//! out of dialog, the first NOTIFY is what makes a dialog, and §4.1.2.4 says
-//! in as many words that the NOTIFY may arrive **before** the answer to the
-//! SUBSCRIBE: "Due to the potential for out-of-order messages, packet loss,
-//! and forking, the subscriber MUST be prepared to receive NOTIFY requests
-//! before the SUBSCRIBE transaction has completed." It does, on real
-//! equipment, and a subscription that is only matched once the 2xx has landed
-//! answers that first notification 481 and kills itself.
+//! **Timer N** (§4.1.2.4, 64·T1 from SUBSCRIBE to the first NOTIFY): if it
+//! fires there is no subscription, whatever the 200 said.
 //!
-//! Which is why a subscription is matched by what §4.4.1 says and by nothing
-//! else: the same `Call-ID`, a `To` tag on the NOTIFY equal to the `From` tag
-//! of the SUBSCRIBE, and an `Event` that matches byte for byte. All three are
-//! known the instant the SUBSCRIBE is handed to a transport, which is why the
-//! tag is chosen here rather than left to the endpoint to mint.
+//! **A failure is an event and leaves nothing behind.** The handle is minted
+//! first, so a SUBSCRIBE that never reaches a socket is reported under it and
+//! its record removed at once, with no timer left. Refreshes and retries that
+//! cannot be sent take the same path.
 //!
-//! **Timer N is the one that stops a subscription hanging.** §4.1.2.4 starts
-//! it at 64·T1 when the SUBSCRIBE goes and stops it at the first NOTIFY; if it
-//! fires, there is no subscription and there never was one, however cheerful
-//! the 200 was. Without it a notifier that accepts and then says nothing
-//! leaves a lamp dark for ever and a record that nothing will ever collect.
-//!
-//! **A failure is an event, and it leaves nothing behind.** The first
-//! SUBSCRIBE can fail before it reaches a socket — the interface it named has
-//! gone, a name no longer resolves, the transport was closed under it — and
-//! that is not an error of the call the application made, because by then the
-//! subscription has a name. So the handle is minted first, the failure is
-//! reported under it, and the record is removed in the same breath: no timer
-//! is scheduled, no map keeps an entry, and there is nothing for a later sweep
-//! to trip over. The same path runs for a refresh that cannot be sent and for
-//! a re-subscription that fires while the network is still down.
-//!
-//! **Thirty subscriptions are not thirty round trips.** Nothing here waits for
-//! anything: [`UserAgent::subscribe`] hands one SUBSCRIBE to the endpoint and
-//! returns, so thirty calls put thirty requests in the transmit queue and the
-//! application writes them in one pass over `poll_transmit`. What
-//! [`UserAgent::subscribe_many`] adds is that the whole batch is drained once
-//! instead of thirty times, and that a target which cannot be sent to becomes
-//! an event rather than stopping the twenty-nine after it. There is nothing
-//! else the stack can do about it and it should not pretend otherwise: it owns
-//! no socket, so it cannot pace, and pacing is what an application does by
-//! calling this more than once.
+//! **Batches do not wait.** Each SUBSCRIBE goes straight to the transmit
+//! queue; [`UserAgent::subscribe_many`] only drains once and turns a failing
+//! target into an event. The stack owns no socket, so pacing is the
+//! application's.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -84,19 +51,14 @@ use crate::registration::{
 
 /// How long a subscription asks for when nothing says otherwise.
 ///
-/// RFC 4235 §3.4: "In another case, a subscriber is interested in the state of
-/// all dialogs for a specific user. In these cases, a shorter interval makes
-/// more sense. The default is one hour for these subscriptions." Which is what
-/// a busy lamp field is, and it is the same hour a registration asks for, so a
-/// phone wakes up for both at about the same time rather than twice as often.
+/// One hour, RFC 4235 §3.4's default; the same as a registration, so a phone
+/// wakes once for both.
 pub const DEFAULT_EXPIRES: Duration = Duration::from_hours(1);
 
 /// One subscription the application is watching.
 ///
-/// Minted before anything is sent, so that a SUBSCRIBE which never reaches a
-/// transport still has a name to be reported under. Never reused, so a handle
-/// to a subscription that has ended names nothing rather than naming somebody
-/// else's.
+/// Minted before anything is sent, so a failed SUBSCRIBE can be reported
+/// under it. Never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubscriptionHandle(pub(crate) u32);
 
@@ -107,18 +69,15 @@ pub enum SubscriptionState {
     /// A SUBSCRIBE is out and no NOTIFY has arrived. The RFC's `notify_wait`,
     /// and the only state Timer N runs in.
     Requesting,
-    /// The notifier has it and has not decided whether to grant it. §4.1.3:
-    /// "there is insufficient policy information to grant or deny the
-    /// subscription yet". Nothing is known about the resource.
+    /// The notifier has not decided yet (§4.1.3). Nothing is known about the
+    /// resource.
     Pending,
     /// Notifications are arriving and the state is being kept up to date.
     Active,
-    /// It ended in a way worth trying again, and the next attempt is
-    /// scheduled. Nothing is known about the resource until it succeeds.
+    /// It ended in a way worth retrying, and the next attempt is scheduled.
     ///
-    /// There is no state past this one. A subscription that has ended for good
-    /// has no record left to be in a state — the handle names nothing, and
-    /// [`UaEvent::SubscriptionEnded`] with no `retry_in` was the last word.
+    /// There is no final state: a subscription ended for good has no record,
+    /// and [`UaEvent::SubscriptionEnded`] with no `retry_in` was the last word.
     Retrying,
 }
 
@@ -143,70 +102,50 @@ impl core::fmt::Display for SubscriptionState {
 
 /// Why a subscription is not live.
 ///
-/// The first seven are §4.1.3's own reason codes, carried through as the
-/// notifier sent them, because each says something different about whether to
-/// ask again and the RFC spells out which. The rest are this end's, for the
-/// failures that never reach a notifier at all.
+/// The first seven are §4.1.3's reason codes as the notifier sent them; the
+/// rest are failures this end saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SubscriptionEnd {
-    /// `reason=deactivated`: the notifier is handing the subscription on.
-    /// "the subscriber SHOULD retry immediately with a new subscription".
+    /// `reason=deactivated`: retry at once with a new subscription.
     Deactivated,
-    /// `reason=probation`: come back later, and `retry-after` says when.
+    /// `reason=probation`: come back after `retry-after`.
     Probation,
-    /// `reason=rejected`: authorisation changed. "Clients SHOULD NOT attempt
-    /// to re-subscribe."
+    /// `reason=rejected`: authorisation changed; not retried.
     Rejected,
-    /// `reason=timeout`: it lapsed without being refreshed. Also what a poll
-    /// gets (§4.4.3), which is a subscription that was never meant to last.
+    /// `reason=timeout`: it lapsed. Also what a poll gets (§4.4.3).
     Timeout,
-    /// `reason=giveup`: the notifier could not get authorisation in time.
+    /// `reason=giveup`: authorisation took too long.
     GaveUp,
-    /// `reason=noresource`: there is nothing there to watch any more.
-    /// "Clients SHOULD NOT attempt to re-subscribe."
+    /// `reason=noresource`: nothing left to watch; not retried.
     NoResource,
-    /// `reason=invariant`: the state is guaranteed not to change again.
+    /// `reason=invariant`: the state will never change again.
     Invariant,
-    /// The notifier said `terminated` and gave no reason, or one nothing here
-    /// knows. §4.1.3 leaves retrying open, so it is retried.
+    /// `terminated` with no reason or an unknown one; retried (§4.1.3).
     Unstated,
-    /// The application asked, with an `Expires: 0` (§4.1.2.3).
+    /// The application asked, with `Expires: 0` (§4.1.2.3).
     Unsubscribed,
-    /// A 489: the notifier does not know the event package. Asking again with
-    /// the same package gets the same answer.
+    /// A 489: the event package is unknown to the notifier.
     BadEvent,
-    /// The notifier refused in a way that trying again cannot fix: a 403, a
-    /// 404, or one of the other final responses §4.1.2.2 lists.
+    /// A final refusal retrying cannot fix, such as 403 or 404.
     Refused,
-    /// A 3xx naming somewhere else. Following it needs an address, and
-    /// resolving one is the caller's, so it is reported rather than chased.
+    /// A 3xx. Following it needs name resolution, which is the caller's.
     Redirected,
-    /// The notifier is not answering, or says it cannot serve this now: a
-    /// timeout, a dead transport, a 5xx.
+    /// A timeout, a dead transport or a 5xx.
     Unreachable,
-    /// The SUBSCRIBE was accepted and no NOTIFY followed within 64·T1
-    /// (§4.1.2.4's Timer N). There is no subscription, whatever the 200 said.
+    /// Accepted, but no NOTIFY before Timer N (§4.1.2.4).
     NoNotify,
-    /// The subscription reached the end of what the notifier granted and
-    /// nothing refreshed it in time.
+    /// The granted lifetime ran out with no successful refresh.
     Expired,
 }
 
 impl SubscriptionEnd {
     /// Whether asking again could give a different answer.
     ///
-    /// §4.1.3 decides the notifier's half of this, and it decides it per
-    /// reason code: `rejected`, `noresource` and `invariant` are the three it
-    /// tells clients not to come back from. The rest is this end's, and it is
-    /// the same split registration makes — a refusal about the resource will
-    /// be made again, an outage will not. `Expired` sits with the refusals
-    /// rather than the outages, and for a third reason that is neither: it is
-    /// not the notifier answering and it is not a failure to reach one, it is
-    /// this end letting the granted lifetime run out with nothing having
-    /// refreshed it in time. Asking again after that is subscribing, not
-    /// retrying, and `subscribe` is the call for it; the back-off this answer
-    /// drives is for a subscription that ended against this end's will.
+    /// §4.1.3 forbids retrying after `rejected`, `noresource` and
+    /// `invariant`. Of this end's reasons, refusals are not retried and
+    /// outages are. `Expired` is not retried either: the lifetime ran out on
+    /// this end's side, and asking again is a new `subscribe`.
     #[must_use]
     pub const fn is_worth_retrying(self) -> bool {
         !matches!(
@@ -296,15 +235,12 @@ impl Subscribe {
     /// Subscribe to `package` at `target`.
     ///
     /// The package is the token that names it: `dialog` for a busy lamp field
-    /// (RFC 4235 §3.1), `message-summary` for message waiting (RFC 3842 §3),
-    /// `presence` (RFC 3856 §6.1). §8.2.1 compares it byte for byte, so it
-    /// goes out exactly as written here.
+    /// (RFC 4235 §3.1), `message-summary` (RFC 3842 §3), `presence` (RFC 3856
+    /// §6.1). Compared byte for byte (§8.2.1), so it goes out as written.
     ///
-    /// It leaves on the account's transport, for the account's address: the
-    /// one it registers with — the outbound proxy for a registered line, which
-    /// is why a softphone behind a NAT works at all — or, for an account that
-    /// never registers, the outbound proxy it was given
-    /// ([`crate::Account::unregistered`]).
+    /// Sent on the account's transport to the account's address (its
+    /// registrar's outbound proxy, or the one given to
+    /// [`crate::Account::unregistered`]).
     #[must_use]
     pub fn new(target: Uri, package: &str) -> Self {
         Self {
@@ -319,23 +255,15 @@ impl Subscribe {
 
     /// How long to ask for.
     ///
-    /// What the notifier grants wins (§3.1.1: "The period of time in the
-    /// response is the one that defines the duration of the subscription"),
-    /// and the refresh is scheduled against that rather than against this.
+    /// What the notifier grants wins (§3.1.1); the refresh follows that.
     #[must_use]
     pub const fn expires(mut self, expires: Duration) -> Self {
         self.expires = expires;
         self
     }
 
-    /// The `Accept` value, when the package's default body type is not the one
-    /// wanted.
-    ///
-    /// Left out, no `Accept` goes at all, which §3.1.3 makes the package's
-    /// default: `application/dialog-info+xml` for `dialog` (RFC 4235 §3.5).
-    /// Sending the wrong one is worse than sending none — §4.1.2.1 has the
-    /// notifier answer 406 for a type it cannot generate — so nothing is
-    /// guessed on the caller's behalf.
+    /// The `Accept` value. Left out, no `Accept` is sent and the package default applies
+    /// (§3.1.3). Nothing is guessed: a wrong type gets a 406 (§4.1.2.1).
     #[must_use]
     pub fn accept(mut self, media_type: &[u8]) -> Self {
         self.accept = Some(Box::from(media_type));
@@ -343,9 +271,7 @@ impl Subscribe {
     }
 
     /// Send it somewhere other than the account's address.
-    ///
-    /// Resolving a name is the caller's, here as everywhere: this takes the
-    /// answer, not the question.
+    /// Name resolution is the caller's.
     #[must_use]
     pub const fn to_address(
         mut self,
@@ -383,59 +309,38 @@ enum Waiting {
 pub(crate) struct Subscription {
     pub(crate) state: SubscriptionState,
     pub(crate) account: AccountId,
-    /// What was asked for, kept because §4.1.2.2 has a re-subscription send it
-    /// again from the beginning rather than repair the old one.
+    /// Kept because a re-subscription starts over (§4.1.2.2).
     wanted: Subscribe,
-    /// §4.4.1 matches a NOTIFY to a SUBSCRIBE on this and the tag below.
     call_id: CallId,
-    /// Ours, chosen here rather than left to the endpoint, because a
-    /// notification can arrive before the answer that would have told us what
-    /// the endpoint chose.
+    /// Chosen here: a NOTIFY can arrive before the 2xx (§4.4.1).
     local_tag: Box<[u8]>,
-    /// The notifier's, once a NOTIFY has named it. What tells one fork from
-    /// another (§4.1.4).
+    /// The notifier's; tells one fork from another (§4.1.4).
     remote_tag: Option<Box<[u8]>>,
-    /// The number the last out-of-dialog SUBSCRIBE carried, so the dialog the
-    /// NOTIFY opens continues the series instead of restarting it.
+    /// The last out-of-dialog CSeq, continued by the dialog.
     cseq: u32,
-    /// The dialog the first NOTIFY opened (§4.4.1).
     dialog: Option<DialogId>,
-    /// The last duration the notifier stated, from the 2xx (§3.1.1) or from a
-    /// `Subscription-State` (§4.1.3).
+    /// From the 2xx (§3.1.1) or a `Subscription-State` (§4.1.3).
     granted: Duration,
-    /// When the subscription is over if nothing refreshes it.
     lapses_at: Option<Instant>,
-    /// The next thing this layer does about it, and what that is.
     due: Option<(Instant, Waiting)>,
-    /// How long a NOTIFY may still open a *second* dialog on this attempt.
-    /// §4.1.2.4: "Until Timer N expires, several NOTIFY requests may arrive
-    /// from different destinations. Each of these requests establishes a new
-    /// dialog usage and a new subscription."
+    /// Until when a NOTIFY may open another forked dialog (§4.1.2.4).
     forks_until: Option<Instant>,
-    /// Consecutive failures worth retrying, which is what the back-off counts.
+    /// Consecutive retryable failures, for the back-off.
     failures: u32,
-    /// An `Expires: 0` is in flight and its answer is not a subscription.
     unsubscribing: bool,
-    /// A challenge came back and it is not yet known whether anything could
-    /// read it. The refusal is kept for the event that says so.
+    /// A challenge nothing has answered yet, kept for the event.
     pub(crate) unanswered: Option<OwnedMessage>,
-    /// The challenged SUBSCRIBE whose answer §18.1.1 would not let out over a
-    /// datagram, waiting for the connection the endpoint asked for. While
-    /// this is set the refusal above is not a refusal yet.
+    /// A challenged SUBSCRIBE too large for a datagram (§18.1.1), waiting
+    /// for a stream. While set, `unanswered` is not yet a refusal.
     pub(crate) waiting_for_stream: Option<AnyTransactionId>,
-    /// RFC 4235 §4.3's table, for the one package that has one.
+    /// RFC 4235 §4.3's table.
     table: DialogInfoTable,
-    /// The last `application/simple-message-summary` document a `NOTIFY`
-    /// carried (RFC 3842 §3.5). Unlike `table`, this is a whole snapshot
-    /// every time — §3.5 defines no version and no partial state — so
-    /// nothing here merges; a fresh document simply replaces it.
+    /// RFC 3842 §3.5: a whole snapshot each time, replaced, not merged.
     summary: Option<Arc<MessageSummary>>,
-    /// What a `conference` subscription has been told, merged (RFC 4575
-    /// §4.6). Started afresh with every attempt, because `version` numbers
-    /// the documents of one subscription and not of the next.
+    /// RFC 4575 §4.6, merged. Reset per attempt: `version` is per
+    /// subscription.
     conference: Conference,
-    /// The last `application/pidf+xml` document a `presence` subscription
-    /// was told (RFC 3856 §6.8): full state every time, so replaced whole.
+    /// RFC 3856 §6.8: full state each time, replaced whole.
     presence: Option<Arc<Presence>>,
 }
 
@@ -467,10 +372,8 @@ impl Subscription {
 
     /// The one a fork of this attempt starts from (§4.1.4).
     ///
-    /// Same question, same identity, same numbering — a different notifier
-    /// answered it, and §4.4.1 gives that its own dialog and its own state
-    /// machine. It does not carry the fork window: a second fork is measured
-    /// against the attempt that produced it, not against its siblings.
+    /// Same identity and numbering, its own dialog (§4.4.1). The fork window
+    /// stays with the original attempt.
     fn fork(&self) -> Self {
         Self {
             state: SubscriptionState::Requesting,
@@ -506,11 +409,8 @@ impl Subscription {
 
     /// Forget every deadline this layer scheduled.
     ///
-    /// Called only from `distrust`, on a subscription it is about to demote:
-    /// once `dialog_info` stops being evidence, a refresh or a lapse due
-    /// against a clock that stopped while the machine slept is not evidence
-    /// either, and left alone it would fire against a wall-clock reading it
-    /// was never measured for. `UserAgent::resubscribe` is what re-arms it.
+    /// Only from `distrust`: deadlines measured before a sleep are meaningless
+    /// after it. `UserAgent::resubscribe` re-arms them.
     pub(crate) fn stop_timers(&mut self) {
         self.due = None;
         self.lapses_at = None;
@@ -524,18 +424,14 @@ impl UserAgent {
     /// Subscribe, and keep the subscription alive until told otherwise
     /// (RFC 6665).
     ///
-    /// Refreshes, credential retries, re-subscription after an outage and the
-    /// coherent state of the package all happen without another call. What
-    /// stops it is [`UserAgent::unsubscribe`], or a refusal that trying again
-    /// cannot fix.
+    /// Refreshes, credential retries and re-subscription after an outage need
+    /// no further call. It stops on [`UserAgent::unsubscribe`] or a refusal
+    /// retrying cannot fix.
     ///
-    /// The handle comes back whether or not the SUBSCRIBE reached a transport.
-    /// One that did not is reported as [`UaEvent::SubscriptionEnded`] with
-    /// [`SubscriptionEnd::Unreachable`] and no `retry_in`, and nothing is left
-    /// scheduled — the handle names nothing from that moment. It is one event
-    /// rather than one error because every later failure of the same
-    /// subscription arrives that way, and an application should not have two
-    /// places to look.
+    /// The handle comes back even if the SUBSCRIBE reached no transport; that
+    /// is reported as [`UaEvent::SubscriptionEnded`] with
+    /// [`SubscriptionEnd::Unreachable`] and no `retry_in`, like every later
+    /// failure, and the handle then names nothing.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -553,17 +449,11 @@ impl UserAgent {
 
     /// Subscribe to several things at once.
     ///
-    /// A busy lamp field is twenty to forty of these and they all go up when
-    /// the phone starts. Nothing here waits for anything, so the batch leaves
-    /// as one burst of requests into the transmit queue rather than as one
-    /// round trip after another; what this adds over calling
-    /// [`UserAgent::subscribe`] in a loop is that the events are drained once
-    /// at the end, and that a target which cannot be sent to becomes an event
-    /// instead of stopping the ones behind it.
+    /// Unlike [`UserAgent::subscribe`] in a loop, events are drained once and
+    /// a failing target does not stop the rest.
     ///
-    /// Every handle comes back, in the order asked for, including the ones
-    /// whose request never left. Those have already queued their
-    /// [`UaEvent::SubscriptionEnded`].
+    /// Every handle comes back in order, including those whose request never
+    /// left; they have already queued [`UaEvent::SubscriptionEnded`].
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`], before anything is sent.
@@ -573,9 +463,7 @@ impl UserAgent {
         wanted: &[Subscribe],
         now: Instant,
     ) -> Result<Vec<SubscriptionHandle>, UaError> {
-        // asked once rather than once per target, so that a batch either mints
-        // every handle or none: a partial one would leave records nothing has
-        // a name for
+        // checked once, so a batch mints every handle or none
         if !self.accounts.contains_key(&account) {
             return Err(UaError::NoSuchAccount);
         }
@@ -592,12 +480,9 @@ impl UserAgent {
 
     /// Give the subscription up: a SUBSCRIBE with `Expires: 0` (§4.1.2.3).
     ///
-    /// The subscription is not over when this returns. §4.4.1: "the
-    /// subscription is not considered terminated until the NOTIFY transaction
-    /// with a `Subscription-State` of `terminated` completes" — so the closing
-    /// notification is still answered, and [`UaEvent::SubscriptionEnded`] with
-    /// [`SubscriptionEnd::Unsubscribed`] says when it has. One that has no
-    /// dialog yet has nothing to send this in, and ends at once.
+    /// Not over on return: the closing NOTIFY is still answered (§4.4.1), then
+    /// [`UaEvent::SubscriptionEnded`] with [`SubscriptionEnd::Unsubscribed`].
+    /// One with no dialog yet ends at once.
     ///
     /// # Errors
     /// [`UaError::NoSuchSubscription`].
@@ -638,14 +523,9 @@ impl UserAgent {
     /// What a `dialog` subscription has been told, merged into one picture
     /// (RFC 4235 §4.3).
     ///
-    /// `None` while the subscription is not live, and that is the whole point
-    /// of the method: a table nothing is refreshing is not evidence about
-    /// anything. §4.1.2.4 puts a subscription that has not been notified yet
-    /// in "a neutral state", which for this package is an empty table — and an
-    /// empty table rendered as a lamp says the colleague is free, which is the
-    /// one wrong answer a busy lamp field must never give. So a subscription
-    /// that is requesting, retrying or over says nothing at all, and the
-    /// application shows that it does not know.
+    /// `None` while the subscription is not live. An unrefreshed or empty
+    /// table would show the colleague as free, the one wrong answer a busy
+    /// lamp field must never give; the application shows "unknown" instead.
     #[must_use]
     pub fn dialog_info(&self, subscription: SubscriptionHandle) -> Option<&DialogInfoTable> {
         let held = self.subscriptions.get(&subscription)?;
@@ -655,12 +535,9 @@ impl UserAgent {
     /// The last `application/simple-message-summary` document a `message-summary`
     /// subscription was told (RFC 3842 §3.5).
     ///
-    /// `None` while the subscription is not live, for the same reason
-    /// [`UserAgent::dialog_info`] answers nothing then: a mailbox count
-    /// nothing is refreshing is not evidence about the mailbox. Unlike
-    /// `dialog_info`'s table, this is never merged — §3.5 defines no version
-    /// and no partial state, so every `NOTIFY` carries the whole picture and
-    /// this is simply the last one.
+    /// `None` while the subscription is not live, as in
+    /// [`UserAgent::dialog_info`]. Never merged: each NOTIFY is the whole
+    /// picture.
     #[must_use]
     pub fn message_summary(&self, subscription: SubscriptionHandle) -> Option<&MessageSummary> {
         let held = self.subscriptions.get(&subscription)?;
@@ -673,20 +550,15 @@ impl UserAgent {
     /// What a `conference` subscription has been told, merged into one
     /// picture (RFC 4575 §4.6).
     ///
-    /// `None` while the subscription is not live, for the reason
-    /// [`UserAgent::dialog_info`] gives, and while no document has named the
-    /// conference yet.
+    /// `None` while not live (see [`UserAgent::dialog_info`]) or before any
+    /// document named the conference.
     #[must_use]
     pub fn conference(&self, subscription: SubscriptionHandle) -> Option<&Conference> {
         let held = self.subscriptions.get(&subscription)?;
         (held.state.is_live() && held.conference.entity().is_some()).then_some(&held.conference)
     }
 
-    /// The last presence document a `presence` subscription was told (RFC
-    /// 3856 §6.8).
-    ///
-    /// `None` while the subscription is not live, for the reason
-    /// [`UserAgent::dialog_info`] gives.
+    /// The last presence document (RFC 3856 §6.8); `None` while not live.
     #[must_use]
     pub fn presence(&self, subscription: SubscriptionHandle) -> Option<&Presence> {
         let held = self.subscriptions.get(&subscription)?;
@@ -752,9 +624,7 @@ impl UserAgent {
         held.summary = None;
         held.conference = Conference::new();
         held.presence = None;
-        // §4.1.2.4: "a subscriber starts a Timer N, set to 64*T1, when it
-        // sends a SUBSCRIBE request", and the same window is the one a fork
-        // may still arrive in
+        // Timer N (§4.1.2.4), also the window for forks
         held.due = Some((now + timer_n, Waiting::Notify));
         held.forks_until = Some(now + timer_n);
         let account = held.account;
@@ -765,15 +635,10 @@ impl UserAgent {
         });
     }
 
-    /// A fresh SUBSCRIBE for every subscription `distrust` demoted and
-    /// nothing has touched since.
-    ///
-    /// `due.is_none()` is that signature: `stop_timers` is the only thing
-    /// that puts a subscription in `Retrying` without also scheduling
-    /// something for it, because the sole other writer of `Retrying`,
-    /// `retry_subscription`, always sets `due` in the same statement. `true`
-    /// when at least one reached a transport, which mirrors `reregister` and
-    /// is what decides whether the ladder has anything left to wait for.
+    /// A fresh SUBSCRIBE for every subscription `distrust` demoted.
+    /// `Retrying` with no `due` marks them: `retry_subscription` always sets
+    /// `due`, only `stop_timers` clears it. `true` when at least one reached a
+    /// transport, as in `reregister`.
     pub(crate) fn resubscribe(&mut self, now: Instant) -> bool {
         let waiting: Vec<SubscriptionHandle> = self
             .subscriptions
@@ -783,12 +648,9 @@ impl UserAgent {
             .collect();
         let mut sent = false;
         for subscription in waiting {
-            // a new subscription, not a refresh of the old one: the dialog it
-            // had is gone, and RFC 6665 §4.1.2.4 identifies a subscription by
-            // the dialog its Call-ID and tags name. Re-using them would offer
-            // the notifier a second subscription under a name it already has
-            // one for, and leave it to decide which of the two the next
-            // NOTIFY belongs to
+            // a new subscription needs a new Call-ID and tag (RFC 6665
+            // §4.1.2.4); reusing them would collide with the dead one at the
+            // notifier
             let call_id = CallId::new(&self.endpoint.token());
             let local_tag = self.endpoint.token();
             if let Some(held) = self.subscriptions.get_mut(&subscription) {
@@ -797,10 +659,7 @@ impl UserAgent {
                 held.cseq = 0;
             }
             self.start_subscription(subscription, now);
-            // a send that fails ends the subscription outright here, the same
-            // as it does for `UserAgent::subscribe` -- `start_subscription`
-            // does not know it was called from the ladder rather than the
-            // application, and that is not this method's to change
+            // a failed send ends it, as for `UserAgent::subscribe`
             sent |= self.subscriptions.contains_key(&subscription);
         }
         sent
@@ -828,8 +687,7 @@ impl UserAgent {
         let id = self.endpoint.request_in_dialog(dialog, &request, now)?;
         let timer_n = self.timer_n;
         if let Some(held) = self.subscriptions.get_mut(&subscription) {
-            // §4.1.2.2 starts Timer N again for a refresh, and its expiry
-            // means the same thing: no NOTIFY, no subscription
+            // a refresh restarts Timer N (§4.1.2.2)
             held.due = Some((now + timer_n, Waiting::Notify));
             held.unanswered = None;
         }
@@ -848,10 +706,8 @@ impl UserAgent {
             .insert(AnyTransactionId::NonInviteClient(id), subscription);
     }
 
-    /// A SUBSCRIBE that never reached a transport.
-    ///
-    /// The record goes with the event, so that nothing is scheduled against a
-    /// subscription that does not exist and no later sweep finds one.
+    /// A SUBSCRIBE that never reached a transport: the record goes with the
+    /// event.
     fn unsendable(&mut self, subscription: SubscriptionHandle) {
         self.end_subscription(subscription, SubscriptionEnd::Unreachable, None, None);
     }
@@ -890,10 +746,7 @@ impl UserAgent {
                 held.forks_until = None;
             }
             match what {
-                // §4.1.2.4: "If this Timer N expires prior to the receipt of a
-                // NOTIFY request, the subscriber considers the subscription
-                // failed, and cleans up any state associated with the
-                // subscription attempt."
+                // Timer N expired: the attempt failed (§4.1.2.4)
                 Waiting::Notify => self.retry_subscription(
                     subscription,
                     SubscriptionEnd::NoNotify,
@@ -907,14 +760,12 @@ impl UserAgent {
             }
         }
 
-        // the notifier's side: the subscriptions a REFER this end took
-        // opened, and the referrals nobody has answered yet
+        // the notifier side: REFER subscriptions and pending referrals
         self.fire_refer_subscriptions(now);
         self.fire_referral_timers(now);
     }
 
-    /// When this layer next has something to do about a subscription, on
-    /// either side of one.
+    /// The next subscription deadline, subscriber or notifier side.
     pub(crate) fn subscription_deadline(&self) -> Option<Instant> {
         self.subscriptions
             .values()
@@ -933,10 +784,8 @@ impl UserAgent {
             self.start_subscription(subscription, now);
             return;
         };
-        // a failure here is reported the same way one on the wire is: the
-        // transport can have gone since the refresh was scheduled. One that
-        // §18.1.1 holds back for a stream is not a failure yet, and goes when
-        // the stream is bound
+        // the transport may have gone since scheduling; one held back for a
+        // stream (§18.1.1) is parked, not failed
         match self.send_in_dialog(subscription, dialog, expires, now) {
             Ok(()) => {}
             Err(ref error) if call_needs_a_stream(error) => {
@@ -950,8 +799,7 @@ impl UserAgent {
     }
 }
 
-/// The out-of-dialog SUBSCRIBE that starts an attempt (§4.1.2.1), with what the
-/// account's registrar said when it goes where the account registers.
+/// The out-of-dialog SUBSCRIBE that starts an attempt (§4.1.2.1).
 fn build_subscribe(
     account: &Account,
     held: &Subscription,
@@ -978,8 +826,7 @@ fn build_subscribe(
     .from(&from)
     .call_id(held.call_id.clone())
     .cseq(held.cseq.saturating_add(1))
-    // §8.1.1.8: a request that can establish a dialog carries one, and
-    // RFC 5627 §4.4 lists the SUBSCRIBE among those that name a GRUU
+    // §8.1.1.8; RFC 5627 §4.4 for the GRUU
     .contact(&dialog_contact(
         account,
         learned,
@@ -987,8 +834,7 @@ fn build_subscribe(
     ))
     .header(HeaderName::Event, &held.wanted.package)
     .header(HeaderName::Expires, seconds.as_bytes());
-    // RFC 5627 §4.4 SHOULD: "a UA SHOULD include a Supported header field
-    // with the option tag gruu in requests and responses it generates"
+    // RFC 5627 §4.4
     if account.wants_gruu() {
         request = request.header(HeaderName::Supported, b"gruu");
     }
@@ -1007,9 +853,8 @@ fn build_subscribe(
     Some(request)
 }
 
-/// The in-dialog one that refreshes or ends it. A refresh is a target refresh
-/// request, which RFC 5627 §4.4 gives a GRUU as well; the route is the
-/// dialog's own by now, and the service route has no part in it.
+/// The in-dialog one that refreshes or ends it, with a GRUU (RFC 5627 §4.4)
+/// and the dialog's route, not the service route.
 fn build_refresh(
     account: &Account,
     held: &Subscription,
@@ -1042,19 +887,10 @@ fn build_refresh(
 // -- what comes back ---------------------------------------------------------
 
 impl UserAgent {
-    /// `None` when the event belonged to a subscription and has been dealt
-    /// with; the event back when it did not.
-    ///
-    /// A NOTIFY that matches nothing is refused here, which is why this sits
-    /// below the transfer handler rather than above it. §4.1.3 has exactly one
-    /// answer for a notification nobody subscribed to — "it MUST return a 481
-    /// (Subscription does not exist) response unless another 400- or 500-class
-    /// response is more appropriate" — and something can only say that once
-    /// everything that runs a subscription of its own has had its turn. RFC
-    /// 3515 §2.4.4's is the other one: a REFER opens a subscription this
-    /// machine never sees, so the transfer handler claims the `refer` package
-    /// inside a call it is running, and everything it leaves is either one of
-    /// these subscriptions or nobody's.
+    /// `None` when the event was a subscription's; otherwise it comes back.
+    /// An unmatched NOTIFY is refused 481 here (§4.1.3), so this runs after
+    /// the transfer handler, which claims the `refer` package inside calls
+    /// (RFC 3515 §2.4.4).
     pub(crate) fn on_subscription_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::IncomingOutOfDialog {
@@ -1075,9 +911,7 @@ impl UserAgent {
                 self.on_known_notify(found, transaction, &request, now);
                 None
             }
-            // the three that carry a transaction handle: an answer to a
-            // request somebody else sent has to go on, or it takes somebody
-            // else's news with it
+            // answers to other layers' requests must pass through
             Event::Response {
                 transaction,
                 status,
@@ -1107,8 +941,7 @@ impl UserAgent {
                 self.on_subscribe_challenged(subscription, transaction, now);
                 None
             }
-            // the flow every subscription on this account was running over is
-            // gone, and a lamp fed by a dead flow is a lamp that lies
+            // a lamp fed by a dead flow lies
             Event::FlowFailed { transport } => {
                 self.on_flow_lost(transport, now);
                 Some(event)
@@ -1158,9 +991,7 @@ impl UserAgent {
                 });
                 self.on_known_notify(Some(sibling), transaction, request, now);
             }
-            // §4.1.3: "If, for some reason, the event package designated in
-            // the Event header field of the NOTIFY request is not supported,
-            // the subscriber will respond with a 489 (Bad Event) response."
+            // §4.1.3: 489 for an unsupported package
             Matched::WrongPackage => self.refuse_notify(transaction, BAD_EVENT, now),
             Matched::Nobody => {
                 self.refuse_notify(transaction, StatusCode::CALL_DOES_NOT_EXIST, now);
@@ -1168,8 +999,7 @@ impl UserAgent {
         }
     }
 
-    /// §4.4.1's rule, and nothing else: the same `Call-ID`, a `To` tag equal
-    /// to the `From` tag of the SUBSCRIBE, and a matching `Event`.
+    /// §4.4.1: same `Call-ID`, `To` tag equal to our `From` tag, same `Event`.
     fn match_notify(&self, request: &RawMessage<'_>, now: Instant) -> Matched {
         let (Ok(call_id), Ok(Some(tag))) = (request.call_id(), request.to().map(|to| to.tag()))
         else {
@@ -1183,8 +1013,7 @@ impl UserAgent {
         let Ok(theirs) = request.event() else {
             return Matched::WrongPackage;
         };
-        // §8.2.1 compares the event type byte for byte, and an `Event` with an
-        // id never matches one without
+        // §8.2.1: byte for byte, and the id must match too
         let ours = |held: &Subscription| {
             named(held)
                 && EventRef::parse(&held.wanted.package).is_ok_and(|ours| ours.matches(&theirs))
@@ -1192,10 +1021,7 @@ impl UserAgent {
         if !self.subscriptions.values().any(ours) {
             return Matched::WrongPackage;
         }
-        // a notifier that sends the same notification again under a fresh
-        // branch is not a second notifier: §4.1.4 tells forks apart by the
-        // `From` tag, and one already installed names a subscription that
-        // exists rather than one to mint
+        // a known `From` tag is a retransmission, not a fork (§4.1.4)
         if let Some(theirs) = request.from().ok().and_then(|from| from.tag())
             && let Some((known, _)) = self
                 .subscriptions
@@ -1204,7 +1030,6 @@ impl UserAgent {
         {
             return Matched::Fresh(*known);
         }
-        // the usual case: the attempt that has no dialog yet takes it
         if let Some((waiting, _)) = self
             .subscriptions
             .iter()
@@ -1212,8 +1037,8 @@ impl UserAgent {
         {
             return Matched::Fresh(*waiting);
         }
-        // otherwise a second notifier answered the same SUBSCRIBE, and
-        // §4.1.2.4 gives it a subscription of its own until Timer N passes
+        // a second notifier before Timer N gets its own subscription
+        // (§4.1.2.4)
         if let Some((parent, _)) = self
             .subscriptions
             .iter()
@@ -1221,9 +1046,7 @@ impl UserAgent {
         {
             return Matched::Forked(*parent);
         }
-        // "After the expiration of Timer N, the subscriber SHOULD reject any
-        // such NOTIFY requests that would otherwise establish a new dialog
-        // usage with a 481 (Subscription does not exist) response code."
+        // after Timer N, a new fork gets 481 (§4.1.2.4)
         Matched::Nobody
     }
 
@@ -1253,8 +1076,7 @@ enum Matched {
     Fresh(SubscriptionHandle),
     /// A second notifier answering the same SUBSCRIBE (§4.1.4).
     Forked(SubscriptionHandle),
-    /// The `Call-ID` and the tag name a subscription, and the `Event` does
-    /// not.
+    /// `Call-ID` and tag match, the `Event` does not.
     WrongPackage,
     /// Nothing here asked for this.
     Nobody,
@@ -1263,14 +1085,11 @@ enum Matched {
 /// 489, which §8.3.2 adds for an event package the far end does not know.
 const BAD_EVENT: StatusCode = match StatusCode::new(489) {
     Ok(status) => status,
-    // 489 is in range, so this arm never runs; it exists because `new` is
-    // fallible and nothing in this crate panics to say otherwise
+    // unreachable; avoids a panic
     Err(_) => StatusCode::CALL_DOES_NOT_EXIST,
 };
 
-/// 400, for a NOTIFY without the one field §4.1.3 makes mandatory. §4.1.3
-/// leaves room for it: "unless another 400- or 500-class response is more
-/// appropriate".
+/// 400, for a NOTIFY without `Subscription-State` (§4.1.3).
 const BAD_REQUEST: StatusCode = match StatusCode::new(400) {
     Ok(status) => status,
     Err(_) => StatusCode::CALL_DOES_NOT_EXIST,
@@ -1292,27 +1111,20 @@ impl UserAgent {
             self.refuse_notify(transaction, StatusCode::CALL_DOES_NOT_EXIST, now);
             return;
         };
-        // §4.4.1: notifications inside an existing dialog "match if they are
-        // in the same dialog and the Event header fields match"
+        // §4.4.1: same dialog and matching Event
         if !self.package_of(subscription, &raw) {
             self.refuse_notify(transaction, BAD_EVENT, now);
             return;
         }
-        // §4.1.3 makes the field mandatory, and a notification that does not
-        // say where the subscription is says nothing that can be acted on
+        // mandatory (§4.1.3)
         let Ok(state) = raw.subscription_state() else {
             self.refuse_notify(transaction, BAD_REQUEST, now);
             return;
         };
         let over = state.state() == Substate::Terminated;
-        // §4.4.1: "Dialogs usages are created upon completion of a NOTIFY
-        // transaction for a new subscription, unless the NOTIFY request
-        // contains a Subscription-State of terminated."
-        //
-        // Before the 200 rather than after it, and that is not a choice: on a
-        // reliable transport §17.2.2's Timer J is zero, so the server
-        // transaction is retired the instant the final response goes — and the
-        // request and the flow the dialog is built from live on it.
+        // §4.4.1: no dialog for a `terminated` NOTIFY. Opened before the 200:
+        // on a reliable transport Timer J is zero (§17.2.2), and the
+        // transaction the dialog is built from dies with the response.
         let fresh = self
             .subscriptions
             .get(&subscription)
@@ -1333,8 +1145,7 @@ impl UserAgent {
         self.on_notified(subscription, &state, request, now);
     }
 
-    /// Whether the `Event` of this NOTIFY is the one that subscription asked
-    /// for (§8.2.1).
+    /// Whether the NOTIFY's `Event` is the one asked for (§8.2.1).
     fn package_of(&self, subscription: SubscriptionHandle, request: &RawMessage<'_>) -> bool {
         let Some(held) = self.subscriptions.get(&subscription) else {
             return false;
@@ -1381,8 +1192,7 @@ impl UserAgent {
         request: &OwnedMessage,
         now: Instant,
     ) {
-        // §4.1.3: under `active` and `pending`, "the subscriber SHOULD take it
-        // as the authoritative subscription duration and adjust accordingly"
+        // §4.1.3: the stated `expires` is authoritative
         let stated = state
             .expires()
             .and_then(|value| value.require().ok())
@@ -1396,8 +1206,7 @@ impl UserAgent {
             request: request.clone(),
             info,
         });
-        // after the notification itself, so that an application reading the
-        // raw NOTIFY and the typed news in order meets them in that order
+        // typed events follow the raw NOTIFY
         self.merge_conference(subscription, request, now);
         self.merge_presence(subscription, request);
     }
@@ -1431,9 +1240,7 @@ impl UserAgent {
         held.lapses_at = Some(now + granted);
         held.due = Some((now + refresh_in, Waiting::Refresh));
         let state = held.state;
-        // where a subscription is, is an event. Where it is inside its own
-        // hour is not: a lamp does not change when a refresh is scheduled, and
-        // thirty subscriptions saying so every hour is noise
+        // only a state change is an event, not every refresh
         if was != state {
             self.events.push_back(UaEvent::Subscribed {
                 subscription,
@@ -1484,9 +1291,7 @@ impl UserAgent {
         {
             return None;
         }
-        // a document that will not read leaves the table exactly as it was: a
-        // lamp showing what was last known beats one showing what a malformed
-        // body happened to contain
+        // a malformed body leaves the last known table standing
         let document = DialogInfo::parse(body).ok()?;
         let applied = self
             .subscriptions
@@ -1499,15 +1304,9 @@ impl UserAgent {
         (applied != Applied::Stale).then(|| Arc::new(document))
     }
 
-    /// §4.3: "If the document did not contain full state, the subscriber
-    /// SHOULD generate a refresh request (SUBSCRIBE) to trigger a full state
-    /// notification."
-    ///
-    /// Only when there is not already one in flight. §3.3 makes the answer to
-    /// a SUBSCRIBE carry "the complete view of dialog state", so one round
-    /// trip settles it — and asking again while the first is unanswered is how
-    /// a notifier that numbers its documents badly turns into one request per
-    /// notification.
+    /// A refresh to get full state after a gap (RFC 4235 §4.3), unless one is
+    /// already in flight; otherwise a badly numbering notifier would cause one
+    /// request per notification.
     fn ask_for_full_state(&mut self, subscription: SubscriptionHandle, now: Instant) {
         let waiting = self
             .subscriptions
@@ -1519,21 +1318,11 @@ impl UserAgent {
     }
 
     /// Read an `application/simple-message-summary` body and raise
-    /// [`UaEvent::MessagesWaiting`] for it (RFC 3842 §3.9: "the subscriber
-    /// SHOULD immediately render the message status and summary information
-    /// to the end user").
+    /// [`UaEvent::MessagesWaiting`] for it (RFC 3842 §3.9).
     ///
-    /// A body that will not read is left exactly as `merge_dialog_info`
-    /// leaves one: nothing here changes, and the last good reading stands —
-    /// a mailbox light showing what was last known beats one showing what a
-    /// malformed body happened to contain. A `NOTIFY` for `message-summary`
-    /// that arrives with no matching subscription at all never reaches
-    /// here: `match_notify` answers it 481 before a package is even
-    /// dispatched to, which is RFC 6665 §4.1.3's own answer to an
-    /// unsolicited notification and applies to every package alike,
-    /// `message-summary` included — a PBX that sends one without a
-    /// subscription, which several do, gets the same 481 an unsolicited
-    /// `dialog` `NOTIFY` gets, and `docs/04-ua.md` says so.
+    /// A malformed body leaves the last good reading standing. An unsolicited
+    /// `message-summary` NOTIFY, which several PBXs send, never gets here:
+    /// `match_notify` answers it 481 like any other (RFC 6665 §4.1.3).
     fn merge_message_summary(&mut self, subscription: SubscriptionHandle, request: &OwnedMessage) {
         let raw = request.as_raw();
         let body = raw.body();
@@ -1570,14 +1359,10 @@ impl UserAgent {
     }
 
     /// Merge an `application/conference-info+xml` body into the
-    /// subscription's picture of the conference (RFC 4575 §4.6), and act on
-    /// what the merge says.
+    /// subscription's picture of the conference (RFC 4575 §4.6).
     ///
-    /// A gap asks for full state with a refresh — what §4.6 has a subscriber
-    /// do, and what RFC 6665 §4.2.1 makes the answer carry — and a deleted
-    /// conference gives the subscription up, as §4.6 asks: "the subscriber
-    /// SHOULD terminate the subscription". A body that will not read leaves
-    /// the picture as it was, for the reason `merge_dialog_info` gives.
+    /// A gap asks for full state with a refresh; a deleted conference ends
+    /// the subscription (§4.6). A malformed body changes nothing.
     fn merge_conference(
         &mut self,
         subscription: SubscriptionHandle,
@@ -1605,8 +1390,6 @@ impl UserAgent {
                     subscription,
                     update,
                 });
-                // the unsubscribe answers only for a subscription that is
-                // still held, which this one is: it was just notified
                 self.unsubscribe(subscription, now).ok();
             }
             ConferenceUpdate::Resubscribe => self.ask_for_full_state(subscription, now),
@@ -1617,10 +1400,7 @@ impl UserAgent {
 
     /// Read an `application/pidf+xml` body of a `presence` subscription and
     /// raise [`UaEvent::PresenceChanged`] for it (RFC 3856 §6.8).
-    ///
-    /// Every notification of this package carries the presentity's whole
-    /// state, so there is nothing to merge: the last readable document is
-    /// the picture, and one that will not read leaves the last one standing.
+    /// Full state each time; a malformed body leaves the last one standing.
     fn merge_presence(&mut self, subscription: SubscriptionHandle, request: &OwnedMessage) {
         if !self.package_is(subscription, crate::publishing::PRESENCE_EVENT) {
             return;
@@ -1648,8 +1428,7 @@ impl UserAgent {
         });
     }
 
-    /// Whether the subscription asked for `package`, compared as §8.2.1
-    /// compares event packages.
+    /// Whether the subscription asked for `package` (§8.2.1).
     fn package_is(&self, subscription: SubscriptionHandle, package: &str) -> bool {
         let Some(held) = self.subscriptions.get(&subscription) else {
             return false;
@@ -1675,7 +1454,6 @@ impl UserAgent {
         now: Instant,
     ) {
         if status.is_provisional() {
-            // a notifier that says it is working on it is not a result
             return;
         }
         if status.is_success() {
@@ -1683,8 +1461,7 @@ impl UserAgent {
             return;
         }
         if matches!(status.get(), 401 | 407) {
-            // held until the end of the drain: whether this is answerable is
-            // decided by whether a challenge follows it
+            // held until the drain ends: a challenge may still follow
             if let Some(held) = self.subscriptions.get_mut(&subscription) {
                 held.unanswered = Some(response.clone());
             }
@@ -1700,9 +1477,7 @@ impl UserAgent {
         response: &OwnedMessage,
         now: Instant,
     ) {
-        // §3.1.1: "200-class responses to SUBSCRIBE requests also MUST contain
-        // an Expires header field ... The period of time in the response is
-        // the one that defines the duration of the subscription."
+        // §3.1.1: the 2xx `Expires` defines the duration
         let granted = response
             .as_raw()
             .expires()
@@ -1714,9 +1489,7 @@ impl UserAgent {
         };
         held.failures = 0;
         held.granted = granted.unwrap_or(held.wanted.expires);
-        // Timer N keeps running. §4.1.2.4 establishes the subscription with
-        // the NOTIFY and not with this, and a 200 that is never followed by
-        // one is exactly the case Timer N exists for
+        // Timer N keeps running until the NOTIFY (§4.1.2.4)
         held.lapses_at = (!held.granted.is_zero()).then(|| now + held.granted);
     }
 
@@ -1732,10 +1505,8 @@ impl UserAgent {
             .subscriptions
             .get(&subscription)
             .is_some_and(|held| held.dialog.is_some());
-        // §4.1.2.2: "If a SUBSCRIBE request to refresh a subscription fails
-        // with any error code other than those listed above, the original
-        // subscription is still considered valid for the duration of the most
-        // recently known Expires value."
+        // §4.1.2.2: other refresh failures leave the subscription valid
+        // until its last known expiry
         if established && !ends_the_subscription(status) {
             self.try_again_before_it_lapses(subscription, asked_for, now);
             return;
@@ -1756,8 +1527,7 @@ impl UserAgent {
         reason: FailureReason,
         now: Instant,
     ) {
-        // a timeout and a dead transport say the same thing about the
-        // subscription, which is nothing yet
+        // timeout and dead transport are treated alike
         let _ = reason;
         let established = self
             .subscriptions
@@ -1788,8 +1558,7 @@ impl UserAgent {
             .get(&subscription)
             .map(|held| held.account);
         let Some(credentials) = self.credentials_for_challenge(account, transaction) else {
-            // nothing to answer with; the refusal stands, and it stands the
-            // same way every time
+            // no credentials: the refusal stands
             return;
         };
         match self
@@ -1797,9 +1566,7 @@ impl UserAgent {
             .retry_with_credentials(transaction, &credentials, now)
         {
             Ok(retried) => self.subscribe_retry_went(subscription, transaction, retried),
-            // §18.1.1 wants a connection first, and the endpoint is still
-            // holding the challenge. The number is not moved either: nothing
-            // has gone out to move it past
+            // §18.1.1 wants a connection first; CSeq stays, nothing went out
             Err(error) if crate::agent::wants_a_stream(&error) => {
                 if let Some(held) = self.subscriptions.get_mut(&subscription) {
                     held.waiting_for_stream = Some(transaction);
@@ -1809,8 +1576,7 @@ impl UserAgent {
         }
     }
 
-    /// The retry is a transaction now, so everything that named the refused
-    /// one names this one.
+    /// Point everything at the retry's transaction.
     fn subscribe_retry_went(
         &mut self,
         subscription: SubscriptionHandle,
@@ -1822,15 +1588,12 @@ impl UserAgent {
         if let Some(held) = self.subscriptions.get_mut(&subscription) {
             held.unanswered = None;
             held.waiting_for_stream = None;
-            // §22.2 has the retry carry the next number, and outside a dialog
-            // that is one more than the one that was refused. The dialog the
-            // NOTIFY opens continues from there, so this has to move with it
+            // the retry took the next CSeq (§22.2); the dialog continues it
             held.cseq = held.cseq.saturating_add(1);
         }
     }
 
-    /// Send the subscription retries §18.1.1 held back, now that there is a
-    /// connection.
+    /// Send the retries §18.1.1 held back, now that a stream exists.
     pub(crate) fn resume_parked_subscriptions(&mut self, now: Instant) {
         let waiting: Vec<(SubscriptionHandle, AnyTransactionId)> = self
             .subscriptions
@@ -1857,26 +1620,20 @@ impl UserAgent {
         }
     }
 
-    /// Stop holding one back, so the next settle reports the refusal it
-    /// still carries.
+    /// Stop holding one back; the next settle reports its refusal.
     fn stop_waiting_for_subscribe(&mut self, subscription: SubscriptionHandle) {
         if let Some(held) = self.subscriptions.get_mut(&subscription) {
             held.waiting_for_stream = None;
         }
     }
 
-    /// A refusal that carried a challenge and got no retry was a refusal.
-    ///
-    /// The same settling registration does, for the same reason: the core
-    /// answers a challenge once, and the same nonce coming back is §22.1's way
-    /// of saying the password was wrong. Nothing follows the refusal in that
-    /// case, and that silence is the answer.
+    /// A challenge that got no retry was a refusal, as in registration: the
+    /// core answers once, so silence means wrong credentials (§22.1).
     pub(crate) fn settle_subscription_challenges(&mut self, now: Instant) {
         let refused: Vec<(SubscriptionHandle, OwnedMessage)> = self
             .subscriptions
             .iter_mut()
-            // except one the endpoint is holding until a connection exists:
-            // its answer has not been sent yet, so there is no silence to read
+            // not one still waiting for a stream: its retry has not gone
             .filter(|(_, held)| held.waiting_for_stream.is_none())
             .filter_map(|(handle, held)| held.unanswered.take().map(|response| (*handle, response)))
             .collect();
@@ -1896,11 +1653,8 @@ impl UserAgent {
     /// The flow every subscription on an account was running over has died
     /// (RFC 5626 §4.4.1).
     ///
-    /// A subscription does not notice by itself: its refresh is most of an
-    /// hour out, and until then the table it holds is the last thing a working
-    /// notifier said. That table is what a busy lamp field renders, so leaving
-    /// it standing shows a colleague as free for the rest of the hour because
-    /// a socket died while they were on a call.
+    /// Otherwise the stale table would show a colleague as free until the
+    /// next refresh, up to an hour away.
     fn on_flow_lost(&mut self, transport: TransportId, now: Instant) {
         let lost: Vec<SubscriptionHandle> = self
             .subscriptions
@@ -1948,11 +1702,8 @@ impl UserAgent {
 
     /// Something recoverable: start the whole thing again, later.
     ///
-    /// §4.1.2.2 is exact about what "again" means, and it is not a repair:
-    /// "he does so by composing an unrelated initial SUBSCRIBE request with a
-    /// freshly generated Call-ID and a new, unique From tag". So the dialog
-    /// goes, the identity goes, and what is kept is the question and the handle
-    /// the application is holding.
+    /// §4.1.2.2: a new Call-ID and `From` tag; only the request and the handle
+    /// are kept.
     fn retry_subscription(
         &mut self,
         subscription: SubscriptionHandle,
@@ -1969,11 +1720,8 @@ impl UserAgent {
             return;
         };
         held.failures = held.failures.saturating_add(1);
-        // §4.1.3: `deactivated` says "the subscriber SHOULD retry immediately
-        // with a new subscription" and `timeout` says clients "MAY
-        // re-subscribe immediately". Once. A notifier that answers either of
-        // those to an immediate retry as well is a loop, and the back-off is
-        // what a loop is worth
+        // §4.1.3: `deactivated` and `timeout` allow an immediate retry, but
+        // only once, or a notifier could loop us
         let immediate = held.failures <= 1
             && matches!(
                 reason,
@@ -1997,10 +1745,7 @@ impl UserAgent {
         held.cseq = 0;
         held.call_id = call_id;
         held.local_tag = local_tag;
-        // §4.1.2.4 puts an attempt that has not been notified yet in a neutral
-        // state, and for RFC 4235 that is an empty table. Nothing may be read
-        // out of it while the subscription is not live, which is what
-        // `dialog_info` and `message_summary` are for
+        // neutral state (§4.1.2.4), hidden by the accessors until live
         held.table = DialogInfoTable::default();
         held.summary = None;
         held.conference = Conference::new();
@@ -2017,10 +1762,8 @@ impl UserAgent {
 
     /// A refresh that failed in a way §4.1.2.2 does not make fatal.
     ///
-    /// The subscription stands, and no event goes out: nothing the application
-    /// renders has changed, and the event that matters is the one when the
-    /// subscription actually ends — which happens by itself when `lapses_at`
-    /// passes with nothing having refreshed it.
+    /// No event: the subscription stands, and ends by itself at `lapses_at`
+    /// if no refresh succeeds.
     fn try_again_before_it_lapses(
         &mut self,
         subscription: SubscriptionHandle,
@@ -2058,12 +1801,8 @@ impl UserAgent {
         });
     }
 
-    /// §4.4.1: "the destruction of a subscription results in the termination
-    /// of its associated dialog", and nothing on the wire says so.
-    ///
-    /// Unless a sibling of a fork is still in it, which cannot happen today —
-    /// §4.4.1 gives each fork its own dialog — and costs one comparison to be
-    /// sure of.
+    /// Close the dialog with the subscription (§4.4.1), unless another
+    /// subscription still uses it.
     fn forget_subscription_dialog(
         &mut self,
         subscription: SubscriptionHandle,
@@ -2082,12 +1821,8 @@ impl UserAgent {
     }
 }
 
-/// §4.1.2.2's list: the responses to a refresh that end the subscription
-/// rather than the attempt.
-///
-/// "If a SUBSCRIBE request to refresh a subscription receives a 404, 405, 410,
-/// 416, 480-485, 489, 501, or 604 response, the subscriber MUST consider the
-/// subscription terminated."
+/// §4.1.2.2's list: refresh responses that end the subscription, not just
+/// the attempt.
 const fn ends_the_subscription(status: StatusCode) -> bool {
     matches!(
         status.get(),
@@ -2098,8 +1833,7 @@ const fn ends_the_subscription(status: StatusCode) -> bool {
 /// What a final response that is not a 2xx says about trying again.
 const fn refusal(status: StatusCode) -> SubscriptionEnd {
     match status.get() {
-        // §8.3.2: "489 (Bad Event) is used to indicate that the server did not
-        // understand the event package specified in a Event header field"
+        // §8.3.2
         489 => SubscriptionEnd::BadEvent,
         300..=399 => SubscriptionEnd::Redirected,
         500..=599 => SubscriptionEnd::Unreachable,

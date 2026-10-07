@@ -3,19 +3,10 @@
 
 //! The session inside a call, and which way it is held.
 //!
-//! Hold is not a SIP feature. It is a session description with its direction
-//! attributes changed, carried by whatever request the dialog allows, and
-//! RFC 3264 §8.4 is the whole of it: a stream that was `sendrecv` is held by
-//! marking it `sendonly`, one that was `recvonly` by marking it `inactive`.
-//! Each direction is held separately, and the rule that the answerer must not
-//! echo held SDP back needs no code of its own — §6.1 already leaves
-//! `recvonly` as the only sensible answer to `sendonly`.
-//!
-//! So what is kept here is what each end last described, plus the direction
-//! every stream had before anybody pressed hold. That last one earns its
-//! place: a stream that started `recvonly` — an announcement, a recorder —
-//! is resumed to `recvonly`, not promoted to `sendrecv` by a user who never
-//! asked for it.
+//! Hold is only SDP direction (RFC 3264 §8.4): `sendrecv` becomes
+//! `sendonly`, `recvonly` becomes `inactive`. Each end's last description is
+//! kept, plus each stream's direction before any hold, so a stream that
+//! started `recvonly` resumes as `recvonly`, not `sendrecv`.
 
 use sipral_core::sdp::{
     AcceptedStream, Attribute, Connection, Direction, MediaDescription, Origin, SessionDescription,
@@ -24,9 +15,8 @@ use sipral_core::sdp::{
 
 /// Which way a call is held (RFC 3264 §8.4).
 ///
-/// Two flags rather than one, because "a stream is placed on hold separately
-/// in each direction" and the two are not the same event. Music plays for
-/// whoever was put on hold; it does not play for whoever pressed the button.
+/// Two flags because each direction is held separately: music plays for
+/// whoever was put on hold, not for whoever pressed the button.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Hold {
     /// This end asked the far end to stop sending.
@@ -61,34 +51,28 @@ pub(crate) struct Session {
     local: Option<SessionDescription>,
     /// The one the far end last sent.
     remote: Option<SessionDescription>,
-    /// The direction each stream has when nothing is held, taken from the
-    /// first description this end wrote.
+    /// Each stream's direction when nothing is held, from this end's first
+    /// description.
     base: Vec<Direction>,
-    /// The next `o=` version to write. It climbs across a refused offer too:
-    /// §8 makes the number the way an end says "this is different from what I
-    /// said before", and a description that was turned down was still said.
+    /// The next `o=` version. It climbs across a refused offer too (§8).
     version: u64,
-    /// Which way it is held.
     pub(crate) hold: Hold,
-    /// Whether this end has offered and is still owed the answer, which for a
-    /// 2xx means the answer travels in the ACK (§13.2.2.4).
+    /// This end offered and awaits the answer; after a 2xx it comes in the
+    /// ACK (§13.2.2.4).
     pub(crate) answer_owed: bool,
 }
 
 impl Session {
-    /// Whether this end has described anything, which for an outgoing call is
-    /// the same question as whether the INVITE carried an offer.
+    /// For an outgoing call: whether the INVITE carried an offer.
     pub(crate) const fn has_local(&self) -> bool {
         self.local.is_some()
     }
 
-    /// Whether the far end has described anything yet, which is what decides
-    /// whether a description this end writes is an offer or an answer.
+    /// Decides whether what this end writes next is an offer or an answer.
     pub(crate) const fn has_remote(&self) -> bool {
         self.remote.is_some()
     }
 
-    /// Take a description this end has put on the wire and had accepted.
     pub(crate) fn set_local(&mut self, description: SessionDescription) {
         if self.base.is_empty() {
             self.base = description
@@ -101,21 +85,15 @@ impl Session {
         self.local = Some(description);
     }
 
-    /// Take one the far end sent, and read from it whether it is holding us.
+    /// Also reads whether the far end is holding us.
     pub(crate) fn set_remote(&mut self, description: SessionDescription) {
         self.hold.remote = holds_us(&description);
         self.remote = Some(description);
     }
 
-    /// Give a description this end is about to offer a version that has
-    /// moved (RFC 3264 §8), leaving one the caller has already numbered past
-    /// ours alone.
-    ///
-    /// §8 makes the number the way an end says "this differs from what I said
-    /// before", and pairs it with the other half of the rule: an unchanged
-    /// number promises unchanged bytes. An application that hands us the same
-    /// version twice with different content would be making that promise
-    /// falsely, so the number is ours to write.
+    /// Bump the `o=` version of an offer (RFC 3264 §8), unless the caller
+    /// already numbered it past ours. An unchanged version promises
+    /// unchanged bytes, so the application cannot be trusted with it.
     pub(crate) fn stamp(&mut self, description: &mut SessionDescription) {
         if description.origin.version > self.version {
             self.version = description.origin.version;
@@ -127,24 +105,17 @@ impl Session {
 
     /// The description already agreed, byte for byte.
     ///
-    /// RFC 4028 §7.4 has a session-timer refresh carry an offer "even if the
-    /// details of the session have not changed. In that case, the offer MUST
-    /// indicate that it has not changed" — and RFC 3264 §8 says an unchanged
-    /// `o=` version is exactly how that is said. So this deliberately does not
-    /// move the version.
+    /// For a session-timer refresh (RFC 4028 §7.4): the version stays, which
+    /// is how RFC 3264 §8 says "unchanged".
     pub(crate) fn repeat(&self) -> Option<SessionDescription> {
         self.local.clone()
     }
 
     /// The description this end would offer, held or not (RFC 3264 §8.4).
     ///
-    /// Every stream keyed by a DTLS handshake is offered with `actpass`
-    /// (RFC 8842 §5.5), whichever role it has had: the description this end
-    /// last had accepted may have been an answer, and a role carried out of
-    /// an answer into an offer is what §5.5 asks an offerer not to write.
-    /// The answer comes back with the roles already in force, because §5.3
-    /// asks that of an answerer that keeps the association, and the layer
-    /// holding the association refuses one that moves them.
+    /// DTLS streams are offered `actpass` (RFC 8842 §5.5) even if the last
+    /// local description was an answer with a fixed role; the answerer keeps
+    /// the roles in force (§5.3).
     pub(crate) fn offer(&mut self, held: bool) -> Option<SessionDescription> {
         let mut offer = self.local.clone()?;
         self.version = self.version.saturating_add(1);
@@ -156,8 +127,6 @@ impl Session {
         Some(offer)
     }
 
-    /// Write every stream's direction the way this end wants it while
-    /// `held`, whatever the description said before.
     pub(crate) fn direct(&self, description: &mut SessionDescription, held: bool) {
         for (index, media) in description.media.iter_mut().enumerate() {
             set_direction(media, self.wanted(index, held));
@@ -165,13 +134,8 @@ impl Session {
     }
 
     /// Whether a description this end is about to offer asks the far end to
-    /// stop sending — `holds_us` read from the other side of the call.
-    ///
-    /// Against what each stream is when nothing is held, because that is
-    /// what a hold is measured from: a stream that started `sendonly` or
-    /// `inactive` has nothing §8.4 can take away from it, and `holding`
-    /// leaves it exactly as it was, so it says nothing either way. Every
-    /// stream that can be held has to be, for the reason `holds_us` gives.
+    /// stop sending. Measured against each stream's unheld direction: one
+    /// that started `sendonly` or `inactive` cannot be held and is skipped.
     pub(crate) fn holds_them(&self, description: &SessionDescription) -> bool {
         let mut any = false;
         for (index, media) in description.media.iter().enumerate() {
@@ -190,11 +154,8 @@ impl Session {
         any
     }
 
-    /// The answer to an offer that arrived, when this end can write one.
-    ///
-    /// The ports and the formats are this end's own, because an answer does
-    /// not move them; the direction is what §6.1 leaves of what this end wants
-    /// once the offer has had its say.
+    /// The answer to an offer, when this end can write one: our own ports
+    /// and formats, direction per §6.1.
     pub(crate) fn answer(
         &mut self,
         offer: &SessionDescription,
@@ -219,37 +180,20 @@ impl Session {
         offer.answer(origin, connection, &streams).ok()
     }
 
-    /// Whether an offer that arrived asks for nothing this layer would have to
-    /// hand to the application.
+    /// Whether this layer can answer an offer itself instead of handing it
+    /// to the application.
     ///
-    /// Hold, resume, and a peer moving its media address all keep the streams,
-    /// the formats, the transport profile and the keying that were negotiated.
-    /// A codec change, a stream added or one taken away do not, and those need
-    /// a device this layer does not have.
+    /// Yes for hold, resume, or a moved media address. No for a codec or
+    /// stream change, which needs the device. No for a changed transport
+    /// profile or an `a=crypto` that came or went: that may be a downgrade,
+    /// and only `crates/sipral` knows whether encryption was required.
     ///
-    /// Neither does a transport profile that moved, or an `a=crypto` that
-    /// appeared or disappeared. Those are a change to the security of a call
-    /// in progress, and answering one here would settle it in a layer that
-    /// has never read a crypto line and holds no policy: `RTP/AVP` where
-    /// `RTP/SAVP` was agreed is the whole of a downgrade, and this is the only
-    /// place that can tell it is happening. So it is handed up, and
-    /// `crates/sipral` — which knows whether the account required encryption —
-    /// decides.
+    /// No for any stream on a secure profile, even a hold: the answer needs
+    /// this end's own key (RFC 4568 §5.1.2) or fingerprint and role
+    /// (RFC 8842 §5.3), which this layer does not hold.
     ///
-    /// And a stream on a secure profile is never answered here at all, not
-    /// even a hold. Its answer has to carry something only the holder of its
-    /// keys can write: under SDES a crypto line naming the tag it accepted
-    /// with this end's own key (RFC 4568 §5.1.2), under DTLS-SRTP this end's
-    /// fingerprint and the role the running association gives it (RFC 8842
-    /// §5.3). An answer written here carried neither, and the negotiation
-    /// that followed failed at the end that asked for the hold — a hold that
-    /// never reached its media, and on the wire an answer that had withdrawn
-    /// the key or the certificate.
-    ///
-    /// Nor an ICE restart: an offer whose `a=ice-ufrag` or `a=ice-pwd` moved
-    /// (RFC 8839 §4.4.1.1.1) needs an answer with new credentials of this
-    /// end's own (§4.4.2.1), which this layer does not draw and would
-    /// otherwise answer with the old ones copied from the last description.
+    /// No for an ICE restart (RFC 8839 §4.4.1.1.1): the answer needs fresh
+    /// credentials (§4.4.2.1).
     pub(crate) fn is_same_media(&self, offer: &SessionDescription) -> bool {
         let Some(previous) = self.remote.as_ref() else {
             return false;
@@ -275,10 +219,7 @@ impl Session {
                 .all(|(before, now)| {
                     before.media == now.media
                         && before.formats == now.formats
-                        // folded the way `keying::is_secure` folds it, so that
-                        // a peer writing `rtp/savp` is not pushed off the fast
-                        // path for nothing; it still parts AVP from SAVP,
-                        // which is the whole point
+                        // case-insensitive, like `keying::is_secure`
                         && before.proto.eq_ignore_ascii_case(&now.proto)
                         && !now.is_secured()
                         && before.attribute("crypto").is_some()
@@ -288,19 +229,10 @@ impl Session {
 
     /// Keep the hold this end asked for in an answer somebody else wrote.
     ///
-    /// The application answers the re-offers handed to it, and it writes
-    /// what the call wants when nothing is held — the media facade answers
-    /// every one `sendrecv`. A call this end has on hold would then be taken
-    /// off it by the far end's codec change or session refresh: the answer
-    /// says this end is listening again, the far end starts sending, and the
-    /// stream here starts sending too, into a call its user believes is on
-    /// hold. So each stream is narrowed to what [`Session::wanted`] allows
-    /// while held, which is how [`Session::answer`] writes the ones this layer
-    /// answers itself.
-    ///
-    /// Only ever narrowed, so the answer still honours the offer (§6.1), and
-    /// only while held here: `false` means nothing was touched, and an answer
-    /// this end has no hold to keep in goes out byte for byte as written.
+    /// The application answers re-offers `sendrecv`, which would silently
+    /// unhold a call held here. Each stream is narrowed to what the hold
+    /// allows; narrowing still honours the offer (§6.1). Returns `false`
+    /// when nothing changed.
     pub(crate) fn keep_hold(&self, answer: &mut SessionDescription) -> bool {
         if !self.hold.local {
             return false;
@@ -324,7 +256,7 @@ impl Session {
         rewritten
     }
 
-    /// The bytes of what each end last described.
+    /// Local and remote, as bytes.
     pub(crate) fn described(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
         (
             self.local.as_ref().map(SessionDescription::to_bytes),
@@ -332,14 +264,12 @@ impl Session {
         )
     }
 
-    /// The direction stream `index` gets from this end while `held`.
     fn wanted(&self, index: usize, held: bool) -> Direction {
         let base = self.base.get(index).copied().unwrap_or(Direction::SendRecv);
         if held { holding(base) } else { base }
     }
 
-    /// What to do with one offered stream: keep it on this end's terms, or
-    /// refuse it because there is nothing of ours to match it with.
+    /// Rejected when this end has no matching stream or no common format.
     fn take(&self, index: usize, offered: &MediaDescription, held: bool) -> StreamAnswer {
         let Some(ours) = self.local.as_ref().and_then(|local| local.media.get(index)) else {
             return StreamAnswer::Reject;
@@ -357,45 +287,17 @@ impl Session {
     }
 }
 
-/// What this end said about a stream last time and has to go on saying.
+/// Attributes an answer must repeat from this end's last description;
+/// leaving one out withdraws it (e.g. a hold would silently drop
+/// `rtcp-mux` and move RTCP to a dead port).
 ///
-/// An answer is not a fresh description. Everything a previous negotiation
-/// settled that the offer still asks for belongs in it, because an answer that
-/// leaves it out is an answer that withdrew it — and a hold arriving from the
-/// far end would then take multiplexing away from a call that had it, moving
-/// RTCP to a port nothing is listening on, without either end saying anything.
-/// RFC 5761 §5.1.1 makes `rtcp-mux` mutual, so it is repeated only where the
-/// offer still carries it; `ptime` and `maxptime` are this end's own statement
-/// about what it wants to receive and stand whatever the offer says.
+/// `rtcp-mux` (RFC 5761 §5.1.1) and `rtcp-xr` (RFC 3611 §5.2, our request
+/// for the far end's reports) only while the offer still carries them.
+/// `ptime`, `maxptime` and ICE (RFC 8839 §4.4: on every description) are
+/// ours regardless; there can be several `candidate` lines.
 ///
-/// `rtcp-xr` is mutual for the same reason and by the same rule, though what
-/// it negotiates runs the other way: RFC 3611 §5.2 has each side's own line
-/// ask the *other* to send XR reports, so repeating this end's line here
-/// (rather than the offer's) is what keeps asking the far end for them
-/// across a hold or an unrelated re-INVITE, exactly as leaving it out would
-/// silently withdraw the request.
-///
-/// **`crypto`, `fingerprint` and `setup` are deliberately not here**, and
-/// never need to be: a stream on a secure profile is not answered by this
-/// layer at all ([`Session::is_same_media`] hands it up). RFC 4568 §5.1.2
-/// wants an answer to name the tag it accepted and carry a key of this end's
-/// own, and RFC 8842 §5.3 wants the role the running association gives this
-/// end; neither is a line that can be copied forward, and copying one would
-/// be answering a negotiation this layer had not read.
-///
-/// **ICE is here, and for exactly the reason the paragraph above gives about
-/// multiplexing.** RFC 8839 §4.4 wants the username fragment, the password
-/// and the candidates on every description of a session; an answer that left
-/// them out is a peer reading that ICE has been withdrawn in the middle of a
-/// call, which takes a checked path away from a call that had one and puts
-/// the media back on whatever the signalling says — silently, and from a
-/// layer that never read a candidate. Copying them forward is safe in a way
-/// copying a key is not: they are this end's own published values, unchanged
-/// for the life of the session unless a restart changes both at once, and a
-/// restart is a new offer rather than an answer. `ice-ufrag` and `ice-pwd`
-/// are this end's whatever the offer says; `candidate` and `ice-options` go
-/// with them, and there is more than one candidate line, so they are taken by
-/// name rather than one to a name.
+/// `crypto`, `fingerprint` and `setup` are never copied: secure streams are
+/// not answered here ([`Session::is_same_media`]).
 fn carried(ours: &MediaDescription, offered: &MediaDescription) -> Vec<Attribute> {
     let mutual = ["rtcp-mux", "rtcp-xr"]
         .iter()
@@ -412,10 +314,7 @@ fn carried(ours: &MediaDescription, offered: &MediaDescription) -> Vec<Attribute
     single.chain(candidates).collect()
 }
 
-/// §8.4: "If the stream to be placed on hold was previously a sendrecv media
-/// stream, it is placed on hold by marking it as sendonly. If the stream to be
-/// placed on hold was previously a recvonly media stream, it is placed on hold
-/// by marking it inactive."
+/// §8.4: `sendrecv` holds as `sendonly`, `recvonly` as `inactive`.
 const fn holding(base: Direction) -> Direction {
     match base {
         Direction::SendRecv | Direction::SendOnly => Direction::SendOnly,
@@ -423,8 +322,7 @@ const fn holding(base: Direction) -> Direction {
     }
 }
 
-/// What is left of `now` once `most` has had its say: a stream sends only
-/// where both let it, and receives only where both do.
+/// The intersection of two directions.
 const fn narrowed(now: Direction, most: Direction) -> Direction {
     match (sends(now) && sends(most), receives(now) && receives(most)) {
         (true, true) => Direction::SendRecv,
@@ -444,16 +342,9 @@ const fn receives(direction: Direction) -> bool {
 
 /// Whether a description the far end wrote refuses what this end sends.
 ///
-/// `sendonly` and `inactive` both say the writer will not receive, which is
-/// what putting somebody on hold means. So does an address of `0.0.0.0`:
-/// RFC 2543 held calls that way, §8.4 no longer recommends it, and "an agent
-/// MUST be capable of receiving SDP with a connection address of 0.0.0.0".
-///
-/// Every live stream has to say it, because that is §8.4's own definition —
-/// "an SDP with all streams on hold is referred to as held SDP" — and one
-/// flag for the call cannot mean anything else. A call with two streams held
-/// separately needs a flag per stream, and there will be two streams when
-/// there is video, which is phase 2.
+/// `sendonly`, `inactive`, or the old RFC 2543 `0.0.0.0` address, which
+/// §8.4 still requires us to accept. Every live stream must say it: that is
+/// §8.4's "held SDP". Per-stream hold waits for video.
 fn holds_us(description: &SessionDescription) -> bool {
     let mut any = false;
     for media in description
@@ -475,7 +366,6 @@ fn holds_us(description: &SessionDescription) -> bool {
     any
 }
 
-/// Write one direction on a stream, replacing whatever it said before.
 fn set_direction(media: &mut MediaDescription, direction: Direction) {
     media
         .attributes
@@ -500,7 +390,6 @@ mod tests {
         secured(port, "RTP/AVP", attributes)
     }
 
-    /// The same, with the transport profile named rather than assumed.
     fn secured(port: u16, proto: &str, attributes: Vec<Attribute>) -> SessionDescription {
         let mut description =
             SessionDescription::new(Origin::new(1, 1, address()), Connection::new(address()));
@@ -518,8 +407,6 @@ mod tests {
         )]
     }
 
-    /// What an answer this layer writes itself carries forward from what
-    /// this end said last time, given an offer that still asks for it.
     fn answered(ours: Vec<Attribute>, offered: Vec<Attribute>) -> MediaDescription {
         let mut session = Session::default();
         session.set_local(description(40_000, ours));
@@ -533,14 +420,7 @@ mod tests {
             .expect("the answer has the stream")
     }
 
-    /// RFC 8839 §4.4: the attributes go on every description of the session.
-    ///
-    /// The user agent answers a hold, a resume and a peer moving its address
-    /// without handing the description up, so if this did not carry ICE
-    /// forward the peer would read an answer with no credentials in it as ICE
-    /// being withdrawn part-way through a call — taking a checked path away
-    /// from a call that had one, silently, from a layer that has never read a
-    /// candidate.
+    /// RFC 8839 §4.4: ICE goes on every description of the session.
     #[test]
     fn an_answer_this_layer_writes_does_not_withdraw_ice() {
         let ours = vec![
@@ -574,8 +454,7 @@ mod tests {
                 .and_then(|line| line.value.as_deref()),
             Some("ice2")
         );
-        // both of them, and a helper that took one attribute per name would
-        // have kept only the first
+        // both, not one per name
         assert_eq!(
             answer
                 .attributes
@@ -586,8 +465,6 @@ mod tests {
         );
     }
 
-    /// And the other half: a call that never used ICE does not grow any of it
-    /// because the far end re-offered.
     #[test]
     fn an_answer_does_not_invent_ice_a_call_never_had() {
         let answer = answered(Vec::new(), Vec::new());
@@ -596,43 +473,27 @@ mod tests {
         assert!(answer.attribute("candidate").is_none());
     }
 
-    /// Only a session that has heard from the far end can compare anything.
     fn negotiated(remote: SessionDescription) -> Session {
         let mut session = Session::default();
         session.set_remote(remote);
         session
     }
 
-    /// A downgrade keeps every format the first negotiation settled and
-    /// changes the profile. It is not "the same media", and this layer holds
-    /// no policy with which to answer it, so it has to go up.
-    ///
-    /// The `a=crypto` line is deliberately left on the offer. Without it the
-    /// keying check below would catch this one too, and then nothing here
-    /// would be testing the profile at all — which is what the first version
-    /// of this test did.
+    /// The `a=crypto` line stays on the offer so only the profile differs.
     #[test]
     fn a_re_offer_that_takes_the_transport_profile_down_is_not_the_same_media() {
         let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
         assert!(!session.is_same_media(&secured(40_000, "RTP/AVP", crypto())));
     }
 
-    /// The half a profile check alone would miss: `RTP/SAVP` with the key
-    /// taken out. RFC 4568 §5.1.2 requires the attribute on a secure profile,
-    /// so this is not a stream anyone can open — and answering it here would
-    /// settle that in a layer that never read a crypto line.
+    /// What a profile check alone would miss (RFC 4568 §5.1.2).
     #[test]
     fn a_re_offer_that_keeps_the_profile_and_drops_the_key_is_not_the_same_media() {
         let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
         assert!(!session.is_same_media(&secured(40_000, "RTP/SAVP", Vec::new())));
     }
 
-    /// And a secured stream goes up even when nothing about it moved — the
-    /// hold that repeats every line it had, keys and certificate included.
-    /// The answer to it has to carry this end's own key or its fingerprint
-    /// and role, and those belong to the layer that holds them; an answer
-    /// written here, with neither, is the one that left the holder's
-    /// negotiation failing.
+    /// Its answer needs this end's own key or fingerprint and role.
     #[test]
     fn a_re_offer_on_a_secure_profile_goes_up_even_when_nothing_moved() {
         let session = negotiated(secured(40_000, "RTP/SAVP", crypto()));
@@ -648,10 +509,7 @@ mod tests {
         assert!(!session.is_same_media(&secured(40_000, "UDP/TLS/RTP/SAVP", dtls())));
     }
 
-    /// An ICE restart goes up: its answer needs new credentials of this
-    /// end's own (RFC 8839 §4.4.2.1), and a copy of the last description
-    /// would answer it with the old ones. The same credentials again — a hold
-    /// on a call using ICE — stay here.
+    /// RFC 8839 §4.4.2.1. The same credentials again stay here.
     #[test]
     fn an_ice_restart_is_not_the_same_media() {
         let ice = |ufrag: &str, pwd: &str| {
@@ -677,15 +535,13 @@ mod tests {
         )));
     }
 
-    /// A peer that writes the profile in lower case has not changed it.
     #[test]
     fn the_transport_profile_is_compared_without_regard_to_case() {
         let session = negotiated(secured(40_000, "RTP/AVP", Vec::new()));
         assert!(session.is_same_media(&secured(40_000, "rtp/avp", Vec::new())));
     }
 
-    /// RFC 8842 §5.5: a subsequent offer hands the DTLS roles back with
-    /// `actpass`, including one written from an answer that took a role.
+    /// RFC 8842 §5.5.
     #[test]
     fn a_hold_written_from_an_answer_offers_the_dtls_roles_back() {
         let mut session = Session::default();
@@ -713,8 +569,6 @@ mod tests {
         assert_eq!(offer.direction_of(media), Direction::SendOnly);
     }
 
-    /// An answer written elsewhere keeps a hold this end asked for, and one
-    /// written while nothing is held here is left exactly as it was.
     #[test]
     fn an_answer_written_elsewhere_keeps_the_hold_this_end_asked_for() {
         let mut session = Session::default();
@@ -730,10 +584,8 @@ mod tests {
         let media = answer.media.first().expect("the stream");
         assert_eq!(answer.direction_of(media), Direction::SendOnly);
 
-        // an answer that already stopped listening needs nothing more
         assert!(!session.keep_hold(&mut answer));
 
-        // and one that only listens is left listening to nothing
         let mut listening = description(40_000, Vec::new());
         set_direction(
             listening.media.first_mut().expect("the stream"),
@@ -744,10 +596,7 @@ mod tests {
         assert_eq!(listening.direction_of(media), Direction::Inactive);
     }
 
-    /// The far end putting a call on hold re-offers the session it already
-    /// negotiated. An answer that dropped what the first one settled would be
-    /// this end withdrawing it, and for multiplexing that means RTCP moving
-    /// back to a port nobody is listening on, silently.
+    /// Dropping it would move RTCP back to a port nobody listens on.
     #[test]
     fn an_answer_repeats_the_multiplexing_the_first_negotiation_settled() {
         let mut session = Session::default();
@@ -763,8 +612,7 @@ mod tests {
         );
     }
 
-    /// And it is mutual, so an offer that stopped asking for it gets an answer
-    /// that stops promising it (RFC 5761 §5.1.1).
+    /// RFC 5761 §5.1.1: mutual.
     #[test]
     fn an_offer_that_no_longer_asks_to_multiplex_is_not_answered_as_if_it_did() {
         let mut session = Session::default();
@@ -777,11 +625,8 @@ mod tests {
         assert!(media.attribute("rtcp-mux").is_none());
     }
 
-    /// `rtcp-xr` is carried the same way multiplexing is, but what it
-    /// repeats is this end's own line, not the offer's: RFC 3611 SS5.2 has
-    /// each side's line ask the *other* to send XR, so an answer that
-    /// dropped it would be withdrawing this end's own request to keep
-    /// receiving quality reports across a hold.
+    /// This end's own line is repeated: it asks the far end for XR
+    /// (RFC 3611 §5.2).
     #[test]
     fn an_answer_repeats_this_ends_own_request_for_voip_metrics_xr() {
         let mut session = Session::default();
@@ -803,9 +648,6 @@ mod tests {
         );
     }
 
-    /// And it is mutual too: nothing in the offer asking for XR leaves it
-    /// out of the answer, even though this end's own local description
-    /// still carries it.
     #[test]
     fn an_offer_that_does_not_ask_for_voip_metrics_xr_is_not_answered_with_it() {
         let mut session = Session::default();
@@ -821,8 +663,6 @@ mod tests {
         assert!(media.attribute("rtcp-xr").is_none());
     }
 
-    /// `ptime` is this end's own statement about what it wants to receive, so
-    /// it stands whether or not the offer repeated it.
     #[test]
     fn the_packet_length_this_end_asked_for_survives_a_re_offer() {
         let mut session = Session::default();
@@ -841,10 +681,7 @@ mod tests {
         );
     }
 
-    /// A key is not copied forward. §5.1.2 wants an answer to name the tag it
-    /// accepted and carry a key of this end's own, and a layer that has never
-    /// read a crypto line cannot do either — so it says nothing rather than
-    /// repeating a line it did not negotiate.
+    /// RFC 4568 §5.1.2 wants this end's own key, which this layer lacks.
     #[test]
     fn a_crypto_line_is_not_repeated_by_a_layer_that_never_read_one() {
         let mut session = Session::default();

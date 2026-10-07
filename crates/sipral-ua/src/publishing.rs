@@ -4,28 +4,17 @@
 //! Keeping an account's event state at a compositor (RFC 3903), over this
 //! agent's own endpoint.
 //!
-//! [`Publication`] decides what each PUBLISH says and when the next one is
-//! due; it owns no transaction and no clock. This is what gives it both: it
-//! addresses each request for the account it belongs to, answers the
-//! compositor's challenges with that account's credentials, wakes the
-//! machine for its refresh from [`UserAgent::handle_timeout`], and says what
-//! became of the state as [`UaEvent::Publication`] — the one place an
-//! application looks, whether the news is a refresh that went through or
-//! a compositor that forgot the state.
+//! [`Publication`] decides what each PUBLISH says and when; this module gives
+//! it transactions and a clock, and reports everything as
+//! [`UaEvent::Publication`].
 //!
-//! **A challenge is answered here, never reported.** A 401 or 407 is the
-//! compositor asking who is publishing, and the account's credentials are
-//! the answer (RFC 3903 §13 has the compositor authenticate the publisher).
-//! Only a challenge nothing here can answer — an account with no credentials,
-//! or a retry the endpoint could not send — becomes a refusal, decided at the
-//! end of the drain the way a MESSAGE's is, because the core reports the
-//! refusal before it reports that the refusal is answerable.
+//! A 401/407 is answered with the account's credentials (RFC 3903 §13), never
+//! reported. Only an unanswerable one becomes a refusal, decided at the end of
+//! the drain, because the core reports the refusal before the retry.
 //!
-//! **A publication ends only when its state is removed.** A refresh that
-//! failed, a compositor that answered 412 with nothing left to publish, or a
-//! lifetime that ran out leaves the handle naming the same piece of state,
-//! and the next [`UserAgent::republish`] starts it afresh; a removal the
-//! compositor confirmed is what lets the handle go.
+//! A publication ends only when a removal is confirmed. A failed refresh, a
+//! 412 with nothing to publish, or an expired lifetime keep the handle, and
+//! the next [`UserAgent::republish`] starts it afresh.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,14 +32,13 @@ use crate::presence::Presence;
 use crate::publish::{Publication, PublishEvent, PublishRequest};
 use crate::subscription::DEFAULT_EXPIRES;
 
-/// The event package RFC 3856 names, which is the one a presence document
-/// is published under (RFC 3903 §4.1).
+/// RFC 3856's event package for presence (RFC 3903 §4.1).
 pub const PRESENCE_EVENT: &str = "presence";
 
 /// One piece of event state this agent keeps at a compositor.
 ///
-/// Minted before anything is sent, so that a PUBLISH which never reaches a
-/// transport still has a name to be reported under. Never reused.
+/// Minted before sending, so even an unsent PUBLISH can be reported. Never
+/// reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicationHandle(pub(crate) u32);
 
@@ -63,9 +51,8 @@ pub struct Publish {
 }
 
 impl Publish {
-    /// State of the event package `event`, published for the account's own
-    /// address of record — the resource RFC 3903 §4 has a PUBLISH name in
-    /// its Request-URI — for [`DEFAULT_EXPIRES`].
+    /// State of package `event` for the account's own address of record
+    /// (RFC 3903 §4), for [`DEFAULT_EXPIRES`].
     #[must_use]
     pub fn new(event: &str) -> Self {
         Self {
@@ -81,16 +68,14 @@ impl Publish {
         Self::new(PRESENCE_EVENT)
     }
 
-    /// Publish the state of another resource than the account's own address
-    /// of record: a Request-URI, and the `To` the request carries.
+    /// Publish for another resource (Request-URI and `To`).
     #[must_use]
     pub fn target(mut self, target: Uri) -> Self {
         self.target = Some(target);
         self
     }
 
-    /// Ask for `expires` rather than an hour, as [`Publication::expires`]
-    /// takes it.
+    /// Lifetime to ask for instead of an hour ([`Publication::expires`]).
     #[must_use]
     pub const fn expires(mut self, expires: Duration) -> Self {
         self.expires = expires;
@@ -110,20 +95,16 @@ struct Held {
     account: AccountId,
     target: Uri,
     machine: Publication,
-    /// Whether this is the account's presence, which
-    /// [`UserAgent::publish_presence`] modifies rather than duplicates.
+    /// The account's presence, which [`UserAgent::publish_presence`]
+    /// modifies rather than duplicates.
     presence: bool,
-    /// A 401 or 407 to the request in flight, until the drain ends and it is
-    /// known whether a retry followed.
+    /// A 401/407 not yet known to be retried; settled at the drain's end.
     unanswered: Option<StatusCode>,
-    /// The refused transaction whose answer RFC 3261 §18.1.1 took off the
-    /// datagram, held by the endpoint until a stream is bound or the wait for
-    /// one ends ([`crate::oversize`]).
+    /// A challenged transaction whose retry needs a stream (§18.1.1,
+    /// [`crate::oversize`]).
     waiting_for_stream: Option<AnyTransactionId>,
 }
 
-/// Every publication an agent keeps, and the transactions they have in
-/// flight.
 #[derive(Debug, Default)]
 pub(crate) struct Publications {
     held: HashMap<PublicationHandle, Held>,
@@ -136,9 +117,9 @@ impl UserAgent {
     /// (RFC 3903 §4), and keep it published until
     /// [`UserAgent::unpublish`].
     ///
-    /// The refresh, the answer to a challenge, the fresh initial PUBLISH a
-    /// 412 asks for and the longer lifetime a 423 asks for all happen without
-    /// another call. What happens is [`UaEvent::Publication`].
+    /// Refreshes, challenges, a 412's fresh PUBLISH and a 423's longer
+    /// lifetime are handled automatically and reported as
+    /// [`UaEvent::Publication`].
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -162,14 +143,12 @@ impl UserAgent {
     /// Publish this account's presence (RFC 3856 §6.2's `presence` package,
     /// as `application/pidf+xml`).
     ///
-    /// One per account: the first call creates the publication, and every
-    /// later one modifies it under the same handle, which is what RFC 3903
-    /// §4.4 expects of a publisher whose state changed.
+    /// One per account: later calls modify it under the same handle (RFC
+    /// 3903 §4.4).
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`], or [`UaError::Publish`] with
-    /// [`crate::PublishError::Unwritable`] for a document that cannot be
-    /// written, in which case nothing is sent.
+    /// [`crate::PublishError::Unwritable`]; nothing is sent then.
     pub fn publish_presence(
         &mut self,
         account: AccountId,
@@ -201,9 +180,8 @@ impl UserAgent {
         Ok(handle)
     }
 
-    /// Replace what a publication holds at the compositor: a modification
-    /// (RFC 3903 §4.4), or an initial PUBLISH again when nothing is held
-    /// there any more.
+    /// Replace the published state (RFC 3903 §4.4), or publish afresh if the
+    /// compositor holds nothing.
     ///
     /// # Errors
     /// [`UaError::NoSuchPublication`].
@@ -225,8 +203,7 @@ impl UserAgent {
         Ok(())
     }
 
-    /// Refresh now rather than when the lifetime says (RFC 3903 §4.3): after
-    /// a refresh that failed, say.
+    /// Refresh now (RFC 3903 §4.3), e.g. after a failed refresh.
     ///
     /// # Errors
     /// [`UaError::NoSuchPublication`], or [`UaError::Publish`] with
@@ -251,8 +228,7 @@ impl UserAgent {
     /// [`UaEvent::Publication`] with [`PublishEvent::Removed`] says it is
     /// gone, and the handle names nothing from then on.
     ///
-    /// A publication that never got as far as the compositor has nothing to
-    /// remove, and is let go here and now, with the same event.
+    /// One never published is dropped at once, with the same event.
     ///
     /// # Errors
     /// [`UaError::NoSuchPublication`].
@@ -282,8 +258,7 @@ impl UserAgent {
         Ok(())
     }
 
-    /// The entity tag the compositor holds a publication's state under, once
-    /// a 2xx has named one.
+    /// The entity tag from the compositor's last 2xx.
     #[must_use]
     pub fn publication_etag(&self, publication: PublicationHandle) -> Option<&str> {
         self.publications
@@ -292,8 +267,7 @@ impl UserAgent {
             .and_then(|held| held.machine.etag())
     }
 
-    /// The account's presence publication, when [`UserAgent::publish_presence`]
-    /// has made one and it has not been removed.
+    /// The account's live [`UserAgent::publish_presence`] publication.
     #[must_use]
     pub fn presence_publication(&self, account: AccountId) -> Option<PublicationHandle> {
         self.publications
@@ -327,8 +301,6 @@ impl UserAgent {
         Ok(handle)
     }
 
-    /// Send whatever the machine has to send, and report whatever it has to
-    /// say.
     fn pump_publication(&mut self, publication: PublicationHandle, now: Instant) {
         loop {
             let Some(held) = self.publications.held.get_mut(&publication) else {
@@ -355,8 +327,6 @@ impl UserAgent {
         self.report_publication(publication);
     }
 
-    /// One PUBLISH on the wire, addressed for `account`: the transaction, or
-    /// `None` when it could not be sent.
     fn send_publish(
         &mut self,
         account: AccountId,
@@ -375,9 +345,8 @@ impl UserAgent {
                 .to(&to)
                 .from(&config.sender_value()),
         );
-        // §22.2's caching, as a MESSAGE does: nothing goes on unless this
-        // destination has challenged this account before, and a refresh an
-        // hour does not cost a fresh 401 every time
+        // §22.2 caching: credentials go only where challenged before, so an
+        // hourly refresh does not cost a 401 each time
         let sent = match config.credentials.clone() {
             Some(credentials) => {
                 self.endpoint
@@ -388,8 +357,6 @@ impl UserAgent {
         sent.ok().map(AnyTransactionId::NonInviteClient)
     }
 
-    /// Everything the machine has to say, as events, and the record let go
-    /// once the state is removed.
     fn report_publication(&mut self, publication: PublicationHandle) {
         let Some(held) = self.publications.held.get_mut(&publication) else {
             return;
@@ -398,8 +365,7 @@ impl UserAgent {
         let mut removed = false;
         let mut said = Vec::new();
         while let Some(event) = held.machine.poll_event() {
-            // a challenge is answered by the endpoint's retry, and the
-            // machine is only ever told about one nothing could answer
+            // challenges are retried by the endpoint, not reported
             if matches!(event, PublishEvent::Challenged { .. }) {
                 continue;
             }
@@ -425,9 +391,8 @@ impl UserAgent {
             .retain(|_, owner| *owner != publication);
     }
 
-    /// Drop every publication of an account being removed. Nothing is sent:
-    /// the state lapses at the compositor by itself (RFC 3903 §4), and a
-    /// removal that needs an account's credentials cannot outlive it.
+    /// Drops an account's publications without sending: the state lapses at
+    /// the compositor (RFC 3903 §4), and a removal needs the credentials.
     pub(crate) fn forget_publications(&mut self, account: AccountId) {
         let gone: Vec<PublicationHandle> = self
             .publications
@@ -500,8 +465,7 @@ impl UserAgent {
             return;
         };
         if matches!(status.get(), 401 | 407) {
-            // whether this is a refusal is decided at the end of the drain,
-            // once it is known whether a retry followed
+            // settled at the end of the drain, once a retry may have gone
             held.unanswered = Some(status);
             return;
         }
@@ -530,8 +494,7 @@ impl UserAgent {
             .retry_with_credentials(transaction, &credentials, now)
         {
             Ok(retried) => self.publish_retry_went(publication, transaction, retried),
-            // §18.1.1 wants a connection first, and the endpoint is still
-            // holding the challenge
+            // §18.1.1: needs a stream; the endpoint holds the challenge
             Err(error) if crate::agent::wants_a_stream(&error) => {
                 if let Some(held) = self.publications.held.get_mut(&publication) {
                     held.waiting_for_stream = Some(transaction);
@@ -541,8 +504,7 @@ impl UserAgent {
         }
     }
 
-    /// A PUBLISH that went to the next server (RFC 3263 §4.3): the
-    /// publication names the new transaction, when it held the old one.
+    /// Follows a PUBLISH failed over to the next server (RFC 3263 §4.3).
     pub(crate) fn publish_retry_went_if_held(
         &mut self,
         failed: AnyTransactionId,
@@ -553,7 +515,6 @@ impl UserAgent {
         }
     }
 
-    /// The retry is a transaction now, and the publication names it.
     fn publish_retry_went(
         &mut self,
         publication: PublicationHandle,
@@ -578,8 +539,7 @@ impl UserAgent {
             .collect()
     }
 
-    /// Send the PUBLISH retries §18.1.1 held back, now that there is a
-    /// connection.
+    /// Sends the retries §18.1.1 held, now that a stream exists.
     pub(crate) fn resume_parked_publications(&mut self, now: Instant) {
         for (publication, failed) in self.publications_waiting() {
             let account = self
@@ -605,9 +565,8 @@ impl UserAgent {
         }
     }
 
-    /// No stream is coming for the PUBLISHes whose answer to a challenge
-    /// outgrew the datagram: each fails as unreachable with `status`, rather
-    /// than as the 401 or 407 its credentials never got to answer.
+    /// No stream is coming: each held PUBLISH fails as unreachable with
+    /// `status`, not as the 401/407 it never answered.
     pub(crate) fn give_up_publications(&mut self, status: StatusCode, now: Instant) {
         for (publication, failed) in self.publications_waiting() {
             self.endpoint.abandon_challenge(failed);
@@ -623,7 +582,6 @@ impl UserAgent {
         }
     }
 
-    /// Whether a PUBLISH's answer to a challenge waits for a stream.
     pub(crate) fn publications_wait_for_a_stream(&self) -> bool {
         self.publications
             .held
@@ -638,8 +596,7 @@ impl UserAgent {
             .publications
             .held
             .iter_mut()
-            // except one the endpoint is holding until a connection exists:
-            // its answer has not been sent yet
+            // a retry held for a stream is not a refusal yet
             .filter(|(_, held)| held.waiting_for_stream.is_none())
             .filter_map(|(handle, held)| held.unanswered.take().map(|status| (*handle, status)))
             .collect();
@@ -654,7 +611,6 @@ impl UserAgent {
         }
     }
 
-    /// Refresh what is due, and notice what has lapsed.
     pub(crate) fn fire_publication_timers(&mut self, now: Instant) {
         let due: Vec<PublicationHandle> = self
             .publications
@@ -671,7 +627,6 @@ impl UserAgent {
         }
     }
 
-    /// The soonest a publication has something to do.
     pub(crate) fn publication_deadline(&self) -> Option<Instant> {
         self.publications
             .held

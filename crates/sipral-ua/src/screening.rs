@@ -3,40 +3,23 @@
 
 //! Turning an INVITE away before anybody hears it.
 //!
-//! A phone reachable from the internet is dialled by machines that are not
-//! calling anybody. They walk the extension numbers every PBX ships with, at
-//! every hour, and what they are after is an effect — a telephone that rings
-//! at three in the morning is proof that the number is live and that somebody
-//! is behind it. Everything else in this crate turns an INVITE into a call as
-//! quickly as it can, which is exactly the wrong instinct here.
+//! A phone reachable from the internet is dialled by scanners walking default
+//! extension numbers; a ring at 3 a.m. tells them the number is live.
 //!
-//! **Where the hook runs is the whole of it.** The policy is consulted before
-//! the call exists: before [`UaEvent::IncomingCall`](crate::UaEvent) is
-//! queued, before a [`CallHandle`](crate::CallHandle) is minted, before one
-//! map has an entry that a caller could later observe. That is why it sits
-//! above the call handler in the chain in [`crate::agent`] rather than inside
-//! it — by the time that one has run, the effect the policy exists to prevent
-//! has already happened, and a hook consulted afterwards is a notification
-//! wearing a decision's clothes.
+//! **The hook runs before the call exists:** before
+//! [`UaEvent::IncomingCall`](crate::UaEvent) is queued and before a
+//! [`CallHandle`](crate::CallHandle) is minted. That is why it sits above the
+//! call handler in [`crate::agent`]; consulted later, it could only notify.
 //!
-//! **A refusal is counted, not reported.** There is no event for one, and that
-//! is deliberate twice over: an event queue that anybody on the internet can
-//! fill is the same attack one layer up, and the number an operator wants is
-//! "how often has this happened", which is a counter. It is the same shape
-//! [`Endpoint::refused`](sipral_core::endpoint::Endpoint::refused) already
-//! uses for the requests the core turns away.
+//! **A refusal is counted, not reported.** An event queue anyone can fill is
+//! the same attack one layer up, and operators want a counter, like
+//! [`Endpoint::refused`](sipral_core::endpoint::Endpoint::refused).
 //!
-//! **The rate limit is per source address, and it is deliberately loose.** In
-//! most deployments every legitimate call arrives from one address — the proxy
-//! the phone registered with — so a limit tuned to a scanner is a limit on
-//! your own switchboard. What the default buys is the difference between a
-//! phone that rings fifty times a second and one that rings a few times a
-//! minute; the precise answer is the policy hook, which knows things this
-//! layer cannot, and [`UserAgent::limit_invites`] is there for a deployment
-//! whose one address is genuinely busy. A byte stream the application bound
-//! without naming its far end has no address to count by, and is counted as
-//! itself — one allowance per connection, for as long as it stays open —
-//! rather than not counted at all.
+//! **The rate limit is per source address, and loose.** Most legitimate calls
+//! come from one address, the registrar proxy, so a tight limit would throttle
+//! your own switchboard. The policy hook is the precise tool;
+//! [`UserAgent::limit_invites`] tunes a busy address. A byte stream bound
+//! without a named far end is counted per connection.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -50,80 +33,44 @@ use crate::agent::UserAgent;
 use crate::call::CallHandle;
 use crate::transfer::FORBIDDEN;
 
-/// What this layer answers with when it refuses an INVITE of its own accord.
+/// What this layer answers when it refuses an INVITE itself.
 ///
-/// §21.4.18: "the callee's end system was contacted successfully but the
-/// callee is currently unavailable (for example, is not logged in, logged in
-/// but in a state that precludes communication with the callee, or has
-/// activated the 'do not disturb' feature)". A screened INVITE is the third of
-/// those, and the answer is the same one a phone that has been switched off
-/// gives, so a scanner cannot tell a number that is guarded from one that is
-/// simply not answering.
+/// 480 (§21.4.18) is what a switched-off phone says, so a scanner cannot tell
+/// a guarded number from an idle one. 404 would be an enumeration oracle
+/// (§21.4.5); 503 makes a proxy stop using this server (§21.5.4), taking the
+/// phone off the air; 6xx speaks for every device of the user (§21.6).
 ///
-/// The alternatives were read and each says something worth more than it
-/// costs. 404 claims "definitive information that the user does not exist"
-/// (§21.4.5), which is untrue and, sent for some numbers and not others, is an
-/// oracle for enumerating the ones that do. 503 is what the core sends when it
-/// is out of room, and §21.5.4 has a proxy that receives one stop sending to
-/// that server entirely — a rate limit answering 503 would take the phone off
-/// the air, which is what the scanner wanted. 603 and every other 6xx claim
-/// knowledge of "a particular user, not just the particular instance"
-/// (§21.6), so refusing here would silence the desk phone the same person is
-/// registered on.
-///
-/// No `Retry-After` goes with it, although §21.4.18 allows one: it would tell
-/// a scanner when to come back and tells a real caller nothing they would act
-/// on.
+/// No `Retry-After`: it would only tell a scanner when to come back.
 const UNAVAILABLE: StatusCode = match StatusCode::new(480) {
     Ok(status) => status,
-    // 480 is in range, so this arm never runs; it exists because `new` is
-    // fallible and nothing in this crate panics to say otherwise
+    // unreachable; `new` is fallible and this crate does not panic
     Err(_) => StatusCode::BUSY_HERE,
 };
 
-/// How many sources are watched at once.
-///
-/// A phone talks to a proxy and a handful of peers, so this is far past what
-/// an honest deployment needs. It is a fixed cost rather than a growing one
-/// because a table keyed by whatever address arrives, on a port the whole
-/// internet can reach, is itself the attack.
+/// Sources watched at once. Fixed, because a table keyed by any arriving
+/// address would itself be the attack.
 const WATCHED: usize = 64;
 
 /// How fast one source may offer calls.
 ///
-/// A token bucket: `burst` calls may arrive at once, and one more token is
-/// earned every `every` after that. The shape was chosen over a sliding window
-/// because a window has to remember when each call arrived — which is memory
-/// the sender controls — while a bucket is two numbers whatever the traffic,
-/// and because "a few at once, then a trickle" is what a telephone that is
-/// being used looks like, whereas a scanner is a flat unrelenting rate.
+/// A token bucket: `burst` at once, then one more per `every`. Unlike a
+/// sliding window it holds no per-call memory the sender controls, and
+/// "a few, then a trickle" is how real use looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rate {
     burst: u32,
-    /// `None` is no limit at all. Zero says the same thing arithmetically — a
-    /// token earned in no time is a token always available — but a deployment
-    /// that wants no limit says so with [`Rate::unlimited`], and an interval
-    /// that came out of a division and rounded to nothing meant no such thing.
+    /// `None` is no limit; zero is refused so a rounded-down division cannot
+    /// silently mean unlimited.
     every: Option<Duration>,
 }
 
-/// Why a [`Rate`] was refused.
-///
-/// Both values are arithmetically meaningful and neither is what anybody
-/// wants, so they are answered here rather than quietly turned into something
-/// else. A setting is applied, rejected with a reason, or unsupported; there is
-/// no fourth answer where the value that took effect is not the value that was
-/// given.
+/// Why a [`Rate`] was refused, rather than silently adjusted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RateError {
-    /// A burst of zero admits nothing, ever — not the first call of the day
-    /// and not the one after a week of quiet, because a bucket that holds no
-    /// tokens can never be refilled to one.
+    /// A burst of zero would admit nothing, ever.
     NoBurst,
-    /// An interval of zero earns a token in no time, which is a limit that
-    /// never limits. [`Rate::unlimited`] is how a deployment asks for that on
-    /// purpose.
+    /// An interval of zero never limits; use [`Rate::unlimited`].
     NoInterval,
 }
 
@@ -142,8 +89,7 @@ impl Rate {
     /// `burst` calls at once, then one more every `every`.
     ///
     /// # Errors
-    /// [`RateError`] for a `burst` or an `every` of zero, each of which means
-    /// something other than what the deployment setting it meant.
+    /// [`RateError`] for a `burst` or an `every` of zero.
     pub const fn new(burst: u32, every: Duration) -> Result<Self, RateError> {
         if burst == 0 {
             return Err(RateError::NoBurst);
@@ -157,10 +103,7 @@ impl Rate {
         })
     }
 
-    /// No limit: every INVITE reaches the policy hook, however fast they come.
-    ///
-    /// For a deployment whose one address is genuinely that busy, and which
-    /// has something better than a token bucket to say about it.
+    /// No limit: every INVITE reaches the policy hook.
     #[must_use]
     pub const fn unlimited() -> Self {
         Self {
@@ -169,17 +112,12 @@ impl Rate {
         }
     }
 
-    /// A hundred and twenty-eight at once, then one every fifty milliseconds:
-    /// the preset for a voice agent or a headless answering service.
+    /// 128 at once, then one every 50 ms: the preset for a voice agent.
     ///
-    /// Such a service takes every call from one trunk or proxy, dozens at a
-    /// time when a campaign starts, and the default's one call every two
-    /// seconds from that one address would answer the twelfth caller 480.
-    /// The burst is the default ceiling on calls held at once
-    /// (`EndpointConfig::max_dialogs`), so that at the start of a rush it is
-    /// the ceiling that turns calls away, with a 503 an operator can count,
-    /// and not the rate; twenty a second after that is well past what a trunk
-    /// offers and still far short of what a flood sends.
+    /// Such a service takes dozens of calls at once from one trunk; the
+    /// default would answer the twelfth 480. The burst equals the default
+    /// `EndpointConfig::max_dialogs`, so in a rush the dialog ceiling (503,
+    /// countable) refuses first, not the rate.
     #[must_use]
     pub const fn voice_agent() -> Self {
         Self {
@@ -200,8 +138,7 @@ impl Rate {
         self.every
     }
 
-    /// How many tokens a quiet spell of `elapsed` earned, or `None` when this
-    /// rate is no limit.
+    /// `None` when unlimited.
     fn earned(self, elapsed: Duration) -> Option<u32> {
         let whole = elapsed.as_nanos().checked_div(self.every?.as_nanos())?;
         Some(u32::try_from(whole).unwrap_or(u32::MAX))
@@ -209,12 +146,8 @@ impl Rate {
 }
 
 impl Default for Rate {
-    /// Ten at once, then one every two seconds.
-    ///
-    /// Loose on purpose: see the note at the top of this module about the one
-    /// address every legitimate call arrives from. Written out rather than
-    /// built through [`Rate::new`], which answers with a `Result` that a
-    /// default has nowhere to put.
+    /// Ten at once, then one every two seconds. Loose on purpose (see the
+    /// module docs).
     fn default() -> Self {
         Self {
             burst: 10,
@@ -223,45 +156,29 @@ impl Default for Rate {
     }
 }
 
-/// What has been refused, cumulative since the agent was made.
+/// What has been refused since the agent was made; never reset.
 ///
-/// Only ever grows, because the question an operator has is "how often has
-/// this happened", not "how often since somebody last looked". A REFER
-/// outside any dialog that the floor or the policy turned away
-/// ([`crate::referral`]) is counted as the INVITE it would have become.
+/// An out-of-dialog REFER refused by the floor or policy
+/// ([`crate::referral`]) counts as the INVITE it would have become.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Refusals {
     /// INVITEs a [`Screen`] refused.
     pub by_policy: u64,
-    /// INVITEs refused because their source was offering them faster than
-    /// [`Rate`] allows.
+    /// INVITEs from a source faster than [`Rate`] allows.
     pub by_rate: u64,
-    /// INVITEs refused because every seat in the table of watched sources
-    /// belonged to a source still spending, so this one could not be limited
-    /// and was not let in.
+    /// INVITEs refused because every watched-source slot was busy.
     ///
-    /// Counted apart from [`Refusals::by_rate`] because the two are one
-    /// refusal from the far end and two different things to do about it: one
-    /// source calling too fast is [`UserAgent::limit_invites`], while many
-    /// addresses arriving at once is a flood that wants a firewall.
+    /// Separate from [`Refusals::by_rate`]: one fast source calls for
+    /// [`UserAgent::limit_invites`], many addresses at once for a firewall.
     pub by_crowding: u64,
-    /// INVITEs refused 403 for naming one of this end's live calls in a
-    /// `Replaces` they had no standing to take (RFC 3891 §3).
-    ///
-    /// An attempt at taking over a call, or a transfer arriving by a route
-    /// this end cannot recognise. Either way it is a number an operator
-    /// wants, and one a stranger cannot turn into an event queue. It counts
-    /// what [`Screen::on_replaces`] refused with 403 as well as what the
-    /// default rule did, because to an operator they are the same event; a
-    /// policy refusing with some other status is that policy's to count.
+    /// INVITEs refused 403 for a `Replaces` naming a live call they had no
+    /// standing to take (RFC 3891 §3), whether by the default rule or by
+    /// [`Screen::on_replaces`] returning 403.
     pub by_replaces: u64,
 }
 
 /// An INVITE that has been read and not yet acted on.
-///
-/// What a decision needs and nothing else: where it came from, and what it
-/// says.
 #[derive(Clone, Copy, Debug)]
 pub struct Incoming<'a> {
     source: Option<SocketAddr>,
@@ -269,23 +186,16 @@ pub struct Incoming<'a> {
 }
 
 impl Incoming<'_> {
-    /// The far end of the bytes this INVITE arrived in — not what the `Via`
-    /// claims, which is whatever the sender typed.
+    /// The far end of the transport, not what `Via` claims.
     ///
-    /// `None` in one case: a byte stream the application bound without saying
-    /// who was at the other end of it. Naming the far end in
-    /// [`Input::TransportBound`] is how that is closed, and a policy that
-    /// cannot identify a caller may refuse it.
+    /// `None` for a byte stream bound without naming its far end (see
+    /// [`Input::TransportBound`]); a policy may refuse such a caller.
     #[must_use]
     pub const fn source(&self) -> Option<SocketAddr> {
         self.source
     }
 
     /// The request, whole.
-    ///
-    /// Everything else a policy might read is one call away on it:
-    /// `request().as_raw().from()` for who the sender says it is,
-    /// `request().as_raw().header(..)` for anything else.
     #[must_use]
     pub const fn request(&self) -> &OwnedMessage {
         self.request
@@ -293,19 +203,10 @@ impl Incoming<'_> {
 
     /// `Referred-By`, when the request carries exactly one (RFC 3892 §2.1).
     ///
-    /// **It is context, never authority.** RFC 3892 §2.2 has a transferee
-    /// copy this field from the REFER that asked for the transfer, so on a
-    /// legitimate attended transfer it names the transferor — which is
-    /// exactly what a policy deciding about an off-path transferee wants to
-    /// see. But it is a plain header field on the request being judged, and
-    /// so is `From`: whoever wrote one wrote the other, and RFC 3892 §3's
-    /// signed token, which is the only thing that would make either of them
-    /// proof, is not implemented here. Read it to recognise a transfer you
-    /// were expecting; do not read it as permission.
-    ///
-    /// `None` for a request with none and for one with more than one, which
-    /// §2.1 forbids and which leaves nothing to read that the sender did not
-    /// choose for us.
+    /// **Context, never authority.** On an attended transfer it names the
+    /// transferor (§2.2), but the sender wrote it like `From`, and the signed
+    /// token of §3 is not implemented. Use it to recognise an expected
+    /// transfer, not as permission.
     #[must_use]
     pub fn referred_by(&self) -> Option<&[u8]> {
         let request = self.request.as_raw();
@@ -316,12 +217,8 @@ impl Incoming<'_> {
     }
 }
 
-/// The call an incoming `Replaces` names, and how its INVITE got here.
-///
-/// What [`Screen::on_replaces`] decides about. It is `non_exhaustive` because
-/// what a policy needs in order to judge a takeover is exactly the kind of
-/// thing that grows: an implementation reads the accessors it cares about and
-/// is not broken by the next one.
+/// The call an incoming `Replaces` names, and how its INVITE got here, for
+/// [`Screen::on_replaces`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Replacing {
@@ -334,12 +231,8 @@ impl Replacing {
         Self { call, same_flow }
     }
 
-    /// The call that would be hung up if this INVITE is answered.
-    ///
-    /// It is one of this end's own, matched on the `Call-ID` and both tags
-    /// (RFC 3891 §3), and the application knows what it is and who it is
-    /// with — which is the other half of deciding whether this takeover is
-    /// the transfer it was expecting.
+    /// The call that would be hung up if this INVITE is answered, matched on
+    /// `Call-ID` and both tags (RFC 3891 §3).
     #[must_use]
     pub const fn call(self) -> CallHandle {
         self.call
@@ -348,10 +241,8 @@ impl Replacing {
     /// Whether the INVITE arrived from the same place the named call's own
     /// signalling does.
     ///
-    /// The one thing about a `Replaces` the sender did not write. `true` also
-    /// when neither address is known, which is a call received over a byte
-    /// stream the application bound without naming its far end: nothing was
-    /// recorded, so nothing is compared.
+    /// The one thing about a `Replaces` the sender did not write. `true` when
+    /// neither address is known (an unnamed bound stream).
     #[must_use]
     pub const fn same_flow(self) -> bool {
         self.same_flow
@@ -360,11 +251,8 @@ impl Replacing {
     /// What this gets when no policy says otherwise: the call when
     /// [`Replacing::same_flow`], and 403 when not.
     ///
-    /// The default body of [`Screen::on_replaces`], and what runs when there
-    /// is no [`Screen`] at all. It is public so that a policy which only
-    /// wants to widen the rule for the one case it recognises can hand
-    /// everything else back to it, rather than writing the strict half again
-    /// and getting it subtly different.
+    /// The default of [`Screen::on_replaces`], also used with no [`Screen`].
+    /// Public so a policy that widens one case can delegate the rest.
     #[must_use]
     pub const fn strict(self) -> Screening {
         if self.same_flow {
@@ -378,67 +266,42 @@ impl Replacing {
 /// What a [`Screen`] decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screening {
-    /// Let it through. The application hears about it exactly as it would
-    /// have with no policy at all.
+    /// Let it through as if there were no policy.
     Take,
-    /// Answer it with this and let it go no further. No call is created and no
-    /// event is emitted, so nothing downstream ever learns that it arrived.
+    /// Answer with this status. No call, no event.
     Refuse(StatusCode),
 }
 
 /// What the application decides about an INVITE nobody has heard yet.
 ///
 /// Set with [`UserAgent::screen`]. It runs before ringing and before any
-/// event, so what it refuses leaves no trace outside [`UserAgent::refusals`].
-/// A closure of the same shape is a policy too, for a rule that needs no state
-/// of its own.
+/// event, so a refusal leaves no trace outside [`UserAgent::refusals`]. A
+/// closure of the same shape works too.
 ///
-/// It is called once per INVITE that survives the rate limit, on the thread
-/// driving the agent, and it must not take long: it is between a packet and
-/// the answer to it.
+/// Called once per INVITE that passes the rate limit, on the thread driving
+/// the agent; keep it fast.
 ///
-/// [`Screen::on_replaces`] is the second question, asked only of an INVITE
-/// that names one of this end's live calls, and it is defaulted: a policy that
-/// implements [`Screen::on_invite`] and nothing else — a closure included —
-/// gets the strict rule RFC 3891 §3 is read as here, unchanged.
+/// [`Screen::on_replaces`] defaults to the strict RFC 3891 §3 rule.
 pub trait Screen {
-    /// An INVITE has arrived.
-    ///
-    /// Or a REFER outside any dialog, once
-    /// [`UserAgent::allow_referrals`] is on: somebody asking this end to
-    /// place a call is screened as a call arriving is, and
-    /// `invite.request()` says which of the two this is.
+    /// An INVITE has arrived, or an out-of-dialog REFER once
+    /// [`UserAgent::allow_referrals`] is on (`invite.request()` tells which).
     fn on_invite(&mut self, invite: &Incoming<'_>) -> Screening;
 
-    /// And its `Replaces` names one of this end's live calls (RFC 3891 §3).
+    /// Its `Replaces` names one of this end's live calls (RFC 3891 §3);
+    /// answering it hangs that call up.
     ///
-    /// Answering it hangs that call up, so this is the last word on a
-    /// takeover — and the rule underneath it is deliberately strict: a
-    /// `Replaces` is honoured only when the INVITE carrying it arrived from
-    /// the same place the named call's own signalling does, because the
-    /// `Call-ID` and both tags travel in every packet of the call they name
-    /// and this stack has no authenticated peer to compare instead. That is
-    /// [`Replacing::strict`], it is what this method does by default, and an
-    /// implementation that does not override it behaves exactly as one
-    /// written before this method existed.
+    /// The default, [`Replacing::strict`], takes it only from the named
+    /// call's own flow: `Call-ID` and tags travel in every packet, and there
+    /// is no authenticated peer to compare instead.
     ///
-    /// **Override it where the strict rule is wrong, and it is wrong in a
-    /// real deployment.** An attended transfer whose transferee reaches this
-    /// end directly rather than through the line's proxy arrives from an
-    /// address no call here was placed to, and the default refuses it. A
-    /// policy that knows the deployment can take it — from the source
-    /// address, from [`Incoming::referred_by`], from what
-    /// [`Replacing::call`] is and who it is with — and the same hook can
-    /// tighten as well as loosen: refusing a `Replaces` that did arrive on
-    /// the call's own flow is a decision this returns, not one it overrides.
+    /// **Override where that is wrong.** A transferee reaching this end
+    /// directly, not via the line's proxy, is refused by default. A policy
+    /// can accept it (source address, [`Incoming::referred_by`],
+    /// [`Replacing::call`]) or tighten further.
     ///
-    /// It runs after [`Screen::on_invite`] has taken the same INVITE, and
-    /// only once a call has actually been matched — a `Replaces` that names
-    /// nothing is 481 and never reaches here, so guessing identifiers does
-    /// not reach application code. What it returns is answered as it stands,
-    /// except that the state of the matched call still has the last word
-    /// afterwards: §3 declines a dialog that has already ended with 603
-    /// however much anybody wants the takeover.
+    /// Runs after [`Screen::on_invite`] took the INVITE, and only for a
+    /// matched call: an unmatched `Replaces` is 481 and never gets here. A
+    /// call that has already ended is still declined 603 (§3).
     fn on_replaces(&mut self, invite: &Incoming<'_>, named: Replacing) -> Screening {
         let _ = invite;
         named.strict()
@@ -454,34 +317,25 @@ impl<F: FnMut(&Incoming<'_>) -> Screening> Screen for F {
 /// What an allowance is kept against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
-    /// The address without the port. A source port costs an attacker nothing
-    /// to change, and counting per port would read one scanner as sixty
-    /// thousand polite strangers.
+    /// Without the port: ports are free to change, so per-port counting would
+    /// read one scanner as thousands of strangers.
     Address(IpAddr),
-    /// A byte stream the application bound without saying who was at the
-    /// other end of it. Nothing on its bytes names a sender, so the
-    /// connection is the sender: every INVITE on it spends from one bucket,
-    /// and it is the one thing a caller on it cannot change without opening
-    /// another connection, which is the application's to accept or not.
+    /// An unnamed bound byte stream: the connection is the sender.
     Stream(TransportId),
 }
 
-/// One source, and how much of its allowance is left.
 #[derive(Clone, Copy, Debug)]
 struct Watched {
-    /// Who is spending.
     source: Origin,
-    /// Tokens left.
     tokens: u32,
-    /// What the tokens were last counted from. Not "when it last called": the
-    /// part of a token that has been earned but not completed stays here, or a
-    /// source calling just under the limit would be given a free one on every
-    /// arrival.
+    /// Where tokens were last counted from, not the last call: keeps the
+    /// partial token, or a source just under the limit would gain one free
+    /// on every arrival.
     since: Instant,
 }
 
 impl Watched {
-    /// A source seen for the first time, spending the call that revealed it.
+    /// First sighting; spends the call that revealed it.
     fn new(source: Origin, rate: Rate, now: Instant) -> Self {
         Self {
             source,
@@ -490,7 +344,6 @@ impl Watched {
         }
     }
 
-    /// Give back what the quiet earned.
     fn refill(&mut self, rate: Rate, now: Instant) {
         let elapsed = now.saturating_duration_since(self.since);
         let Some(earned) = rate.earned(elapsed) else {
@@ -509,7 +362,6 @@ impl Watched {
             .unwrap_or(now);
     }
 
-    /// Spend one, if there is one to spend.
     fn spend(&mut self) -> bool {
         let Some(left) = self.tokens.checked_sub(1) else {
             return false;
@@ -518,34 +370,27 @@ impl Watched {
         true
     }
 
-    /// Whether this source has spent nothing that has not since been earned
-    /// back, which makes it indistinguishable from one never seen.
+    /// Fully refilled, so indistinguishable from a source never seen.
     fn quiet(&self, rate: Rate) -> bool {
         self.tokens >= rate.burst
     }
 }
 
-/// What the floor made of one INVITE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Admission {
-    /// There was a token, and it has been spent.
     Take,
-    /// The source has spent its allowance and has not earned it back.
     TooFast,
-    /// There is no seat left to keep an allowance in.
+    /// No free slot to track the source in.
     NoRoom,
 }
 
-/// The sources being watched, at most [`WATCHED`] of them.
 #[derive(Debug, Default)]
 struct Sources {
-    /// A linear scan of at most [`WATCHED`] beats a map plus something to
-    /// order it by, and the scan is what the eviction needs anyway.
+    /// A linear scan of at most [`WATCHED`]; eviction scans anyway.
     watched: Vec<Watched>,
 }
 
 impl Sources {
-    /// Whether this source may offer one more call, spending a token if so.
     fn admit(&mut self, source: Origin, rate: Rate, now: Instant) -> Admission {
         if let Some(known) = self.watched.iter_mut().find(|seat| seat.source == source) {
             known.refill(rate, now);
@@ -560,27 +405,21 @@ impl Sources {
             return Admission::Take;
         }
 
-        // A source whose bucket has refilled completely says nothing that a
-        // source never seen does not, so its seat is the one worth taking.
+        // a fully refilled source is as good as unseen: evict it
         for seat in &mut self.watched {
             seat.refill(rate, now);
         }
         let Some(seat) = self.watched.iter_mut().find(|seat| seat.quiet(rate)) else {
-            // Every seat belongs to a source that is still spending, which is
-            // what a flood from many addresses looks like from in here. The
-            // stranger is refused rather than admitted untracked: admitting
-            // what cannot be limited is a hole exactly when it matters, and a
-            // quiet phone is the better failure at three in the morning. The
-            // seats free themselves as their sources go quiet.
+            // a flood from many addresses: refuse rather than admit untracked,
+            // since that would be a hole exactly when it matters
             return Admission::NoRoom;
         };
         *seat = Watched::new(source, rate, now);
         Admission::Take
     }
 
-    /// A stream has closed, and the allowance kept against it with it: its
-    /// identifier names nobody from here on, and one handed to the next
-    /// connection must not come with what the last one spent.
+    /// A closed stream's id may be reused; the next connection must not
+    /// inherit its spending.
     fn forget(&mut self, source: Origin) {
         self.watched.retain(|seat| seat.source != source);
     }
@@ -593,34 +432,25 @@ pub(crate) struct Guard {
     rate: Rate,
     sources: Sources,
     refusals: Refusals,
-    /// The far end of the bytes being worked through. Set before every
-    /// [`UserAgent::receive`], and an INVITE only ever arrives during one.
+    /// Far end of the current input; set before every [`UserAgent::receive`].
     source: Option<SocketAddr>,
-    /// The stream the bytes being worked through arrived on, set beside
-    /// `source`: what the rate limit counts by when `source` is `None`.
+    /// What the rate limit counts by when `source` is `None`.
     stream: Option<TransportId>,
-    /// The far end of each connected transport, for the INVITEs that arrive on
-    /// a stream where the address is not on the packet. Bounded by the
-    /// transports the application opened, which is not something a stranger
-    /// can grow.
+    /// Far end per connected stream. Bounded by the transports the
+    /// application opened, not by strangers.
     connected: HashMap<TransportId, SocketAddr>,
-    /// This end of the bytes being worked through, and what carried them.
-    /// Set beside `source`, and for the same kind of reader: an INVITE
-    /// addressed to no account still needs a `Contact` naming where this end
-    /// can be reached, and this is the one address that is true of it.
+    /// This end's address for the current input: the true `Contact` for an
+    /// INVITE addressed to no account.
     arrival: Option<(SocketAddr, TransportProtocol)>,
-    /// The transport the bytes being worked through arrived on: the flow an
-    /// incoming request is matched to its account by.
+    /// The flow a request is matched to its account by.
     arrived_on: Option<TransportId>,
-    /// Each bound transport's own address and protocol, for the bytes that
-    /// arrive on a stream with neither on them. Bounded as `connected` is.
+    /// Local address and protocol per bound transport, bounded like
+    /// `connected`.
     bound: HashMap<TransportId, (SocketAddr, TransportProtocol)>,
 }
 
 impl fmt::Debug for Guard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // the policy is the application's own type, and its innards are its
-        // own business
         f.debug_struct("Guard")
             .field("policy", &self.policy.is_some())
             .field("rate", &self.rate)
@@ -677,8 +507,6 @@ impl Guard {
                 self.sources.forget(Origin::Stream(transport));
                 None
             }
-            // the enum is non-exhaustive across crate versions, and a source
-            // this one cannot read is one it will not pretend to know
             _ => None,
         };
         self.stream = match *input {
@@ -693,39 +521,27 @@ impl Guard {
         };
     }
 
-    /// What the rate limit counts the bytes being worked through against:
-    /// the address they came from, or failing that the stream they came on.
     fn origin(&self) -> Option<Origin> {
         self.source
             .map(|source| Origin::Address(source.ip()))
             .or_else(|| self.stream.map(Origin::Stream))
     }
 
-    /// Where the bytes being worked through came from, as far as the
-    /// transport said. `None` on a byte stream the application bound without
-    /// naming its far end.
     pub(crate) const fn source(&self) -> Option<SocketAddr> {
         self.source
     }
 
-    /// Where on this end the bytes being worked through arrived, and over
-    /// what. `None` between arrivals and for a transport never bound.
+    /// `None` between arrivals and for a transport never bound.
     pub(crate) const fn arrival(&self) -> Option<(SocketAddr, TransportProtocol)> {
         self.arrival
     }
 
-    /// The transport the bytes being worked through arrived on. `None`
-    /// between arrivals.
     pub(crate) const fn arrived_on(&self) -> Option<TransportId> {
         self.arrived_on
     }
 
-    /// What the application says about an INVITE whose `Replaces` names one
-    /// of this end's live calls (RFC 3891 §3).
-    ///
-    /// The same answer with no policy set as with one that does not override
-    /// [`Screen::on_replaces`], which is the rule written down in
-    /// [`Replacing::strict`] and nowhere else.
+    /// A `Replaces` naming a live call (RFC 3891 §3); without a policy,
+    /// [`Replacing::strict`].
     pub(crate) fn screen_replaces(
         &mut self,
         request: &OwnedMessage,
@@ -741,22 +557,14 @@ impl Guard {
         )
     }
 
-    /// One more INVITE refused because its `Replaces` named a call the sender
-    /// was not the peer of (RFC 3891 §3).
     pub(crate) const fn refused_replaces(&mut self) {
         self.refusals.by_replaces = self.refusals.by_replaces.saturating_add(1);
     }
 
-    /// What happens to this INVITE: `None` to let it through, or the status to
-    /// refuse it with.
-    ///
-    /// A REFER outside any dialog is asked the same, once the application
-    /// takes them at all ([`crate::referral`]): it is a call this end would
-    /// place, which is what the floor and the policy both ration.
+    /// `None` to let it through, or the status to refuse with. Out-of-dialog
+    /// REFERs ([`crate::referral`]) are rationed the same way.
     pub(crate) fn decide(&mut self, request: &OwnedMessage, now: Instant) -> Option<StatusCode> {
-        // The floor comes first. It is two numbers and a short scan, where the
-        // policy is arbitrary application code — and code called once per
-        // INVITE by whoever is sending them is the second attack.
+        // the cheap floor first, so a flood cannot drive application code
         if let Some(origin) = self.origin() {
             match self.sources.admit(origin, self.rate, now) {
                 Admission::Take => (),
@@ -787,44 +595,31 @@ impl Guard {
 impl UserAgent {
     /// Decide what happens to an incoming INVITE before anybody hears it.
     ///
-    /// The policy runs before ringing and before any event, and what it
-    /// refuses is answered and forgotten: no call, no handle, nothing to drain
-    /// and nothing to clean up. One policy at a time; setting a second
-    /// replaces the first.
+    /// Runs before ringing and before any event; a refusal leaves no call or
+    /// handle behind. Setting a second policy replaces the first.
     ///
-    /// The same policy is what [`Screen::on_replaces`] is asked of, so an
-    /// application that wants a say in who may take one of its calls over
-    /// sets it here and overrides that method — a closure cannot, which is
-    /// the price of a policy that carries no state.
+    /// To judge takeovers, override [`Screen::on_replaces`] (a closure
+    /// cannot).
     pub fn screen(&mut self, policy: impl Screen + Send + 'static) {
         self.guard.policy = Some(Box::new(policy));
     }
 
     /// Take the screening policy off, if one is set.
     ///
-    /// What arrives afterwards reaches the application exactly as it would
-    /// if [`UserAgent::screen`] had never been called. The rate limit set by
-    /// [`UserAgent::limit_invites`] answers a different question and is left
-    /// exactly where it was — removing the policy is not a reason to stop
-    /// counting how fast one source is calling.
+    /// The rate limit ([`UserAgent::limit_invites`]) stays in force.
     pub fn unscreen(&mut self) {
         self.guard.policy = None;
     }
 
     /// How fast one source address may offer calls.
     ///
-    /// The default is loose, because in most deployments every legitimate call
-    /// arrives from the one address the phone registered with. Tighten it for
-    /// a phone that faces the internet directly; loosen it for a switchboard
-    /// that really does ring this extension that often.
+    /// The default is loose since legitimate calls usually share the
+    /// registrar's address. Tighten it for a phone facing the internet.
     pub const fn limit_invites(&mut self, rate: Rate) {
         self.guard.rate = rate;
     }
 
-    /// The limit that is in force, which is the one that was set.
-    ///
-    /// Here because a setting nobody can read back is a setting nobody can
-    /// tell apart from one that was quietly changed on the way in.
+    /// The limit in force, exactly as set.
     #[must_use]
     pub const fn invite_limit(&self) -> Rate {
         self.guard.rate
@@ -836,8 +631,7 @@ impl UserAgent {
         self.guard.refusals
     }
 
-    /// `None` when the INVITE was refused here and the application will never
-    /// hear of it; the event back when it may go on.
+    /// `None` when the INVITE was refused here; the event back otherwise.
     pub(crate) fn on_screening_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let Event::IncomingInvite {
             transaction,
@@ -850,11 +644,8 @@ impl UserAgent {
             return Some(event);
         };
 
-        // Answered rather than dropped, although silence would tell a scanner
-        // even less. An INVITE nobody answers is retransmitted for thirty-two
-        // seconds and holds a server transaction here for all of it, so
-        // silence is the caller growing our table for free — and a refusal
-        // that costs the defender more than the attacker is not a defence.
+        // answered, not dropped: an unanswered INVITE is retransmitted for 32 s
+        // and holds a server transaction the whole time
         self.endpoint
             .respond_invite(transaction, &OutgoingResponse::new(refused), now)
             .ok();
@@ -872,7 +663,6 @@ mod tests {
         Origin::Address(IpAddr::from([192, 0, 2, last]))
     }
 
-    /// A rate that is not one of the two the constructor refuses.
     fn rate(burst: u32, every: Duration) -> Rate {
         Rate::new(burst, every).expect("a usable rate")
     }
@@ -922,8 +712,6 @@ mod tests {
 
     #[test]
     fn the_remainder_of_an_interval_is_not_given_away_twice() {
-        // a source calling just under the limit must not be credited with the
-        // fraction of a token it has earned, over and over
         let t0 = Instant::now();
         let rate = rate(1, Duration::from_secs(2));
         let mut sources = Sources::default();
@@ -933,8 +721,7 @@ mod tests {
             at += Duration::from_millis(1500);
             sources.admit(source(9), rate, at);
         }
-        // four and a half intervals have passed and five calls were offered,
-        // so at most three of them can have been admitted
+        // 4.5 intervals, five calls offered: at most three admitted
         at += Duration::from_millis(1500);
         assert_eq!(
             sources.admit(source(9), rate, at),
@@ -1033,8 +820,6 @@ mod tests {
 
     #[test]
     fn a_burst_of_none_is_refused_where_it_is_set_and_not_read_as_one() {
-        // B2: a setting is applied, rejected with a reason, or unsupported.
-        // Reading a zero as a one is the fourth answer, which does not exist
         assert_eq!(
             Rate::new(0, Duration::from_secs(2)),
             Err(RateError::NoBurst)
@@ -1043,9 +828,6 @@ mod tests {
 
     #[test]
     fn an_interval_of_none_is_refused_rather_than_taken_for_no_limit() {
-        // it does mean no limit arithmetically, which is exactly why it has to
-        // be said on purpose: an interval that came out of a division and
-        // rounded to nothing would otherwise disable the floor without a word
         assert_eq!(Rate::new(1, Duration::ZERO), Err(RateError::NoInterval));
         assert_eq!(Rate::unlimited().every(), None);
     }
@@ -1059,9 +841,8 @@ mod tests {
         assert_eq!(Rate::default().every(), Some(Duration::from_secs(2)));
     }
 
-    /// A trunk handing a voice agent a campaign's first minute: the default
-    /// answers the eleventh call 480, the preset takes the whole rush and
-    /// twenty a second after it.
+    /// A campaign's first minute from one trunk: the default refuses the
+    /// eleventh call, the preset takes the rush.
     #[test]
     fn the_voice_agent_preset_takes_a_trunks_rush_that_the_default_refuses() {
         let t0 = Instant::now();

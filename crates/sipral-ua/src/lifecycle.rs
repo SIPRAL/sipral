@@ -3,68 +3,32 @@
 
 //! What happens to a stack whose machine goes to sleep, or moves.
 //!
-//! Everything else in this crate assumes a network that is there. This module
-//! is about the ways it stops being there, and it exists because that is where
-//! the worst failures of a softphone live: not in a parser and not in a state
-//! machine, but on a background timer that fires after a wake, over a transport
-//! that died while nobody was watching, while thirty subscriptions are being
-//! refreshed at once.
+//! **The clock cannot tell.** A monotonic clock stops while the machine is
+//! suspended, so after eight hours asleep every deadline still looks future.
+//! Only the operating system knows, so the application calls these entry
+//! points.
 //!
-//! **The clock is no help at all.** A monotonic clock does not advance while
-//! the machine is suspended — that is what monotonic means on every platform
-//! this runs on — so a stack that slept for eight hours comes back believing
-//! that eight milliseconds passed. Every deadline it holds is still in the
-//! future, the binding it was granted an hour ago still has fifty minutes to
-//! run, and nothing it can measure contradicts any of that. It cannot find out
-//! by looking. The operating system is the only thing that knows, which is why
-//! these entry points exist and why they are the application's to call.
+//! **A registration that reads valid is not evidence.**
+//! [`RegistrationState::Unverified`] is a binding a registrar granted over a
+//! transport since suspended or lost: not `Registered` (unproven), not
+//! `Failed` (nothing refused it), not `Idle` (a REGISTER did go out). Every
+//! entry point here starts by producing it.
 //!
-//! **A registration that reads valid is not evidence.** The failure this is
-//! designed against is a refresh going out over a dead transport on a timer,
-//! and the reason no amount of "are we registered?" checking prevents it is
-//! that the answer is yes and the answer is worthless. So there is a state for
-//! that: [`RegistrationState::Unverified`] is a binding a registrar really did
-//! grant, over a transport this process has since suspended or lost, which
-//! nothing has proved since. It is not `Registered`, because it is not
-//! evidence; it is not `Failed`, because nothing refused it; and it is not
-//! `Idle`, because a REGISTER really did go out. Every entry point here begins
-//! by producing it.
+//! **No interface and no resolver need opposite treatment.** With no
+//! interface nothing can leave, so nothing is tried. With no resolver packets
+//! flow and everything looks healthy, while every address learned from a name
+//! may be wrong. Accounts whose registrar is a literal address are left
+//! running.
 //!
-//! **Losing an interface and losing a resolver are not the same failure.**
-//! With no interface nothing can leave at all, so nothing is tried: a retry is
-//! not a smaller version of working, and a stack that keeps trying on a dead
-//! interface is a stack that keeps a phone warm in a pocket for nothing. With
-//! a resolver gone the interface is fine and packets flow — which is exactly
-//! what makes it dangerous, because everything looks healthy while every name
-//! this stack holds an address for may now stand for somewhere else. The two
-//! need opposite treatment, so they are different states with different
-//! ladders, and the resolver one distinguishes accounts by whether their
-//! registrar was written as a name at all: an account pointed at a literal
-//! address never needed a resolver and is left running.
+//! **Suspending sends nothing, on purpose.** A REGISTER with `Expires: 0` may
+//! never leave a socket about to stop, and if it does, a de-registered device
+//! cannot be woken by push. The window is spent on bounded, synchronous
+//! bookkeeping instead.
 //!
-//! **Suspending sends nothing, and that is a decision rather than an
-//! omission.** The obvious thing to do in the window before the process stops
-//! is a REGISTER with `Expires: 0`, so that the registrar stops offering calls
-//! to a phone that cannot answer. It is wrong twice over. Nothing waits for
-//! us — the datagram is handed to a socket the operating system is about to
-//! stop servicing, and whether it left is not knowable from here — and if it
-//! does leave, the damage is worse than the failure it was meant to avoid: a
-//! de-registered device cannot be woken by a push notification at all, so the
-//! polite thing to do on the way out is the thing that makes the phone
-//! unreachable until somebody unlocks it. The window is spent on bookkeeping
-//! instead, which is bounded by the number of accounts, synchronous, and
-//! cannot fail.
-//!
-//! **The ladder does not double, and the layer below it does.** Every rung
-//! waits 64·T1, drawn between half of it and all of it. That is not a number
-//! chosen here: §17.1.2.2 gives a non-INVITE transaction exactly that long to
-//! conclude, so a rung never fires while the request the previous rung sent is
-//! still trying, and the ladder cannot outrun itself. Doubling on top of it
-//! would only add dead time to a wake, where somebody is waiting — and the
-//! doubling that a registrar needs protecting by is already there, one layer
-//! down, on the RFC 5626 §4.5 schedule that every registration failure goes
-//! on. The draw is that schedule's idea and is here for its reason: a fleet
-//! that wakes together must not come back in the same millisecond.
+//! **The ladder does not double.** Each rung waits a random draw in
+//! [32·T1, 64·T1]: §17.1.2.2's non-INVITE timeout, so a rung never overlaps
+//! the previous one's request. Doubling already happens below, on the RFC 5626
+//! §4.5 schedule; the random draw keeps a fleet that wakes together apart.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -83,11 +47,9 @@ use crate::subscription::SubscriptionState;
 
 /// What kind of link the application is on.
 ///
-/// Coarse on purpose: nothing here changes what is sent, and the one value
-/// that changes what is *done* is [`Link::Down`]. The rest is carried so that
-/// a change of kind over an unchanged address — a tunnel coming up, a phone
-/// moving from Wi-Fi to a mobile network that kept the address — is visible as
-/// a change at all, and so that an event says which way the phone went.
+/// Coarse on purpose: only [`Link::Down`] changes what is done. The others
+/// make a change of kind under the same address (Wi-Fi to cellular, a tunnel
+/// coming up) visible as a change.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Link {
@@ -116,17 +78,12 @@ impl core::fmt::Display for Link {
     }
 }
 
-/// A network, described in as much detail as it takes to decide what to do
-/// when it becomes a different one.
+/// A network, in enough detail to decide what a change to another one needs.
 ///
-/// Three facts and no more, because three is what the decision needs. The
-/// **address** is the one every `Via` and every `Contact` this stack writes
-/// carries, so a change of it invalidates every transport and every binding at
-/// once. The **interface** is the platform's own identity for the thing the
-/// address is on, because two networks can hand out the same address and a
-/// phone that walks from one office to the other gets away with it until a
-/// call comes in. And **whether names resolve**, because that is the one
-/// failure that leaves everything else looking healthy.
+/// The **address** is in every `Via` and `Contact`, so changing it
+/// invalidates every transport and binding. The **interface** matters because
+/// two networks can hand out the same address. **Whether names resolve** is
+/// the one failure that leaves everything else looking healthy.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Network {
     link: Link,
@@ -167,10 +124,8 @@ impl Network {
 
     /// The platform's identity for the interface, whatever shape it takes.
     ///
-    /// Never parsed and never compared to anything but another one of itself,
-    /// so a name, an index written out, or a universally unique identifier all
-    /// work. What matters is that the same interface produces the same string
-    /// twice and a different one does not.
+    /// Never parsed, only compared for equality: a name, an index or a UUID
+    /// all work, as long as it is stable per interface.
     #[must_use]
     pub fn interface(mut self, name: &str) -> Self {
         self.interface = Some(Box::from(name));
@@ -211,33 +166,26 @@ impl Network {
 
 /// What a change of network is worth doing about.
 ///
-/// The whole point of [`UserAgent::network_changed`] taking two of them is that
-/// this choice can be made at all. A stack told only "something changed" has to
-/// assume the worst and rebuild everything, which on a laptop that flips
-/// between two access points all day is a re-registration storm the registrar
-/// sees and the user does not.
+/// [`UserAgent::network_changed`] takes both networks so that not every
+/// change rebuilds everything; a laptop flipping between access points would
+/// otherwise cause a re-registration storm.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Recovery {
-    /// Nothing this stack uses is different. Nothing is done and nothing is
-    /// sent.
+    /// Nothing this stack uses changed. Nothing is sent.
     #[default]
     Nothing,
-    /// The address still stands, so the transports do. What is upstream of it
-    /// may not: a roam between access points on one subnet keeps the address
-    /// and gets a new binding in whatever translates it, and the registrar is
-    /// still holding the old one.
+    /// The address stands, so the transports do, but a NAT upstream may have
+    /// a new binding the registrar does not know.
     Reregister,
-    /// A wake. The transport probably survived and may not have, and there is
-    /// no way to tell from here but to use it — so it is used first, and only
-    /// a new one is asked for when it turns out to be dead.
+    /// A wake. The transport is tried first; a new one is asked for only if
+    /// it turns out dead.
     Reprove,
-    /// The address is gone. Everything bound to it is unusable and the
-    /// application has to open a transport again before anything can be sent.
+    /// The address is gone. The application must open a transport again
+    /// before anything can be sent.
     Rebuild,
-    /// Packets can leave and names cannot be turned into addresses. Nothing is
-    /// sent, because every address this stack holds may now stand for
-    /// somewhere else.
+    /// Packets leave but names do not resolve. Nothing is sent: every held
+    /// address may now be wrong.
     Resolve,
     /// There is no interface. Nothing is tried until there is one.
     Detach,
@@ -246,12 +194,9 @@ pub enum Recovery {
 impl Recovery {
     /// What is tried, in order, from the moment this is chosen.
     ///
-    /// Every ladder starts with [`Rung::Distrust`], which sends nothing and
-    /// cannot fail, and every ladder but [`Recovery::Detach`]'s ends with
-    /// [`Rung::GiveUp`]. That `Detach` has no `GiveUp` is the design and not an
-    /// oversight: with no interface there is nothing to give up on, so the
-    /// machine rests instead, costs nothing while it does, and waits to be
-    /// told.
+    /// Every ladder starts with [`Rung::Distrust`] and all but
+    /// [`Recovery::Detach`]'s end with [`Rung::GiveUp`]. `Detach` rests at no
+    /// cost until the application reports a network.
     #[must_use]
     pub const fn ladder(self) -> &'static [Rung] {
         match self {
@@ -277,11 +222,8 @@ impl Recovery {
                 Rung::Reregister,
                 Rung::GiveUp,
             ],
-            // the cached address is asked about first and tried second. A
-            // resolver usually dies while the registrar stays where it was, so
-            // one datagram to the address already held is the cheapest thing
-            // that can end this, and it only goes out once the application has
-            // been asked for a better one and has not given one
+            // ask for a new address first; the registrar usually has not
+            // moved, so the cached one is tried if the application gives none
             Self::Resolve => &[
                 Rung::Distrust,
                 Rung::WantAddress,
@@ -306,15 +248,11 @@ impl Recovery {
 
     /// What a change from one network to another is worth doing about.
     ///
-    /// Ordered, and the order is the argument. No interface beats everything.
-    /// A changed address beats a missing resolver, because a transport bound to
-    /// an address that no longer exists carries nothing whether or not names
-    /// resolve — and an application that finds it cannot resolve either says so
-    /// with [`UserAgent::name_resolution_lost`], which moves the machine to the
-    /// cheaper ladder. Below those, a kind of link that changed under an
-    /// unchanged address is the roam case, and a resolver that came back is the
-    /// same shape: the path works and the far end's idea of where we are does
-    /// not.
+    /// In order: no interface, then a changed address or interface (a dead
+    /// transport carries nothing either way; a lost resolver can still be
+    /// reported with [`UserAgent::name_resolution_lost`]), then no resolver,
+    /// then a changed link kind or a resolver back, which both mean
+    /// re-register.
     #[must_use]
     pub fn choose(from: &Network, to: &Network) -> Self {
         if to.link == Link::Down {
@@ -350,22 +288,18 @@ impl core::fmt::Display for Recovery {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Rung {
-    /// Stop believing. Every binding that read as live becomes
-    /// [`RegistrationState::Unverified`], every live subscription stops being
-    /// evidence about anything, and nothing this layer had scheduled stays
-    /// scheduled. Sends nothing, touches no transport, and cannot fail.
+    /// Live bindings become [`RegistrationState::Unverified`], live
+    /// subscriptions stop counting and schedules are cleared. Sends nothing,
+    /// cannot fail.
     Distrust,
-    /// Send a REGISTER for every binding that stopped being evidence. A
-    /// binding the application never asked for is not started here, and one
-    /// that was given up on purpose or refused for good is left alone.
+    /// A REGISTER for every distrusted binding. Bindings never started, given
+    /// up or refused for good are left alone.
     Reregister,
-    /// Ask the application for a transport. Nothing here opens a socket, so a
-    /// transport that cannot be written to is a thing only the application can
-    /// replace — with [`UserAgent::receive`] and then [`UserAgent::rebind`].
+    /// Ask the application for a transport, supplied with
+    /// [`UserAgent::receive`] and then [`UserAgent::rebind`].
     WantTransport,
-    /// Ask the application for an address. The one this stack holds was
-    /// learned from a name, and on this network the name may stand for
-    /// somewhere else.
+    /// Ask the application for an address: the name may resolve elsewhere
+    /// on this network.
     WantAddress,
     /// Stop, and say so as [`UaEvent::RecoveryGaveUp`].
     GiveUp,
@@ -387,22 +321,19 @@ impl core::fmt::Display for Rung {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LifecycleState {
-    /// Nothing is wrong. Bindings refresh themselves, subscriptions refresh
-    /// themselves, and what this layer believes is what it last proved.
+    /// Nothing is wrong.
     #[default]
     Running,
-    /// The operating system says the process stops shortly. Nothing is
-    /// scheduled and nothing is sent.
+    /// The process stops shortly. Nothing is scheduled or sent.
     Suspending,
-    /// Awake, or moved, and proving again what it used to believe.
+    /// Awake or moved, proving bindings again.
     Recovering,
-    /// There is no interface. Nothing is scheduled and nothing is tried, and
-    /// it stays that way until the application says the network is back.
+    /// No interface. Nothing is tried until the network is reported back.
     InterfaceLost,
     /// Packets leave and names do not resolve.
     ResolutionLost,
-    /// Every rung was climbed and none of them worked. Nothing more happens
-    /// until the application says something changed.
+    /// Every rung failed. Nothing happens until the application reports a
+    /// change.
     GaveUp,
 }
 
@@ -423,8 +354,7 @@ impl core::fmt::Display for LifecycleState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecoveryFailure {
-    /// Every REGISTER that could be sent was sent and none of them was
-    /// answered.
+    /// No REGISTER was answered.
     Unreachable,
     /// A transport was asked for and the application did not bind one.
     NoTransport,
@@ -444,35 +374,24 @@ impl core::fmt::Display for RecoveryFailure {
 
 /// What was standing when the process was told it is about to stop.
 ///
-/// Counts and nothing else, because the window this is produced in is one
-/// where an allocation that grows with the number of accounts is a cost with
-/// no upper bound worth paying. Everything in it is already past tense by the
-/// time it is read: the bindings have stopped being evidence, the
-/// subscriptions have stopped being evidence, and nothing was sent about
-/// either.
+/// Counts only, so nothing allocates in the suspend window. Nothing was sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Suspending {
-    /// Bindings that read as live and do not any more.
+    /// Bindings that were live and are now unverified.
     pub unverified: usize,
-    /// Subscriptions whose last notification stopped being evidence.
+    /// Subscriptions that stopped being live.
     pub subscriptions: usize,
-    /// Calls that were up. Nothing was sent about them and nothing was
-    /// changed: see `docs/16-lifecycle.md` for why a lid closing does not hang
-    /// up a call.
+    /// Calls that were up, left untouched (see `docs/16-lifecycle.md`).
     pub calls: usize,
 }
 
 /// What the stack has to do, and when.
 ///
-/// The answer to "may this application stop polling?", which on a phone that
-/// is backgrounded with no call is the difference between a battery that lasts
-/// a day and one that does not. `next` is the whole answer: `None` means there
-/// is no deadline anywhere in the stack, so a loop may block until a packet
-/// arrives, or stop reading altogether if the platform is about to suspend it.
+/// Answers "may the application stop polling?". `next` of `None` means no
+/// deadline anywhere: a loop may block until a packet arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Idle {
-    /// The next deadline anywhere in the stack, including the endpoint's own.
-    /// The same instant [`UserAgent::poll_timeout`] answers with.
+    /// The next deadline in the stack, as [`UserAgent::poll_timeout`].
     pub next: Option<Instant>,
     /// Bindings with something scheduled: a refresh, or a retry.
     pub registrations: usize,
@@ -487,11 +406,8 @@ pub struct Idle {
 }
 
 impl Idle {
-    /// Whether there is nothing at all to do.
-    ///
-    /// No deadline, no call, no transaction — so no timer has to be run, and
-    /// the only thing that can start work again is a packet or the
-    /// application.
+    /// No deadline, no call, no transaction: only a packet or the
+    /// application can start work again.
     #[must_use]
     pub const fn is_quiet(&self) -> bool {
         self.next.is_none() && self.calls == 0 && self.transactions == 0
@@ -506,10 +422,8 @@ pub(crate) struct Machine {
     /// The next rung to climb. One past the end means the ladder is finished.
     step: usize,
     due: Option<Instant>,
-    /// Whether the application answered a [`Rung::WantTransport`] or a
-    /// [`Rung::WantAddress`] on this ladder, which is what tells a give-up
-    /// whether it is reporting an unreachable registrar or an application that
-    /// never supplied what was asked for.
+    /// Whether the application answered a want-rung, which decides the
+    /// give-up reason.
     told: bool,
 }
 
@@ -531,17 +445,11 @@ impl UserAgent {
 
     /// The operating system says this process stops shortly.
     ///
-    /// Everything reached from here is synchronous, bounded by the number of
-    /// accounts and subscriptions, and cannot fail. Nothing is sent — see the
-    /// module note for why a graceful de-registration is the wrong thing to
-    /// attempt in this window rather than the obvious one — and nothing stays
-    /// scheduled, so a stack that is suspended and never resumed has no
-    /// deadline to fire and no work to leave behind.
+    /// Synchronous, bounded and infallible. Nothing is sent (see the module
+    /// doc) and nothing stays scheduled.
     ///
-    /// Calls that are up are left exactly as they are. A lid closing and
-    /// opening again is seconds, and hanging up a live call because the
-    /// machine blinked is worse than finding out a few seconds later that it
-    /// is gone.
+    /// Live calls are left as they are: a lid closing for seconds should not
+    /// hang them up.
     pub fn suspending(&mut self, now: Instant) -> Suspending {
         self.life = Machine {
             state: LifecycleState::Suspending,
@@ -553,24 +461,17 @@ impl UserAgent {
             rung: Some(Rung::Distrust),
             next_in: None,
         });
-        // the clock is taken and not read, and that is the whole shape of this
-        // call: nothing here is scheduled against a time, because nothing will
-        // be running to reach it — a registrar's keep-alive included, which a
-        // suspended phone leaves to push (RFC 8599) rather than to a process
-        // that is not running
+        // nothing is scheduled, keep-alives included: a suspended phone
+        // relies on push (RFC 8599)
         self.settle_keepalives(now);
         report
     }
 
     /// The process is awake again.
     ///
-    /// Arbitrary time has passed — arbitrary, not measurable, because the
-    /// clock this stack is driven by did not run while the machine was
-    /// suspended — and every transport may be dead. What was believed is
-    /// dropped and proved again on [`Recovery::Reprove`]'s ladder: the
-    /// transport that is already there is used first, because most wakes are
-    /// short and it still works, and a new one is asked for only when it turns
-    /// out not to.
+    /// An unknown time has passed and any transport may be dead. Bindings are
+    /// proved again on [`Recovery::Reprove`]'s ladder, current transport
+    /// first.
     ///
     /// Safe to call without a matching [`UserAgent::suspending`]. Some
     /// platforms only notify on the way back.
@@ -580,10 +481,8 @@ impl UserAgent {
 
     /// The network is a different one.
     ///
-    /// Answers with what it decided, so that an application does not have to
-    /// read an event to find out whether anything happened. See
-    /// [`Recovery::choose`] for the decision and [`Recovery::ladder`] for what
-    /// each answer sets off.
+    /// Returns the decision ([`Recovery::choose`]); [`Recovery::ladder`] says
+    /// what it sets off.
     pub fn network_changed(&mut self, from: &Network, to: &Network, now: Instant) -> Recovery {
         let recovery = Recovery::choose(from, to);
         self.recover(recovery, now);
@@ -596,10 +495,8 @@ impl UserAgent {
     /// A [`UaEvent::CallAddressWanted`] for every call that can be offered a
     /// new description, in handle order.
     ///
-    /// Only a change of address or interface raises them. A roam that keeps
-    /// the address keeps every socket bound to it, and the far end's audio
-    /// still arrives; a wake proves the transport before anything else, and
-    /// a machine that slept on the same network is still at the same place.
+    /// Only on a change of address or interface: otherwise the media sockets
+    /// still work.
     fn want_call_addresses(&mut self) {
         let mut moving: Vec<CallHandle> = self
             .calls
@@ -621,45 +518,30 @@ impl UserAgent {
 
     /// There is no usable interface.
     ///
-    /// Distinct from [`UserAgent::name_resolution_lost`] because the recovery
-    /// is the opposite one. Nothing can leave, so nothing is tried and nothing
-    /// is scheduled: [`UserAgent::poll_timeout`] stops offering deadlines of
-    /// this layer's, and the stack costs nothing until the application says
-    /// the network is back with [`UserAgent::network_changed`].
+    /// Nothing is tried or scheduled until [`UserAgent::network_changed`];
+    /// [`UserAgent::poll_timeout`] offers no deadlines from this layer.
     pub fn interface_lost(&mut self, now: Instant) {
         self.recover(Recovery::Detach, now);
     }
 
     /// Names no longer become addresses.
     ///
-    /// The dangerous one, and the reason it is its own entry point: the
-    /// interface is up and packets leave, so everything reads healthy, while
-    /// every address this stack learned from a name may now stand for
-    /// somewhere else. Bindings whose registrar was written as a name stop
-    /// being evidence; bindings pointed at a literal address never needed a
-    /// resolver and are left running.
+    /// Bindings whose registrar is a name stop counting as live; those at a
+    /// literal address are left running.
     pub fn name_resolution_lost(&mut self, now: Instant) {
         self.recover(Recovery::Resolve, now);
     }
 
     /// Point an account at a transport and an address again.
     ///
-    /// What [`Rung::WantTransport`] and [`Rung::WantAddress`] ask for. The
-    /// contact is not optional: after a change of address the old one names
-    /// somewhere the far end cannot reach, and a stack that let it stand would
-    /// register a binding that silently receives nothing.
+    /// The answer to [`Rung::WantTransport`] and [`Rung::WantAddress`]. The
+    /// contact is required: the old one may be unreachable after a move.
     ///
-    /// An account on a connection of its own ([`crate::Account::on_stream`])
-    /// takes `transport` only when it speaks the account's protocol: given
-    /// any other — the stack's UDP socket, after a network change — it keeps
-    /// a connection of its protocol to `remote` if one is bound, and
-    /// otherwise names none until one is, so nothing it sends goes in the
-    /// clear to a server it reaches over TLS.
+    /// An account on its own connection ([`crate::Account::on_stream`])
+    /// ignores a `transport` of another protocol and keeps (or waits for) a
+    /// connection of its own protocol, so nothing meant for TLS goes in clear.
     ///
-    /// When the machine is waiting to be told this, being told it climbs the
-    /// next rung at once rather than at the end of the wait — the application
-    /// answering in milliseconds is the normal case and there is nothing to be
-    /// gained by making a wake take a further half minute.
+    /// If a want-rung is waiting, the next rung is climbed at once.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -690,9 +572,8 @@ impl UserAgent {
         Ok(())
     }
 
-    /// An account that locates its server by a name has been located again
-    /// while [`Rung::WantAddress`] waited: the answer the rung asked for, and
-    /// the ladder climbs at once, as [`UserAgent::rebind`] has it do.
+    /// A named server was located again while [`Rung::WantAddress`] waited:
+    /// climb at once, as [`UserAgent::rebind`] does.
     pub(crate) fn address_found(&mut self, now: Instant) {
         if matches!(self.life.last(), Some(Rung::WantAddress)) && self.life.due.is_some() {
             self.life.told = true;
@@ -701,47 +582,32 @@ impl UserAgent {
         }
     }
 
-    /// This end is reached at `to` now, where it was reached at `from`: every
-    /// account on `transport` whose `Contact` names `from` is rewritten to
-    /// name `to`, and says so to its registrar.
+    /// This end is now reached at `to` instead of `from`: every account on
+    /// `transport` whose `Contact` names `from` is rewritten and re-registered.
     ///
-    /// What a STUN server's answer about the signalling socket turns into
-    /// (`docs/06-nat.md`): `from` is the address the socket is bound to, or
-    /// the public address an earlier answer gave, and `to` is the one this
-    /// answer gives. Only the host and the port move. The user part, the
-    /// parameters and the headers the application wrote stay as written, and
-    /// a `Contact` written with a name or with some other address is one the
-    /// application chose on purpose and is left alone.
+    /// Fed by a STUN answer about the signalling socket
+    /// (`docs/06-nat.md`): `from` is the bound address or an earlier public
+    /// one, `to` the new one. Only host and port change; a `Contact` with a
+    /// name or another address is left alone.
     ///
-    /// An account that holds a binding, or is on its way to one, sends a
-    /// REGISTER at once with the new `Contact`, superseding anything in
-    /// flight the way [`UserAgent::retarget`] does: a registrar holding the
-    /// old one is routing this end's calls to an address that reaches
-    /// nothing. The same REGISTER carries the old `Contact` with
-    /// `expires=0`, and every one after it does until the registrar has
-    /// answered one with a 2xx, so the old binding is removed rather than
-    /// left to expire (RFC 3261 §10.2.2) — including the private address a
-    /// REGISTER sent before the first STUN answer arrived. The old `Contact`
-    /// goes as its URI alone, without `+sip.instance`: RFC 3261 §10.3 matches
-    /// a removal to a binding by URI, but a registrar that matches by
-    /// instance instead — Kamailio does — would take one carrying the tag
-    /// for the new binding as well and leave the account with none. An
-    /// account that was never asked to register, or is giving its binding
-    /// up, is only rewritten.
+    /// An account holding or seeking a binding sends a REGISTER at once,
+    /// superseding anything in flight as [`UserAgent::retarget`] does. Until a
+    /// 2xx, every REGISTER also carries the old `Contact` with `expires=0`
+    /// (RFC 3261 §10.2.2), including a private address registered before the
+    /// first STUN answer. The old `Contact` goes without `+sip.instance`:
+    /// a registrar that matches removals by instance (Kamailio does) would
+    /// otherwise remove the new binding too. Accounts not registering are
+    /// only rewritten.
     ///
-    /// A REGISTER that cannot leave is what a refresh that cannot leave is:
+    /// A REGISTER that cannot leave gives
     /// [`UaEvent::RegistrationFailed`](crate::UaEvent::RegistrationFailed)
-    /// with [`RegistrationFailure::Unreachable`](crate::RegistrationFailure::Unreachable),
-    /// and another attempt on the back-off.
+    /// with [`RegistrationFailure::Unreachable`](crate::RegistrationFailure::Unreachable)
+    /// and a retry on the back-off.
     ///
-    /// Calls already up keep the `Contact` their dialog was given until their
-    /// next target refresh: every re-INVITE and UPDATE this stack sends — a
-    /// hold, a resume, a session timer's refresh — carries the account's
-    /// `Contact` as it is then (RFC 3261 §12.2), and none is sent just for
-    /// this.
+    /// Calls already up switch `Contact` at their next target refresh
+    /// (RFC 3261 §12.2); none is sent just for this.
     ///
-    /// Answers how many accounts were rewritten, whether or not their
-    /// REGISTERs could leave.
+    /// Returns how many accounts were rewritten.
     pub fn readdress(
         &mut self,
         transport: TransportId,
@@ -763,9 +629,8 @@ impl UserAgent {
         }
         moved.sort_unstable_by_key(|(id, ..)| *id);
         let count = moved.len();
-        // the one fact that says these accounts are behind a NAT: the address
-        // the far end sees them at is not the one the socket is bound to, and
-        // their registrar's flow is then one to keep open (`crate::keepalive`)
+        // seen at an address other than the bound one: behind a NAT, so the
+        // flow needs keep-alives (`crate::keepalive`)
         let behind = self
             .endpoint
             .bound_transport(transport)
@@ -826,10 +691,8 @@ impl UserAgent {
 
     /// A registrar answered, so the path works.
     ///
-    /// One account is enough. The ladder is about whether anything can leave
-    /// this machine and come back, not about whether every account is happy —
-    /// an account that still fails against a working path is a registrar
-    /// problem, and it has its own RFC 5626 §4.5 schedule for that.
+    /// One account is enough: an account still failing on a working path is
+    /// a registrar problem, handled by its own RFC 5626 §4.5 schedule.
     pub(crate) fn registration_proved(&mut self) {
         if self.life.state == LifecycleState::Running {
             return;
@@ -853,17 +716,11 @@ impl UserAgent {
             due: None,
             told: false,
         };
-        // a registrar's keep-alive follows the state: none while there is no
-        // interface or the recovery gave up, and once a wake has proved a
-        // binding again, the drain that proved it starts it
+        // keep-alives follow the state
         self.settle_keepalives(now);
         if self.life.ladder.is_empty() {
-            // A ladder with no rungs is the decision that nothing needs doing.
-            // Saying so is worth an event only when the state moved: an event
-            // that repeats the state the stack is already in reads, from a C
-            // application, exactly like a recovery that has just settled, and
-            // a network change that changed nothing would announce one every
-            // time it was reported.
+            // an event only if the state moved: a repeated one reads like a
+            // recovery that just settled
             if state != before {
                 self.events.push_back(UaEvent::Lifecycle {
                     state,
@@ -879,8 +736,7 @@ impl UserAgent {
     /// Do the next rung, and say when the one after it happens.
     fn climb(&mut self, now: Instant) {
         let Some(rung) = self.life.ladder.get(self.life.step).copied() else {
-            // only Detach's ladder ends without a GiveUp rung, and resting is
-            // what it is for
+            // only Detach's ladder ends here, and rests
             self.life.due = None;
             return;
         };
@@ -888,10 +744,8 @@ impl UserAgent {
         let state = self.life.state;
 
         let after = self.perform(rung, now);
-        // the last rung has already moved the machine somewhere else, and a
-        // rung can prove the path on its way past -- a REGISTER answered out
-        // of a queue that was already full -- in which case the ladder it was
-        // on is gone by now
+        // a rung may already have ended the ladder, e.g. a REGISTER answered
+        // from a queued response
         if after == After::Stop || self.life.state != state {
             return;
         }
@@ -920,22 +774,16 @@ impl UserAgent {
                 self.distrust();
                 After::Now
             }
-            // a REGISTER that never reached a transport leaves nothing in
-            // flight, and waiting out a transaction that does not exist is
-            // half a minute of a wake spent on nothing. A demoted
-            // subscription rides the same rung, for the same reason it was
-            // demoted alongside the registrations in the first place
+            // wait only if something went out; demoted subscriptions ride
+            // the same rung
             Rung::Reregister => {
                 let reached = self.reregister(now) | self.resubscribe(now);
                 if reached { After::Wait } else { After::Now }
             }
-            // an event and nothing else. Whoever owns the socket and whoever
-            // owns the resolver is the application, and this is the only way
-            // to reach either of them
+            // only an event: the application owns sockets
             Rung::WantTransport => After::Wait,
-            // and an account that locates its server by a name has the
-            // stack ask the resolver itself, through the same lookups it
-            // locates with (`crate::locate`)
+            // accounts with a named server are also re-located here
+            // (`crate::locate`)
             Rung::WantAddress => {
                 self.relocate(now);
                 After::Wait
@@ -949,19 +797,15 @@ impl UserAgent {
 
     /// Stop believing anything that came off a network.
     ///
-    /// Sends nothing and cannot fail, which is what makes it the first rung of
-    /// every ladder and the only thing [`UserAgent::suspending`] does.
+    /// Sends nothing and cannot fail: the first rung of every ladder and all
+    /// [`UserAgent::suspending`] does.
     ///
-    /// A binding that was never asked for is not started, one that was given
-    /// up on purpose stays given up, and one that was refused for good is left
-    /// refused — none of those claimed anything, so there is nothing to stop
-    /// believing. An account with no registrar never had a binding to claim
-    /// and stays `NotRegistering`; its subscriptions are not a binding and are
-    /// demoted like anybody's. What is left is exactly the set the next rung
-    /// re-registers.
+    /// Bindings never started, given up or refused for good claimed nothing
+    /// and are left alone; an account with no registrar stays
+    /// `NotRegistering`, but its subscriptions are demoted. What is demoted
+    /// is exactly what the next rung re-registers.
     fn distrust(&mut self) -> Suspending {
-        // only a lost resolver divides the accounts. Every other way of losing
-        // a network loses it for all of them at once
+        // only a lost resolver affects some accounts and not others
         let only_named = self.life.state == LifecycleState::ResolutionLost;
         let named = if only_named {
             self.named_registrars()
@@ -976,11 +820,7 @@ impl UserAgent {
             }
             reg.due = None;
             reg.transaction = None;
-            // the service route and the GRUUs came off the same network, and
-            // the lapse that would stop them being used is measured on the
-            // clock that stopped. RFC 5627 §4.4 wants an active registration
-            // before a GRUU is used, and nothing here is one until a 2xx says
-            // it all again
+            // service route and GRUUs need a fresh 2xx (RFC 5627 §4.4)
             reg.learned = None;
             if matches!(
                 reg.state,
@@ -995,33 +835,21 @@ impl UserAgent {
                 doubted.push(*id);
             }
         }
-        // said as it happens, not left for the application to find by
-        // asking: a line shown as ready on a binding that stopped being
-        // evidence is the silence this state exists to end
+        // reported at once, so no line keeps showing as ready
         doubted.sort_unstable();
         for account in doubted {
             self.events.push_back(UaEvent::Unverified { account });
         }
 
-        // a lamp showing what a notifier said before the machine slept is the
-        // one wrong answer a busy lamp field must never give, so the table
-        // stops answering the moment there is any doubt. Its own deadlines go
-        // with it -- an `Instant` frozen across the suspend would otherwise
-        // read a stale refresh or a stale lapse as still ahead, which is not
-        // evidence of anything either. `Rung::Reregister` is what re-proves it
+        // a busy lamp must not show pre-sleep state, and deadlines measured
+        // across a suspend are stale; `Rung::Reregister` re-proves them
         let mut subscriptions = 0_usize;
         for held in self.subscriptions.values_mut() {
             if only_named && !named.contains(&held.account) {
                 continue;
             }
-            // every one of them, not only the live ones. A subscription
-            // waiting on its first NOTIFY has a Timer N scheduled and is not
-            // live; one already retrying has a retry scheduled and is not
-            // live either. Both of those deadlines were measured against a
-            // clock that has since stopped, which is what this rung exists to
-            // disbelieve — and a subscription that has ended for good has no
-            // record here at all, so there is nothing in this table that
-            // should keep what it had scheduled
+            // all of them, not only live ones: Timer N and retry deadlines
+            // are stale too
             held.state = SubscriptionState::Retrying;
             held.stop_timers();
             subscriptions = subscriptions.saturating_add(1);
@@ -1034,10 +862,8 @@ impl UserAgent {
         }
     }
 
-    /// A REGISTER for everything that stopped being evidence.
-    ///
-    /// `true` when at least one of them reached a transport, which is what
-    /// decides whether there is anything to wait for.
+    /// A REGISTER for every unverified binding; `true` when one reached a
+    /// transport.
     fn reregister(&mut self, now: Instant) -> bool {
         let waiting: Vec<AccountId> = self
             .registrations
@@ -1047,9 +873,7 @@ impl UserAgent {
             .collect();
         let mut sent = false;
         for account in waiting {
-            // a send that fails is not an error of this ladder: it is what the
-            // next rung is for, and the account stays unverified until
-            // something proves otherwise
+            // a failed send stays unverified for the next rung
             sent |= self.register(account, now).is_ok();
         }
         sent
@@ -1057,10 +881,8 @@ impl UserAgent {
 
     /// The ladder is finished and nothing worked.
     ///
-    /// The reason is about the ladder rather than about its last rung: one
-    /// that asked for something and was never answered says so, whatever it
-    /// happened to try afterwards, because "no transport was bound" tells an
-    /// application where to look and "nothing answered" does not.
+    /// An unanswered want-rung wins as the reason: "no transport was bound"
+    /// tells the application where to look.
     fn give_up_recovering(&mut self) {
         let rung = self
             .life
@@ -1094,12 +916,8 @@ impl UserAgent {
         });
     }
 
-    /// The accounts whose registrar was written as a name, and so needed a
-    /// resolver to become an address at all.
-    ///
-    /// An account with no registrar is not among them. What it has is an
-    /// outbound proxy, which is an address and never a name, so a resolver
-    /// going away changes nothing about where its requests go.
+    /// Accounts whose registrar is a name. One without a registrar uses an
+    /// outbound proxy address and is never among them.
     fn named_registrars(&self) -> Vec<AccountId> {
         self.accounts
             .iter()
@@ -1121,18 +939,12 @@ enum After {
     Now,
     /// Something went out, or somebody was asked for something.
     Wait,
-    /// There is no next rung: the ladder ended and the machine has already
-    /// moved.
+    /// The ladder ended.
     Stop,
 }
 
 /// How long a rung waits before the next one is climbed.
-///
-/// 64·T1, drawn between half of it and all of it. §17.1.2.2 gives a non-INVITE
-/// transaction exactly that long to conclude, so a rung never fires while the
-/// request the rung before it sent is still trying; the draw is RFC 5626
-/// §4.5's, for its reason, so that a fleet of phones waking from the same
-/// outage does not come back in the same millisecond.
+/// A random draw in [32·T1, 64·T1] (see the module doc).
 fn rung_wait(timer_n: Duration, entropy: &[u8]) -> Duration {
     let whole = u64::try_from(timer_n.as_millis()).unwrap_or(u64::MAX);
     let half = whole / 2;
@@ -1320,9 +1132,7 @@ mod tests {
 
     #[test]
     fn suspending_writes_nothing_at_all() {
-        // the window is one where nothing waits for us, so everything in it is
-        // bookkeeping: a de-registration that may or may not leave is not a
-        // thing to attempt with a hard deadline overhead
+        // no de-registration in the suspend window
         let t0 = Instant::now();
         let (mut agent, _) = registered(t0);
         let report = agent.suspending(t0);
@@ -1423,8 +1233,7 @@ mod tests {
 
     #[test]
     fn a_resume_over_a_dead_transport_asks_for_one_instead_of_waiting() {
-        // the account names a transport this agent was never told about, which
-        // is what a socket that did not survive the sleep looks like from here
+        // an unknown transport: a socket that did not survive the sleep
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         if let Some(config) = agent.accounts.get_mut(&id) {
@@ -1517,9 +1326,7 @@ mod tests {
 
     #[test]
     fn several_accounts_are_proved_by_whichever_one_works() {
-        // one healthy and one whose transport is gone: the path is proved, and
-        // the account that still fails is the registrar's problem, on its own
-        // back-off
+        // one healthy account proves the path; the other stays on its back-off
         let t0 = Instant::now();
         let (mut agent, healthy) = registered(t0);
         let broken = agent.add_account(literal_account());
@@ -1615,9 +1422,7 @@ mod tests {
 
     #[test]
     fn the_same_address_on_a_different_interface_is_still_a_rebuild() {
-        // two offices that hand out the same private address is a real
-        // configuration, and it is the one a phone gets away with until a call
-        // comes in
+        // two offices handing out the same private address
         let elsewhere = Network::new(Link::Wifi)
             .address(address("192.0.2.1"))
             .interface("en1");
@@ -1686,9 +1491,7 @@ mod tests {
 
     #[test]
     fn losing_the_resolver_untrusts_the_bindings_that_needed_one_and_no_others() {
-        // the crash: a cached registration reading as valid over a name that
-        // no longer resolves. A binding pointed at a literal address never
-        // needed the resolver and is left running
+        // a named registrar is distrusted; a literal one keeps running
         let t0 = Instant::now();
         let (mut agent, named) = registered(t0);
         let literal = agent.add_account(literal_account());
@@ -1857,9 +1660,7 @@ mod tests {
             )),
             "{seen:?}"
         );
-        // nothing it holds can be answered by a registrar, so the ladder runs
-        // out the way it does for a stack with no accounts at all, and says
-        // that nothing was left unproved
+        // no registrar to answer: the ladder runs out with nothing unverified
         assert!(
             seen.iter()
                 .any(|event| matches!(*event, UaEvent::RecoveryGaveUp { unverified: 0, .. })),
@@ -1892,9 +1693,8 @@ mod tests {
             config.transport = GONE;
         }
 
-        // ten minutes of a background timer on a dead transport: 4.1.2.4's
-        // Timer N, the transaction giving up, and every re-subscription that
-        // cannot reach a transport at all
+        // ten minutes on a dead transport: Timer N, the transaction giving
+        // up, and re-subscriptions that cannot leave
         for tick in 1..=20 {
             agent.handle_timeout(t0 + Duration::from_secs(30 * tick));
             while let Some(transmit) = agent.poll_transmit() {
@@ -1934,8 +1734,7 @@ mod tests {
 
     #[test]
     fn a_registration_refreshed_over_a_dead_transport_is_an_event_and_not_an_abort() {
-        // the refresh was scheduled while the transport was alive, which is
-        // the only way this ever happens
+        // scheduled while the transport was alive
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let _ = events(&mut agent);
@@ -1944,11 +1743,7 @@ mod tests {
         }
         agent.handle_timeout(t0 + Duration::from_secs(3_060));
         let seen = events(&mut agent);
-        // and it promises another attempt: a refresh that could not leave is
-        // not a registrar that refused, and the transport being gone at the
-        // moment a deadline fell due is the normal case on a machine that
-        // slept rather than a reason to give the account up for the life of
-        // the process
+        // and another attempt follows: an unsendable refresh is not a refusal
         assert!(
             seen.iter().any(|event| matches!(
                 *event,
@@ -1969,8 +1764,7 @@ mod tests {
 
     #[test]
     fn what_a_notifier_said_before_the_sleep_stops_being_evidence() {
-        // a lamp showing a colleague as free because a NOTIFY said so an hour
-        // and one suspend ago is the one wrong answer this must never give
+        // no pre-suspend lamp state may survive
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let watched = agent
@@ -1980,8 +1774,7 @@ mod tests {
                 t0,
             )
             .expect("a subscription");
-        // pretend the notifier answered: only the state is needed here, and it
-        // is what dialog_info gates on
+        // fake an active state, which is what dialog_info gates on
         if let Some(held) = agent.subscriptions.get_mut(&watched) {
             held.state = SubscriptionState::Active;
         }
@@ -2148,8 +1941,7 @@ mod tests {
 
     #[test]
     fn nothing_the_lifecycle_is_told_can_fail_the_call_that_told_it() {
-        // B4 and B3 together: these are the entry points an operating system
-        // notification lands on, and none of them can refuse or fault
+        // OS notification entry points never refuse or fault
         let t0 = Instant::now();
         let mut agent = agent(t0);
         agent.suspending(t0);
@@ -2158,8 +1950,7 @@ mod tests {
         agent.name_resolution_lost(t0);
         agent.network_changed(&Network::down(), &wifi(), t0);
         agent.handle_timeout(t0 + RUNG);
-        // with no accounts at all there is nothing to prove and nothing to
-        // send, and the machine still ends somewhere it can be asked about
+        // with no accounts the machine still ends in a defined state
         assert!(matches!(
             agent.lifecycle(),
             LifecycleState::Recovering | LifecycleState::GaveUp
@@ -2277,10 +2068,9 @@ mod tests {
 
     #[test]
     fn an_account_stun_showed_behind_a_nat_keeps_its_registrars_flow_open() {
-        // the lab's failure: a call 330 s after the REGISTER was dropped by
-        // an address-and-port-dependent filter (RFC 4787 §5), because the
-        // only thing sent in between went to the STUN server. Something has
-        // to go to the registrar itself, and by default every 20 to 25 s
+        // lab failure: a call 330 s after the REGISTER was dropped by an
+        // address-and-port-dependent filter (RFC 4787 §5); keep-alives must
+        // go to the registrar itself, by default every 20 to 25 s
         let t0 = Instant::now();
         let public: SocketAddr = "203.0.113.7:41000".parse().expect("an address");
         let (mut agent, id) = readdressed_to(public, t0);
@@ -2603,11 +2393,8 @@ mod tests {
 
     #[test]
     fn a_register_sent_before_the_nat_answer_is_taken_back_by_the_one_after() {
-        // the account registered its private address, because the STUN
-        // answer had not arrived yet; the REGISTER that moves it must also
-        // remove that binding, or the registrar forks every call to an
-        // address that reaches nothing until the binding expires an hour
-        // later (RFC 3261 §10.2.2: a Contact with expires=0 removes it)
+        // the private address registered before STUN answered must be
+        // removed with expires=0 (RFC 3261 §10.2.2), or calls fork to it
         let t0 = Instant::now();
         let mut agent = agent(t0);
         let id = agent.add_account(account());
@@ -2666,12 +2453,9 @@ mod tests {
 
     #[test]
     fn the_contact_taken_back_names_its_address_and_not_the_instance() {
-        // a registrar that keys a binding by `+sip.instance` rather than by
-        // URI reads a removal carrying the tag as a removal of the instance:
-        // the lab's Kamailio, given the public Contact and the private one
-        // with expires=0 under the same tag, kept neither. The URI alone
-        // removes that one binding wherever bindings are keyed (RFC 3261
-        // §10.2.2), and the new Contact keeps its tag
+        // the lab's Kamailio keys by `+sip.instance`: a tagged removal took
+        // the new binding too. The bare URI removes only the old one (RFC
+        // 3261 §10.2.2); the new Contact keeps its tag
         let t0 = Instant::now();
         let mut agent = agent(t0);
         let id = agent
@@ -2693,11 +2477,8 @@ mod tests {
 
     #[test]
     fn an_account_moved_whose_register_cannot_leave_is_still_counted_and_retried() {
-        // the Contact moves whatever happens to the REGISTER that says so;
-        // an answer of "none moved" would have the application believe its
-        // accounts still name the private address, and the REGISTER that
-        // could not leave is a refresh that could not leave, owed again on
-        // the back-off rather than dropped
+        // the Contact moves even if the REGISTER cannot leave; that one is
+        // retried on the back-off
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let _ = events(&mut agent);
@@ -2766,8 +2547,7 @@ mod tests {
 
     #[test]
     fn a_registrar_that_refuses_for_good_is_not_woken_up_again_by_a_resume() {
-        // a password that was refused stays refused; re-sending it is how an
-        // account gets locked out, and a wake is not new information about it
+        // a refused password is not re-sent on wake: it would lock the account
         let t0 = Instant::now();
         let mut agent = agent(t0);
         let id = agent.add_account(account());

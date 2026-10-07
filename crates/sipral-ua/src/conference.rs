@@ -4,47 +4,27 @@
 //! The conference event package: `application/conference-info+xml`, and the
 //! picture of a conference a subscriber keeps from it (RFC 4575).
 //!
-//! A focus reports a conference in documents that are either the whole of it
-//! or only what changed (§4.6), numbered by a `version` that goes up by one
-//! with every notification of one subscription. [`ConferenceInfo`] is one such
-//! document; [`Conference`] is what the documents add up to, merged by the
-//! rules of §4.6.
+//! [`ConferenceInfo`] is one document, full or partial (§4.6);
+//! [`Conference`] is what they add up to.
 //!
-//! **The reader is the one [`crate::DialogInfo`] is read with, and inherits
-//! every refusal.**
-//! These bodies arrive from whatever answered a SUBSCRIBE, exactly like dialog
-//! information, so there is no document type declaration, no entity other
-//! than the five predefined ones and character references, no CDATA, and the
-//! size, the nesting and the element count are bounded before anything is
-//! kept. Namespaces are read as prefixes and otherwise ignored, for the same
-//! reason as there: the `Content-Type` says what the body is, and the local
-//! name says what an element is.
+//! **The reader is [`crate::DialogInfo`]'s and inherits every refusal:** no
+//! DTD, no entities beyond the predefined ones, no CDATA, bounded size,
+//! nesting and element count, namespaces ignored.
 //!
-//! **A partial document is only ever applied on top of the one before it.**
-//! §4.6 has a partial notification carry the changes since the previous
-//! version, so applying one whose predecessor was lost merges a delta onto
-//! the wrong base, and the picture drifts from the focus's with nothing to
-//! say so. A gap is therefore not merged: [`Conference::apply`] answers
-//! [`ConferenceUpdate::Resubscribe`], and the refresh
-//! ([`UserAgent::request_full_state`]) gets full state back: a notifier
-//! answers every accepted or refreshed SUBSCRIBE with the current state
-//! (RFC 6665 §4.2.1), which for this package is full state. Until it
-//! arrives, further partial documents are held off rather than asked about
-//! again, so a focus that keeps notifying while the refresh is in flight does
-//! not turn into one SUBSCRIBE per NOTIFY.
+//! **A partial document is only applied on top of its predecessor.** On a
+//! gap, merging a delta onto the wrong base would drift silently, so
+//! [`Conference::apply`] answers [`ConferenceUpdate::Resubscribe`] and the
+//! refresh ([`UserAgent::request_full_state`]) brings full state (RFC 6665
+//! §4.2.1). Partial documents arriving meanwhile are held off, not asked
+//! about again, so a chatty focus does not cause one SUBSCRIBE per NOTIFY.
 //!
-//! **What is held is bounded like what is read.** Every document is bounded,
-//! but partial ones only add up: a merge that would hold more than one
-//! full-state document can carry, or more rows in a list than one may list,
-//! is not kept, and is answered like a gap.
+//! **What is held is bounded like what is read.** A merge that would exceed
+//! what one full document can carry is dropped and treated like a gap.
 //!
-//! **What is keyed is merged; what is not is replaced.** Under §4.6 a partial
-//! element's children are matched to what is held by their key — a user and
-//! an endpoint by `entity`, a media stream by `id`, an available-media entry
-//! by `label`, a URI entry by its `uri` — and merged in turn; a child that is
-//! not keyed replaces the held value when it is present and leaves it alone
-//! when it is not. An element marked `deleted` is removed, and one marked
-//! `full` replaces what was held for it whole.
+//! **Keyed children are merged, the rest replaced.** Users and endpoints key
+//! on `entity`, media on `id`, available media on `label`, URI entries on
+//! `uri`. An unkeyed child replaces the held value only when present.
+//! `deleted` removes an element; `full` replaces it whole.
 
 use std::time::Instant;
 
@@ -60,25 +40,16 @@ pub const CONFERENCE_EVENT: &str = "conference";
 /// The body type its notifications carry (RFC 4575 §3.5).
 pub const CONFERENCE_INFO_TYPE: &str = "application/conference-info+xml";
 
-/// The largest document that will be read at all. A conference of a few
-/// hundred participants, each with an endpoint and two streams, stays well
-/// under it.
+/// A few hundred participants stay well under it.
 const MAX_BYTES: usize = 256 * 1024;
-/// How deep the elements may nest. The deepest path in §5 is
-/// `conference-info` → `users` → `user` → `endpoint` → `joining-info` →
-/// `when`: six.
+/// §5's deepest path is six elements.
 const MAX_DEPTH: usize = 10;
-/// How many nodes will be read before the document is refused.
 const MAX_NODES: usize = 65_536;
-/// The longest text one element may hold.
 const MAX_TEXT: usize = 4_096;
-/// How many users one conference may hold.
 const MAX_USERS: usize = 1_024;
-/// How many endpoints one user may hold.
 const MAX_ENDPOINTS: usize = 16;
-/// How many media streams one endpoint may hold.
 const MAX_MEDIA: usize = 16;
-/// How many entries one list of URIs, roles or available media may hold.
+/// Per list of URIs, roles or available media.
 const MAX_ENTRIES: usize = 32;
 
 /// Why a conference information document could not be read.
@@ -126,28 +97,23 @@ impl From<DialogInfoError> for ConferenceInfoError {
 
 // -- a document as a tree ----------------------------------------------------
 
-/// One element of a document read by [`read_tree`]: its local name, its
-/// attributes, its text and its children, in order.
+/// One element read by [`read_tree`].
 pub(crate) struct XmlNode<'a> {
-    /// The name with any namespace prefix taken off.
+    /// Local name, prefix removed.
     pub(crate) name: &'a [u8],
-    /// The attributes, read on demand.
     pub(crate) attributes: Attributes<'a>,
-    /// The character data directly inside it, references resolved.
+    /// Direct character data, references resolved.
     pub(crate) text: Vec<u8>,
-    /// The elements directly inside it.
     pub(crate) children: Vec<XmlNode<'a>>,
 }
 
 impl<'a> XmlNode<'a> {
-    /// The first child called `name`.
     pub(crate) fn child(&self, name: &str) -> Option<&XmlNode<'a>> {
         self.children
             .iter()
             .find(|child| child.name == name.as_bytes())
     }
 
-    /// Every child called `name`, in document order.
     pub(crate) fn children_named<'s>(
         &'s self,
         name: &'s str,
@@ -157,12 +123,10 @@ impl<'a> XmlNode<'a> {
             .filter(move |child| child.name == name.as_bytes())
     }
 
-    /// The text, with the whitespace around it taken off.
     pub(crate) fn trimmed(&self) -> Result<&str, DialogInfoError> {
         as_str(self.text.trim_ascii())
     }
 
-    /// The trimmed text of the first child called `name`, when there is one.
     pub(crate) fn child_text(&self, name: &str) -> Result<Option<Box<str>>, DialogInfoError> {
         self.child(name)
             .map(|child| child.trimmed().map(Box::from))
@@ -170,30 +134,21 @@ impl<'a> XmlNode<'a> {
     }
 }
 
-/// The bounds one [`read_tree`] holds a document to.
 #[derive(Clone, Copy)]
 pub(crate) struct TreeLimits {
-    /// The largest body read at all.
     pub(crate) bytes: usize,
-    /// How deep elements may nest.
     pub(crate) depth: usize,
-    /// How many nodes are read before the document is refused.
     pub(crate) nodes: usize,
-    /// The longest text one element may hold.
     pub(crate) text: usize,
 }
 
-/// Read a whole document into a tree, over [`crate::dialoginfo`]'s tokeniser.
-///
-/// Everything that tokeniser refuses is refused here, and the bounds are
-/// checked as the document is read rather than after: nothing past the
-/// nesting, the node count or the text length is ever kept.
+/// Read a whole document into a tree over [`crate::dialoginfo`]'s
+/// tokeniser. Bounds are checked while reading, so nothing past them is kept.
 pub(crate) fn read_tree(body: &[u8], limits: TreeLimits) -> Result<XmlNode<'_>, DialogInfoError> {
     if body.len() > limits.bytes {
         return Err(DialogInfoError::TooLarge("document"));
     }
-    // XML 1.0 §4.3.3: a UTF-8 entity may begin with a byte order mark, which
-    // is not character data
+    // XML 1.0 §4.3.3: a leading byte order mark is not character data
     let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
     let mut reader = Reader::new(body);
     let mut open: Vec<XmlNode<'_>> = Vec::new();
@@ -856,21 +811,19 @@ fn take<T: Clone>(held: &mut Option<T>, update: Option<&T>) {
 /// Something §4.6 matches by a key and merges field by field.
 trait Keyed: Clone {
     fn key(&self) -> &str;
-    /// What the document said about it. Elements the schema gives no `state`
-    /// attribute are merged whenever they appear.
+    /// Elements without a `state` attribute always merge.
     fn state(&self) -> ElementState {
         ElementState::Partial
     }
     fn merge(&mut self, update: &Self);
-    /// The value as held: every state `full`, nothing `deleted` left in it.
+    /// Every state `full`, nothing `deleted` left.
     fn settled(&self) -> Self {
         self.clone()
     }
 }
 
-/// Merge `updates` into `held` by key. A row not held is added even past the
-/// list's bound: [`Conference::apply`] checks the bounds on the merged copy
-/// and keeps none of it when one is passed.
+/// Merge by key. New rows are added even past the bound;
+/// [`Conference::apply`] checks bounds on the merged copy.
 fn merge_rows<T: Keyed>(held: &mut Vec<T>, updates: &[T]) {
     for update in updates {
         let at = held.iter().position(|row| row.key() == update.key());
@@ -894,7 +847,6 @@ fn merge_rows<T: Keyed>(held: &mut Vec<T>, updates: &[T]) {
     }
 }
 
-/// The rows of a list, settled: what a `full` element holds.
 fn settled_rows<T: Keyed>(rows: &[T]) -> Vec<T> {
     rows.iter()
         .filter(|row| row.state() != ElementState::Deleted)
@@ -975,8 +927,7 @@ impl Keyed for User {
     }
     fn merge(&mut self, update: &Self) {
         take(&mut self.display_text, update.display_text.as_ref());
-        // roles are a plain list of tokens, not keyed: present, they are the
-        // whole list
+        // roles are not keyed: when present, they replace the list
         if !update.roles.is_empty() {
             self.roles.clone_from(&update.roles);
         }
@@ -991,8 +942,7 @@ impl Keyed for User {
     }
 }
 
-/// An element that is not keyed but carries a `state`: the three sections
-/// of the document under its root.
+/// The three unkeyed top-level sections that carry a `state`.
 trait Section: Clone {
     fn state(&self) -> ElementState;
     fn merge(&mut self, update: &Self);
@@ -1071,13 +1021,11 @@ impl Section for ConferenceStatus {
 
 // -- what is held, weighed ---------------------------------------------------
 
-/// What each element and each value costs on top of its text: less than the
-/// markup of any of them (`<a/>`, `a=""`), so that a picture read from one
-/// document never weighs more than the document did.
+/// Per-element overhead, below any real markup (`<a/>`, `a=""`), so a
+/// picture read from one document never outweighs it.
 const MARKUP: usize = 4;
 
-/// What holding something costs, counted in the bytes of the document it
-/// would take to say it.
+/// Size in document bytes it would take to say this.
 trait Weigh {
     fn weigh(&self) -> usize;
 }
@@ -1102,7 +1050,6 @@ impl<T: Weigh> Weigh for Vec<T> {
     }
 }
 
-/// The sum of what `parts` weigh, and the element around them.
 fn weigh_all(parts: &[&dyn Weigh]) -> usize {
     parts
         .iter()
@@ -1246,31 +1193,24 @@ impl Weigh for ConferenceStatus {
 pub enum ConferenceUpdate {
     /// It was merged in.
     Applied,
-    /// Its version is not newer than the one already applied, so it is late
-    /// or repeated, and was discarded.
+    /// Not newer than the version held: late or repeated, discarded.
     Stale,
-    /// It carries partial state and the version before it never arrived (or
-    /// nothing has arrived yet), or merging it would hold more than one
-    /// full-state document can carry, so it was not applied. A refresh gets
-    /// full state back: [`UserAgent::request_full_state`]. (A conference too
-    /// large for that is then refused by [`ConferenceInfo::parse`].)
+    /// Partial after a gap, or the merge would exceed one full document: not
+    /// applied. Call [`UserAgent::request_full_state`].
     Resubscribe,
-    /// It carries partial state while full state is already being asked
-    /// for, so it was discarded without asking again.
+    /// Partial while full state is already requested: discarded, no new
+    /// request.
     AwaitingFullState,
-    /// Its `conference-info` is `deleted`: the conference has ceased to
-    /// exist, everything held about it was dropped, and RFC 4575 §4.6 has
-    /// the subscriber end its subscription (`SUBSCRIBE` with `Expires: 0`,
-    /// [`UserAgent::unsubscribe`]).
+    /// The conference was `deleted`: everything held is dropped, and RFC 4575
+    /// §4.6 has the subscriber unsubscribe ([`UserAgent::unsubscribe`]).
     Ended,
 }
 
 /// Everything one conference subscription has been told, merged (§4.6).
 ///
-/// One per subscription: `version` numbers the documents of one
-/// subscription, so when the user agent starts a fresh subscription under
-/// the same handle (a [`crate::UaEvent::Subscribing`] after an end worth
-/// retrying), start a fresh `Conference` with it.
+/// Versions are per subscription: when the agent restarts one under the same
+/// handle ([`crate::UaEvent::Subscribing`] after a retryable end), start a
+/// fresh `Conference`.
 #[derive(Clone, Debug, Default)]
 pub struct Conference {
     entity: Option<Box<str>>,
@@ -1339,13 +1279,10 @@ impl Conference {
 
     /// Merge one document in (§4.6).
     pub fn apply(&mut self, document: &ConferenceInfo) -> ConferenceUpdate {
-        // a version at or behind the one held is a notification that arrived
-        // late or twice: nothing in it is newer than what is held
         if self.version.is_some_and(|held| document.version <= held) {
             return ConferenceUpdate::Stale;
         }
-        // §4.6: "full" and "deleted" both replace the local information
-        // and take the document's version, whatever version came before
+        // §4.6: "full" and "deleted" replace everything, whatever came before
         if document.state != ElementState::Partial {
             *self = Self {
                 entity: Some(document.entity.clone()),
@@ -1360,8 +1297,6 @@ impl Conference {
             self.merge(document);
             return ConferenceUpdate::Applied;
         }
-        // partial state is a change against the version just before it,
-        // and against nothing else
         let follows = self
             .version
             .is_some_and(|held| document.version == held.saturating_add(1));
@@ -1372,12 +1307,8 @@ impl Conference {
             self.awaiting_full = true;
             return ConferenceUpdate::Resubscribe;
         }
-        // merged on a copy, kept only while it holds no more than one
-        // full-state document could carry: every partial document is bounded,
-        // but what they add up to is not, and a picture larger than any full
-        // state this reads is not one the focus can ever confirm. Leaving out
-        // the rows past a bound instead would keep a picture the focus never
-        // had, with nothing to say so
+        // partials add up without bound; a picture larger than any full state
+        // could never be confirmed, and truncating it would silently lie
         let mut merged = self.clone();
         merged.version = Some(document.version);
         merged.merge(document);
@@ -1389,7 +1320,6 @@ impl Conference {
         ConferenceUpdate::Applied
     }
 
-    /// Merge a document's sections and users into what is held.
     fn merge(&mut self, document: &ConferenceInfo) {
         merge_section(&mut self.description, document.description.as_ref());
         merge_section(&mut self.host, document.host.as_ref());
@@ -1421,7 +1351,6 @@ impl Conference {
             })
     }
 
-    /// What everything held weighs.
     fn weigh(&self) -> usize {
         weigh_all(&[
             &self.entity,
@@ -1440,16 +1369,12 @@ impl Conference {
         ConferenceInfo::parse(body).map(|document| self.apply(&document))
     }
 
-    /// Merge in what a NOTIFY of a `conference` subscription carried — the
-    /// `request` of [`crate::UaEvent::Notified`].
-    ///
-    /// `Ok(None)` for a NOTIFY with no body, which is what a pending
-    /// subscription is usually told.
+    /// Merge in the `request` of a [`crate::UaEvent::Notified`].
+    /// `Ok(None)` for an empty body (usual while pending).
     ///
     /// # Errors
-    /// [`ConferenceInfoError::NotConferenceInfo`] for a body of another
-    /// type, and anything [`ConferenceInfo::parse`] refuses. Either way
-    /// nothing held changes.
+    /// [`ConferenceInfoError::NotConferenceInfo`] for another body type, or
+    /// whatever [`ConferenceInfo::parse`] refuses. Nothing held changes.
     pub fn apply_notify(
         &mut self,
         request: &OwnedMessage,
@@ -1472,10 +1397,8 @@ impl Conference {
 // -- subscribing -------------------------------------------------------------
 
 impl Subscribe {
-    /// A subscription to the conference at `focus` (RFC 4575 §3): `Event:
-    /// conference`, with `Accept: application/conference-info+xml` (§3.4),
-    /// for [`crate::DEFAULT_EXPIRES`] — the hour §3.3 makes the default —
-    /// unless [`Subscribe::expires`] says otherwise.
+    /// A subscription to the conference at `focus` (RFC 4575 §3, §3.4), for
+    /// [`crate::DEFAULT_EXPIRES`] unless [`Subscribe::expires`] changes it.
     #[must_use]
     pub fn conference(focus: Uri) -> Self {
         Self::new(focus, CONFERENCE_EVENT).accept(CONFERENCE_INFO_TYPE.as_bytes())
@@ -1483,16 +1406,14 @@ impl Subscribe {
 }
 
 impl UserAgent {
-    /// Subscribe to a conference (RFC 4575 §3), kept alive like any other
-    /// subscription by [`UserAgent::subscribe`].
+    /// Subscribe to a conference (RFC 4575 §3), refreshed like any other
+    /// subscription.
     ///
-    /// Every notification arrives as [`crate::UaEvent::Notified`], and the
-    /// agent merges it into the subscription's own picture
-    /// ([`UserAgent::conference`]) by §4.6's rules: a change is
-    /// [`crate::UaEvent::ConferenceChanged`], a gap asks for full state by
-    /// itself, and a deleted conference ends the subscription. Any
-    /// subscription to the `conference` package is kept this way, however it
-    /// was asked for.
+    /// Each notification arrives as [`crate::UaEvent::Notified`] and is
+    /// merged into [`UserAgent::conference`]: a change raises
+    /// [`crate::UaEvent::ConferenceChanged`], a gap requests full state by
+    /// itself, a deleted conference ends the subscription. This holds for
+    /// any `conference` subscription, however it was started.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -1505,13 +1426,9 @@ impl UserAgent {
         self.subscribe(account, &Subscribe::conference(focus), now)
     }
 
-    /// Refresh a subscription now, so that the notification answering it
-    /// carries full state: what [`ConferenceUpdate::Resubscribe`] asks for
-    /// (RFC 4575 §4.6), and what RFC 6665 §4.2.1 makes the NOTIFY after a
-    /// refresh carry.
-    ///
-    /// A subscription whose dialog is not open yet is started again instead,
-    /// which gets full state the same way.
+    /// Refresh a subscription now, so the answering NOTIFY carries full
+    /// state (RFC 6665 §4.2.1), as [`ConferenceUpdate::Resubscribe`] asks.
+    /// One whose dialog is not open yet is restarted instead.
     ///
     /// # Errors
     /// [`UaError::NoSuchSubscription`].

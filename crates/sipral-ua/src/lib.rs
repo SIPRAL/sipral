@@ -3,28 +3,19 @@
 
 //! User agent layer.
 //!
-//! Registration with refresh, outgoing and incoming calls, hold and resume,
-//! blind and attended transfer — and, where the application allows it, a
-//! REFER from outside any call ([`referral`]) — the SUBSCRIBE/NOTIFY
-//! subscriptions behind message waiting and busy lamp field, the policy that
-//! decides whether an INVITE off the internet is ever heard at all, and what
-//! all of that stops being worth when the machine underneath it goes to
-//! sleep: a call announced by a push before there is a transport, a
-//! registration that can be written down and read back, and a lifecycle that
-//! says which of the two is which.
+//! Registration and refresh, calls, hold, transfer, out-of-dialog REFER
+//! ([`referral`]), SUBSCRIBE/NOTIFY for message waiting and busy lamp field,
+//! screening of incoming INVITEs, and sleep/wake handling: push-announced
+//! calls, registration snapshots, and a lifecycle machine.
 //!
-//! Also sans-I/O: this is policy and sequencing over [`sipral_core`], not
-//! transport. The five calls are the endpoint's five calls, so the same event
-//! loop drives either, and a year of registration refreshes is a test that
-//! finishes in a millisecond.
+//! Sans-I/O, like the core: policy and sequencing over [`sipral_core`], driven
+//! by the same five calls as the endpoint. A year of refreshes is a test that
+//! runs in a millisecond.
 //!
-//! What lives here is everything the core deliberately refuses to decide.
-//! Answering a challenge needs a password and answering it twice locks an
-//! account. Refreshing a binding needs a number the RFC does not give. Backing
-//! off after an outage needs a random interval, or a thousand phones come back
-//! in the same second. None of those are protocol, and all of them are the
-//! difference between a stack that parses SIP and a phone that stays
-//! reachable.
+//! This layer holds what the core refuses to decide: passwords (answering a
+//! challenge twice locks an account), refresh intervals the RFC does not give,
+//! and randomised back-off so a thousand phones do not return in the same
+//! second.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",
@@ -55,28 +46,22 @@ mod auth_scope_tests;
 mod bridging_tests;
 mod call;
 mod calls;
-/// The conference event package (RFC 4575): the document a focus notifies,
-/// and the merged picture of a conference kept from it — under its own path
-/// because its element types (`User`, `Endpoint`, `Media`) are the
-/// package's vocabulary, not this crate's.
+/// The conference event package (RFC 4575) and the merged picture kept from
+/// it. Its own path, since `User`, `Endpoint` and `Media` are its vocabulary.
 pub mod conference;
 mod contact;
 mod dialoginfo;
-/// Validation shared by every way a digit crosses this stack's boundary, and
-/// the two ad hoc `Content-Type`s an INFO carries one in — grouped under its
-/// own path rather than flattened like the rest of this crate's surface,
-/// because [`UserAgent::send_dtmf_info`] and the incoming parser are the only
-/// callers most applications ever need and the bound and the parser are what
-/// a binding or a fuzz target reaches for by name.
+/// Digit validation and the two ad hoc INFO `Content-Type`s. Its own path so
+/// bindings and fuzz targets can name the bounds and the parser; most
+/// applications only need [`UserAgent::send_dtmf_info`].
 pub mod dtmf;
 mod error;
 mod event;
 mod flow;
 mod headers;
 mod identity;
-/// Keeping a registration reachable through a NAT over UDP: what is sent to
-/// the registrar, when and how often, grouped under its own path for the
-/// bounds a binding checks its own setting against.
+/// Keeping a UDP registration reachable through a NAT, and the interval
+/// bounds a binding checks against.
 pub mod keepalive;
 mod lifecycle;
 pub mod locate;
@@ -87,9 +72,8 @@ mod oauth_tests;
 mod options;
 mod oversize;
 mod parked;
-/// Presence documents (RFC 3863) with the rich presence activities of
-/// RFC 4480 — under their own path because `Tuple`, `Note` and `Contact`
-/// are PIDF's vocabulary, not this crate's.
+/// Presence documents (RFC 3863) with RFC 4480 activities. Its own path,
+/// since `Tuple`, `Note` and `Contact` are PIDF's vocabulary.
 pub mod presence;
 mod probe;
 mod publish;
@@ -113,9 +97,8 @@ mod screening;
 mod session;
 #[cfg(test)]
 mod signalling_tests;
-/// SIPREC recording metadata (RFC 7865, RFC 7866) and the pieces of the
-/// INVITE that offers a recording session, grouped under its own path: its
-/// model has a `Session` and a `Stream` of its own.
+/// SIPREC metadata (RFC 7865, RFC 7866) and the recording-session INVITE.
+/// Its own path, since it has its own `Session` and `Stream`.
 pub mod siprec;
 #[cfg(feature = "stir")]
 mod stir;
@@ -181,15 +164,12 @@ pub use verification::{
 };
 pub use websocket::WebSocketTarget;
 
-/// What a caller needs from the layer below to drive this one, re-exported so
-/// that an application does not have to name `sipral-core` to use a phone.
+/// Re-exported so an application need not name `sipral-core`.
 pub use sipral_core::auth::Credentials;
-/// What [`UaEvent::TokenRequired`] carries: a server's `Bearer` challenge
-/// (RFC 8898) and the error it named.
+/// What [`UaEvent::TokenRequired`] carries (RFC 8898).
 pub use sipral_core::auth::{BearerChallenge, BearerError};
-/// RFC 3263's lookups, as [`UaEvent::LookupWanted`] asks for them and
-/// [`UserAgent::looked_up`] takes their answers, and the procedure itself for
-/// an application that locates something of its own.
+/// RFC 3263 lookups for [`UaEvent::LookupWanted`] and
+/// [`UserAgent::looked_up`], and the procedure itself.
 pub use sipral_core::endpoint::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
@@ -201,6 +181,5 @@ pub use sipral_core::msg::{StatusCode, Uri};
 /// A TLS server certificate trusted by its SHA-256 fingerprint, per account
 /// ([`Account::tls_pin`]).
 pub use sipral_core::pin::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
-/// Recording a session and feeding it back, which a user agent is driven by
-/// exactly as the endpoint under it is (`docs/18-replay.md`).
+/// Session record and replay, as for the endpoint (`docs/18-replay.md`).
 pub use sipral_core::replay::{Driven, Played, Recorder, Recording, Replay};

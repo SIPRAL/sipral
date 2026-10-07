@@ -3,11 +3,8 @@
 
 //! What the user agent tells the application.
 //!
-//! One vocabulary, and it is about accounts and calls rather than about
-//! transactions. What the layer below says is not hidden — an event this layer
-//! has no policy for is passed through whole — but everything it does have a
-//! policy for arrives already decided: a registration that is live, one that
-//! is being retried and when, one that will never succeed and why.
+//! Events are about accounts and calls, not transactions. Whatever this layer
+//! has a policy for arrives already decided; anything else passes through whole.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,14 +34,12 @@ pub enum RegistrationState {
     Registered,
     /// A refresh is in flight. The binding stands until it is answered.
     Refreshing,
-    /// A binding the registrar really did grant, over a transport this process
-    /// has since suspended or lost, that nothing has proved since.
+    /// A granted binding over a transport that was since suspended or lost,
+    /// not proved since.
     ///
-    /// Not evidence, and that is the whole point of it existing: the worst
-    /// failure of a softphone is a refresh going out on a timer after a wake,
-    /// over a transport that died while nobody was watching, and the reason no
-    /// amount of checking prevents it is that "are we registered?" answers yes.
-    /// See `docs/16-lifecycle.md`.
+    /// It exists so that "are we registered?" does not answer yes after a
+    /// wake, when a refresh would go out over a dead transport. See
+    /// `docs/16-lifecycle.md`.
     Unverified,
     /// Something recoverable went wrong and the next attempt is scheduled.
     Retrying,
@@ -52,25 +47,19 @@ pub enum RegistrationState {
     Unregistered,
     /// The registrar refused in a way that trying again cannot fix.
     Failed,
-    /// A snapshot was restored, and nothing has spoken to the registrar since
+    /// A snapshot was restored and nothing has spoken to the registrar since
     /// (see [`UserAgent::thaw_registration`](crate::UserAgent::thaw_registration)).
     ///
-    /// There is a binding on paper. It is deliberately not `Registered`: what
-    /// was restored is what a registrar said before the device slept, and a
-    /// cached registration that still read as valid while name resolution had
-    /// gone is a failure this project has had. Nothing may be inferred from
-    /// this state except that the next REGISTER can be a refresh rather than a
-    /// new registration.
+    /// Deliberately not `Registered`: the binding is only what the registrar
+    /// said before the device slept. The one thing it allows is that the next
+    /// REGISTER can be a refresh.
     Restored,
     /// The account has no registrar
     /// ([`Account::unregistered`](crate::Account::unregistered)) and never
     /// sends a REGISTER: a trunk that knows this end by its address.
     ///
-    /// Not `Idle`, which is one
-    /// [`UserAgent::register`](crate::UserAgent::register) away from a binding;
-    /// that call is refused here. An account starts in this state and never
-    /// leaves it — nothing on the wire moves it, and a wake, a move or a push
-    /// has no binding of its to doubt or refresh.
+    /// Unlike `Idle`, [`UserAgent::register`](crate::UserAgent::register) is
+    /// refused here. An account starts in this state and never leaves it.
     NotRegistering,
 }
 
@@ -96,15 +85,14 @@ impl core::fmt::Display for RegistrationState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ChallengeRefusal {
-    /// The challenged request went somewhere other than the account's own
-    /// server — its registrar, or the outbound proxy of an account that does
-    /// not register — so whoever asked is the far end of a call, or a peer
-    /// reached directly, and not the party that issued the password.
+    /// The request went somewhere other than the account's registrar or
+    /// outbound proxy, so the challenger is a far end, not the party that
+    /// issued the password.
     NotTheAccountsServer,
-    /// The account's server asked for a realm that is not the account's: not
-    /// one of [`Account::realms`](crate::Account::realms), or, with none
-    /// named, not the one its server first challenged with. A proxy passing
-    /// on a far end's own challenge is what this looks like.
+    /// The account's server asked for a realm not in
+    /// [`Account::realms`](crate::Account::realms) (or, with none named, not
+    /// the one it first challenged with). Typically a proxy passing on a far
+    /// end's challenge.
     NotTheAccountsRealm,
 }
 
@@ -119,44 +107,35 @@ impl core::fmt::Display for ChallengeRefusal {
 
 /// Why a registration is not live.
 ///
-/// The split that matters is whether trying again can help. Everything that
-/// can is retried on the RFC 5626 §4.5 schedule without the application being
-/// asked; everything that cannot stops, because a client that re-sends a
-/// refused password locks the account it was trying to use.
+/// What can be fixed by trying again is retried on the RFC 5626 §4.5 schedule.
+/// The rest stops: re-sending a refused password locks the account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RegistrationFailure {
-    /// The registrar refused, and it will refuse the same request again: a
-    /// 403, a 404, or any other final response that is about the account
-    /// rather than about this attempt.
+    /// A final refusal about the account rather than this attempt (403, 404,
+    /// and the like).
     Rejected,
-    /// A challenge came back that could not be answered — no credentials on
-    /// the account — or the same challenge came back after it was answered,
-    /// which §22.1 reads as the password being wrong.
+    /// No credentials to answer the challenge, or the same challenge came back
+    /// after it was answered, which §22.1 reads as a wrong password.
     BadCredentials,
-    /// The registrar is not answering, or says it cannot serve this now: a
-    /// timeout, a dead transport, a 5xx.
+    /// Timeout, dead transport, or a 5xx.
     Unreachable,
-    /// The registrar moved: a 3xx naming somewhere else. Following it needs an
-    /// address, and resolving one is the caller's, so the redirect is reported
-    /// rather than chased.
+    /// A 3xx naming somewhere else. Resolving it is the caller's, so it is
+    /// reported rather than followed.
     Redirected,
-    /// The account's `Contact` names an address the registrar cannot reach
-    /// this end at — loopback, to a registrar that is not, or the unspecified
-    /// address — and nothing was sent (see [`crate::UaError::UnreachableAddress`]).
-    /// Trying again cannot help until the account is given an address the
-    /// registrar can reach ([`UserAgent::rebind`](crate::UserAgent::rebind)).
+    /// The `Contact` names an address the registrar cannot reach (loopback to
+    /// a remote registrar, or unspecified), so nothing was sent (see
+    /// [`crate::UaError::UnreachableAddress`]). Fixed only by
+    /// [`UserAgent::rebind`](crate::UserAgent::rebind).
     UnreachableContact,
 }
 
 impl RegistrationFailure {
-    /// A note about what usually causes this, where there is one worth saying.
+    /// A note about the usual cause, where there is one worth saying.
     ///
-    /// Not a diagnosis: nothing on the wire proves it. But a registrar that
-    /// refuses every binding is almost always configured to allow none — the
-    /// SIP channel driver of one widely deployed PBX defaults `max_contacts`
-    /// to zero, which does exactly that — and the client gets blamed for a
-    /// server setting often enough that it is worth saying out loud.
+    /// Not a diagnosis. A registrar refusing every binding is usually set to
+    /// allow none (one common PBX defaults `max_contacts` to zero), and the
+    /// client gets blamed for it.
     #[must_use]
     pub const fn hint(self) -> Option<&'static str> {
         match self {
@@ -196,12 +175,8 @@ pub enum UaEvent {
     },
     /// The registrar holds a binding.
     ///
-    /// `expires` is what it granted, which wins over what was asked for
-    /// (§10.2.4), and `refresh_in` is when the next REGISTER goes — early
-    /// enough that one lost refresh and one retransmission round still fit
-    /// before the binding lapses. The 2xx rides whole, for the same reason a
-    /// refusal does: the `Contact` set the registrar holds for the address of
-    /// record, and whatever else it said, says more than a lifetime can.
+    /// `expires` is what it granted (§10.2.4). `refresh_in` leaves room for
+    /// one lost refresh and a retransmission round before the binding lapses.
     Registered {
         /// Which account.
         account: AccountId,
@@ -211,9 +186,8 @@ pub enum UaEvent {
         refresh_in: Duration,
         /// The 2xx, whole.
         response: OwnedMessage,
-        /// The service route, the GRUUs and the associated identities it
-        /// carried, as far as they could be read. What this account's
-        /// requests use from here on, until the next 2xx replaces it.
+        /// Service route, GRUUs and associated identities read from it. Used
+        /// by this account's requests until the next 2xx.
         info: RegistrarInfo,
     },
     /// A refresh is in flight. The binding stands until it is answered.
@@ -223,10 +197,8 @@ pub enum UaEvent {
     },
     /// The registration is not live.
     ///
-    /// `retry_in` is set when the user agent is going to try again by itself,
-    /// and absent when it has stopped. Either way the response is here whole,
-    /// because a reason phrase, a `Retry-After` or the `Contact` of a redirect
-    /// says more than a status code can.
+    /// `retry_in` is set when the user agent will try again by itself, absent
+    /// when it has stopped.
     RegistrationFailed {
         /// Which account.
         account: AccountId,
@@ -244,32 +216,21 @@ pub enum UaEvent {
         /// Which account.
         account: AccountId,
     },
-    /// A binding the registrar granted is no longer evidence of anything:
-    /// the machine slept, the network under it changed, or names stopped
-    /// resolving and its registrar was one. Its state is
+    /// A granted binding is no longer evidence: the machine slept, the
+    /// network changed, or name resolution failed. It stays
     /// [`RegistrationState::Unverified`](crate::RegistrationState::Unverified)
-    /// from now until a 2xx proves it again; the recovery that follows says
-    /// what it tries in [`UaEvent::Lifecycle`].
+    /// until a 2xx proves it; the recovery reports in [`UaEvent::Lifecycle`].
     Unverified {
         /// Which account.
         account: AccountId,
     },
-    /// The INVITE for a call a push had already announced has arrived
-    /// (RFC 8599).
+    /// The INVITE for a call a push already announced has arrived (RFC 8599).
     ///
-    /// Queued immediately before the [`UaEvent::IncomingCall`] naming the same
-    /// call, and never without one, so that an application reading the queue
-    /// in order knows the call belongs to a screen it has already raised
-    /// before it is told there is a call at all. That is the whole point: on a
-    /// phone the ringing screen exists first, and a stack that reports the
-    /// INVITE without saying which announcement it answers has made the
-    /// application guess.
-    ///
-    /// It is a separate event rather than a field on `IncomingCall` because a
-    /// variant that grows a field breaks every pattern that names its fields —
-    /// here, and in the C ABI and the bindings generated from it, where
-    /// `docs/13-client-requirements.md` B7 makes "adding a function cannot
-    /// leave a platform behind" a requirement rather than a preference.
+    /// Queued immediately before the [`UaEvent::IncomingCall`] for the same
+    /// call, and never without one, so the application knows which ringing
+    /// screen the call belongs to. A separate event rather than a field, since
+    /// a new field would break the C ABI and its bindings
+    /// (`docs/13-client-requirements.md` B7).
     CallAnnounced {
         /// The call the INVITE opened.
         call: CallHandle,
@@ -278,13 +239,9 @@ pub enum UaEvent {
     },
     /// An announced call never arrived.
     ///
-    /// Not an error. A wake-up chain has a notification service, a proxy, a
-    /// bucket timer and a radio in it, and when a call does not come through
-    /// it this is the only place that says which end gave up: the push was
-    /// delivered, this device woke, refreshed its binding, and no INVITE
-    /// followed. RFC 8599 §5.6.2 has several ways for that to be the proxy's
-    /// doing — the caller hung up, the push request failed, the bucket timer
-    /// ran out — and none of them reaches this device as a SIP message.
+    /// Not an error: the push was delivered, the device woke and refreshed,
+    /// and no INVITE followed. RFC 8599 §5.6.2 gives the proxy several ways
+    /// to cause that, none of which reaches this device.
     AnnouncedCallMissing {
         /// What was expected.
         announcement: Announcement,
@@ -293,54 +250,48 @@ pub enum UaEvent {
     },
     /// Somebody is calling.
     ///
-    /// Answer it with [`UserAgent::answer`](crate::UserAgent::answer), say it
-    /// is ringing with [`UserAgent::ring`](crate::UserAgent::ring), or refuse
-    /// it with [`UserAgent::reject`](crate::UserAgent::reject). A 100 Trying
-    /// has already gone out; nothing else has.
+    /// Answer with [`UserAgent::answer`](crate::UserAgent::answer), ring with
+    /// [`UserAgent::ring`](crate::UserAgent::ring), or refuse with
+    /// [`UserAgent::reject`](crate::UserAgent::reject). Only a 100 Trying has
+    /// gone out.
     IncomingCall {
         /// The call.
         call: CallHandle,
-        /// The account it came in on, when it could be told which. An INVITE
-        /// addressed to somewhere this agent does not register still arrives,
-        /// because refusing it silently would hide a misrouted call.
+        /// The account it came in on, when known. A call to an address this
+        /// agent does not register still arrives, so a misrouted call shows.
         account: Option<AccountId>,
         /// The INVITE, whole; the offer may be in it.
         request: OwnedMessage,
-        /// Who is calling, read out of the INVITE as it arrived: its `From`,
-        /// `To` and `Call-ID`, what the network asserted about the caller
-        /// behind the account's trust gate (RFC 3325 §8), and how the call
-        /// asked to be answered and rung. `None` only for an INVITE whose
-        /// `From`, `To` or `Call-ID` could not be read.
+        /// Who is calling: `From`, `To`, `Call-ID`, the network-asserted
+        /// identity behind the account's trust gate (RFC 3325 §8), and the
+        /// answer and ring hints. `None` only when `From`, `To` or `Call-ID`
+        /// could not be read.
         identity: Option<std::sync::Arc<crate::CallIdentity>>,
     },
-    /// A call's `Identity` header field (RFC 8224) names a certificate this
-    /// end has to fetch before it can say who is calling: the call is held
-    /// back until [`UserAgent::stir_certificate`](crate::UserAgent::stir_certificate)
-    /// hands over what `url` yielded, or says nothing could be had.
+    /// A call's `Identity` header field (RFC 8224) needs a certificate fetched
+    /// before the caller can be verified. The call is held back until
+    /// [`UserAgent::stir_certificate`](crate::UserAgent::stir_certificate)
+    /// hands over what `url` yielded, or that nothing could be had.
     ///
-    /// The fetch is the application's — its cache, its HTTP client and their
-    /// timeouts — and it is waited for only so long
-    /// ([`StirConfig::certificate_wait`](crate::StirConfig::certificate_wait));
-    /// after that the call is verified as one whose certificate could not be
-    /// had. The handle names a call the application has not been told about
-    /// yet: [`UaEvent::CallerVerified`] and then [`UaEvent::IncomingCall`]
-    /// follow, or [`UaEvent::CallEnded`] if the caller gives up first.
+    /// The fetch is the application's. After
+    /// [`StirConfig::certificate_wait`](crate::StirConfig::certificate_wait)
+    /// the call is verified without the certificate. The handle names a call
+    /// not yet reported: [`UaEvent::CallerVerified`] and
+    /// [`UaEvent::IncomingCall`] follow, or [`UaEvent::CallEnded`] if the
+    /// caller gives up first.
     CertificateWanted {
         /// The call waiting.
         call: CallHandle,
         /// The `info` URL of its `Identity` header field.
         url: Box<str>,
     },
-    /// A request of `account`'s was challenged by somebody its password is
-    /// not for, and the challenge was not answered (RFC 3261 §22.1: "each
-    /// such protection domain has its own set of usernames and passwords").
+    /// A request of `account`'s was challenged by somebody its password is not
+    /// for, and the challenge was not answered (RFC 3261 §22.1).
     ///
-    /// Raised before the refusal settles the way any unanswered challenge
-    /// does — a call ending with the 401 or 407, a registration failing
-    /// with [`RegistrationFailure::BadCredentials`], a request inside a call
-    /// refused — so the application reading in order knows why first. Every
-    /// answer is material for an offline search of the password by whoever
-    /// chose the nonce (RFC 7616 §5.10, §5.11), which is why nothing is sent.
+    /// Raised before the refusal settles the usual way (call ended with the
+    /// 401/407, [`RegistrationFailure::BadCredentials`], in-call request
+    /// refused). Nothing is sent because every answer helps an offline
+    /// password search by whoever chose the nonce (RFC 7616 §5.10, §5.11).
     ChallengeDeclined {
         /// Whose password was asked for.
         account: AccountId,
@@ -351,22 +302,16 @@ pub enum UaEvent {
         /// Why the password is not for it.
         why: ChallengeRefusal,
     },
-    /// The account's server takes an OAuth 2.0 access token (RFC 8898) and
-    /// the account has none it would accept: none was supplied, or the one
-    /// supplied was refused — expired or revoked, as
-    /// `challenge.error`'s `invalid_token` says (RFC 6750 §3.1).
+    /// The account's server wants an OAuth 2.0 access token (RFC 8898) and
+    /// the account has none it accepts: none supplied, or the one supplied
+    /// was refused (`invalid_token`, RFC 6750 §3.1).
     ///
-    /// Fetching the token is the application's: from
-    /// `challenge.authz_server`, which RFC 8898 §2.1.1 says the client
-    /// "MUST check ... against a list of trusted ASs", for
-    /// `challenge.scope`. Hand it over with
-    /// [`UserAgent::set_access_token`](crate::UserAgent::set_access_token).
-    /// The refusal settles meanwhile the way an unanswered challenge does —
-    /// a registration failing with [`RegistrationFailure::BadCredentials`],
-    /// a call ending with the 401 or 407 — and the token is used from the
-    /// next request on; [`UserAgent::register`](crate::UserAgent::register)
-    /// registers again at once. Only for a challenge from the account's own
-    /// server: anybody else's is [`UaEvent::ChallengeDeclined`].
+    /// Fetching it is the application's, from `challenge.authz_server`, which
+    /// it MUST check against its trusted list (RFC 8898 §2.1.1). Hand it over
+    /// with [`UserAgent::set_access_token`](crate::UserAgent::set_access_token);
+    /// it is used from the next request on. Meanwhile the refusal settles as
+    /// an unanswered challenge does. Only for the account's own server;
+    /// anybody else's is [`UaEvent::ChallengeDeclined`].
     TokenRequired {
         /// Whose token is wanted.
         account: AccountId,
@@ -375,22 +320,16 @@ pub enum UaEvent {
         /// The challenge: realm, scope, authorization server and error.
         challenge: sipral_core::auth::BearerChallenge,
     },
-    /// This end's verification service reached its verdict on who is
-    /// calling (RFC 8224 §6.2).
+    /// The verification service's verdict on the caller (RFC 8224 §6.2).
     ///
-    /// Queued immediately before the [`UaEvent::IncomingCall`] naming the
-    /// same call, whose identity carries the same verdict
-    /// ([`CallerIdentity::verification`](crate::CallerIdentity::verification)),
-    /// so an application reading in order has it before the phone rings.
-    /// For an account set to refuse what does not verify
-    /// ([`StirVerification::Strict`](crate::StirVerification::Strict)) and a
-    /// call that did not, `verification.refused` is set, the call has been
-    /// answered with the response RFC 8224 §6.2.2 prescribes, and
-    /// [`UaEvent::CallEnded`] follows instead.
+    /// Queued immediately before the matching [`UaEvent::IncomingCall`],
+    /// whose identity carries the same verdict. Under
+    /// [`StirVerification::Strict`](crate::StirVerification::Strict), a call
+    /// that failed has `verification.refused` set, has been answered as
+    /// §6.2.2 prescribes, and [`UaEvent::CallEnded`] follows instead.
     ///
-    /// Only for an account whose verification is in force: one set to
-    /// [`StirVerification::Off`](crate::StirVerification::Off), or to report
-    /// on an agent given no trust anchors, never raises it.
+    /// Never raised with [`StirVerification::Off`](crate::StirVerification::Off)
+    /// or on an agent with no trust anchors.
     CallerVerified {
         /// The call.
         call: CallHandle,
@@ -401,8 +340,7 @@ pub enum UaEvent {
         /// The INVITE, whole.
         request: OwnedMessage,
     },
-    /// A response short of an answer: the far end is ringing, or is playing
-    /// something before it answers.
+    /// A provisional response: ringing, or early media.
     CallProgress {
         /// The call.
         call: CallHandle,
@@ -412,15 +350,13 @@ pub enum UaEvent {
         status: StatusCode,
         /// The response, whole; early media is in it when there is any.
         response: OwnedMessage,
-        /// Whether this response carried an offer whose answer has to travel
-        /// in the PRACK that acknowledges it (RFC 3262 §5). Only ever true for
-        /// a call placed without an offer, and answered with
-        /// [`UserAgent::answer_early`](crate::UserAgent::answer_early) — until
-        /// it is, the response is retransmitted and the call does not proceed.
+        /// The response carries an offer whose answer goes in the PRACK
+        /// (RFC 3262 §5). Only for a call placed without an offer; until
+        /// [`UserAgent::answer_early`](crate::UserAgent::answer_early) is
+        /// called the response is retransmitted and the call waits.
         answer_wanted: bool,
     },
-    /// One INVITE opened a second dialog: a proxy forked it, and more than one
-    /// phone is ringing.
+    /// A proxy forked the INVITE and a second dialog opened.
     ///
     /// `sibling` is a call of its own from here on. What happens to it when
     /// another branch answers is [`ForkPolicy`](crate::ForkPolicy).
@@ -433,12 +369,10 @@ pub enum UaEvent {
     /// The call is up.
     ///
     /// `answer_wanted` is true only for a call placed without an offer: the
-    /// offer then arrives in this 2xx, the answer to it has to travel in the
-    /// ACK, and nothing has been acknowledged yet. Call
-    /// [`UserAgent::acknowledge`](crate::UserAgent::acknowledge) with it.
-    /// Otherwise the ACK has already gone — a 2xx left unacknowledged is
-    /// retransmitted for 32 seconds and then hung up by the far end, which is
-    /// not a decision worth leaving to an application.
+    /// offer is in this 2xx, and its answer goes in the ACK through
+    /// [`UserAgent::acknowledge`](crate::UserAgent::acknowledge). Otherwise
+    /// the ACK has already gone, since an unacknowledged 2xx gets the call
+    /// hung up after 32 seconds.
     CallConfirmed {
         /// The call.
         call: CallHandle,
@@ -448,12 +382,11 @@ pub enum UaEvent {
         /// Whether the ACK is waiting for a session description.
         answer_wanted: bool,
     },
-    /// The session inside a live call changed: a hold, a resume, or an offer
-    /// either end made and had accepted.
+    /// The session changed: a hold, a resume, or an accepted offer from
+    /// either end.
     ///
-    /// Both descriptions ride along because the user agent writes some of them
-    /// itself — the held version of an offer is derived here, from RFC 3264
-    /// §8.4, and this is the only place the application sees it.
+    /// Both descriptions are given because the held version of an offer is
+    /// derived here (RFC 3264 §8.4) and this is the only place it is seen.
     SessionChanged {
         /// The call.
         call: CallHandle,
@@ -464,16 +397,15 @@ pub enum UaEvent {
         /// And what the far end is.
         remote: Option<Arc<[u8]>>,
     },
-    /// The far end offered a change this layer has no policy for: a codec
-    /// swap, a stream added. A body that is not a session description never
-    /// arrives here: RFC 3261 §8.2.3 has it refused 415 first, or ignored
-    /// when its sender marked it optional.
+    /// The far end offered a change this layer has no policy for (codec swap,
+    /// added stream). A body that is not a session description never arrives
+    /// here: it is refused 415, or ignored if marked optional (RFC 3261
+    /// §8.2.3).
     ///
-    /// The transaction is held open for it. Answer with
+    /// The transaction is held open. Answer with
     /// [`UserAgent::accept_reoffer`](crate::UserAgent::accept_reoffer) or
-    /// refuse with
-    /// [`UserAgent::reject_reoffer`](crate::UserAgent::reject_reoffer) — a
-    /// re-INVITE nobody answers is retransmitted and then ends the call.
+    /// [`UserAgent::reject_reoffer`](crate::UserAgent::reject_reoffer); an
+    /// unanswered re-INVITE ends the call.
     Reoffer {
         /// The call.
         call: CallHandle,
@@ -482,9 +414,8 @@ pub enum UaEvent {
     },
     /// A change this end offered was refused, or will not be answered.
     ///
-    /// §14.1: the session stands exactly as it was. `retry_in` is set only for
-    /// a 491, where two offers crossed and this one is going out again by
-    /// itself when the wait is over.
+    /// The session stands as it was (§14.1). `retry_in` is set only for a
+    /// 491 (crossed offers): the change goes out again by itself after it.
     SessionChangeFailed {
         /// The call.
         call: CallHandle,
@@ -497,13 +428,11 @@ pub enum UaEvent {
     },
     /// The far end asked this one to call somebody else (RFC 3515).
     ///
-    /// Take it with
-    /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer),
-    /// which answers 202 and places the call, or refuse it with
-    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer). A
-    /// REFER nobody answers is retransmitted until it gives up; 64·T1 after
-    /// it arrived the stack answers it 408 itself, and the call takes the
-    /// next REFER it is sent as though this one had never come.
+    /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer)
+    /// answers 202 and places the call;
+    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer)
+    /// refuses. Left unanswered for 64·T1, the stack answers 408 and the call
+    /// takes the next REFER as if this one never came.
     TransferRequested {
         /// The call it arrived in.
         call: CallHandle,
@@ -515,63 +444,57 @@ pub enum UaEvent {
         /// The REFER, whole.
         request: OwnedMessage,
     },
-    /// A transfer this end asked for is under way, as the far end reports it
-    /// in a `message/sipfrag` (RFC 3515 §2.4.5).
+    /// Progress of a transfer this end asked for, from the far end's
+    /// `message/sipfrag` (RFC 3515 §2.4.5).
     TransferProgress {
         /// The call that was transferred.
         call: CallHandle,
         /// What the far end's own call is doing.
         status: StatusCode,
     },
-    /// And how it ended. A success hangs this call up, because this end is not
-    /// in it any more; a failure leaves it exactly where it was.
+    /// How a transfer ended. Success hangs this call up; failure leaves it
+    /// as it was.
     ///
-    /// A REFER the far end refused outright (§2.4.2's 4xx–6xx) opens no
-    /// subscription and no NOTIFY follows it, so its refusal is reported
-    /// here too, with the refusal's status — as is one that went unanswered,
-    /// as a 408, or whose transport failed, as a 503 (RFC 3261 §8.1.3.1).
+    /// Also reported here: a REFER refused outright (4xx–6xx, no NOTIFY
+    /// follows, §2.4.2), one unanswered (408), or one whose transport failed
+    /// (503, RFC 3261 §8.1.3.1).
     TransferDone {
         /// The call that was transferred.
         call: CallHandle,
         /// The final status the far end reported.
         status: StatusCode,
     },
-    /// Somebody outside any call asked this end to place one (RFC 3515, a
-    /// REFER with no dialog): click-to-dial from a switchboard or a CRM.
+    /// An out-of-dialog REFER asks this end to place a call (RFC 3515):
+    /// click-to-dial from a switchboard or a CRM.
     ///
     /// Raised only with
     /// [`UserAgent::allow_referrals`](crate::UserAgent::allow_referrals) on,
-    /// and only for a REFER the same screening an INVITE meets let through.
-    /// Take it with
+    /// and only after the same screening an INVITE gets.
     /// [`UserAgent::accept_transfer`](crate::UserAgent::accept_transfer) on
-    /// `referral`, which answers 202, reports on the call it places, and
-    /// places it from `account`; refuse it with
-    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer).
-    /// Taking one is the application's decision every time, because a peer
-    /// that can make a phone dial is a toll-fraud vector: see
-    /// [`crate::referral`]. One left unanswered for 64·T1 is
+    /// `referral` answers 202 and places the call from `account`;
+    /// [`UserAgent::reject_transfer`](crate::UserAgent::reject_transfer)
+    /// refuses. Always the application's decision, because it is a toll-fraud
+    /// vector (see [`crate::referral`]). Unanswered for 64·T1, it becomes
     /// [`UaEvent::ReferralLapsed`].
     ReferralRequested {
-        /// The referral: a handle of the call kind that names no call, only
-        /// this request, until it is answered or lapses.
+        /// A call-kind handle that names only this request until it is
+        /// answered or lapses.
         referral: CallHandle,
-        /// The line it was addressed to, by its Request-URI or its `To`, and
-        /// the one the call it asks for is placed from.
+        /// The line it was addressed to (Request-URI or `To`), and the one
+        /// the call is placed from.
         account: AccountId,
         /// Who to call.
         target: sipral_core::msg::Uri,
         /// Whether its `Refer-To` named a dialog to replace (RFC 3891).
         attended: bool,
-        /// Its `Referred-By`, when it carried exactly one (RFC 3892 §2.1):
-        /// who the sender says is asking. Written by the sender, so it is
-        /// context for a decision and never proof of anything.
+        /// Its `Referred-By`, when it carried exactly one (RFC 3892 §2.1).
+        /// Written by the sender: context, never proof.
         referred_by: Option<Box<[u8]>>,
         /// The REFER, whole.
         request: OwnedMessage,
     },
-    /// A referral nobody took or refused before its transaction ran out
-    /// (RFC 3515 §2.4.2), answered by the stack itself. Its handle names
-    /// nothing from here on.
+    /// A referral nobody answered before its transaction ran out (RFC 3515
+    /// §2.4.2); the stack answered it. Its handle names nothing from here on.
     ReferralLapsed {
         /// The referral.
         referral: CallHandle,
@@ -588,15 +511,9 @@ pub enum UaEvent {
     },
     /// The notifier has the subscription.
     ///
-    /// `state` says whether it is granted or still being decided — §4.1.3's
-    /// `pending` means "there is insufficient policy information to grant or
-    /// deny the subscription yet", and nothing is known about the resource
-    /// until it becomes `active`. `expires` is what the notifier granted,
-    /// which wins over what was asked for (§3.1.1).
-    ///
-    /// Sent when the state changes and not on every refresh: a lamp does not
-    /// move when a refresh is scheduled, and thirty subscriptions saying so
-    /// every hour is noise.
+    /// `state` is granted or still pending (§4.1.3); nothing is known about
+    /// the resource until it is `active`. `expires` is what the notifier
+    /// granted (§3.1.1). Sent on state changes only, not on every refresh.
     Subscribed {
         /// Which subscription.
         subscription: SubscriptionHandle,
@@ -607,30 +524,24 @@ pub enum UaEvent {
         /// How long until the refresh.
         refresh_in: Duration,
     },
-    /// One SUBSCRIBE was answered by two notifiers, so there are now two
+    /// Two notifiers answered one SUBSCRIBE, so there are now two
     /// subscriptions (RFC 6665 §4.1.4).
     ///
-    /// `sibling` is a subscription of its own from here on, with its own
-    /// dialog, its own refresh and its own state. RFC 4235 §3.9 makes this the
-    /// normal case for dialog state: "a forked SUBSCRIBE request for dialog
-    /// state can install multiple subscriptions", one per device the address
-    /// of record is registered on.
+    /// `sibling` has its own dialog, refresh and state. For dialog state this
+    /// is normal: one per registered device (RFC 4235 §3.9).
     SubscriptionForked {
         /// The one that was already known.
         subscription: SubscriptionHandle,
         /// The one that has just appeared.
         sibling: SubscriptionHandle,
     },
-    /// A notification arrived and has been answered (RFC 6665 §4.1.3).
+    /// A NOTIFY arrived and has been answered (RFC 6665 §4.1.3).
     ///
-    /// `info` is there when the body was an `application/dialog-info+xml`
-    /// document that could be read, and it is what changed rather than the
-    /// whole picture — RFC 4235 §3.8 lets a notifier send only the dialogs
-    /// whose state moved. The merged picture is
-    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info). A body that
-    /// could not be read leaves both alone and arrives here as `None` with the
-    /// request whole, because a lamp showing what was last known beats one
-    /// showing what a malformed document happened to contain.
+    /// `info` is set for a readable `application/dialog-info+xml` body and
+    /// holds only what changed (RFC 4235 §3.8); the merged picture is
+    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info). An
+    /// unreadable body changes neither and arrives as `None`, so the lamp
+    /// keeps showing what was last known.
     Notified {
         /// Which subscription.
         subscription: SubscriptionHandle,
@@ -642,14 +553,11 @@ pub enum UaEvent {
     },
     /// The subscription is not live.
     ///
-    /// `retry_in` is set when the user agent is going to start a fresh one by
-    /// itself — §4.1.2.2 makes that "an unrelated initial SUBSCRIBE request
-    /// with a freshly generated Call-ID and a new, unique From tag", under the
-    /// same handle — and absent when it has stopped, in which case the handle
-    /// names nothing from here on. Either way what a `dialog` subscription had
-    /// been told is no longer evidence about anything, and
-    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info) says so by
-    /// answering nothing.
+    /// `retry_in` is set when a fresh subscription will start by itself under
+    /// the same handle (new Call-ID and From tag, §4.1.2.2); absent, the
+    /// handle names nothing from here on. Either way
+    /// [`UserAgent::dialog_info`](crate::UserAgent::dialog_info) answers
+    /// nothing for it.
     SubscriptionEnded {
         /// Which subscription.
         subscription: SubscriptionHandle,
@@ -662,15 +570,12 @@ pub enum UaEvent {
         /// The refusal, whole, when there was one.
         response: Option<OwnedMessage>,
     },
-    /// A MESSAGE arrived (RFC 3428 §7) and has already been answered: 200,
-    /// because this stack delivers rather than relays.
+    /// A MESSAGE arrived (RFC 3428 §7) and was already answered 200: this
+    /// stack delivers rather than relays.
     ///
-    /// `account` is the line it was addressed to, when one could be told —
-    /// absent the same way [`UaEvent::IncomingCall`]'s is for a request this
-    /// agent does not register the name in. `call` is set when the MESSAGE
-    /// rode inside a dialog (§4's MAY); `None` for the ordinary out-of-dialog
-    /// case. The `Content-Type` and the body are read from `request`, which
-    /// carries the whole MESSAGE.
+    /// `account` is absent as for [`UaEvent::IncomingCall`]. `call` is set
+    /// when the MESSAGE came inside a dialog (§4). Content type and body are
+    /// read from `request`.
     MessageReceived {
         /// The account it was addressed to, when known.
         account: Option<AccountId>,
@@ -681,13 +586,9 @@ pub enum UaEvent {
     },
     /// A MESSAGE this end sent reached its final answer, or never will.
     ///
-    /// `status` is 200 when the far end delivered it, 202 when it went
-    /// through a relay that could not promise delivery (§4), a 415 carrying
-    /// an `Accept` the far end could not read the body against, a 413 over
-    /// its size policy, or the 408/503 this stack reports for one that timed
-    /// out or lost its transport (RFC 3261 §8.1.3.1's reading of the same for
-    /// any non-INVITE request). `response` is the answer whole, when one
-    /// arrived.
+    /// `status`: 200 delivered, 202 accepted by a relay that cannot promise
+    /// delivery (§4), 415 with the far end's `Accept`, 413 over its size
+    /// limit, or 408/503 for a timeout or lost transport (RFC 3261 §8.1.3.1).
     MessageSent {
         /// Which send.
         message: MessageHandle,
@@ -706,17 +607,12 @@ pub enum UaEvent {
         /// What came of it.
         outcome: crate::ProbeOutcome,
     },
-    /// A message-summary NOTIFY reported the state of a mailbox (RFC 3842
-    /// §3.9).
+    /// A message-summary NOTIFY reported a mailbox (RFC 3842 §3.9).
     ///
-    /// `new`, `old` and the urgent counts are the `voice-message` class's
-    /// (RFC 3458 §6.2) — the one a phone's message-waiting light is about —
-    /// read from
-    /// [`UserAgent::message_summary`](crate::UserAgent::message_summary)'s
-    /// full document, which keeps every class a notifier reported. `waiting`
-    /// is §3.5's boolean status line alone, sent by every notifier even one
-    /// with nothing more detailed to say; a body that never names
-    /// `voice-message` still carries it, with the four counts at zero.
+    /// The counts are the `voice-message` class's (RFC 3458 §6.2); every class
+    /// is in [`UserAgent::message_summary`](crate::UserAgent::message_summary).
+    /// `waiting` is the §3.5 status line, present even when the body names no
+    /// `voice-message` (the counts are then zero).
     MessagesWaiting {
         /// Which subscription.
         subscription: SubscriptionHandle,
@@ -733,15 +629,13 @@ pub enum UaEvent {
         /// Old ones flagged urgent.
         urgent_old: u32,
     },
-    /// A `conference` subscription's picture of the conference changed, or
-    /// the conference ended (RFC 4575 §4.6). The picture itself is
+    /// A `conference` subscription's picture changed, or the conference ended
+    /// (RFC 4575 §4.6). The picture is
     /// [`UserAgent::conference`](crate::UserAgent::conference).
     ///
-    /// Only for a document that was merged. One that was late or repeated
-    /// changes nothing and says nothing; one that could not be merged — a
-    /// partial document whose predecessor never arrived — is answered here by
-    /// asking for full state again, and the picture stands as it was until
-    /// that arrives.
+    /// Only for a merged document. A late or repeated one is silent; one that
+    /// cannot be merged (its predecessor never arrived) triggers a request
+    /// for full state, and the picture stands until it comes.
     ConferenceChanged {
         /// Which subscription.
         subscription: SubscriptionHandle,
@@ -759,14 +653,13 @@ pub enum UaEvent {
         /// the presentity's full state.
         presence: Arc<crate::presence::Presence>,
     },
-    /// Something happened to state this agent keeps at a compositor (RFC
-    /// 3903): it was published or refreshed, it lapsed, it was removed, or
-    /// the compositor refused.
+    /// State kept at a compositor (RFC 3903) was published, refreshed,
+    /// lapsed, removed, or refused.
     ///
     /// Never [`PublishEvent::Challenged`](crate::PublishEvent::Challenged):
-    /// the account's credentials answer a challenge, and one they cannot is
-    /// a [`PublishEvent::Failed`](crate::PublishEvent::Failed) with the 401
-    /// or 407 in it.
+    /// the account's credentials answer it, and when they cannot it is a
+    /// [`PublishEvent::Failed`](crate::PublishEvent::Failed) with the 401 or
+    /// 407.
     Publication {
         /// Which publication.
         publication: crate::PublicationHandle,
@@ -794,15 +687,12 @@ pub enum UaEvent {
         /// The refusal, whole, when there was one. A 302 names where to try
         /// instead, and a 380 carries an alternative service.
         response: Option<OwnedMessage>,
-        /// The BYE or the CANCEL the far end ended the call with, whole,
-        /// when that is how it ended: a header field of the far end's own on
-        /// it — an outcome, a disposition — is the application's to read.
+        /// The far end's BYE or CANCEL, whole, when that is how it ended, so
+        /// its own header fields can be read.
         request: Option<OwnedMessage>,
-        /// Why the far end said it ended the call (RFC 3326): the `Reason`
-        /// of the BYE or the CANCEL that ended it, or of the refusal when a
-        /// gateway put one there (RFC 6432). One value per protocol, in the
-        /// order written, and empty when nothing said. A forking proxy's
-        /// CANCEL of a branch that lost carries a SIP 200,
+        /// The `Reason` values (RFC 3326) of the BYE, CANCEL, or refusal
+        /// (RFC 6432), one per protocol, in order; empty when none. A forking
+        /// proxy's CANCEL of a losing branch carries
         /// [`Reason::is_completed_elsewhere`](crate::Reason::is_completed_elsewhere):
         /// answered on another phone, not missed.
         causes: Box<[crate::Reason]>,
@@ -810,18 +700,11 @@ pub enum UaEvent {
     /// An INFO sent for [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)
     /// reached a final answer.
     ///
-    /// `status` is whatever the far end gave it — a 200 from a switch that
-    /// read the body, a 415 from one that does not take this `Content-Type`,
-    /// or anything else a proxy in front of it chose to send instead. Either
-    /// way the application learns the digit and the code together, without
-    /// having to keep its own map from a fire-and-forget send back to what it
-    /// was about. An INFO nobody answered is reported the way RFC 3261
-    /// §8.1.3.1 says to treat one, as a 408 when it timed out and a 503 when
-    /// its transport failed; one challenged on an account with nothing to
-    /// answer the challenge with, as that challenge's 401 or 407. A digit
-    /// that waited behind another and whose own INFO could then not be sent
-    /// at all is reported too, as a 503, the status §8.1.3.1 gives a request
-    /// that never went out; nothing reached the far end for that one.
+    /// `status` is whatever the far end or a proxy sent (200, 415, ...). No
+    /// answer is reported per RFC 3261 §8.1.3.1: 408 on timeout, 503 on
+    /// transport failure. A challenge the account cannot answer gives its
+    /// 401 or 407. A queued digit whose INFO could not be sent at all is a
+    /// 503, and nothing reached the far end.
     DtmfSent {
         /// The call the INFO went out on, or was to go out on.
         call: CallHandle,
@@ -831,16 +714,11 @@ pub enum UaEvent {
         /// answer that never came.
         status: StatusCode,
     },
-    /// A digit arrived by SIP INFO (RFC 6086), carrying
-    /// `application/dtmf-relay` or `application/dtmf` — see
-    /// `docs/04-ua.md` for the two conventions, neither of which has an RFC
-    /// of its own.
+    /// A digit arrived by SIP INFO (RFC 6086) as `application/dtmf-relay` or
+    /// `application/dtmf` (see `docs/04-ua.md`; neither has an RFC).
     ///
-    /// Not an event of its own kind: the facade this layer sits under unifies
-    /// this with the RFC 4733 digit its media reports into one `DigitReceived`
-    /// the application reads, tagged with which of the two carried it. This
-    /// variant exists only because that unification cannot happen here — this
-    /// layer has no media of its own to unify with.
+    /// The facade above merges this with RFC 4733 digits into one
+    /// `DigitReceived`; it cannot happen here because this layer has no media.
     DtmfReceived {
         /// The call the INFO arrived in.
         call: CallHandle,
@@ -849,15 +727,13 @@ pub enum UaEvent {
         /// `application/dtmf-relay`'s `Duration=`, when the body carried one.
         held_ms: Option<u32>,
     },
-    /// The lifecycle machine moved: the machine was told it sleeps, that it
-    /// woke, or that the network under it is a different one.
+    /// The lifecycle machine moved: sleep, wake, or a different network.
     ///
-    /// `rung` is what was just done about it and `next_in` is when the next
-    /// thing is tried. A rung of [`Rung::WantTransport`] or
-    /// [`Rung::WantAddress`] is a request: nothing here opens a socket or
-    /// resolves a name, so the recovery stops there until
-    /// [`UserAgent::rebind`](crate::UserAgent::rebind) is called, or until the
-    /// wait runs out and the ladder climbs on without it.
+    /// `rung` is what was just done and `next_in` when the next step goes. A
+    /// [`Rung::WantTransport`] or [`Rung::WantAddress`] is a request: nothing
+    /// here opens sockets or resolves names, so recovery waits for
+    /// [`UserAgent::rebind`](crate::UserAgent::rebind) or for the wait to run
+    /// out.
     Lifecycle {
         /// Where the machine is now.
         state: LifecycleState,
@@ -869,29 +745,25 @@ pub enum UaEvent {
     /// A DNS lookup is needed to locate an account's server by RFC 3263
     /// ([`Account::located`](crate::Account::located)).
     ///
-    /// Make it with the platform's resolver and hand the answer to
-    /// [`UserAgent::looked_up`](crate::UserAgent::looked_up) — every one,
-    /// failures included, since the procedure waits for each answer. Several
-    /// can be outstanding at once: one per SRV target's host.
+    /// Hand every answer, failures included, to
+    /// [`UserAgent::looked_up`](crate::UserAgent::looked_up); the procedure
+    /// waits for each. Several can be outstanding, one per SRV target host.
     LookupWanted {
         /// The account whose server is being located.
         account: AccountId,
         /// The name and the kind of record to ask for.
         query: sipral_core::endpoint::Query,
     },
-    /// An account's server was located, or located again once the last
-    /// answer's time-to-live ran out: every address the answer named, first
-    /// the one the account's requests now go to.
+    /// An account's server was located, or relocated after the TTL ran out.
     Located {
         /// The account.
         account: AccountId,
         /// The addresses, in RFC 3263 §4.3's order from the one in use.
         targets: Vec<std::net::SocketAddr>,
     },
-    /// A lookup of an account's server named no address. A REGISTER that was
-    /// waiting for it is reported failed as well, and backs off; anything
-    /// else is looked up again after `retry_in`. An address an earlier
-    /// answer named stays in use meanwhile.
+    /// A lookup of an account's server named no address. A waiting REGISTER
+    /// fails too and backs off; otherwise the lookup repeats after
+    /// `retry_in`. An address from an earlier answer stays in use.
     LocateFailed {
         /// The account.
         account: AccountId,
@@ -900,27 +772,24 @@ pub enum UaEvent {
         /// How long until the next lookup.
         retry_in: Duration,
     },
-    /// The address this call's media was described at is gone: the network
-    /// changed under it ([`Recovery::Rebuild`](crate::Recovery::Rebuild)),
-    /// and the far end is still sending its audio to the old one.
+    /// The network changed ([`Recovery::Rebuild`](crate::Recovery::Rebuild))
+    /// and the far end still sends this call's audio to the old address.
     ///
-    /// One for every call that can still be offered a new description — up,
-    /// or early in a dialog that allows UPDATE — raised as the change is
-    /// reported. Nothing here opens a socket: the application binds one on
-    /// the new network and offers the call there, with
-    /// `sipral::MediaEngine::readdress` for a call whose media the facade
-    /// describes, or [`UserAgent::change_formats`](crate::UserAgent::change_formats)
-    /// with a description of its own. [`UserAgent::rebind`](crate::UserAgent::rebind)
-    /// goes first, so that the re-INVITE carries the new `Contact`.
+    /// One per call that can still take a new offer (up, or early with
+    /// UPDATE). The application binds a socket on the new network and
+    /// re-offers, with `sipral::MediaEngine::readdress` or
+    /// [`UserAgent::change_formats`](crate::UserAgent::change_formats).
+    /// Call [`UserAgent::rebind`](crate::UserAgent::rebind) first so the
+    /// re-INVITE carries the new `Contact`.
     CallAddressWanted {
         /// The call.
         call: CallHandle,
     },
-    /// Every rung of a recovery ladder was climbed and none of them worked.
+    /// Every rung of a recovery ladder failed. Nothing more happens by
+    /// itself.
     ///
-    /// Nothing more happens by itself. Bindings whose REGISTER reached a
-    /// transport are still on their own back-off; `unverified` counts the ones
-    /// that never got that far, which are the ones nothing is retrying.
+    /// Bindings whose REGISTER reached a transport keep their own back-off;
+    /// `unverified` counts those nothing is retrying.
     RecoveryGaveUp {
         /// The last thing that was tried.
         rung: Rung,
@@ -929,20 +798,15 @@ pub enum UaEvent {
         /// Bindings left unproved.
         unverified: usize,
     },
-    /// A protocol event this layer has no policy for.
+    /// A protocol event this layer has no policy for, passed through
+    /// uninterpreted.
     ///
-    /// Nothing the endpoint says is dropped on the way through, and nothing
-    /// that passes here has been interpreted. The one exception is a request
-    /// that no handler here claims, which leaves no choice in how it is
-    /// answered and would otherwise go unanswered until the far end's timer
-    /// gives up: outside a dialog RFC 3261 §8.2.1 has it 405 with `Allow`,
-    /// 501, or 481 when it names a dialog this agent does not have, and
-    /// inside one the usage RFC 5057 §5.3 matches it to decides between the
-    /// same statuses, with RFC 6086 §4.2.2's answer for an INFO. So it is
-    /// answered here and never arrives as `Event::IncomingOutOfDialog` or
-    /// `Event::IncomingInDialog` — except an INFO in a call that is not
-    /// DTMF, once
-    /// [`UserAgent::hand_over_info`](crate::UserAgent::hand_over_info) has
-    /// asked for those (`docs/04-ua.md`).
+    /// Exception: a request no handler claims is answered here (405 with
+    /// `Allow`, 501, or 481 per RFC 3261 §8.2.1 and RFC 5057 §5.3; RFC 6086
+    /// §4.2.2 for INFO) and never arrives as `Event::IncomingOutOfDialog` or
+    /// `Event::IncomingInDialog`. The one exception to that is a non-DTMF INFO
+    /// in a call after
+    /// [`UserAgent::hand_over_info`](crate::UserAgent::hand_over_info)
+    /// (`docs/04-ua.md`).
     Unclaimed(Event),
 }

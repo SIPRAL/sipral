@@ -3,38 +3,23 @@
 
 //! Keeping a binding alive, and knowing when to stop trying.
 //!
-//! Registration is the one part of SIP that a user agent has to keep doing for
-//! as long as it is switched on, and the two numbers that decide whether it
-//! works are both policy rather than protocol: when to refresh, and how long to
-//! wait after a failure.
-//!
 //! **When to refresh.** RFC 3261 §10.2.4 says only "before the expiration
-//! interval has elapsed". Cutting it fine is how a phone stops receiving calls
-//! for thirty seconds every hour: one lost datagram and the binding is gone
-//! before the retransmission arrives. So the refresh goes at 0.85 of what the
-//! registrar granted, and never later than thirty seconds before it lapses,
-//! which leaves room for a lost REGISTER and a full retransmission round. Never
-//! sooner than halfway either, so that a registrar handing out very short
-//! bindings does not turn the client into a metronome.
+//! interval has elapsed". Cutting it fine loses the binding to one lost
+//! datagram. So the refresh goes at 0.85 of the grant, no later than 30 s
+//! before it lapses (room for a lost REGISTER and a retransmission round),
+//! and no sooner than halfway, so very short bindings do not make the client
+//! spin.
 //!
-//! **How long to wait.** RFC 5626 §4.5 has the schedule, and it is used here
-//! for the same reason it exists there: a thousand phones that lost the same
-//! server must not come back in the same second. `W = min(max, base · 2^n)`,
-//! and the actual wait is drawn uniformly between half of W and W.
+//! **How long to wait.** RFC 5626 §4.5: `W = min(max, base · 2^n)`, the wait
+//! drawn uniformly between W/2 and W, so phones that lost the same server do
+//! not all come back in the same second. A 403 or a refused password is not
+//! retried: re-sending it gets accounts locked out.
 //!
-//! What is *not* retried is the other half of this. A registrar that says 403
-//! will say 403 again, and a password that was refused will be refused again —
-//! and re-sending it is how an account gets locked out. Those stop, and say so.
-//!
-//! **Freezing and thawing.** A device that sleeps pays for a whole
-//! registration every time it wakes, and most of that is avoidable: the
-//! `Call-ID` and the sequence number are what make the next REGISTER a refresh
-//! of the binding the registrar still holds rather than a new one, and both
-//! are cheap to write down. What is *not* restored is the belief that the
-//! binding works. A cached registration that still read as valid while name
-//! resolution had gone is one of the failures this stack exists to stop, so a
-//! thawed account comes back as [`RegistrationState::Restored`] and reaches
-//! [`RegistrationState::Registered`] only when a registrar has answered.
+//! **Freezing and thawing.** The `Call-ID` and CSeq are what make the next
+//! REGISTER a refresh rather than a new binding, so they are saved across a
+//! sleep. The belief that the binding works is not: a thawed account is
+//! [`RegistrationState::Restored`] and becomes
+//! [`RegistrationState::Registered`] only when a registrar answers.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -62,24 +47,19 @@ const REFRESH_MARGIN: u64 = 30;
 const BACKOFF_BASE: u64 = 30;
 /// "max-time with a default of 1800 seconds".
 const BACKOFF_MAX: u64 = 1_800;
-/// The doubling stops mattering here; going higher only risks the shift.
+/// Past this the doubling no longer matters; higher only risks the shift.
 const BACKOFF_CEILING: u32 = 16;
-/// What every snapshot starts with, so that a file of anything else is
-/// refused rather than read as a registration.
 const MAGIC: &[u8; 4] = b"SPRG";
-/// The only snapshot layout that exists. See [`freeze`].
+/// The only snapshot layout. See [`freeze`].
 const SNAPSHOT_VERSION: u16 = 1;
-/// Magic, version, sequence number, granted seconds, remaining seconds and
-/// the length of the `Call-ID` that follows them.
+/// Magic, version, CSeq, granted, remaining, `Call-ID` length.
 const SNAPSHOT_HEAD: usize = 20;
-/// RFC 3608's field. It has no compact form and no variant of its own.
+/// RFC 3608.
 const SERVICE_ROUTE: HeaderName<'static> = HeaderName::Extension("Service-Route");
-/// RFC 7315 §4.1's.
+/// RFC 7315 §4.1.
 const P_ASSOCIATED_URI: HeaderName<'static> = HeaderName::Extension("P-Associated-URI");
-/// The most `Service-Route` entries taken from one response. Every one of them
-/// rides on every request the account starts, so a long list makes every
-/// INVITE longer, and past a handful it makes one that no longer fits a
-/// datagram (RFC 3261 §18.1.1). RFC 3608's own examples have two.
+/// The most `Service-Route` entries taken from one response. Each rides on
+/// every request, and a long list overflows a datagram (RFC 3261 §18.1.1).
 const MAX_SERVICE_ROUTE: usize = 8;
 /// The most associated identities kept from one response.
 const MAX_ASSOCIATED: usize = 32;
@@ -90,67 +70,50 @@ const MAX_LEARNED_BYTES: usize = 512;
 #[derive(Debug)]
 pub(crate) struct Registration {
     pub(crate) state: RegistrationState,
-    /// §10.2.4: "A UA SHOULD use the same Call-ID for all registrations during
-    /// a single boot cycle."
+    /// Same for all registrations in a boot cycle (§10.2.4).
     pub(crate) call_id: CallId,
-    /// §10.2: the number grows across refreshes, so a registrar can tell a
-    /// refresh from a replay.
+    /// Grows across refreshes, so a registrar can tell one from a replay.
     pub(crate) cseq: u32,
-    /// The REGISTER in flight, when there is one.
     pub(crate) transaction: Option<TransactionId<NonInviteClient>>,
-    /// The interval being asked for, which a 423 may raise once (§10.2.8).
+    /// The interval asked for; a 423 may raise it once (§10.2.8).
     pub(crate) asking: Duration,
-    /// Whether a 423 has already raised it. A second one is the registrar
-    /// contradicting itself, and is not chased.
+    /// A 423 already raised it; a second one is not chased.
     pub(crate) raised: bool,
-    /// When the next thing happens: a refresh, or a retry.
+    /// The next refresh or retry.
     pub(crate) due: Option<Instant>,
-    /// Consecutive failures worth retrying, which is what the back-off counts.
+    /// Consecutive retryable failures, for the back-off.
     pub(crate) failures: u32,
-    /// A de-registration is in flight, or waiting for a lookup or a
-    /// connection to go: its 200 is not read as a binding, and whatever this
-    /// account sends next -- the wait ending, a retry -- is one again.
+    /// A de-registration is in flight or waiting to go: its 200 is not a
+    /// binding, and whatever goes next is a de-registration too.
     pub(crate) unregistering: bool,
-    /// A challenge came back and it is not yet known whether anything could
-    /// read it. The refusal is kept for the event that says so.
+    /// A challenge nobody has answered yet, kept for the event that says so.
     pub(crate) unanswered: Option<OwnedMessage>,
-    /// What the registrar said about push in its last 2xx, when it said
-    /// anything (RFC 8599 §4.1.1).
+    /// Push echo of the last 2xx (RFC 8599 §4.1.1).
     pub(crate) echo: Option<PushEcho>,
-    /// When the binding the registrar granted stops being a binding. What the
-    /// snapshot carries across a sleep, and the only thing in it with a time
-    /// in it.
+    /// When the granted binding lapses.
     pub(crate) lapses_at: Option<Instant>,
-    /// How long this account took to become reachable, measured from the cold
-    /// start the application declared.
+    /// Time from the declared cold start to reachable.
     pub(crate) ready: Option<Duration>,
-    /// A push asked for a refresh that could not be sent, because there was no
-    /// transport yet. It goes the moment the application hands one over.
+    /// A push asked for a refresh before there was a transport; it goes as
+    /// soon as one is handed over.
     pub(crate) owed: bool,
-    /// The challenged REGISTER whose answer §18.1.1 would not let out over a
-    /// datagram, waiting for the connection the endpoint asked for.
+    /// The challenged REGISTER whose answer is too big for a datagram
+    /// (§18.1.1), waiting for a connection.
     ///
-    /// The transaction is kept here rather than read back out of the agent's
-    /// map of owners, because a refresh clears that account's entries there
-    /// on every new attempt and one can fall between the park and the bind.
-    /// While this is set the refusal held in `unanswered` is not a refusal
-    /// yet, so nothing settles it.
+    /// Kept here, not in the agent's owner map, because a refresh clears that
+    /// account's entries there. While set, `unanswered` is not a refusal yet.
     pub(crate) waiting_for_stream: Option<AnyTransactionId>,
-    /// What the registrar's last 2xx said beside the binding's lifetime.
-    /// `None` until one has, and again once the binding it came with is given
-    /// up. Read through [`Registration::learned`], which also stops answering
-    /// the moment that binding lapses.
+    /// What the last 2xx said beside the lifetime. Read through
+    /// [`Registration::learned`], which stops answering once the binding
+    /// lapses.
     pub(crate) learned: Option<RegistrarInfo>,
-    /// `Contact`s the registrar may still hold for this account at an
-    /// address it no longer has, as a REGISTER writes them, each sent again
-    /// with `expires=0` until a 2xx says the registrar has read them
-    /// (RFC 3261 §10.2.2). What `UserAgent::readdress` leaves behind.
+    /// Old `Contact`s left by `UserAgent::readdress`, sent again with
+    /// `expires=0` until a 2xx confirms (RFC 3261 §10.2.2).
     pub(crate) retired: Vec<Box<[u8]>>,
 }
 
-/// How many moved-away `Contact`s one account keeps asking to remove. A NAT
-/// that moves the mapping on every refresh, with no REGISTER answered in
-/// between, would otherwise grow the list and the request with it.
+/// Cap on retired `Contact`s, so a NAT that moves on every refresh does not
+/// grow the request.
 const MAX_RETIRED: usize = 4;
 
 impl Registration {
@@ -176,9 +139,8 @@ impl Registration {
         }
     }
 
-    /// Ask the registrar to drop `old`, the `Contact` this account has just
-    /// moved away from, and never `current`, the one it moved to — which a
-    /// mapping that moves back to where it was would otherwise remove.
+    /// Ask the registrar to drop `old`, never `current` (a mapping can move
+    /// back).
     pub(crate) fn retire(&mut self, old: Box<[u8]>, current: &[u8]) {
         self.retired
             .retain(|kept| **kept != *current && *kept != old);
@@ -191,11 +153,9 @@ impl Registration {
     /// What the registrar last said, for as long as the binding it said it
     /// about still stands.
     ///
-    /// RFC 5627 §4.4: a UA "MUST NOT reuse a GRUU learned through a previous
-    /// registration that has lapsed"; RFC 3608 §6.1 discards the service route
-    /// when "an existing registration expires and the UA chooses not to
-    /// re-register". The lapse is what both turn on, so it is checked here, at
-    /// the moment of use, rather than by a timer that could fire late.
+    /// RFC 5627 §4.4 and RFC 3608 §6.1 both drop what was learned once the
+    /// binding lapses. Checked at use rather than by a timer that could fire
+    /// late.
     pub(crate) fn learned(&self, now: Instant) -> Option<&RegistrarInfo> {
         let info = self.learned.as_ref()?;
         self.lapses_at.is_some_and(|at| now < at).then_some(info)
@@ -203,22 +163,16 @@ impl Registration {
 
     /// The registrar refused this registration.
     ///
-    /// RFC 3608 §6.1: "If the re-registration request is refused ... the UA
-    /// SHOULD discard any stored service route". The GRUUs stay: RFC 5627 §4.2
-    /// says a non-2xx "does not remove, delete, or otherwise invalidate" one,
-    /// and the binding they route to stands at the registrar until it lapses.
+    /// The service route goes (RFC 3608 §6.1); the GRUUs stay, since a
+    /// non-2xx does not invalidate them (RFC 5627 §4.2).
     pub(crate) fn refused(&mut self) {
         if let Some(info) = self.learned.as_mut() {
             info.service_route.clear();
         }
     }
 
-    /// Whether a binding is believed to be live, which is what a refresh has
-    /// to protect and a first registration does not.
-    ///
-    /// A restored one is not among them, deliberately. It is a binding on
-    /// paper, and the whole point of naming it separately is that the wire has
-    /// not confirmed it.
+    /// Whether a binding is believed live. A restored one is not: the wire
+    /// has not confirmed it.
     pub(crate) const fn is_bound(&self) -> bool {
         matches!(
             self.state,
@@ -235,9 +189,7 @@ impl Registration {
         now: Instant,
     ) -> Duration {
         self.lapses_at = Some(now + granted);
-        // the first time an account becomes reachable after a cold start is
-        // the number the product cares about; every refresh after it is not a
-        // cold start and does not overwrite it
+        // only the first binding after a cold start counts
         if let Some(cold) = cold
             && self.ready.is_none()
         {
@@ -248,11 +200,8 @@ impl Registration {
 
     /// How long before the binding lapses the refresh has to be sent.
     ///
-    /// Thirty seconds is ours, and it is a floor rather than a value: RFC 8599
-    /// §4.1.4 lets the network demand more with a `sip.pnsreg` indicator, and
-    /// a UA that gets one "MUST send a binding-refresh REGISTER request prior
-    /// to binding expiration" at least that long before it. Taking the larger
-    /// of the two is the only reading that satisfies both.
+    /// Our 30 s, or more if the network demands it with `sip.pnsreg` (RFC
+    /// 8599 §4.1.4).
     fn lead(&self) -> u64 {
         self.echo
             .and_then(PushEcho::refresh_lead)
@@ -262,10 +211,8 @@ impl Registration {
 
 /// What the registrar said about push notifications in a 2xx to a REGISTER.
 ///
-/// Nothing here changes whether the REGISTER worked. What it changes is what
-/// the application may rely on afterwards: a phone that lets itself be
-/// suspended because it believes the network will wake it, when the network
-/// never said so, is a phone that stops ringing.
+/// It does not change whether the REGISTER worked, only whether the
+/// application may suspend and rely on a push to wake it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PushEcho {
     accepted: bool,
@@ -276,11 +223,8 @@ impl PushEcho {
     /// Whether the network said it will ask for notifications of the type this
     /// account asked for.
     ///
-    /// §4.1.1: a 2xx carrying `sip.pns` "with an indicator value identifying
-    /// the same type of PNS that was identified by the 'pn-provider' URI
-    /// parameter" means another proxy will request them. Anything else — a
-    /// different type, no indicator at all — means the UA "MUST NOT assume"
-    /// they are coming.
+    /// True only when the 2xx's `sip.pns` names the same provider as
+    /// `pn-provider` (§4.1.1); otherwise pushes must not be assumed.
     #[must_use]
     pub const fn accepted(self) -> bool {
         self.accepted
@@ -289,14 +233,10 @@ impl PushEcho {
     /// How long before the binding lapses the network insists on seeing a
     /// refresh, from a `sip.pnsreg` indicator (§4.1.4).
     ///
-    /// Absent when the network sent none, which §4.1.4 turns into advice
-    /// rather than a rule: a UA that can refresh on its own timer "SHOULD only
-    /// send a binding-refresh REGISTER request when it receives a push
-    /// notification". That advice is not taken here. It trades reachability
-    /// for battery on the strength of a SHOULD, and nothing in this crate can
-    /// tell whether the wake-ups are actually arriving — so the refresh timer
-    /// keeps running, and an application that knows better stops it by taking
-    /// the account down.
+    /// Absent when the network sent none. §4.1.4 then advises refreshing
+    /// only on a push; that is not followed, since this crate cannot tell
+    /// whether pushes arrive. The refresh timer keeps running unless the
+    /// application takes the account down.
     #[must_use]
     pub const fn refresh_lead(self) -> Option<Duration> {
         self.lead
@@ -305,9 +245,8 @@ impl PushEcho {
 
 /// What a 2xx to a REGISTER says about push, for an account that asked.
 ///
-/// `Feature-Caps` is RFC 6809's, and RFC 8599 §8.2 puts the indicators in it:
-/// `*;+sip.pns="apns";+sip.pnsreg="121"`. Several rows and one row with commas
-/// are the same message (§7.3.1), so both are walked.
+/// Read from `Feature-Caps` (RFC 6809, RFC 8599 §8.2), every row and every
+/// comma-separated value (§7.3.1).
 pub(crate) fn echoed(response: &RawMessage<'_>, account: &Account) -> Option<PushEcho> {
     let push = account.push.as_ref()?;
     let mut echo = PushEcho {
@@ -334,12 +273,9 @@ pub(crate) fn echoed(response: &RawMessage<'_>, account: &Account) -> Option<Pus
 
 /// What a registrar's 2xx said beyond how long the binding lasts.
 ///
-/// Three things, each from its own RFC, and every one of them arrives from a
-/// peer. Each is read with the core's parsers and bounded before it is kept,
-/// and one that does not survive that is left out and written into the
-/// REGISTER's diagnostic record rather than trusted: a value that goes back
-/// out in this account's own requests is one that could otherwise stop every
-/// one of them. None of it outlives the binding it came with; see
+/// Each value is parsed and bounded before it is kept; one that fails is
+/// left out and noted in the REGISTER's diagnostics, since it would go back
+/// out in every request of the account. None of it outlives its binding; see
 /// [`UserAgent::registrar_info`].
 #[derive(Clone, Debug, Default)]
 pub struct RegistrarInfo {
@@ -354,12 +290,9 @@ impl RegistrarInfo {
     /// first, each entry a `Route` value as it goes out: angle brackets and
     /// parameters included.
     ///
-    /// It is placed as a preloaded route on the requests this account starts
-    /// towards the address it registers with — an INVITE, a SUBSCRIBE — and
-    /// not on the REGISTER that refreshes the binding. §3 hands the route out
-    /// "to request services from the system it just registered with", and a
-    /// refresh sent along it would make a stale route unrecoverable: the one
-    /// request that can replace it would have to travel it.
+    /// Preloaded on requests the account starts toward its registrar (§3),
+    /// but not on the REGISTER: a refresh sent along a stale route could
+    /// never replace it.
     pub fn service_route(&self) -> impl ExactSizeIterator<Item = &[u8]> {
         self.service_route.iter().map(|hop| &**hop)
     }
@@ -381,9 +314,7 @@ impl RegistrarInfo {
     /// The other identities the provider has given this user (RFC 7315 §4.1),
     /// in the order they were sent.
     ///
-    /// Reported and not acted on. §4.1 says a UAC "MUST NOT assume that the
-    /// associated URIs are registered", so none of them changes what this
-    /// account sends.
+    /// Reported only: §4.1 says they must not be assumed registered.
     #[must_use]
     pub fn associated(&self) -> &[Uri] {
         &self.associated
@@ -391,10 +322,9 @@ impl RegistrarInfo {
 
     /// Which GRUU a dialog opens with.
     ///
-    /// RFC 5627 §3.3: "use one of its temporary GRUUs for anonymous calls, and
-    /// use its public GRUU otherwise", and §4.4 lets either be used where the
-    /// other is missing — except that an anonymous request never falls back to
-    /// the public one, which names the address of record it is trying not to.
+    /// Temporary for anonymous calls, public otherwise (RFC 5627 §3.3), each
+    /// standing in for the other (§4.4), except that an anonymous call never
+    /// falls back to the public one, which names the address of record.
     const fn gruu_for(&self, anonymous: bool) -> Option<&Uri> {
         if anonymous {
             return self.temporary_gruu.as_ref();
@@ -434,12 +364,9 @@ pub(crate) fn read_registrar_info(
     (info, ignored)
 }
 
-/// RFC 3608 §5: `Service-Route = "Service-Route" HCOLON sr-value *(COMMA
-/// sr-value)`, each value a `Route` element that "MUST include the
-/// loose-routing indicator parameter".
+/// RFC 3608 §5: each value a loose-routed `Route` entry.
 ///
-/// `None` when any of it cannot be taken. A route is an order of hops, and one
-/// with a hop left out of it goes somewhere else.
+/// `None` when any hop cannot be taken: a route missing a hop goes elsewhere.
 fn read_service_route(response: &RawMessage<'_>) -> Option<Vec<Box<[u8]>>> {
     let mut hops = Vec::new();
     for value in response.field_values(SERVICE_ROUTE) {
@@ -448,8 +375,8 @@ fn read_service_route(response: &RawMessage<'_>) -> Option<Vec<Box<[u8]>>> {
         }
         let flat = one_line(value)?;
         let entry = RouteRef::parse(&flat).ok()?;
-        // a strict router would need the Request-URI rewritten (§12.2.1.1),
-        // which nothing does for a preloaded route here, and §5 rules one out
+        // no strict routers: §5 rules them out, and nothing here would
+        // rewrite the Request-URI (§12.2.1.1)
         let hop = entry.uri().sip()?;
         if !hop.is_loose_route()
             || hop.headers().next().is_some()
@@ -462,15 +389,11 @@ fn read_service_route(response: &RawMessage<'_>) -> Option<Vec<Box<[u8]>>> {
     Some(hops)
 }
 
-/// Whether every byte is one a SIP URI is written with (RFC 3261 §25.1):
-/// `alphanum`, the `mark` characters, `%` for an escape, the `reserved` set,
-/// and the square brackets of an IPv6 reference and of `param-unreserved`.
+/// Whether every byte is a SIP URI character (RFC 3261 §25.1).
 ///
-/// The core's URI reader splits a URI at its delimiters and leaves the bytes
-/// between them alone, which is right for a message that is only being read.
-/// A value kept here is written back into this account's own requests, and a
-/// `<`, `>`, `"` or space inside it would change where the header it sits in
-/// ends.
+/// The core parser does not check the bytes between delimiters. A value kept
+/// here is written back out, where a `<`, `>`, `"` or space would end the
+/// header early.
 fn uri_bytes_only(text: &[u8]) -> bool {
     text.iter()
         .all(|byte| byte.is_ascii_alphanumeric() || b"-_.!~*'()%;/?:@&=+$,[]".contains(byte))
@@ -495,11 +418,9 @@ impl Offered {
 /// The GRUUs on the `Contact` the registrar returned for this instance
 /// (RFC 5627 §4.2), public first.
 ///
-/// The response lists every binding the address of record has, and another
-/// device's GRUUs are not this one's to use, so the entry is found by its
-/// `+sip.instance` rather than by its address — which is also what survives a
-/// registrar that rewrote the address behind a NAT. An entry that does not
-/// parse cannot be shown to be this instance's, and is passed over.
+/// The entry is found by `+sip.instance`, not by address: the response lists
+/// other devices too, and a registrar may rewrite the address behind a NAT.
+/// An entry that does not parse is skipped.
 fn offered_gruus(response: &RawMessage<'_>, account: &Account) -> (Offered, Offered) {
     let nothing = (Offered::Absent, Offered::Absent);
     let Some(ref instance) = account.instance_id else {
@@ -513,8 +434,7 @@ fn offered_gruus(response: &RawMessage<'_>, account: &Account) -> (Offered, Offe
         let ours = params
             .get("+sip.instance")
             .is_some_and(|echoed| same_instance(&echoed, instance));
-        // a stated zero is a binding the registrar removed, and §5.3 removes
-        // its GRUUs with it
+        // expires=0: removed, and its GRUUs with it (§5.3)
         let removed = addr
             .expires()
             .ok()
@@ -532,15 +452,9 @@ fn offered_gruus(response: &RawMessage<'_>, account: &Account) -> (Offered, Offe
 
 /// Whether an echoed `+sip.instance` names this instance.
 ///
-/// RFC 5626 §4.1: the instance identifier is "extracted" from the value, out
-/// of the angle brackets RFC 3840 §9 wraps a string value in, and "equality
-/// comparisons are performed using the rules for URN equality that are
-/// specific to the scheme in the URN", or lexically by RFC 2141 where the
-/// scheme is not understood. Lexically, `urn:` and the namespace identifier are
-/// compared without regard to case and the rest exactly; `uuid` is the one
-/// namespace understood here, and RFC 4122 §3 makes its hexadecimal case
-/// insensitive as well. The account may be configured with or without the
-/// brackets, so they are taken off both sides.
+/// URN equality (RFC 5626 §4.1, RFC 2141): `urn:` and the namespace ignore
+/// case, the rest is exact, except `uuid` whose hex ignores case too (RFC
+/// 4122 §3). Angle brackets (RFC 3840 §9) come off both sides.
 fn same_instance(echoed: &[u8], ours: &str) -> bool {
     let (theirs, mine) = (bare_urn(echoed), bare_urn(ours.as_bytes()));
     match (urn_parts(theirs), urn_parts(mine)) {
@@ -571,9 +485,8 @@ fn bare_urn(value: &[u8]) -> &[u8] {
         .unwrap_or(value)
 }
 
-/// One of `pub-gruu` and `temp-gruu`: `EQUAL quoted-string`, and the quoted
-/// string "MUST contain a SIP URI" (RFC 5627 §7). A GRUU is known by its `gr`
-/// parameter (§4.5), so a URI without one is not taken for one.
+/// `pub-gruu` or `temp-gruu`: a quoted SIP URI (RFC 5627 §7) with a `gr`
+/// parameter (§4.5).
 fn gruu_param(params: &Params<'_>, name: &str) -> Offered {
     let mut named = params
         .clone()
@@ -581,8 +494,7 @@ fn gruu_param(params: &Params<'_>, name: &str) -> Offered {
     let Some((_, written)) = named.next() else {
         return Offered::Absent;
     };
-    // two values for one GRUU are two answers to one question, and taking
-    // either is guessing which one the registrar meant
+    // two values: no guessing which one was meant
     if named.next().is_some() {
         return Offered::Garbled;
     }
@@ -594,9 +506,7 @@ fn gruu_param(params: &Params<'_>, name: &str) -> Offered {
 
 fn gruu_uri(text: &[u8]) -> Option<Uri> {
     let flat = one_line(text)?;
-    // the value came out of a quoted string and goes back in angle brackets,
-    // where a `>` it held would end the Contact and whatever followed would
-    // become a second one
+    // it goes back in angle brackets, where a `>` would split the Contact
     if !uri_bytes_only(&flat) {
         return None;
     }
@@ -607,14 +517,10 @@ fn gruu_uri(text: &[u8]) -> Option<Uri> {
     usable.then_some(uri)
 }
 
-/// RFC 7315 §4.1: `P-Associated-URI = "P-Associated-URI" HCOLON
-/// [p-aso-uri-spec] *(COMMA p-aso-uri-spec)`, `p-aso-uri-spec = name-addr
-/// *(SEMI ai-param)`. A field with nothing in it is the grammar's own way of
-/// saying there are none.
+/// RFC 7315 §4.1: name-addr entries; an empty field means none.
 ///
-/// `None` when an entry cannot be read, or when there are more than are kept.
-/// The response rides on the event whole, so nothing is lost to the
-/// application by refusing the list rather than guessing at part of it.
+/// `None` when an entry cannot be read or there are too many. The whole
+/// response rides on the event, so refusing loses nothing.
 fn read_associated(response: &RawMessage<'_>) -> Option<Vec<Uri>> {
     let values = response.field_values(P_ASSOCIATED_URI);
     if values.clone().all(<[u8]>::is_empty) {
@@ -635,13 +541,8 @@ fn read_associated(response: &RawMessage<'_>) -> Option<Vec<Uri>> {
     Some(uris)
 }
 
-/// A value from the wire as one line: a fold becomes the space it stands for
-/// (§7.3.1), and anything else that could end or corrupt a header this stack
-/// writes is refused.
-///
-/// What is kept here goes back out in the account's own requests, and a byte
-/// that made the builder refuse one would stop every INVITE the account sends
-/// until the next registration replaced it.
+/// A wire value as one line: folds unfolded (§7.3.1), control bytes refused.
+/// A bad byte kept here would make the builder refuse every later INVITE.
 fn one_line(value: &[u8]) -> Option<Cow<'_, [u8]>> {
     if value.len() > MAX_LEARNED_BYTES {
         return None;
@@ -658,13 +559,9 @@ fn one_line(value: &[u8]) -> Option<Cow<'_, [u8]>> {
 
 /// The `Contact` of a request or a response that opens a dialog for `account`.
 ///
-/// RFC 5627 §4.4: "A UA SHOULD use a GRUU when populating the Contact header
-/// field of dialog-forming and target refresh requests and responses", which
-/// is the INVITE, the 18x and 2xx that answer one, and the SUBSCRIBE. The GRUU
-/// goes out bare, without `+sip.instance`: §9's examples write it so, the
-/// public one carries the instance in its `gr` already, and on a temporary one
-/// the instance is exactly what §10.3 says a correspondent must not be able to
-/// read.
+/// The GRUU when there is one (RFC 5627 §4.4), bare, without
+/// `+sip.instance`: the public one has it in `gr`, and a temporary one must
+/// not reveal it (§10.3).
 pub(crate) fn dialog_contact(
     account: &Account,
     learned: Option<&RegistrarInfo>,
@@ -695,8 +592,7 @@ pub(crate) fn anonymous(extra: &[Extra]) -> bool {
 /// When to send the next request for something granted for `granted`, with
 /// this crate's own margin.
 ///
-/// See the module note. Zero in means the binding or the subscription was
-/// removed, and there is nothing to refresh.
+/// Zero in means removed: nothing to refresh.
 pub(crate) fn refresh_after(granted: Duration) -> Duration {
     refresh_within(granted, REFRESH_MARGIN)
 }
@@ -704,9 +600,7 @@ pub(crate) fn refresh_after(granted: Duration) -> Duration {
 /// The same, for a registration the network insists on seeing refreshed
 /// `lead` seconds before it lapses (RFC 8599 §4.1.4).
 ///
-/// A `lead` longer than the binding itself is a network contradicting itself,
-/// and the floor answers it: halfway, which is the soonest this is willing to
-/// turn into a metronome.
+/// A `lead` longer than the binding falls to the halfway floor.
 fn refresh_within(granted: Duration, lead: u64) -> Duration {
     let seconds = granted.as_secs();
     if seconds == 0 {
@@ -714,8 +608,7 @@ fn refresh_within(granted: Duration, lead: u64) -> Duration {
     }
     let fraction = seconds.saturating_mul(REFRESH_FRACTION) / 100;
     let margin = seconds.saturating_sub(lead);
-    // never sooner than halfway, and never zero: a binding of a second or two
-    // is a registrar being strange, and answering it with a spin is worse
+    // never zero, even for a one-second binding
     let floor = (seconds / 2).max(1);
     Duration::from_secs(fraction.min(margin).max(floor))
 }
@@ -732,10 +625,8 @@ pub(crate) fn backoff_bound(failures: u32) -> Duration {
 /// "a uniform random time between 50 and 100% of the upper-bound wait time",
 /// spread by `entropy`.
 ///
-/// `entropy` is a token from the endpoint's own stream, which is hexadecimal;
-/// its first eight characters are thirty-two bits drawn from that stream. The
-/// modulo is biased by less than one part in a hundred million over these
-/// ranges, which is far below the second this value is rounded to.
+/// `entropy` is a hex token; its first 32 bits are used. The modulo bias is
+/// negligible at these ranges.
 pub(crate) fn backoff_delay(failures: u32, entropy: &[u8]) -> Duration {
     let bound = backoff_bound(failures).as_secs();
     let half = bound / 2;
@@ -763,15 +654,11 @@ pub(crate) fn spread(entropy: &[u8]) -> u32 {
 
 /// How long the registrar says the binding lasts (§10.2.4).
 ///
-/// The `expires` parameter of the `Contact` it echoed back for us wins, then
-/// the `Expires` header field, then what was asked for. Our own contact is
-/// found by §19.1.4 equivalence rather than by byte comparison, because a
-/// registrar is allowed to normalise what it stores.
+/// Our `Contact`'s `expires` wins, then `Expires`, then what was asked for.
+/// Our contact is matched by §19.1.4 equivalence, since registrars normalise.
 ///
-/// A contact list that does not name us is not read as a removal. Registrars
-/// rewrite addresses behind a NAT, and concluding "the binding was refused"
-/// from an address that no longer matches would drop a working registration.
-/// Only a stated zero means removed.
+/// A list that does not name us is not a removal: registrars rewrite
+/// addresses behind a NAT. Only a stated zero means removed.
 pub(crate) fn granted_expiry(
     response: &RawMessage<'_>,
     ours: &Uri,
@@ -822,8 +709,7 @@ pub(crate) fn min_expires(response: &RawMessage<'_>) -> Option<Duration> {
 
 /// A `Retry-After` in seconds, which RFC 5626 §4.5 lets extend the back-off.
 ///
-/// Only the delta-seconds are read. The header can also carry a comment and
-/// parameters, and neither changes when to come back.
+/// Only the delta-seconds are read.
 pub(crate) fn retry_after(response: &RawMessage<'_>) -> Option<Duration> {
     let value = response.header(sipral_core::msg::HeaderName::RetryAfter)?;
     let seconds = value
@@ -843,21 +729,16 @@ pub(crate) fn retry_after(response: &RawMessage<'_>) -> Option<Duration> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SnapshotError {
-    /// It does not begin with what every snapshot begins with. Whatever those
-    /// bytes are, they are not a registration.
+    /// It does not start with the snapshot magic.
     NotASnapshot,
-    /// Written by a version of this stack that knows a layout this one does
-    /// not. Read as far as it goes and the fields land in the wrong places,
-    /// so it is refused instead.
+    /// Written by a newer build, in a layout this one does not know.
     FromTheFuture {
         /// The version it claims to be.
         version: u16,
     },
     /// It ends inside a field, or has bytes left over after the last one.
     Malformed,
-    /// The address of record in it is not this account's. A binding belongs to
-    /// one identity, and restoring somebody else's would register this device
-    /// as them.
+    /// The address of record in it is not this account's.
     AnotherAccount,
     /// The account never registers
     /// ([`Account::unregistered`](crate::Account::unregistered)), so there is
@@ -885,10 +766,9 @@ impl fmt::Display for SnapshotError {
 
 impl core::error::Error for SnapshotError {}
 
-/// A registration written down, so that waking up does not cost a whole
-/// handshake.
+/// A registration written down, so waking up does not cost a handshake.
 ///
-/// One layout, version 1, every number big-endian:
+/// Version 1, big-endian:
 ///
 /// | bytes | what |
 /// |---|---|
@@ -900,18 +780,10 @@ impl core::error::Error for SnapshotError {}
 /// | 2 + n | the `Call-ID`, and its length |
 /// | 2 + m | the address of record, and its length |
 ///
-/// The rule about versions is the whole reason there is a version. A reader
-/// takes every layout it was built to understand and refuses every other one,
-/// which means a snapshot from a newer build is an error and never a
-/// misreading: fields that moved would still parse, into the wrong meanings,
-/// and a sequence number read out of a length would produce REGISTERs the
-/// registrar answers with 400 for as long as the file exists. Adding a field
-/// means version 2, never a longer version 1.
-///
-/// It is written by hand because that is the only way to promise the above.
-/// There is no schema language in this workspace and no dependency that brings
-/// one, and a format whose compatibility rule is enforced by twenty lines that
-/// can be read in one sitting is worth more than one where it is implied.
+/// A reader refuses every layout it does not know, so a newer snapshot is an
+/// error, never a misreading (a CSeq read out of a length would get 400s for
+/// as long as the file exists). Adding a field means version 2, never a
+/// longer version 1.
 fn freeze(reg: &Registration, aor: &Uri, now: Instant) -> Vec<u8> {
     let call_id = reg.call_id.as_bytes();
     let aor = aor.as_bytes();
@@ -963,8 +835,7 @@ fn thaw(snapshot: &[u8]) -> Result<Thawed, SnapshotError> {
     let rest = rest.get(call_id_len..).ok_or(SnapshotError::Malformed)?;
     let aor_len = usize::from(be16(rest, 0).ok_or(SnapshotError::Malformed)?);
     let aor = rest.get(2..2 + aor_len).ok_or(SnapshotError::Malformed)?;
-    // bytes after the last field mean this is not the document it says it is,
-    // and reading the part that parsed would be reading half of something else
+    // trailing bytes: not what it claims to be
     if rest.len() != 2 + aor_len {
         return Err(SnapshotError::Malformed);
     }
@@ -990,9 +861,7 @@ fn be32(bytes: &[u8], at: usize) -> Option<u32> {
     ]))
 }
 
-/// Seconds that fit the field. A binding longer than a hundred and thirty-six
-/// years is a registrar being strange, and the snapshot says so rather than
-/// wrapping.
+/// Seconds that fit the field, saturating rather than wrapping.
 fn seconds_of(duration: Duration) -> u32 {
     u32::try_from(duration.as_secs()).unwrap_or(u32::MAX)
 }
@@ -1004,14 +873,11 @@ fn length_of(bytes: &[u8]) -> u16 {
 impl UserAgent {
     /// Write an account's registration down, so a later start can continue it.
     ///
-    /// `None` when there is nothing worth keeping: an account that has never
-    /// registered, one that never will, or one whose registration failed, has
-    /// no binding for a snapshot to be about.
+    /// `None` when there is no binding: never registered, never will, or
+    /// failed.
     ///
-    /// What comes back is opaque bytes with a version in them. Storing them is
-    /// the application's, and so is protecting them — a snapshot names an
-    /// address of record and is not a secret, but it is a record of who uses
-    /// this device.
+    /// The bytes are opaque and versioned. Storing and protecting them is the
+    /// application's: not a secret, but they name who uses this device.
     #[must_use]
     pub fn freeze_registration(&self, account: AccountId, now: Instant) -> Option<Vec<u8>> {
         let config = self.accounts.get(&account)?;
@@ -1025,28 +891,19 @@ impl UserAgent {
     /// Read one back, for an account that has been added and has not
     /// registered.
     ///
-    /// `asleep` is how long the snapshot sat unused. This crate never reads a
-    /// clock, and a monotonic instant does not survive the process that minted
-    /// it, so the only honest source for that number is the application: it
-    /// has the wall clock, and it is the one that knows whether this is a wake
-    /// from suspend or a cold launch a week later.
+    /// `asleep` is how long the snapshot sat unused. The application supplies
+    /// it: this crate reads no clock, and a monotonic instant does not
+    /// survive the process.
     ///
-    /// **What is restored, and what is not.** The `Call-ID` and the sequence
-    /// number come back, and they are what make the next REGISTER a refresh of
-    /// the binding the registrar is still holding rather than a second
-    /// registration for the same device — that is the whole saving. The
-    /// binding's remaining life comes back too, and only as a schedule: the
-    /// refresh is booked for where it would have fallen, or for now if it has
-    /// already passed.
+    /// The `Call-ID` and CSeq come back, so the next REGISTER refreshes the
+    /// binding the registrar still holds. The remaining life comes back as a
+    /// schedule only: the refresh is booked where it would have fallen, or
+    /// now if that has passed.
     ///
-    /// What does not come back is any belief that this device is reachable.
-    /// The account is [`RegistrationState::Restored`], never `Registered`, and
-    /// nothing may be inferred from it — not that the registrar still has the
-    /// binding, not that the address in the `Contact` is still this device's,
-    /// not that the registrar's name still resolves. A restored registration
-    /// that read as valid while name resolution had gone is a failure this
-    /// project has actually had, and the distinction between these two states
-    /// is what makes it un-representable.
+    /// Reachability does not come back. The account is
+    /// [`RegistrationState::Restored`], never `Registered`, until a registrar
+    /// answers: the binding, the `Contact` address and the registrar's name
+    /// may all have gone stale.
     ///
     /// # Errors
     /// [`SnapshotError`], and the account is left exactly as it was.
@@ -1062,8 +919,7 @@ impl UserAgent {
             .accounts
             .get(&account)
             .ok_or(SnapshotError::AnotherAccount)?;
-        // restored, it would book a refresh that can never be sent, and the
-        // back-off would retry that refusal for the life of the process
+        // it would book a refresh that can never be sent, retried forever
         if config.registrar.is_none() {
             return Err(SnapshotError::NotRegistering);
         }
@@ -1082,27 +938,19 @@ impl UserAgent {
         reg.raised = false;
         reg.lapses_at = Some(now + left);
         reg.ready = None;
-        // a thaw puts the snapshot's Call-ID in place of the one the GRUUs
-        // were learned under, and RFC 5627 §4.2 has a UA on another Call-ID
-        // "discard all temporary GRUUs learned through prior REGISTER
-        // responses"; a restored registration proves nothing either, so it
-        // carries nothing until the next 2xx says it all again
+        // a new Call-ID discards temporary GRUUs (RFC 5627 §4.2), and a
+        // restored registration proves nothing until the next 2xx
         reg.learned = None;
-        // the same schedule a fresh grant of what is left would have earned,
-        // which is now when there is nothing left
+        // as if what is left were a fresh grant; now when nothing is left
         reg.due = Some(now + refresh_after(left));
         Ok(())
     }
 
     /// How long the binding an account holds is believed to last.
     ///
-    /// Believed, and no stronger than that: for a restored registration this
-    /// is what a registrar said before the device went to sleep, and nothing
-    /// has spoken to it since.
-    ///
-    /// `None` for an account that holds no binding at all, which includes one
-    /// that has just given its up — the last grant it was told about is not
-    /// news about a binding that no longer exists.
+    /// For a restored registration this is what the registrar said before
+    /// the sleep. `None` when no binding is held, including one just given
+    /// up.
     #[must_use]
     pub fn binding_expires_in(&self, account: AccountId, now: Instant) -> Option<Duration> {
         let reg = self.registrations.get(&account)?;
@@ -1114,12 +962,8 @@ impl UserAgent {
 
     /// A cold start began now.
     ///
-    /// The stack cannot know this by itself. The process was launched, or
-    /// woken, before any of this existed, and reading a clock to find out is
-    /// the one thing the protocol crates may not do — so the instant comes
-    /// from the application, which has it.
-    ///
-    /// Every account's [`UserAgent::time_to_ready`] is cleared, and each is
+    /// The application declares it, since the stack reads no clock. Every
+    /// account's [`UserAgent::time_to_ready`] is cleared, and each is
     /// measured again the next time it registers.
     pub fn cold_start(&mut self, now: Instant) {
         self.cold = Some(now);
@@ -1131,13 +975,9 @@ impl UserAgent {
     /// How long this account took to become reachable, measured from
     /// [`UserAgent::cold_start`].
     ///
-    /// This is the number a queue needs. How long it rings each agent before
-    /// giving up and trying the next one has to be longer than this, or a
-    /// phone that was asleep is skipped every time and its owner is told the
-    /// queue was quiet. `None` until an account has registered; `None` always
-    /// for an account that never registers, because nothing marks the moment
-    /// one of those became reachable; and `None` always if no cold start was
-    /// ever declared.
+    /// A queue's ring time per agent must exceed this, or a sleeping phone
+    /// is always skipped. `None` until registered, and always `None` for an
+    /// account that never registers or with no declared cold start.
     #[must_use]
     pub fn time_to_ready(&self, account: AccountId) -> Option<Duration> {
         self.registrations.get(&account)?.ready
@@ -1156,10 +996,8 @@ impl UserAgent {
     /// What an account's registrar said beside the binding: the service route,
     /// the GRUUs, the associated identities.
     ///
-    /// `None` while no binding it said them about is standing — none granted
-    /// yet, one given up, or one that has lapsed — because none of the three
-    /// means anything once the binding is gone, and RFC 5627 §4.4 forbids
-    /// using a GRUU from one that has.
+    /// `None` unless their binding stands (none yet, given up, or lapsed);
+    /// RFC 5627 §4.4 forbids a GRUU from a lapsed one.
     #[must_use]
     pub fn registrar_info(&self, account: AccountId, now: Instant) -> Option<&RegistrarInfo> {
         self.registrations.get(&account)?.learned(now)
@@ -1168,13 +1006,9 @@ impl UserAgent {
     /// The same, for something this account sends to `destination`, where
     /// `None` is the address the account registers with.
     ///
-    /// Nothing when it goes anywhere else. Both halves are about that path: a
-    /// service route is the rest of the route behind the proxy the account
-    /// registers through (RFC 3608 §6.1 appends it "to any locally configured
-    /// route needed to egress the access proxy chain"), and a GRUU is reached
-    /// through the registrar's domain. A request the application sent
-    /// somewhere else on purpose would be pulled back through the network it
-    /// chose not to use, and so would everything the far end sent back to it.
+    /// Nothing when it goes anywhere else: the service route (RFC 3608 §6.1)
+    /// and the GRUU both belong to the registrar's path, and would pull a
+    /// request sent elsewhere on purpose back through it.
     pub(crate) fn learned_for(
         &self,
         account: AccountId,
@@ -1350,9 +1184,7 @@ mod tests {
 
     #[test]
     fn the_first_retry_after_a_boot_failure_lands_where_the_rfc_says() {
-        // "the first retry happens somewhere between 30 and 60 seconds after
-        // the failure of the first registration request" - one failure, so the
-        // bound has doubled once
+        // RFC 5626 §4.5: first retry between 30 and 60 seconds
         for nonce in 0_u32..200 {
             let token = format!("{nonce:016x}").into_bytes();
             let delay = backoff_delay(1, &token);

@@ -3,73 +3,45 @@
 
 //! SIP over a WebSocket this stack opens itself (RFC 7118 on RFC 6455).
 //!
-//! The application still owns the socket. What it hands over is a TCP
-//! connection, or a TLS one it secured with whatever TLS it already uses for
-//! `sips:`, and it binds that connection as a `Ws` or `Wss` transport *with
-//! the far end named*. From then on the connection is this module's: the
-//! opening handshake goes out as the first bytes to write, the server's
-//! answer is checked, every SIP message leaves as one masked frame and every
-//! frame that arrives is unmasked, reassembled and handed to the endpoint as
-//! the one message RFC 7118 §4.2 says it is. Pings are answered, pings are
-//! sent, a close from the server is answered, and
-//! [`UserAgent::close_websocket`] closes one from this end.
+//! The application owns the socket: it binds a TCP (or its own TLS)
+//! connection as a `Ws`/`Wss` transport *with the far end named*. This
+//! module then does the handshake, masks and frames each SIP message, and
+//! reassembles incoming frames into one message each (RFC 7118 §4.2). It
+//! answers and sends pings, answers a server close, and
+//! [`UserAgent::close_websocket`] closes from this end. Bound without a far
+//! end, the application does the framing itself and feeds datagrams.
 //!
-//! An application that binds a WebSocket transport *without* a far end keeps
-//! what it had before this module existed: it does the handshake and the
-//! framing itself and feeds each message in as a datagram.
+//! # Handshake (RFC 6455 §4.1, RFC 7118 §4.1)
 //!
-//! # The handshake (RFC 6455 §4.1, RFC 7118 §4.1)
-//!
-//! `GET` on the resource with `Upgrade: websocket`, `Connection: Upgrade`, a
-//! fresh sixteen-byte `Sec-WebSocket-Key`, `Sec-WebSocket-Version: 13` and
-//! `Sec-WebSocket-Protocol: sip`. The server's answer has to be a 101 whose
-//! `Upgrade` and `Connection` agree, whose `Sec-WebSocket-Accept` is the
-//! SHA-1 of the key and the protocol's GUID in base64, which selects `sip`
-//! as the subprotocol and which turns on no extension, since none was
-//! offered. Anything else fails the connection (§4.1: "the client MUST
-//! _Fail the WebSocket Connection_"). SIP that the endpoint writes before the
-//! answer arrives waits for it, in order.
-//!
-//! The resource and the `Host` are [`WebSocketTarget`]'s, set per far end
-//! with [`UserAgent::set_websocket_target`]. Left unset, the `Host` is the
-//! far end's address and the resource is `/ws` — the path Asterisk serves
-//! SIP on and one that Kamailio, OpenSIPS and FreeSWITCH accept as readily
-//! as any other — so a connection made through the C ABI, which has no field
-//! for either yet, reaches the common servers as it stands.
+//! The answer must be a 101 with a matching `Sec-WebSocket-Accept`, the
+//! `sip` subprotocol and no extension; anything else fails the connection.
+//! SIP written before the answer waits, in order. `Host` and resource come
+//! from [`UserAgent::set_websocket_target`]; unset, they are the far end's
+//! address and `/ws`, which Asterisk serves and Kamailio, OpenSIPS and
+//! FreeSWITCH accept, so the C ABI (no field for either yet) still works.
 //!
 //! # Frames (RFC 6455 §5)
 //!
-//! Every frame this end sends is masked with a key drawn for it (§5.3), and
-//! every frame the server sends must not be (§5.1). A SIP message goes out
-//! as one text frame when it is UTF-8 and as one binary frame when it is
-//! not (RFC 7118 §4.2); both kinds are accepted coming in. A fragmented
-//! message is put back together before it is handed on, a control frame may
-//! arrive between its fragments, and nothing larger than
-//! [`MAX_MESSAGE_BYTES`] is ever held. A frame that breaks the protocol
-//! closes the connection with the status §7.4.1 names for it.
+//! Ours are masked (§5.3), the server's must not be (§5.1). UTF-8 goes out
+//! as text, anything else as binary. Control frames may come between
+//! fragments; nothing over [`MAX_MESSAGE_BYTES`] is held. A protocol
+//! violation closes with the §7.4.1 status.
 //!
-//! # Keeping it alive, and noticing it died
+//! # Liveness
 //!
-//! A ping goes every [`PING_EVERY`] while the connection is quiet in that
-//! direction, and a pong has [`PONG_WAIT`] to come back; a server that
-//! answers nothing for that long is a connection that is gone, and it is
-//! failed the way RFC 5626 §4.4.1 fails a flow that stops answering CRLF.
-//! A handshake that is not answered within [`OPENING_WAIT`] fails too.
-//!
-//! A connection that fails or closes is told the way a TCP or TLS one is:
-//! the transport is retired, the transactions on it fail, an account on a
-//! connection of its own asks for a new one (the `flow` module), and
-//! [`Event::FlowFailed`] tells the application to close its socket.
+//! A ping after [`PING_EVERY`] of quiet; no pong within [`PONG_WAIT`], or no
+//! handshake answer within [`OPENING_WAIT`], fails the connection like a
+//! dead RFC 5626 §4.4.1 flow. A failed or closed connection is retired like
+//! TCP: its transactions fail, a flow account reconnects, and
+//! [`Event::FlowFailed`] tells the application to close the socket.
 //! [`UserAgent::websocket_failure`] says why.
 //!
 //! # The `.invalid` host (RFC 7118 Appendix B.1)
 //!
-//! A WebSocket client cannot be reached at the address its socket has, so
-//! the `Via` of everything it sends names a random host under `.invalid`
-//! (RFC 2606), and so does the `Contact` of an account that would otherwise
-//! name the bound address. The same far end keeps the same name across
-//! reconnections, so a binding refreshed on a new connection is the same
-//! binding.
+//! The client is unreachable at its socket address, so `Via`, and a
+//! `Contact` that would name the bound address, use a random `.invalid`
+//! host (RFC 2606). It stays the same per far end across reconnections so a
+//! refreshed binding is the same binding.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -88,18 +60,15 @@ use crate::event::UaEvent;
 /// RFC 6455 §1.3's GUID, appended to the key before it is hashed.
 const GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// The largest SIP message one WebSocket message may carry. Four times the
-/// 65 535 bytes a datagram can, and far past anything a SIP message is.
+/// The largest SIP message accepted in one WebSocket message.
 pub const MAX_MESSAGE_BYTES: usize = 262_144;
 
-/// The largest handshake answer read before it is given up on.
 const MAX_HEAD_BYTES: usize = 8_192;
 
 /// How long the server has to answer the opening handshake.
 pub const OPENING_WAIT: Duration = Duration::from_secs(10);
 
-/// How long a connection goes without this end sending anything before a
-/// ping is sent on it.
+/// Send idle time before a ping.
 pub const PING_EVERY: Duration = Duration::from_secs(25);
 
 /// How long a ping waits for its pong.
@@ -108,9 +77,7 @@ pub const PONG_WAIT: Duration = Duration::from_secs(10);
 /// The resource asked for when nothing else was set.
 pub const DEFAULT_RESOURCE: &str = "/ws";
 
-// -- frames ------------------------------------------------------------------
-
-/// What one frame, or one reassembled message, carried.
+/// One frame, or one reassembled message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     /// A whole text message, checked to be UTF-8.
@@ -142,18 +109,15 @@ pub enum FrameError {
     Masked,
     /// A control frame longer than 125 bytes, or fragmented (§5.5).
     BadControl,
-    /// A continuation with no message to continue, or a new message
-    /// started before the last one ended (§5.4).
+    /// A stray continuation, or a message started inside another (§5.4).
     BadFragment,
-    /// A length with its top bit set, or written longer than it had to be
-    /// (§5.2: "the minimal number of bytes MUST be used").
+    /// Top bit set, or not minimally encoded (§5.2).
     BadLength,
     /// A message longer than [`MAX_MESSAGE_BYTES`].
     TooLarge,
     /// A text message, or a close reason, that is not UTF-8 (§8.1).
     NotUtf8,
-    /// A close body of one byte, or with a code §7.4 does not allow on the
-    /// wire.
+    /// A one-byte close body, or a code §7.4 forbids on the wire.
     BadClose,
 }
 
@@ -200,25 +164,21 @@ const CLOSE: u8 = 0x8;
 const PING: u8 = 0x9;
 const PONG: u8 = 0xA;
 
-/// The frames a server sends, read off the bytes in whatever pieces they
-/// arrive.
+/// Reads server frames from bytes in any chunking.
 ///
-/// Push what was read, then take frames until there are none. A message
-/// sent in fragments comes out whole, once its last fragment is in; control
-/// frames come out as they arrive, between the fragments if that is where
-/// they were. After an error nothing more is read: the connection has to be
-/// closed.
+/// Push bytes, then take frames until `None`. Fragmented messages come out
+/// whole; control frames come out as they arrive. After an error nothing
+/// more is read and the connection must be closed.
 #[derive(Debug, Default)]
 pub struct FrameReader {
     buffer: Vec<u8>,
-    /// A message whose first fragments are in: whether it is text, and what
-    /// it holds so far.
+    /// (is text, bytes so far) of a fragmented message.
     partial: Option<(bool, Vec<u8>)>,
     broken: Option<FrameError>,
 }
 
 impl FrameReader {
-    /// A reader with nothing in it.
+    /// An empty reader.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -235,9 +195,8 @@ impl FrameReader {
         }
     }
 
-    /// How many bytes are held: read and not yet a frame, and the fragments
-    /// of a message not yet whole. Never more than a frame's header and
-    /// [`MAX_MESSAGE_BYTES`] past what the last [`FrameReader::push`] added.
+    /// Bytes held, unframed or in an incomplete message. Bounded by a header
+    /// plus [`MAX_MESSAGE_BYTES`] beyond the last [`FrameReader::push`].
     #[must_use]
     pub fn pending(&self) -> usize {
         self.buffer.len() + self.partial.as_ref().map_or(0, |(_, held)| held.len())
@@ -318,17 +277,15 @@ enum Step {
     Fragment,
 }
 
-/// A frame's first bytes, read.
 struct Head {
     fin: bool,
     opcode: u8,
-    /// How many bytes the header takes.
     header: usize,
     length: usize,
 }
 
 impl Head {
-    /// The header at the front of `buffer`, `None` until all of it is there.
+    /// `None` until the whole header is there.
     fn read(buffer: &[u8]) -> Result<Option<Self>, FrameError> {
         let (Some(&first), Some(&second)) = (buffer.first(), buffer.get(1)) else {
             return Ok(None);
@@ -411,8 +368,7 @@ fn close_of(payload: &[u8]) -> Result<Frame, FrameError> {
         [_] => Err(FrameError::BadClose),
         [high, low, reason @ ..] => {
             let code = u16::from_be_bytes([*high, *low]);
-            // §7.4.1 and §7.4.2: the codes an endpoint may send. 1004, 1005,
-            // 1006 and 1015 are reserved, and nothing below 1000 is used
+            // §7.4.1, §7.4.2: 1004-1006 and 1015 are reserved
             let allowed = matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999);
             if !allowed {
                 return Err(FrameError::BadClose);
@@ -454,8 +410,7 @@ pub fn client_frame(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
     out
 }
 
-/// The opcode a SIP message goes out under: text when it is UTF-8, binary
-/// when it is not (RFC 7118 §4.2).
+/// Text for UTF-8, binary otherwise (RFC 7118 §4.2).
 #[must_use]
 pub fn opcode_for(message: &[u8]) -> u8 {
     if core::str::from_utf8(message).is_ok() {
@@ -476,10 +431,7 @@ pub const OPCODE_PING: u8 = PING;
 /// The opcode of a pong.
 pub const OPCODE_PONG: u8 = PONG;
 
-// -- the handshake -----------------------------------------------------------
-
-/// The `Sec-WebSocket-Accept` a server owes for `key` (§4.2.2): the SHA-1 of
-/// the key and the GUID, in base64.
+/// The `Sec-WebSocket-Accept` a server owes for `key` (§4.2.2).
 #[must_use]
 pub fn accept_for(key: &str) -> String {
     let mut hasher = Sha1::new();
@@ -514,8 +466,7 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Where a WebSocket connection to one far end asks to go: the `Host` it
-/// names and the resource it asks for.
+/// The `Host` and resource a WebSocket connection to one far end asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebSocketTarget {
     host: String,
@@ -545,12 +496,10 @@ impl fmt::Display for TargetError {
 impl core::error::Error for TargetError {}
 
 impl WebSocketTarget {
-    /// `host` (a name or an address, with a port when it is not the
-    /// scheme's) and `resource` (the path and query of the `ws-URI`).
+    /// `host` may carry a port; `resource` is the `ws-URI` path and query.
     ///
     /// # Errors
-    /// [`TargetError`] for a host or a resource that cannot go in the
-    /// request as written.
+    /// [`TargetError`] for a host or resource that cannot go in the request.
     pub fn new(host: &str, resource: &str) -> Result<Self, TargetError> {
         let printable = |text: &str| text.bytes().all(|byte| byte.is_ascii_graphic());
         if host.is_empty() || !printable(host) || host.contains('/') {
@@ -596,8 +545,7 @@ fn request(target: &WebSocketTarget, key: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Check the server's answer to the handshake (§4.1, the list after "If the
-/// server's response does not conform").
+/// The client-side checks of §4.1.
 fn check_answer(head: &[u8], accept: &str) -> Result<(), String> {
     let text = core::str::from_utf8(head).map_err(|_| "an answer that is not text".to_owned())?;
     let mut lines = text.split("\r\n");
@@ -639,8 +587,7 @@ fn check_answer(head: &[u8], accept: &str) -> Result<(), String> {
     }
     match fields.get("sec-websocket-protocol").map(Vec::as_slice) {
         Some([chosen]) if chosen.eq_ignore_ascii_case("sip") => {}
-        // RFC 7118 §4.1: a server that did not pick "sip" is one this end
-        // cannot speak SIP to
+        // RFC 7118 §4.1
         _ => return Err("the server did not agree to the sip subprotocol".to_owned()),
     }
     if fields.contains_key("sec-websocket-extensions") {
@@ -649,12 +596,8 @@ fn check_answer(head: &[u8], accept: &str) -> Result<(), String> {
     Ok(())
 }
 
-// -- one connection ----------------------------------------------------------
-
-/// Bytes drawn for keys, masks and names: SHA-1 over a seed taken once from
-/// the endpoint's own stream and a counter. Kept apart from that stream so
-/// that the masks a connection draws, which depend on when the stack writes,
-/// never move the branches and tags the endpoint draws after them.
+/// Keys, masks and names: SHA-1 of a seed and a counter. Separate from the
+/// endpoint's stream so mask draws never shift its branches and tags.
 #[derive(Debug)]
 struct Draw {
     seed: Box<[u8]>,
@@ -704,16 +647,14 @@ impl Draw {
 
 #[derive(Debug)]
 enum State {
-    /// The handshake is out; its answer is being read.
+    /// Handshake sent, reading the answer.
     Opening { accept: String, until: Instant },
     /// Frames go both ways.
     Open,
-    /// This end sent a close and waits for the server's (§7.1.2); nothing
-    /// more is sent.
+    /// Our close is out; waiting for the server's (§7.1.2), sending nothing.
     Closing { until: Instant },
 }
 
-/// One connection this module runs.
 #[derive(Debug)]
 struct Link {
     protocol: TransportProtocol,
@@ -726,19 +667,14 @@ struct Link {
     draw: Draw,
     /// SIP written before the handshake was answered, in order.
     held: Vec<Arc<[u8]>>,
-    /// When the next ping is due, unless something is sent first.
     ping_at: Instant,
-    /// When a ping already sent stops waiting for its pong.
     pong_by: Option<Instant>,
 }
 
-/// What a connection did with what it was given.
 enum Happened {
-    /// Bytes to write to the socket.
     Send(Vec<u8>),
-    /// A SIP message.
     Message(Vec<u8>),
-    /// The connection is over: failed, or closed by the far end.
+    /// Failed, or closed by the far end.
     Over {
         why: String,
         kind: TransportErrorKind,
@@ -746,8 +682,7 @@ enum Happened {
 }
 
 impl Link {
-    /// One frame on this connection, masked; sending it puts the next ping
-    /// off, when the time is known.
+    /// A masked frame; postpones the next ping when `now` is known.
     fn frame(&mut self, opcode: u8, payload: &[u8], now: Option<Instant>) -> Vec<u8> {
         if let Some(now) = now {
             self.ping_at = now + PING_EVERY;
@@ -849,9 +784,6 @@ impl Link {
     }
 }
 
-// -- the user agent's side ---------------------------------------------------
-
-/// Every connection this module runs, and what it keeps between them.
 #[derive(Debug, Default)]
 pub(crate) struct WebSockets {
     links: BTreeMap<TransportId, Link>,
@@ -859,19 +791,16 @@ pub(crate) struct WebSockets {
     names: HashMap<SocketAddr, String>,
     out: VecDeque<Transmit>,
     failures: HashMap<TransportId, (TransportErrorKind, String)>,
-    /// The latest moment this agent was told of. A frame written from
-    /// [`UserAgent::poll_transmit`], which is given no time, puts the next
-    /// ping off from here: nothing in this crate reads a clock.
+    /// The latest time we were given; [`UserAgent::poll_transmit`] gets no
+    /// time and this crate reads no clock.
     clock: Option<Instant>,
 }
 
 impl WebSockets {
-    /// The name a transport advertises, when it is one of these.
     pub(crate) fn name_of(&self, transport: TransportId) -> Option<&str> {
         self.links.get(&transport).map(|link| link.name.as_str())
     }
 
-    /// The earliest moment any connection needs attention.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.links.values().map(Link::deadline).min()
     }
@@ -894,21 +823,17 @@ impl WebSockets {
 }
 
 impl UserAgent {
-    /// Where WebSocket connections to `remote` ask to go: the `Host` they
-    /// name and the resource they ask for. Read when a connection to that
-    /// far end is bound, so set it before; until it is set, the `Host` is
-    /// the address and the resource is [`DEFAULT_RESOURCE`].
+    /// The `Host` and resource for WebSockets to `remote`. Read at bind time,
+    /// so set it before; the default is the address and [`DEFAULT_RESOURCE`].
     pub fn set_websocket_target(&mut self, remote: SocketAddr, target: WebSocketTarget) {
         self.websockets.targets.insert(remote, target);
     }
 
-    /// Why the WebSocket on `transport` was last given up on — a handshake
-    /// the server refused, a frame that broke the protocol, a close, a pong
-    /// that never came — and how to file it: [`TransportErrorKind::Closed`]
-    /// for a close from the server, [`TransportErrorKind::TimedOut`] for a
-    /// handshake or a pong that never came, [`TransportErrorKind::Other`]
-    /// for the rest. `None` when nothing has gone wrong on it since it was
-    /// last bound.
+    /// Why the WebSocket on `transport` last failed:
+    /// [`TransportErrorKind::Closed`] for a server close,
+    /// [`TransportErrorKind::TimedOut`] for a missing handshake answer or
+    /// pong, [`TransportErrorKind::Other`] otherwise. `None` since the last
+    /// bind if nothing failed.
     #[must_use]
     pub fn websocket_failure(&self, transport: TransportId) -> Option<(TransportErrorKind, &str)> {
         self.websockets
@@ -917,15 +842,13 @@ impl UserAgent {
             .map(|(kind, why)| (*kind, why.as_str()))
     }
 
-    /// Whether `transport` is a WebSocket this agent runs: bound as `Ws` or
-    /// `Wss` with its far end named.
+    /// Whether `transport` was bound as `Ws`/`Wss` with its far end named.
     #[must_use]
     pub fn runs_websocket(&self, transport: TransportId) -> bool {
         self.websockets.links.contains_key(&transport)
     }
 
-    /// The input, if it is this module's to take; `None` sends it on as it
-    /// was.
+    /// `None` passes the input on unchanged.
     pub(crate) fn websocket_input(
         &mut self,
         input: Input<'_>,
@@ -1007,11 +930,9 @@ impl UserAgent {
         self.name_contacts(transport, protocol, local, remote, &name);
     }
 
-    /// Point the `Contact` of every account that goes out on this
-    /// connection, and that names the address the connection is bound at,
-    /// at the connection's `.invalid` name instead (RFC 7118 Appendix B.1).
-    /// A `Contact` the application wrote with a name of its own is its
-    /// choice and stays as written.
+    /// Rewrite to the `.invalid` name each `Contact` on this connection that
+    /// names the bound address (RFC 7118 Appendix B.1). A `Contact` with the
+    /// application's own name stays.
     fn name_contacts(
         &mut self,
         transport: TransportId,
@@ -1070,8 +991,7 @@ impl UserAgent {
         outcome
     }
 
-    /// The connection is over: retired the way a TCP or TLS one is, and the
-    /// application told to close its socket.
+    /// Retired like TCP; the application is told to close its socket.
     fn websocket_over(
         &mut self,
         transport: TransportId,
@@ -1094,8 +1014,8 @@ impl UserAgent {
             .push_back(UaEvent::Unclaimed(Event::FlowFailed { transport }));
     }
 
-    /// What goes out on a connection this module runs, framed; `None` when
-    /// it waits for the handshake. Anything else passes through as it was.
+    /// Frames a transmit on one of our connections; `None` while it waits
+    /// for the handshake. Others pass unchanged.
     pub(crate) fn websocket_frame(&mut self, transmit: Transmit) -> Option<Transmit> {
         let now = self.websockets.clock;
         let Some(link) = self.websockets.links.get_mut(&transmit.transport) else {
@@ -1106,8 +1026,7 @@ impl UserAgent {
                 link.held.push(transmit.payload);
                 return None;
             }
-            // §5.5.1: nothing goes after a close; what the endpoint still
-            // wrote finds out by its own timers, as on a closed TCP stream
+            // §5.5.1: nothing after a close; transactions time out
             State::Closing { .. } => return None,
             State::Open => {}
         }
@@ -1119,14 +1038,11 @@ impl UserAgent {
         })
     }
 
-    /// The next thing a connection wants written on its own account: the
-    /// handshake, a pong, a ping, a close.
+    /// Handshakes, pongs, pings and closes.
     pub(crate) fn poll_websocket(&mut self) -> Option<Transmit> {
         self.websockets.out.pop_front()
     }
 
-    /// Handshakes that went unanswered, pings that are due, and pongs that
-    /// never came.
     pub(crate) fn fire_websockets(&mut self, now: Instant) {
         self.websockets.clock = Some(now);
         let due: Vec<TransportId> = self
@@ -1171,13 +1087,11 @@ impl UserAgent {
         }
     }
 
-    /// Close the WebSocket on `transport` the way RFC 6455 §7.1.2 does: a
-    /// close frame with status 1000 is the next thing to write, nothing is
-    /// sent after it, and once the server's own close comes back — or
-    /// [`PONG_WAIT`] has gone by without one — the transport is retired and
-    /// [`Event::FlowFailed`] says the socket can be closed. `false` for a
-    /// transport that is not a WebSocket this agent runs, or one already
-    /// closing.
+    /// Close the WebSocket on `transport` (RFC 6455 §7.1.2): a 1000 close
+    /// goes next and nothing after it. When the server's close arrives, or
+    /// after [`PONG_WAIT`], the transport is retired and
+    /// [`Event::FlowFailed`] says the socket can be closed. `false` if not
+    /// one of ours or already closing.
     pub fn close_websocket(&mut self, transport: TransportId, now: Instant) -> bool {
         self.websockets.clock = Some(now);
         let Some(link) = self.websockets.links.get_mut(&transport) else {

@@ -5,57 +5,31 @@
 //! from (RFC 4235 §4).
 //!
 //! **This is not an XML parser and must not become one.** It reads the one
-//! document RFC 4235 §4.4 defines and refuses everything else, because the
-//! bytes arrive over UDP from whatever answered a SUBSCRIBE and there is no
-//! version of "try harder" that is safe there. Every general-purpose XML
-//! feature that has ever been a vulnerability is absent by construction rather
-//! than by option: there is no document type declaration, so there are no
-//! entity declarations, so there is no expansion to bound; there are no
-//! external references, so nothing is fetched; and the nesting, the element
-//! count, the attribute count and the length of every value are bounded before
-//! the first byte is read. A document that needs any of it is refused whole.
+//! document RFC 4235 §4.4 defines, from whatever answered a SUBSCRIBE, and
+//! refuses everything else. No DTD, so no entities to expand; no external
+//! references; nesting, element count, attribute count and value length are
+//! bounded. CDATA is refused too: §4.4 has no content that needs it.
 //!
-//! CDATA is refused for the same reason. §4.4's schema has no element whose
-//! content is anything but a URI, a token or a number, so a document that
-//! needs to escape markup is not one of these — and a construct that is never
-//! needed is a construct that cannot be got wrong.
+//! **Namespaces are ignored; local names are matched.** Notifiers get the
+//! binding wrong often enough that refusing on it would break working phones.
 //!
-//! **Namespaces are read as prefixes and otherwise ignored.** §4 puts these
-//! documents in `urn:ietf:params:xml:ns:dialog-info`, and notifiers get the
-//! binding wrong often enough that refusing on it would turn working phones
-//! off. What identifies the body is the `Content-Type` that carried it; what
-//! is matched here is the local name.
-//!
-//! **The table is §4.3's, and the version rule has one deliberate leniency.**
-//! A document whose version is lower than what has already been applied is
-//! discarded; one more than a step ahead means a notification was lost, and if
-//! that one carried partial state the subscriber asks for full state again.
-//! What §4.3 does not say is what to do with a version that repeats, and
-//! repeating is what several PBXs do — every notification stamped `version=0`.
-//! Discarding those freezes the lamp for ever, so a repeat is applied. It
-//! cannot make the table wrong: full state replaces, and re-applying the same
-//! partial update lands on the value it already holds.
+//! **Version rule (§4.3), with one leniency.** A lower version is discarded;
+//! a gap with partial state asks for full state. A repeated version is
+//! applied, because several PBXs stamp every notification `version=0` and
+//! discarding those freezes the lamp. Re-applying is harmless: full state
+//! replaces, and a repeated partial update is idempotent.
 
 use std::time::Duration;
 
-/// The largest document that will be read at all.
-///
-/// Forty extensions with both parties named comes to a few kilobytes. This is
-/// an order of magnitude above the largest real one and two below anything
-/// that would matter for memory; what it is really for is putting a number on
-/// the outermost loop.
+/// Forty extensions come to a few kilobytes; this is ten times the largest
+/// real document.
 const MAX_BYTES: usize = 64 * 1024;
-/// How deep the elements may nest. §4.4's deepest path is `dialog-info` →
-/// `dialog` → `local` → `target` → `param`, which is five.
+/// §4.4's deepest path is five elements.
 const MAX_DEPTH: usize = 8;
-/// How many elements will be read before the document is refused.
 const MAX_NODES: usize = 8_192;
-/// How many attributes one element may carry. §4.4's widest is `dialog`, with
-/// five.
+/// §4.4's widest element, `dialog`, has five.
 const MAX_ATTRIBUTES: usize = 24;
-/// The longest attribute value or text run that will be kept.
 const MAX_VALUE: usize = 1_024;
-/// How many dialogs one document may report.
 const MAX_DIALOGS: usize = 512;
 
 /// Why a dialog information document could not be read.
@@ -64,14 +38,12 @@ const MAX_DIALOGS: usize = 512;
 pub enum DialogInfoError {
     /// The body is not XML, or the markup does not close.
     Malformed(&'static str),
-    /// A construct this reader refuses on sight: a document type declaration,
-    /// an entity declaration, a CDATA section, an entity reference that is not
-    /// one of the five XML predefines or a character reference.
+    /// A DTD, entity declaration, CDATA section, or an entity reference
+    /// other than the five predefined ones and character references.
     Refused(&'static str),
-    /// One of the bounds in this module was reached.
+    /// A size bound was reached.
     TooLarge(&'static str),
-    /// A value that has to be text is not UTF-8. §4 requires the document to
-    /// be encoded in UTF-8.
+    /// A text value is not UTF-8, which §4 requires.
     NotUtf8,
     /// The root element is not `dialog-info`.
     NotDialogInfo,
@@ -127,13 +99,8 @@ impl DialogPhase {
         }
     }
 
-    /// How far along a lamp should read this as being.
-    ///
-    /// §3.7.2's virtual state machine, which is the rule for turning several
-    /// dialogs into one indication: "If there is any dialog at the UA whose
-    /// state is Confirmed, the virtual FSM is in the Confirmed state. If there
-    /// are no dialogs at the UA in the Confirmed state but there is at least
-    /// one in the Early state..." and so on down.
+    /// Precedence in §3.7.2's virtual state machine: the most advanced
+    /// dialog decides the lamp.
     const fn rank(self) -> u8 {
         match self {
             Self::Terminated | Self::Unknown => 0,
@@ -211,10 +178,8 @@ pub struct Participant {
 /// One dialog, or one half of one (§4.1.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchedDialog {
-    /// The `id` attribute, which is what rows of the table are keyed by. Not
-    /// the RFC 3261 dialog identifier: §4.1.1 is explicit that it is "a
-    /// different identifier than the dialog ID defined in RFC 3261, but
-    /// related to it".
+    /// The `id` attribute, the table key. Not the RFC 3261 dialog ID
+    /// (§4.1.1).
     pub id: Box<str>,
     /// The `Call-ID`, when the notifier says.
     pub call_id: Option<Box<str>>,
@@ -228,8 +193,7 @@ pub struct WatchedDialog {
     pub phase: DialogPhase,
     /// What ended it, when it has ended and the notifier said.
     pub ended: Option<DialogEnded>,
-    /// The status code of the response that caused the transition, when there
-    /// was one.
+    /// The status code that caused the transition, if any.
     pub code: Option<u16>,
     /// How long since the state machine was created.
     pub duration: Option<Duration>,
@@ -273,13 +237,11 @@ pub struct DialogInfo {
 /// What one document did to the table (§4.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Applied {
-    /// It was merged in.
     Taken,
-    /// Its version is behind what is already held, so it was discarded.
+    /// Older version, discarded.
     Stale,
-    /// It was merged, but a notification was lost on the way and this one
-    /// carried only a change — so the picture may be missing something and
-    /// §4.3 asks for a refresh to get full state back.
+    /// Merged, but a notification was lost and this one was partial: §4.3
+    /// asks for a refresh.
     Incomplete,
 }
 
@@ -303,11 +265,7 @@ impl DialogInfoTable {
         self.version
     }
 
-    /// What a lamp for this resource should show: §3.7.2's virtual state
-    /// machine over every dialog in the table.
-    ///
-    /// `None` when nothing is going on, which is the state §4.1.2 leaves a
-    /// row in once it has terminated.
+    /// What a lamp should show (§3.7.2 over every dialog); `None` when idle.
     #[must_use]
     pub fn phase(&self) -> Option<DialogPhase> {
         self.rows
@@ -320,19 +278,12 @@ impl DialogInfoTable {
     /// Merge one document in (§4.3).
     pub(crate) fn apply(&mut self, document: &DialogInfo) -> Applied {
         let gap = match self.version {
-            // "If the value in the document is less than the local version,
-            // the document is discarded without processing."
             Some(held) if document.version < held => return Applied::Stale,
-            // "If the value in the document is more than one higher than the
-            // local version number, the local version number is set to the
-            // value in the new document and the document is processed."
             Some(held) => document.version > held.saturating_add(1),
             None => false,
         };
         self.version = Some(document.version);
 
-        // "If it contains full state ... the contents of the table are flushed
-        // and then repopulated from the document."
         if document.full {
             self.rows.clear();
         }
@@ -344,10 +295,7 @@ impl DialogInfoTable {
                 None => (),
             }
         }
-        // "If a row is updated or created, such that its state is now
-        // terminated, that entry MAY be removed from the table at any time."
-        // It is removed here, because a lamp reads the table and a row that
-        // has ended is a call that is over.
+        // §4.3 lets terminated rows go; a lamp reads them as over anyway
         self.rows.retain(|row| row.phase != DialogPhase::Terminated);
 
         if gap && !document.full {
@@ -364,10 +312,8 @@ impl DialogInfo {
     /// Read one document.
     ///
     /// # Errors
-    /// [`DialogInfoError`]. Every failure is the notifier's, and every one of
-    /// them leaves the table the subscription already holds exactly as it was:
-    /// a lamp showing what was last known is better than one showing what a
-    /// malformed document happened to contain.
+    /// [`DialogInfoError`]. A failure leaves the subscription's table as it
+    /// was, so the lamp keeps showing the last known state.
     pub fn parse(body: &[u8]) -> Result<Self, DialogInfoError> {
         if body.len() > MAX_BYTES {
             return Err(DialogInfoError::TooLarge("document"));
@@ -472,10 +418,8 @@ impl Builder {
             .text("version")?
             .and_then(|text| text.parse::<u32>().ok())
             .unwrap_or(0);
-        // §4.1: the attribute is "state", and its two values are "full" and
-        // "partial". Absent, the document is read as full: it is the only
-        // reading that cannot leave the table holding a row nothing will
-        // ever correct
+        // absent `state` reads as full: partial could leave a row nothing
+        // ever corrects
         let full = attributes
             .value("state")?
             .is_none_or(|value| !value.eq_ignore_ascii_case(b"partial"));
@@ -560,9 +504,8 @@ impl Builder {
 }
 
 fn open_dialog(attributes: Attributes<'_>) -> Result<WatchedDialog, DialogInfoError> {
-    // §4.1.1 makes `id` the only mandatory attribute, and §4.3 keys the table
-    // by it. One without it names no row, and a synthesised name would make
-    // every notification look like a new dialog
+    // §4.3 keys the table by `id`; a synthesised one would make every
+    // notification a new dialog
     let id = attributes
         .text("id")?
         .ok_or(DialogInfoError::Malformed("a dialog with no id"))?;
@@ -578,7 +521,6 @@ fn open_dialog(attributes: Attributes<'_>) -> Result<WatchedDialog, DialogInfoEr
     Ok(dialog)
 }
 
-/// A name with any namespace prefix taken off.
 pub(crate) fn local_name(name: &[u8]) -> &[u8] {
     match name.iter().rposition(|byte| *byte == b':') {
         Some(colon) => name.get(colon + 1..).unwrap_or(name),
@@ -586,33 +528,28 @@ pub(crate) fn local_name(name: &[u8]) -> &[u8] {
     }
 }
 
-/// Bytes the document holds as text, refused when they are not UTF-8.
 pub(crate) fn as_str(bytes: &[u8]) -> Result<&str, DialogInfoError> {
     core::str::from_utf8(bytes).map_err(|_| DialogInfoError::NotUtf8)
 }
 
 // -- the tokeniser -----------------------------------------------------------
 
-/// One piece of markup.
 pub(crate) enum Node<'a> {
-    /// A start tag, or an empty-element tag.
     Open(Element<'a>),
-    /// An end tag, by its name.
     Close(&'a [u8]),
-    /// Character data, with its references still unresolved.
+    /// References still unresolved.
     Text(&'a [u8]),
 }
 
 pub(crate) struct Element<'a> {
-    /// The name as written, prefix included.
+    /// Prefix included.
     pub(crate) name: &'a [u8],
-    /// What the tag carries after its name.
     pub(crate) attributes: Attributes<'a>,
-    /// Written `<x/>`, so it closes itself.
+    /// Written `<x/>`.
     pub(crate) empty: bool,
 }
 
-/// The attributes of one element, read on demand.
+/// Read on demand.
 #[derive(Clone, Copy)]
 pub(crate) struct Attributes<'a> {
     raw: &'a [u8],
@@ -634,7 +571,6 @@ impl Attributes<'_> {
         Err(DialogInfoError::TooLarge("attribute count"))
     }
 
-    /// The same, as text.
     pub(crate) fn text(&self, name: &str) -> Result<Option<Box<str>>, DialogInfoError> {
         match self.value(name)? {
             Some(value) => Ok(Some(Box::from(as_str(&value)?))),
@@ -643,14 +579,12 @@ impl Attributes<'_> {
     }
 }
 
-/// One `name="value"` pair, and what follows it.
 struct Attribute<'a> {
     name: &'a [u8],
     value: &'a [u8],
     rest: &'a [u8],
 }
 
-/// The next pair, or `None` when the tag has no more.
 fn next_attribute(raw: &[u8]) -> Result<Option<Attribute<'_>>, DialogInfoError> {
     let rest = raw.trim_ascii_start();
     if rest.is_empty() {
@@ -665,8 +599,7 @@ fn next_attribute(raw: &[u8]) -> Result<Option<Attribute<'_>>, DialogInfoError> 
         .get(equals + 1..)
         .unwrap_or_default()
         .trim_ascii_start();
-    // §2.3 of XML 1.0 allows either quote and requires one of them; an
-    // unquoted value is not a document this reads
+    // XML 1.0 §2.3: either quote, but one is required
     let (&quote, body) = after
         .split_first()
         .filter(|(quote, _)| matches!(**quote, b'"' | b'\''))
@@ -685,7 +618,6 @@ fn next_attribute(raw: &[u8]) -> Result<Option<Attribute<'_>>, DialogInfoError> 
     }))
 }
 
-/// The tokeniser: one node at a time, with every refusal described above.
 pub(crate) struct Reader<'a> {
     rest: &'a [u8],
 }
@@ -695,21 +627,16 @@ impl<'a> Reader<'a> {
         Self { rest: body }
     }
 
-    /// The next node, or `None` at the end of the document.
+    /// The next node, or `None` at the end.
     pub(crate) fn next(&mut self) -> Result<Option<Node<'a>>, DialogInfoError> {
-        // at most one skipped construct per call is not enough: a document
-        // starts with a declaration and may then carry comments
         for _ in 0..MAX_NODES {
             let rest = self.rest;
             let Some(&first) = rest.first() else {
                 return Ok(None);
             };
             if first != b'<' {
-                // a run of nothing but whitespace (XML 1.0 §2.3's S) is
-                // markup's layout and not a node; any other run is text as
-                // written, its leading whitespace included, since text that
-                // follows a comment or a child element begins where it
-                // ends and the space before its first word is part of it
+                // whitespace-only runs are layout; other text keeps its
+                // leading whitespace
                 let end = rest
                     .iter()
                     .position(|byte| *byte == b'<')
@@ -730,9 +657,6 @@ impl<'a> Reader<'a> {
                     if rest.starts_with(b"<!--") {
                         self.skip(b"-->", "a comment")?;
                     } else {
-                        // <!DOCTYPE brings entity declarations, <![CDATA[
-                        // brings content that is not markup, and neither is
-                        // in a dialog-info document
                         return Err(DialogInfoError::Refused("a declaration or CDATA section"));
                     }
                 }
@@ -804,11 +728,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// The `>` that closes a tag, skipping the ones inside attribute values.
-///
-/// XML §2.4 forbids `<` and `&` in an attribute value and allows everything
-/// else, `>` included — so `display="a &gt; b"` is the conventional spelling
-/// and `display="a > b"` is legal too. Stopping at the first `>` would cut the
-/// tag in half and read the rest of it as text.
+/// XML §2.4 allows a raw `>` in an attribute value.
 fn tag_end(tag: &[u8]) -> Option<usize> {
     let mut quote: Option<u8> = None;
     for (at, byte) in tag.iter().enumerate() {
@@ -824,10 +744,7 @@ fn tag_end(tag: &[u8]) -> Option<usize> {
 }
 
 /// The five references XML predefines, and character references. Nothing else.
-///
-/// This is where a general-purpose reader would look a declaration up, and
-/// where the billion laughs would expand. There is no table to look in: an
-/// entity that is not one of these five is a document this refuses.
+/// No entity table, so nothing like the billion laughs can expand.
 pub(crate) fn unescape(raw: &[u8]) -> Result<Vec<u8>, DialogInfoError> {
     if raw.len() > MAX_VALUE {
         return Err(DialogInfoError::TooLarge("value"));
@@ -837,8 +754,6 @@ pub(crate) fn unescape(raw: &[u8]) -> Result<Vec<u8>, DialogInfoError> {
     }
     let mut out = Vec::with_capacity(raw.len());
     let mut rest = raw;
-    // one reference is at least three bytes, so the input's own length bounds
-    // this as tightly as anything else would
     for _ in 0..=MAX_VALUE {
         let Some(at) = rest.iter().position(|byte| *byte == b'&') else {
             out.extend_from_slice(rest);

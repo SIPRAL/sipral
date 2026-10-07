@@ -1,25 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What it takes to be reachable at an address of record.
+//! Accounts: one identity each, usually with a registrar, sometimes none (a
+//! trunk). Accounts in one agent share nothing: no `Call-ID`, no sequence
+//! number, no credentials.
 //!
-//! An account is the configuration of one identity — usually a relationship
-//! with one registrar, and sometimes with none, for a trunk that knows this end
-//! by the address its requests come from. Several of them coexist in one user
-//! agent without sharing anything — not a `Call-ID`, not a sequence number, not
-//! a set of credentials. A softphone with a work line and a personal line has
-//! two, and neither can affect the other.
-//!
-//! Two things here are the caller's and not this crate's. The address and the
-//! transport, because resolving a server's name is I/O and belongs to
-//! whoever owns the sockets; and the instance identifier, because RFC 5626
-//! §4.1 requires it to survive a power cycle, and a library with no storage
-//! cannot promise that.
-//!
-//! A third is the push resource identifier. RFC 8599 §4.1.1 puts it in the
-//! `Contact` of a REGISTER so that the network can wake a suspended device,
-//! and getting one is a conversation with a notification service that has
-//! nothing to do with SIP.
+//! The caller supplies the server address (resolving is I/O), the instance
+//! identifier (RFC 5626 §4.1 needs it to survive a power cycle) and the push
+//! identifier (RFC 8599, obtained from the notification service).
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -32,18 +20,15 @@ use sipral_core::pin::CertificatePin;
 
 use crate::identity::{ANONYMOUS_FROM, Privacy};
 
-/// One hour, which is what most registrars grant anyway.
 pub(crate) const DEFAULT_EXPIRES: Duration = Duration::from_hours(1);
 
 /// The name of an account inside one [`UserAgent`](crate::UserAgent).
 ///
 /// Minted by [`UserAgent::add_account`](crate::UserAgent::add_account) and
-/// never reused, so a handle to an account that has been removed names nothing
-/// rather than naming somebody else's.
+/// never reused, so a stale handle names nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccountId(pub(crate) u32);
 
-/// One header the caller added to every REGISTER this account sends.
 #[derive(Clone, Debug)]
 pub(crate) struct Extra {
     pub(crate) name: Box<[u8]>,
@@ -52,16 +37,9 @@ pub(crate) struct Extra {
 
 /// Where a push notification for this account is delivered (RFC 8599 §4.1.1).
 ///
-/// The three values are opaque here and mean something only to the
-/// notification service named by `provider`: §8.7 says "the format and
-/// semantics of pn-prid and pn-param are specific to the pn-provider value",
-/// and §10 to §12 register one triple each for Apple, Firebase and RFC 8030.
-/// Obtaining them is the application's — it talks to the service, it owns the
-/// entitlements, and a stack that guessed would guess wrong on every platform.
-///
-/// They go out on REGISTER and nowhere else. §4.1 forbids the parameters in
-/// any other request, because a `pn-prid` in the `Contact` of an INVITE hands
-/// the far end a token that wakes this device whenever it likes.
+/// The values are opaque, meaningful only to the service (§8.7); the
+/// application obtains them. They go out on REGISTER only (§4.1): a `pn-prid`
+/// in an INVITE would let the far end wake this device at will.
 #[derive(Clone)]
 pub struct Push {
     provider: Box<str>,
@@ -72,14 +50,8 @@ pub struct Push {
 }
 
 impl core::fmt::Debug for Push {
-    /// The provider, and nothing that identifies the device.
-    ///
-    /// `pn-prid` is a token that wakes this installation. §4.1 keeps it off
-    /// every request but REGISTER for exactly that reason — "a `pn-prid` in
-    /// the `Contact` of an INVITE hands the far end a token that wakes this
-    /// device whenever it likes" — and a log file is a worse place for it than
-    /// an INVITE, because it is kept. `pn-param` goes with it: §8.7 makes both
-    /// opaque and service-specific, so neither can be judged safe from here.
+    /// Redacts `pn-prid` and `pn-param`: the identifier wakes the device, and
+    /// a log keeps it longer than an INVITE would.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Push")
             .field("provider", &self.provider)
@@ -91,11 +63,8 @@ impl core::fmt::Debug for Push {
 }
 
 impl Push {
-    /// Notifications of type `provider`, addressed to `prid`.
-    ///
-    /// `provider` is the registered name of the service — `apns`, `fcm`,
-    /// `webpush` — and `prid` the resource identifier it issued for this
-    /// installation.
+    /// Notifications from `provider` (`apns`, `fcm`, `webpush`) to the
+    /// identifier `prid` it issued.
     #[must_use]
     pub fn new(provider: &str, prid: &str) -> Self {
         Self {
@@ -106,24 +75,16 @@ impl Push {
         }
     }
 
-    /// The extra value a service needs beside the identifier: the application
-    /// bundle for Apple, the sender for Firebase.
-    ///
-    /// §4.1.1 makes it mandatory "if required for the specific PNS", so it is
-    /// optional here and the service decides.
+    /// `pn-param`: the app bundle for Apple, the sender for Firebase. Needed
+    /// only when the service requires it (§4.1.1).
     #[must_use]
     pub fn param(mut self, param: &str) -> Self {
         self.param = Some(Box::from(param));
         self
     }
 
-    /// This device can send a binding refresh without being woken by a push,
-    /// which §4.1.4 makes it say with a `+sip.pnsreg` media feature tag.
-    ///
-    /// It is the application's fact and not this crate's to guess: a process
-    /// the operating system has suspended has no timer that runs, and one that
-    /// claims otherwise gets a registrar that stops sending the wake-ups the
-    /// device is relying on.
+    /// This device can refresh its binding without a push (`+sip.pnsreg`,
+    /// §4.1.4). Claim it only if true: the registrar may stop the wake-ups.
     #[must_use]
     pub const fn wakes_itself(mut self) -> Self {
         self.wakes_itself = true;
@@ -136,13 +97,8 @@ impl Push {
         &self.provider
     }
 
-    /// `;pn-provider=…;pn-param=…;pn-prid=…`, in the order §4.1.4's example
-    /// writes them.
-    ///
-    /// `removing` leaves out the identifier: §4.1.2 says a REGISTER that gives
-    /// up the binding "MUST NOT insert the 'pn-prid' SIP URI parameter", and
-    /// its absence is how the network is told to stop sending notifications
-    /// for it.
+    /// `;pn-provider=…;pn-param=…;pn-prid=…`. `removing` omits `pn-prid`
+    /// (§4.1.2).
     fn write(&self, out: &mut Vec<u8>, removing: bool) {
         out.extend_from_slice(b";pn-provider=");
         escape(out, &self.provider);
@@ -157,13 +113,8 @@ impl Push {
     }
 }
 
-/// A URI parameter value, escaped as §25.1's `pvalue` requires.
-///
-/// A push identifier is whatever the notification service made of it, and two
-/// of the three registered services hand out something that is not a SIP token
-/// — a base64 identifier carries `=`, a Web Push identifier is a whole URL.
-/// §8.7 says as much: "parameter value characters that are not part of pvalue
-/// need to be escaped".
+/// Escape a URI parameter value as `pvalue` (RFC 3261 §25.1). Push
+/// identifiers carry `=` or whole URLs (RFC 8599 §8.7).
 fn escape(out: &mut Vec<u8>, value: &str) {
     for byte in value.as_bytes() {
         // param-unreserved / unreserved, §25.1
@@ -203,87 +154,49 @@ const fn hex(nibble: u8) -> u8 {
     }
 }
 
-/// The transport an account on a connection of its own names until it has
-/// one ([`Account::on_stream`]): a number no transport is bound under.
+/// The transport of an [`Account::on_stream`] account before its connection
+/// exists; nothing is bound under it.
 pub(crate) const NO_FLOW_YET: TransportId = TransportId(u32::MAX);
 
-/// An identity, where its requests go, how to prove it — and, for every
-/// account but a trunk, the registrar that keeps it reachable.
+/// An identity, where its requests go, how to prove it, and (except for a
+/// trunk) the registrar that keeps it reachable.
 #[derive(Clone, Debug)]
 pub struct Account {
-    /// The address of record: `sip:alice@example.com`. Goes in `To` and
-    /// `From` (§10.2).
     pub(crate) aor: Uri,
-    /// Where the REGISTER is addressed: `sip:example.com`, no user part.
-    ///
-    /// `None` for an account that never registers ([`Account::unregistered`]).
+    /// `None` for an account that never registers.
     pub(crate) registrar: Option<Uri>,
-    /// Where this endpoint can be reached, as it goes in `Contact`.
     pub(crate) contact: Uri,
     pub(crate) display_name: Option<Box<str>>,
-    /// Refcounted rather than copied: [`Credentials`] is deliberately not
-    /// `Clone`, so that the password exists once however many places name it.
+    /// Shared, not copied: [`Credentials`] is deliberately not `Clone`.
     pub(crate) credentials: Option<Arc<Credentials>>,
-    /// The realms the password answers, as configured. See
-    /// [`Account::realms`].
     pub(crate) realms: Vec<Arc<str>>,
-    /// With none configured, the realms the account's server first
-    /// challenged with, taken then and kept — and, for an account that
-    /// registers, the realms its registrar challenges its REGISTERs with.
+    /// With no realms configured, those the server first challenged with,
+    /// plus whatever the registrar challenges REGISTERs with.
     pub(crate) pinned_realms: Vec<Arc<str>>,
     pub(crate) expires: Duration,
-    /// The session interval to ask for on a call (RFC 4028). `None` asks for
-    /// none, and takes one only if the far end insists.
     pub(crate) session_interval: Option<Duration>,
     pub(crate) instance_id: Option<Box<str>>,
     pub(crate) transport: TransportId,
-    /// Where this account's requests go when they name nowhere more specific:
-    /// the registrar's address for an account that registers, and the
-    /// outbound proxy for one that does not.
+    /// The registrar, or the outbound proxy for an account that does not
+    /// register.
     pub(crate) remote: SocketAddr,
     pub(crate) extra: Vec<Extra>,
     pub(crate) push: Option<Push>,
-    /// `text/plain` and this list are the bodies a MESSAGE to this account is
-    /// answered rather than 415'd. See [`Account::accepts_message_type`].
     pub(crate) message_types: Vec<Box<[u8]>>,
-    /// What `transport` is, when the caller chose to say. See
-    /// [`Account::transport_protocol`].
     pub(crate) protocol: Option<TransportProtocol>,
-    /// Where this account's end-of-call voice quality reports go (RFC 6035,
-    /// carried by a PUBLISH, RFC 3903), or `None` to send none.
     pub(crate) quality_report_uri: Option<Uri>,
-    /// What privacy every call this account places asks for (RFC 3323).
-    /// See [`Account::privacy`].
     pub(crate) privacy: Privacy,
-    /// The peers inside this account's trust domain (RFC 3325 §2.3), by
-    /// address. See [`Account::trust`].
     pub(crate) trusted: Vec<IpAddr>,
-    /// What this account does with the `Identity` header fields of the calls
-    /// it receives (RFC 8224 §6.2). See [`Account::stir_verification`].
     pub(crate) stir_verification: crate::StirVerification,
-    /// What it signs the calls it places with (RFC 8224 §6.1), if anything.
-    /// See [`Account::stir_signing`].
     #[cfg(feature = "stir")]
     pub(crate) stir_signing: Option<crate::StirSigning>,
-    /// How often this account keeps its flow to `remote` open whatever STUN
-    /// found, or `None` to leave that to the agent's NAT rule. See
-    /// [`Account::keepalive`].
     pub(crate) keepalive: Option<Duration>,
-    /// The URI whose server `remote` is found from by RFC 3263, for an
-    /// account made with a name rather than an address. See
-    /// [`Account::located`].
+    /// The URI `remote` is found from by RFC 3263, for a located account.
     pub(crate) server: Option<Uri>,
-    /// Whether a NAPTR lookup comes first for `server`. See
-    /// [`Account::naptr`].
     pub(crate) naptr: bool,
-    /// Whether `remote` is an address yet: always for an account made with
-    /// one, and for a located one once the first lookup has answered.
+    /// `remote` is a real address: always, or after the first lookup.
     pub(crate) located: bool,
-    /// The one TLS server certificate this account trusts, by fingerprint,
-    /// in place of a trust anchor. See [`Account::tls_pin`].
     pub(crate) tls_pin: Option<CertificatePin>,
-    /// The protocol of the connection of its own this account's requests go
-    /// over, when it has one. See [`Account::on_stream`].
     pub(crate) own_stream: Option<TransportProtocol>,
 }
 
@@ -291,10 +204,8 @@ impl Account {
     /// An account at `aor`, registering with `registrar`, reachable at
     /// `contact`.
     ///
-    /// `transport` and `remote` say where the REGISTER actually goes, and
-    /// where a call goes when it names no destination of its own. Nothing
-    /// here resolves a name: RFC 3263 is I/O, and the platform's resolver is
-    /// better than a protocol library's.
+    /// `transport` and `remote` are where the REGISTER goes, and any request
+    /// that names no destination of its own. No name is resolved here.
     #[must_use]
     pub fn new(
         aor: Uri,
@@ -309,19 +220,11 @@ impl Account {
     /// An account at `aor` that never registers, reachable at `contact`,
     /// whose requests go to `outbound_proxy`.
     ///
-    /// A trunk, in the usual case: the far end knows this end by the address
-    /// its packets come from, so there is no binding to create and none to
-    /// keep alive. What exists to protect a binding — the refresh, the
-    /// back-off, the recovery ladder after a wake or a move, the refresh a
-    /// push asks for, the snapshot — has nothing to do here, and asking this
-    /// account to register is refused with
-    /// [`UaError::NoRegistrar`](crate::UaError::NoRegistrar) rather than sent
-    /// somewhere.
-    ///
-    /// Everything else is what any account does. A call or a subscription
-    /// leaves on `transport` for `outbound_proxy` unless it names a
-    /// destination of its own, and a challenge from the proxy is answered
-    /// from [`Account::credentials`].
+    /// Usually a trunk that knows this end by source address. Asking it to
+    /// register fails with
+    /// [`UaError::NoRegistrar`](crate::UaError::NoRegistrar). Requests go to
+    /// `outbound_proxy` unless they name a destination, and its challenges
+    /// are answered from [`Account::credentials`].
     #[must_use]
     pub fn unregistered(
         aor: Uri,
@@ -371,29 +274,22 @@ impl Account {
         }
     }
 
-    /// An account at `aor`, registering with `registrar`, reachable at
-    /// `contact`, whose registrar is found from `registrar`'s host by RFC
-    /// 3263 rather than given as an address.
+    /// Like [`Account::new`], but the registrar's address is found from its
+    /// host by RFC 3263.
     ///
-    /// The lookups are the application's resolver's, asked for one at a time
-    /// ([`UaEvent::LookupWanted`](crate::UaEvent::LookupWanted), answered
-    /// with [`UserAgent::looked_up`](crate::UserAgent::looked_up)); the order
-    /// they go in, the SRV ranking and the fallback to the host's own
-    /// addresses are this crate's ([`sipral_core::endpoint::Locator`]). The
-    /// transport is `transport`'s, so the SRV name asked is the one that
-    /// serves it: `_sip._udp`, `_sip._tcp` or `_sips._tcp`. A `registrar`
-    /// with a port skips SRV, and one with a numeric host asks nothing.
+    /// Each lookup is asked of the application
+    /// ([`UaEvent::LookupWanted`](crate::UaEvent::LookupWanted), answered by
+    /// [`UserAgent::looked_up`](crate::UserAgent::looked_up)); ordering, SRV
+    /// ranking and fallback are [`sipral_core::endpoint::Locator`]'s. The SRV
+    /// name follows `transport`. A port skips SRV; a numeric host asks
+    /// nothing.
     ///
-    /// The first REGISTER waits for the first answer. Every address found is
-    /// kept, and a request outside a dialog — a REGISTER, or an INVITE,
-    /// MESSAGE, SUBSCRIBE or PUBLISH sent to it — that times out, whose
-    /// transport fails or that is
-    /// answered 503 moves to the next at once (§4.3); once none is left, or once the shortest
-    /// time-to-live of the answer runs out, the name is looked up again, so a
-    /// registrar that changes address is followed without a restart (see
-    /// [`crate::locate`]). Until the first answer, a call, a MESSAGE, a
-    /// SUBSCRIBE or a PUBLISH that names no destination of its own is
-    /// refused with [`UaError::NotLocated`](crate::UaError::NotLocated).
+    /// The first REGISTER waits for the first answer. An out-of-dialog
+    /// request that times out, fails at transport or gets 503 moves to the
+    /// next address (§4.3); when none is left or the TTL expires, the name is
+    /// looked up again (see [`crate::locate`]). Before the first answer, a
+    /// request with no destination of its own fails with
+    /// [`UaError::NotLocated`](crate::UaError::NotLocated).
     #[must_use]
     pub fn located(aor: Uri, registrar: Uri, contact: Uri, transport: TransportId) -> Self {
         let mut account = Self::with(
@@ -408,9 +304,8 @@ impl Account {
         account
     }
 
-    /// [`Account::unregistered`], with the outbound proxy found from
-    /// `outbound_proxy`'s host by RFC 3263, as [`Account::located`] finds a
-    /// registrar. The first lookup starts with the agent's first round of
+    /// [`Account::unregistered`], with the outbound proxy located as in
+    /// [`Account::located`]. The first lookup starts on the next round of
     /// work after the account is added.
     #[must_use]
     pub fn unregistered_located(
@@ -431,12 +326,9 @@ impl Account {
         account
     }
 
-    /// Send this account's requests to the server `server` names, found by
-    /// RFC 3263 as [`Account::located`] finds a registrar, rather than to the
-    /// address it was made with: for an account that registers with one URI
-    /// and reaches its registrar through an outbound proxy known by name, or
-    /// for a binding that builds every account the same way and names the
-    /// server last. The `registrar` a REGISTER is addressed to is unchanged.
+    /// Send requests to `server`, located by RFC 3263, instead of the address
+    /// given (e.g. an outbound proxy known by name). The REGISTER's
+    /// Request-URI is unchanged.
     #[must_use]
     pub fn locate(mut self, server: Uri) -> Self {
         self.server = Some(server);
@@ -445,26 +337,21 @@ impl Account {
         self
     }
 
-    /// Ask the server's domain for NAPTR records before SRV (RFC 3263 §4.1),
-    /// for an account made with [`Account::located`] or
-    /// [`Account::unregistered_located`]. Off by default: most domains
-    /// publish none, and a client that already knows its transport may start
-    /// at SRV. No effect on an account made with an address.
+    /// Look up NAPTR before SRV (RFC 3263 §4.1) for a located account. Off by
+    /// default, since most domains publish none.
     #[must_use]
     pub const fn naptr(mut self) -> Self {
         self.naptr = true;
         self
     }
 
-    /// The URI whose server this account locates by RFC 3263, or `None` for
-    /// one made with an address.
+    /// The URI located by RFC 3263, or `None`.
     #[must_use]
     pub const fn server(&self) -> Option<&Uri> {
         self.server.as_ref()
     }
 
-    /// Where this account's requests go when they name nowhere of their own,
-    /// or `None` while a located account has no answer yet.
+    /// `None` while a located account has no answer yet.
     pub(crate) const fn destination(&self) -> Option<(TransportId, SocketAddr)> {
         if self.located {
             Some((self.transport, self.remote))
@@ -482,74 +369,46 @@ impl Account {
 
     /// The password to answer a challenge with.
     ///
-    /// Left out, a challenge is reported and the registration stops there:
-    /// there is nothing to answer with, and sending the request again would
-    /// only earn the same refusal.
+    /// Without it a challenge is reported and the registration stops.
     ///
-    /// The password answers the account's own server and nobody else (RFC
-    /// 3261 §22.1): a challenge to a request that went anywhere but the
-    /// account's registrar — or its outbound proxy, for an account that does
-    /// not register — is not answered, nor one for a realm that is not the
-    /// account's ([`Account::realms`]). Either is reported as
-    /// [`UaEvent::ChallengeDeclined`](crate::UaEvent::ChallengeDeclined) and
-    /// the refusal stands.
+    /// Only the account's own server is answered (RFC 3261 §22.1): a
+    /// challenge from elsewhere, or for a realm not the account's
+    /// ([`Account::realms`]), is reported as
+    /// [`UaEvent::ChallengeDeclined`](crate::UaEvent::ChallengeDeclined).
     #[must_use]
     pub fn credentials(mut self, credentials: Credentials) -> Self {
         self.credentials = Some(Arc::new(credentials));
         self
     }
 
-    /// The realms the password answers, when the account's server uses more
-    /// than one or the first it challenges with is not one to keep.
-    ///
-    /// Named none — the default — the account takes the realms its own
-    /// server first challenges it with, and from then on answers those and
-    /// no others: a proxy passing on a far end's own 401, under a realm of
-    /// its choosing, gets nothing. For an account that registers, what its
-    /// registrar challenges a REGISTER with is always the account's — nobody
-    /// passes a REGISTER on to a far end of their choosing — so those realms
-    /// are added to the ones taken, on every registration and every refresh,
-    /// and a registrar that moved to another realm is followed. An SBC or
-    /// outbound proxy at the server's address
-    /// that challenges calls under a realm the REGISTERs never meet needs
-    /// both named here, since nothing else says that realm is the
-    /// account's. Named, these and no others are answered, REGISTERs
+    /// The realms the password answers. When set, only these, REGISTERs
     /// included.
+    ///
+    /// Unset (the default), the account keeps the realms its server first
+    /// challenged with, so a proxy relaying a far end's 401 gets nothing.
+    /// Realms a registrar uses on REGISTER are always added, so a realm
+    /// change is followed. An SBC that challenges calls under a realm
+    /// REGISTERs never see needs both realms named here.
     #[must_use]
     pub fn realms(mut self, realms: &[&str]) -> Self {
         self.realms = realms.iter().map(|realm| Arc::from(*realm)).collect();
         self
     }
 
-    /// How long a binding to ask for. One hour unless said otherwise.
-    ///
-    /// What the registrar grants wins, always (§10.2.4), and the refresh is
-    /// scheduled against the granted value rather than this one.
+    /// How long a binding to ask for (default one hour). The refresh follows
+    /// what the registrar grants (§10.2.4).
     #[must_use]
     pub const fn expires(mut self, expires: Duration) -> Self {
         self.expires = expires;
         self
     }
 
-    /// The instance identifier, as the `+sip.instance` parameter of `Contact`
-    /// (RFC 5626 §4.1).
+    /// The `+sip.instance` URN (RFC 5626 §4.1), usually `urn:uuid:`. The
+    /// caller stores it across restarts so the registrar replaces this
+    /// device's binding. Angle brackets are optional.
     ///
-    /// A URN, usually `urn:uuid:`, that identifies this device and survives a
-    /// power cycle and a change of network. It is the caller's to generate and
-    /// to store, because a library that minted one per process would defeat
-    /// the point: the value is what lets a registrar replace this device's
-    /// binding instead of accumulating one per address it has ever had.
-    ///
-    /// The `reg-id` parameter that goes with it in an Outbound registration is
-    /// deliberately not sent. RFC 5626 §4.2 pairs it with the `outbound` option
-    /// tag and with flow keepalive and flow recovery, none of which exists
-    /// here yet; claiming the tag without them would be a promise this stack
-    /// does not keep.
-    ///
-    /// Given with or without the angle brackets `+sip.instance` wraps it in:
-    /// one pair is taken off here and `Contact` writes the pair back, so an
-    /// application that copied the value out of a `Contact` does not send it
-    /// bracketed twice.
+    /// `reg-id` is not sent: RFC 5626 §4.2 ties it to the `outbound` tag and
+    /// flow recovery, which this stack does not claim.
     #[must_use]
     pub fn instance_id(mut self, urn: &str) -> Self {
         let bare = urn
@@ -560,13 +419,8 @@ impl Account {
         self
     }
 
-    /// How long a call may go without a refresh before it is hung up
-    /// (RFC 4028 §4).
-    ///
-    /// Thirty minutes by default, which is the value §4 recommends. `None`
-    /// asks for no timer at all — the far end may still impose one, and then
-    /// it is honoured, because refusing to refresh a session the other end is
-    /// timing is a call that drops for no visible reason.
+    /// The session timer to ask for (RFC 4028 §4), thirty minutes by default. `None` asks for no timer, but one the far
+    /// end imposes is still honoured, or the call would drop.
     #[must_use]
     pub const fn session_interval(mut self, interval: Option<Duration>) -> Self {
         self.session_interval = interval;
@@ -576,12 +430,9 @@ impl Account {
     /// Ask the network to wake this device with push notifications
     /// (RFC 8599 §4.1.1).
     ///
-    /// The parameters ride on the `Contact` of every REGISTER and on nothing
-    /// else. Whether the network acts on them is
-    /// [`UserAgent::push_echo`](crate::UserAgent::push_echo): §4.1.1 says a UA
-    /// that gets no `sip.pns` back "MUST NOT assume the proxy will request
-    /// that push notifications are sent", and a phone that assumes it goes to
-    /// sleep and is never woken again.
+    /// Sent on REGISTER only. Whether the network accepted them is
+    /// [`UserAgent::push_echo`](crate::UserAgent::push_echo); without that
+    /// echo, do not rely on push (§4.1.1).
     #[must_use]
     pub fn push(mut self, push: Push) -> Self {
         self.push = Some(push);
@@ -589,9 +440,7 @@ impl Account {
     }
 
     /// Where to send an end-of-call voice quality report (RFC 6035),
-    /// carried by a PUBLISH (RFC 3903). Left unset, no call on this
-    /// account ever sends one — the report is opt in, per destination,
-    /// rather than something a build turns on for every account.
+    /// carried by a PUBLISH (RFC 3903). Unset, none is sent.
     #[must_use]
     pub fn quality_report_uri(mut self, uri: Uri) -> Self {
         self.quality_report_uri = Some(uri);
@@ -604,42 +453,29 @@ impl Account {
         self.quality_report_uri.as_ref()
     }
 
-    /// Place every call from this account anonymously (RFC 3323), asking
-    /// for `privacy` — [`Privacy::withheld`] for the usual "withhold my
-    /// number".
+    /// Place every call anonymously (RFC 3323); [`Privacy::withheld`] is the
+    /// usual choice.
     ///
-    /// `From` becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`
-    /// (§4.1.1.3), a `Privacy` field carries what was asked for, and the
-    /// call names a temporary GRUU where the account has one (RFC 5627
-    /// §3.3). The account's own identity goes in `P-Asserted-Identity` only
-    /// toward a peer it trusts ([`Account::trust`]), the one that can still
-    /// bill the call and has to strip the field before it leaves the trust
-    /// domain (RFC 3325 §7). A call whose own header fields already carry
-    /// `Privacy` keeps its own.
-    ///
-    /// Nothing is asked for by default.
+    /// `From` becomes the anonymous URI (§4.1.1.3), `Privacy` is added, and a
+    /// temporary GRUU is used if the account has one (RFC 5627 §3.3). The
+    /// real identity goes in `P-Asserted-Identity` only toward a trusted peer
+    /// ([`Account::trust`], RFC 3325 §7). A call that sets its own `Privacy`
+    /// keeps it. Off by default.
     #[must_use]
     pub const fn privacy(mut self, privacy: Privacy) -> Self {
         self.privacy = privacy;
         self
     }
 
-    /// Trust the peer at `address`: it is inside this account's trust domain
-    /// (RFC 3325 §2.3), usually the registrar or the trunk the account
-    /// reaches the network through.
+    /// Put the peer at `address` in the trust domain (RFC 3325 §2.3).
     ///
-    /// Two things turn on it, both RFC 3325's. A call arriving from a trusted
-    /// peer has its `P-Asserted-Identity`, its `Remote-Party-ID` and its
-    /// `verstat` read into [`CallerIdentity`](crate::CallerIdentity); from
-    /// anywhere else they are left out, because §8 has a UAS "MUST NOT use"
-    /// an identity asserted by an element it does not trust. And a call this
-    /// account places toward any other peer carries no
-    /// `P-Asserted-Identity` or `P-Preferred-Identity`, whoever wrote it
-    /// (§6: "user agents MUST NOT populate the P-Preferred-Identity header
-    /// field in a message that is not sent directly to a proxy that is
-    /// trusted").
+    /// Only calls from a trusted peer have `P-Asserted-Identity`,
+    /// `Remote-Party-ID` and `verstat` read into
+    /// [`CallerIdentity`](crate::CallerIdentity) (§8). Calls toward an
+    /// untrusted peer carry no `P-Asserted-Identity` or
+    /// `P-Preferred-Identity`, whoever set them (§6).
     ///
-    /// Called once per peer. Nobody is trusted by default.
+    /// Once per peer; nobody is trusted by default.
     #[must_use]
     pub fn trust(mut self, address: IpAddr) -> Self {
         if !self.trusted.contains(&address) {
@@ -648,9 +484,7 @@ impl Account {
         self
     }
 
-    /// What to do with the `Identity` header fields of the calls this account
-    /// receives (RFC 8224 §6.2): verify and report, the default, verify and
-    /// refuse what does not verify, or verify nothing. See
+    /// How incoming `Identity` headers are verified (RFC 8224 §6.2); see
     /// [`StirVerification`](crate::StirVerification).
     #[must_use]
     pub const fn stir_verification(mut self, verification: crate::StirVerification) -> Self {
@@ -658,14 +492,10 @@ impl Account {
         self
     }
 
-    /// Sign every call this account places (RFC 8224 §6.1, with RFC 8588's
-    /// SHAKEN claims): a full-form PASSporT in an `Identity` header field,
-    /// and the `Date` it is dated by.
-    ///
-    /// The agent must know the time ([`UserAgent::set_wall_clock`]); a call
-    /// placed before it does is refused with
-    /// [`UaError::NoWallClock`](crate::UaError::NoWallClock) rather than
-    /// sent unsigned.
+    /// Sign every call placed (RFC 8224 §6.1, RFC 8588 SHAKEN) with an
+    /// `Identity` header and its `Date`. Without
+    /// [`UserAgent::set_wall_clock`] a call fails with
+    /// [`UaError::NoWallClock`](crate::UaError::NoWallClock), never unsigned.
     ///
     /// [`UserAgent::set_wall_clock`]: crate::UserAgent::set_wall_clock
     #[cfg(feature = "stir")]
@@ -675,31 +505,14 @@ impl Account {
         self
     }
 
-    /// Keep this account's flow to its registrar — to its outbound proxy,
-    /// for one that never registers — open with a CRLF keep-alive every
-    /// `every`, whether or not STUN ran or found a NAT.
+    /// Keep the flow to the registrar (or outbound proxy) open with a CRLF
+    /// keep-alive every `every`, whether or not STUN found a NAT.
     ///
-    /// For a network whose NAT forgets a UDP flow sooner than the REGISTER
-    /// refresh comes round, with STUN off: without a keep-alive, a call the
-    /// registrar forwards between two REGISTERs is dropped at the NAT. On a
-    /// datagram transport a double CRLF goes out alone in a datagram, which
-    /// RFC 3261 §7.5 has a registrar ignore. That is not RFC 5626's
-    /// mechanism: its CRLF keep-alive "MUST NOT be used with connection-less
-    /// transports such as UDP" (§4.4.1), which get STUN instead (§4.4.2), and
-    /// a registrar that is no STUN server does not answer one. The datagram
-    /// is sent for what it does to the NAT, which a request that gets no
-    /// answer does as well as one that does (RFC 4787 REQ-6); on a stream the endpoint pings
-    /// the connection at this interval instead of its own (RFC 5626 §4.4.1's
-    /// double CRLF, with its single-CRLF pong). Each interval is drawn
-    /// between 80% and 100% of `every`, as §4.4 asks, so what the NAT
-    /// sees is never further apart than `every`.
-    ///
-    /// Sent while the account's registration holds a binding or is getting
-    /// one, and for an account with no registrar while the agent runs, from
-    /// the first round of work after it was added; never while the agent is
-    /// suspended. Left unset — the default — an
-    /// account is kept open only when STUN showed it behind a NAT, at the
-    /// agent's interval ([`crate::keepalive`]).
+    /// On UDP a lone double CRLF, which the registrar ignores (RFC 3261 §7.5)
+    /// but the NAT sees (RFC 4787 REQ-6); on a stream, RFC 5626 §4.4.1 pings.
+    /// Intervals are drawn from 80-100% of `every` (§4.4). Never sent while
+    /// suspended. Unset, only a NAT found by STUN gets keep-alives
+    /// ([`crate::keepalive`]).
     ///
     /// # Errors
     /// [`UaError::InvalidKeepalive`](crate::UaError::InvalidKeepalive) for an
@@ -719,19 +532,14 @@ impl Account {
         self.keepalive
     }
 
-    /// Trust the TLS server this account connects to by the SHA-256
-    /// fingerprint of its certificate, rather than by a trust anchor: for a
-    /// PBX that serves a certificate it signed itself.
+    /// Trust the TLS server by the SHA-256 fingerprint of its certificate
+    /// instead of a trust anchor, e.g. a self-signed PBX.
     ///
-    /// TLS is the application's (`docs/22-tls.md`), so this is what its
-    /// certificate verifier asks: [`Account::pinned_certificate`] gives the
-    /// pin, and [`CertificatePin::check`] takes the DER bytes of the leaf
-    /// certificate the server presented and answers in constant time. With a
-    /// pin, the fingerprint is the whole verdict: no chain, no trust anchor
-    /// and no host name is consulted, and an expired certificate that
-    /// matches is accepted and reported as expired. `sipral_core::pin` says
-    /// why for each. Unset by default, and then the platform's own checks
-    /// apply as they always did.
+    /// TLS is the application's (`docs/22-tls.md`): its verifier reads
+    /// [`Account::pinned_certificate`] and calls [`CertificatePin::check`] on
+    /// the leaf's DER bytes. With a pin, the fingerprint is the whole verdict:
+    /// no chain or host name is checked, and a matching expired certificate
+    /// is accepted and reported as expired (see `sipral_core::pin`).
     #[must_use]
     pub const fn tls_pin(mut self, pin: CertificatePin) -> Self {
         self.tls_pin = Some(pin);
@@ -750,8 +558,7 @@ impl Account {
         self.trusted.contains(&address)
     }
 
-    /// `From` for a call this account places: its own identity, or RFC 3323
-    /// §4.1.1.3's anonymous one when it asked for privacy.
+    /// `From` for a call, anonymous when privacy is asked (RFC 3323 §4.1.1.3).
     pub(crate) fn caller_value(&self) -> Box<[u8]> {
         if self.privacy.requested() {
             Box::from(ANONYMOUS_FROM)
@@ -770,63 +577,34 @@ impl Account {
         self
     }
 
-    /// Take a MESSAGE addressed to this account whose body is `media_type`,
-    /// beyond `text/plain`, which RFC 3428 §7 makes mandatory and needs no
-    /// call here.
-    ///
-    /// A `Content-Type` this list and `text/plain` do not name is refused
-    /// with a 415 carrying an `Accept` built from the two — see
-    /// [`crate::UaEvent::MessageReceived`]. Call again for every type the
-    /// application can render; `message/cpim`, which §7's MAY singles out, is
-    /// one call like any other.
+    /// Accept MESSAGE bodies of `media_type`, besides `text/plain` (always
+    /// accepted, RFC 3428 §7). Other types get a 415 with `Accept`; see
+    /// [`crate::UaEvent::MessageReceived`]. Call once per type.
     #[must_use]
     pub fn accepts_message_type(mut self, media_type: &[u8]) -> Self {
         self.message_types.push(Box::from(media_type));
         self
     }
 
-    /// Say that `transport` speaks `protocol`, so that a MESSAGE this account
-    /// sends is not held to RFC 3428 §8's 1300-byte ceiling.
-    ///
-    /// Left unset, every out-of-dialog MESSAGE this account sends is
-    /// conservative about its size the way §8 asks a UAC to be when it does
-    /// not know better: "the size of MESSAGE requests outside of a media
-    /// session MUST NOT exceed 1300 bytes, unless the UAC has positive
-    /// knowledge that the message will not traverse a congestion-unsafe link
-    /// at any hop". This is that knowledge, for the one hop this end actually
-    /// controls. It is not the whole guarantee §8 asks for — "SIP does not
-    /// provide a mechanism to prevent a downstream hop from sending a request
-    /// over UDP... use of a congestion-controlled transport by the UAC is not
-    /// sufficient" — so calling this says only that the local hop will not be
-    /// the one that turns a large body into a fragmented UDP datagram; a
-    /// congestion-unsafe hop further on is still the network's to have and
-    /// this stack's to have no knowledge of.
+    /// Declare the transport's protocol. Unset, out-of-dialog MESSAGEs stay
+    /// under 1300 bytes (RFC 3428 §8); a reliable protocol lifts that, for
+    /// the first hop only.
     #[must_use]
     pub const fn transport_protocol(mut self, protocol: TransportProtocol) -> Self {
         self.protocol = Some(protocol);
         self
     }
 
-    /// Send this account's requests over a TCP, TLS or WebSocket connection
-    /// of its own, to its own server, which this crate asks the application
-    /// to open — a WebSocket as the TCP or TLS connection under it, bound as
-    /// `Ws` or `Wss` with its far end named, the handshake then this
-    /// crate's ([`crate::websocket`])
-    /// (`crate::flow`): the account's transport is whichever one of
-    /// `protocol` the application binds to the server's address, under any
-    /// number, adopted when it is bound. Until then a REGISTER waits, and an
+    /// Use a TCP, TLS or WebSocket connection of its own to its server, which
+    /// the application opens when asked by
     /// [`Event::TransportWanted`](sipral_core::endpoint::Event::TransportWanted)
-    /// names the protocol and the address — once when the account is added,
-    /// for one that never registers. Beside an account on the stack's UDP
-    /// transport, to another server, in the same agent: each keeps its own
-    /// flow, and its calls keep it for every request inside them. Implies
-    /// [`Account::transport_protocol`]. A datagram protocol is the account's
-    /// own transport as it was given, and changes nothing.
-    ///
-    /// The transport the account was made with is not used meanwhile: until
-    /// a connection is adopted the account names none, and a call it places
-    /// is refused for an unknown transport rather than sent over a datagram
-    /// to a server that expects a stream.
+    /// (for WebSocket, the TCP/TLS connection bound as `Ws`/`Wss`; the
+    /// handshake is [`crate::websocket`]'s). The first transport of
+    /// `protocol` bound to the server's address is adopted; until then a
+    /// REGISTER waits and a call fails for an unknown transport. Each account
+    /// keeps its own flow, and its calls keep it. Implies
+    /// [`Account::transport_protocol`]; a datagram protocol changes nothing
+    /// else.
     #[must_use]
     pub const fn on_stream(mut self, protocol: TransportProtocol) -> Self {
         if protocol.is_reliable() {
@@ -856,13 +634,8 @@ impl Account {
         &self.contact
     }
 
-    /// Whether this account asks its registrar for GRUUs (RFC 5627 §4.1).
-    ///
-    /// Only possible with an instance identifier: GRUUs are handed out per
-    /// instance, and a `Contact` naming none cannot carry one. What decides
-    /// whether `Supported: gruu` goes on a REGISTER, an INVITE or a SUBSCRIBE,
-    /// and whether an incoming `Require: gruu` is honoured rather than
-    /// answered 420.
+    /// Whether this account asks for GRUUs (RFC 5627 §4.1), which needs an
+    /// instance identifier. Decides `Supported: gruu` and `Require: gruu`.
     pub(crate) const fn wants_gruu(&self) -> bool {
         self.instance_id.is_some()
     }
@@ -874,8 +647,7 @@ impl Account {
         if let Some(ref name) = self.display_name {
             out.push(b'"');
             for byte in name.as_bytes() {
-                // §25.1 quoted-string: a quote or a backslash inside one has
-                // to be escaped, or the value ends early
+                // §25.1 quoted-string
                 if matches!(*byte, b'"' | b'\\') {
                     out.push(b'\\');
                 }
@@ -889,7 +661,7 @@ impl Account {
         out.into_boxed_slice()
     }
 
-    /// `To`, which §10.2 makes the address of record being registered.
+    /// `To`: the address of record (§10.2).
     pub(crate) fn to_value(&self) -> Box<[u8]> {
         let mut out = Vec::with_capacity(self.aor.as_bytes().len() + 2);
         out.push(b'<');
@@ -900,33 +672,22 @@ impl Account {
 
     /// `Contact`, with the instance identifier when the account has one.
     ///
-    /// No push parameters, whatever the account was configured with. This is
-    /// the `Contact` of a dialog — an INVITE, the 200 that answers one — and
-    /// RFC 8599 §4.1 says a UA "MUST NOT insert the SIP URI parameters ... in
-    /// non-REGISTER requests in order to prevent the PNS information
-    /// associated with the UA from reaching the remote peer". A `pn-prid` that
-    /// leaks here is a token that lets whoever it reached wake this device at
-    /// will. [`Account::register_contact_value`] is the other one.
+    /// Never with push parameters (RFC 8599 §4.1); see
+    /// [`Account::register_contact_value`].
     pub(crate) fn contact_value(&self) -> Box<[u8]> {
         self.contact_with(None, false)
     }
 
-    /// `Contact` for a REGISTER, which is the only request the push
-    /// parameters belong in.
-    ///
-    /// `removing` is a REGISTER with `Expires: 0`, where §4.1.2 leaves the
-    /// identifier out.
+    /// `Contact` for a REGISTER, with push parameters. `removing` is
+    /// `Expires: 0`, which omits `pn-prid` (§4.1.2).
     pub(crate) fn register_contact_value(&self, removing: bool) -> Box<[u8]> {
         self.contact_with(self.push.as_ref(), removing)
     }
 
-    /// `Contact` for asking a registrar to drop the binding at this
-    /// account's address and no other, in a REGISTER that may bind another
-    /// address in the same breath: the URI alone, as §4.1.2 writes it for a
-    /// removal, without the feature tags. RFC 3261 §10.3 matches a binding
-    /// by URI; a registrar that matches by `+sip.instance` instead reads a
-    /// removal carrying the tag as one of every binding the instance has,
-    /// the one the same request adds included.
+    /// `Contact` removing only this address's binding: the bare URI, without
+    /// feature tags. A registrar matching by `+sip.instance` would otherwise
+    /// remove every binding of the instance, including one added in the same
+    /// REGISTER.
     pub(crate) fn removal_contact_value(&self) -> Box<[u8]> {
         self.bracketed_uri(self.push.as_ref(), true)
             .into_boxed_slice()
@@ -935,11 +696,7 @@ impl Account {
     fn contact_with(&self, push: Option<&Push>, removing: bool) -> Box<[u8]> {
         let mut out = self.bracketed_uri(push, removing);
         if let Some(ref urn) = self.instance_id {
-            // §4.1: c-p-instance = "+sip.instance" EQUAL
-            //         DQUOTE "<" instance-val ">" DQUOTE — the angle brackets
-            // are part of the grammar, not decoration, because RFC 3840 §9
-            // compares the quoted string case-sensitively and this is the
-            // encapsulation that makes that comparison work
+            // RFC 5626 §4.1: the brackets are part of the grammar
             out.extend_from_slice(b";+sip.instance=\"<");
             out.extend_from_slice(urn.as_bytes());
             out.extend_from_slice(b">\"");
@@ -955,8 +712,7 @@ impl Account {
         let bytes = self.contact.as_bytes();
         let mut out = Vec::with_capacity(bytes.len() + 128);
         out.push(b'<');
-        // URI parameters go before the URI headers (§19.1.1), so a contact
-        // written with headers has to be opened up rather than appended to
+        // URI parameters go before URI headers (§19.1.1)
         let cut = bytes
             .iter()
             .position(|byte| *byte == b'?')
@@ -999,8 +755,7 @@ mod tests {
 
     #[test]
     fn a_push_identifier_that_is_a_url_survives_being_a_uri_parameter() {
-        // RFC 8599 §12: an RFC 8030 identifier is a whole push endpoint, and
-        // §8.7 says what is not a pvalue has to be escaped
+        // RFC 8599 §8.7, §12
         let account = account("sip:alice@192.0.2.1")
             .push(Push::new("webpush", "https://push.example.net/sub/A1?k=v#f").param("aBcD=="));
         assert_eq!(
@@ -1012,8 +767,7 @@ mod tests {
 
     #[test]
     fn the_push_parameters_go_in_front_of_the_uri_headers_and_not_after_them() {
-        // §19.1.1 puts parameters before headers, and appending to a contact
-        // that already has headers would produce a URI nobody can parse
+        // RFC 3261 §19.1.1
         let account = account("sip:alice@192.0.2.1?Subject=call").push(Push::new("apns", "p1"));
         assert_eq!(
             rendered(&account, false),
@@ -1033,8 +787,6 @@ mod tests {
 
     #[test]
     fn an_instance_given_with_its_brackets_is_not_bracketed_twice() {
-        // an application that copied the value out of a Contact hands it over
-        // bracketed, and RFC 5626 §4.1 writes one pair around it, never two
         let bracketed = account("sip:alice@192.0.2.1").instance_id("<urn:uuid:1234>");
         let bare = account("sip:alice@192.0.2.1").instance_id("urn:uuid:1234");
         assert_eq!(

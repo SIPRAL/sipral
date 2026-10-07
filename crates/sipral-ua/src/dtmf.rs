@@ -4,29 +4,16 @@
 //! A digit sent or received by SIP INFO (RFC 6086), and the validation every
 //! way a digit crosses this stack's boundary shares.
 //!
-//! Neither body this module reads or writes has an RFC of its own.
-//! `application/dtmf-relay`'s `Signal=`/`Duration=` lines came from an
-//! Internet-Draft that expired years before this was written, and
-//! `application/dtmf`'s bare character is a convention rather than a
-//! document. What is implemented here is what the lab's servers are expected
-//! to take: `interop/harness`'s own `Flow::DtmfInfo` sends the relay form to
-//! the lab's Asterisk and reads its dialplan's echo back in whichever form
-//! that sends, and no lab flow sends the plain form. Neither has been run
-//! against the real container yet; the lab run is what confirms it, and
-//! `docs/04-ua.md` says the same.
+//! Neither body has an RFC: `application/dtmf-relay` (`Signal=`,
+//! `Duration=`) comes from an expired draft, `application/dtmf` (a bare
+//! character) is a convention. The lab's `Flow::DtmfInfo` exercises the
+//! relay form against Asterisk; see `docs/04-ua.md`.
 //!
-//! [`digit`](crate::dtmf::digit) is the one validation RFC 4733 sending, INFO
-//! sending and INFO receiving all read through, so a digit no keypad has is
-//! refused the same way by every one of the three. Duration is not shared the
-//! same way: sending generates a tone, so
-//! [`duration_ms`](crate::dtmf::duration_ms) holds every sending form — RTP,
-//! `application/dtmf-relay`'s own `Duration=`, and the C ABI's `duration_ms`
-//! — to the same floor and ceiling, and to the same hundred-millisecond
-//! default when nothing is asked for. Receiving reports a length the peer
-//! already held rather than one this end is about to generate, so
+//! [`digit`](crate::dtmf::digit) validates every path (RFC 4733, INFO out,
+//! INFO in). [`duration_ms`](crate::dtmf::duration_ms) gives every sending
+//! form the same floor, ceiling and 100 ms default.
 //! [`received_duration_ms`](crate::dtmf::received_duration_ms) checks only
-//! the ceiling, and `Duration=0` is exactly what it looks like rather than
-//! the sending default in disguise (8.3.11-bis).
+//! the ceiling: a peer's `Duration=0` means zero, not the default.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -44,35 +31,24 @@ use crate::event::UaEvent;
 /// The sixteen events a keypad has (RFC 4733 §3.2, Table 3).
 pub const KEYPAD: &[u8] = b"0123456789*#ABCD";
 
-/// What one DTMF tone lasts when nobody says: the one default RTP, both INFO
-/// bodies and the C ABI's own `duration_ms` all fall back to, so that no form
-/// of DTMF holds a key longer than another when the application does not
-/// name a length (8.3.11-bis). RFC 4733 §2.5.2.2 has no figure of its own for
-/// this; a hundred milliseconds is comfortably above the floor equipment
-/// needs and short enough that four keys pressed in a row do not queue for
-/// long.
+/// Tone length when none is given, the same for RTP, both INFO bodies and
+/// the C ABI. RFC 4733 §2.5.2.2 gives no figure; 100 ms is well above the
+/// floor and keeps a run of keys short.
 pub const DEFAULT_DTMF_MS: u32 = 100;
 
-/// Shorter than equipment recognises. RFC 4733 §2.5.2.1, citing ITU-T Q.24
-/// Table A-1: the switching equipment surveyed "expects a minimum
-/// recognizable signal duration of 40 ms". A digit sent by INFO is played out
-/// as a tone somewhere past the far end all the same, so the floor is one
-/// for every form.
+/// Shortest tone equipment recognises (RFC 4733 §2.5.2.1, citing ITU-T Q.24
+/// Table A-1). INFO digits become tones too, so it applies to every form.
 pub const MIN_DTMF_MS: u32 = 40;
 
-/// Longer than any key is actually held, and short enough that a caller who
-/// passed milliseconds where it meant seconds finds out.
+/// Longer than any real key press; catches seconds passed as milliseconds.
 pub const MAX_DTMF_MS: u32 = 10_000;
 
-/// `application/dtmf-relay`'s two lines: which signal, and for how long.
+/// `Signal=` and `Duration=` lines.
 pub const RELAY: &[u8] = b"application/dtmf-relay";
-/// `application/dtmf`'s whole body: the character alone.
+/// The body is the character alone.
 pub const PLAIN: &[u8] = b"application/dtmf";
 
-/// The longest body either form is read from. One key and a duration inside
-/// the bound take under thirty octets in the relay form and one in the plain
-/// one; this leaves room for the whitespace senders put around them, and
-/// nothing a single digit needs beyond that.
+/// One digit needs under 30 octets; the rest is room for whitespace.
 const MAX_INFO_BODY: usize = 256;
 
 /// Why a digit or a duration was refused.
@@ -131,15 +107,8 @@ pub fn duration_ms(asked: u32) -> Result<u32, DtmfError> {
     }
 }
 
-/// `asked`, read off a peer's own `Duration=`, or which bound it broke.
-///
-/// Sending checks a floor because it is about to generate a tone equipment
-/// has to recognise, and treats zero as "say nothing" because a sender never
-/// has a reason to ask for a tone of no length. Neither applies to reading
-/// what a peer already held a key for: zero there means the peer said zero,
-/// and nothing shorter than that is this end's to second-guess. Only the
-/// ceiling every sending form also refuses is — ten seconds is not a real key
-/// press regardless of which end is reporting it (8.3.11-bis).
+/// A peer's `Duration=`. Only the ceiling applies: the floor and the zero
+/// default exist for tones this end generates, and a peer's zero means zero.
 ///
 /// # Errors
 /// [`DtmfError::ToneTooLong`] past [`MAX_DTMF_MS`].
@@ -153,9 +122,8 @@ pub fn received_duration_ms(asked: u32) -> Result<u32, DtmfError> {
 
 /// Which of the two bodies an INFO this end sends carries.
 ///
-/// Chosen per send rather than per call: which one a peer takes is a fact
-/// about the peer, discovered by trying — see
-/// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info).
+/// Chosen per send: which one a peer takes is found by trying (see
+/// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DtmfInfoForm {
     /// `application/dtmf-relay`: `Signal=` and `Duration=` lines.
@@ -164,8 +132,6 @@ pub enum DtmfInfoForm {
     Plain,
 }
 
-/// One key, in the two lines every switch that reads `application/dtmf-relay`
-/// takes.
 pub(crate) fn relay_body(key: u8, held_ms: u32) -> Arc<[u8]> {
     let mut body = Vec::with_capacity(32);
     body.extend_from_slice(b"Signal=");
@@ -176,14 +142,12 @@ pub(crate) fn relay_body(key: u8, held_ms: u32) -> Arc<[u8]> {
     Arc::from(body)
 }
 
-/// What a digit named on the wire — by `Signal=` or by a bare body — read
-/// out, and how long it was held when the body said.
+/// A digit read from an INFO body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DtmfInfo {
     /// The key, upper-cased.
     pub digit: char,
-    /// `application/dtmf-relay`'s `Duration=`, when the body carried one.
-    /// `application/dtmf` never does.
+    /// The relay form's `Duration=`, if present; never in the plain form.
     pub held_ms: Option<u32>,
 }
 
@@ -193,10 +157,8 @@ pub enum InfoRefusal {
     /// No `Content-Type`, or one that is not `application/dtmf-relay` or
     /// `application/dtmf` (RFC 3261 §21.4.13).
     UnsupportedType,
-    /// The right `Content-Type`, but a body that does not name exactly one
-    /// digit this stack can read, is longer than any one digit needs, or
-    /// carries a duration past the ceiling every sending form also refuses
-    /// (RFC 3261 §21.4.1).
+    /// Not exactly one readable digit, too long, or a duration over the
+    /// ceiling (RFC 3261 §21.4.1).
     Malformed,
 }
 
@@ -211,24 +173,15 @@ impl InfoRefusal {
     }
 }
 
-/// Whether `media` is one of the two bodies this module reads.
 fn is_dtmf_media(media: &MediaTypeRef<'_>) -> bool {
     media.kind().eq_ignore_ascii_case(b"application")
         && (media.subtype().eq_ignore_ascii_case(b"dtmf-relay")
             || media.subtype().eq_ignore_ascii_case(b"dtmf"))
 }
 
-/// Whether an INFO whose `Content-Type` is `content_type` is this stack's to
-/// answer at all.
-///
-/// The gate `agent.rs`'s dispatcher checks before claiming an INFO in a call's
-/// dialog (8.3.11-bis): only `application/dtmf-relay` and `application/dtmf`
-/// belong here. RFC 6086 does not reserve INFO for DTMF — any Info-Package can
-/// use it, RFC 5168's media control body among them — so every other
-/// `Content-Type`, and an INFO with no body at all, is the application's, not
-/// answered by this stack at all rather than refused by it. A malformed body
-/// of the right type is still this module's: [`parse_info`] answers that one
-/// 400 rather than passing it on half read.
+/// Whether this module claims the INFO. RFC 6086 INFO is not only for DTMF
+/// (e.g. RFC 5168), so any other `Content-Type`, or no body, is left for
+/// the application. A malformed DTMF body is still ours and gets a 400.
 #[must_use]
 pub(crate) fn names_a_dtmf_body(content_type: Option<&[u8]>) -> bool {
     content_type
@@ -238,12 +191,9 @@ pub(crate) fn names_a_dtmf_body(content_type: Option<&[u8]>) -> bool {
 
 /// Read an incoming INFO's DTMF body, never panicking on any input.
 ///
-/// `content_type` is the request's `Content-Type` header value, when it had
-/// one; `body` is the whole of it, whatever `content_type` said. Two-thirds
-/// of what makes this safe against a hostile peer is already proven
-/// elsewhere: [`MediaTypeRef::parse`] and [`digits`] are the same reader
-/// every header in this stack goes through, and neither indexes, unwraps, or
-/// allocates without a bound the input itself sets.
+/// `content_type` is the header value, if any; `body` the whole body.
+/// [`MediaTypeRef::parse`] and [`digits`] are the stack's shared bounded
+/// readers.
 ///
 /// # Errors
 /// [`InfoRefusal`] naming which of RFC 3261 §21.4.13 or §21.4.1 applies.
@@ -256,8 +206,7 @@ pub fn parse_info(content_type: Option<&[u8]>, body: &[u8]) -> Result<DtmfInfo, 
         return Err(InfoRefusal::UnsupportedType);
     }
     let relay = media.subtype().eq_ignore_ascii_case(b"dtmf-relay");
-    // the right type, so a body too long for any one digit is malformed
-    // rather than unsupported, and it is refused before a line of it is read
+    // right type, so too long is malformed, not unsupported
     if body.len() > MAX_INFO_BODY {
         return Err(InfoRefusal::Malformed);
     }
@@ -268,8 +217,7 @@ pub fn parse_info(content_type: Option<&[u8]>, body: &[u8]) -> Result<DtmfInfo, 
     }
 }
 
-/// The `Content-Type` and the body of an incoming INFO, read together because
-/// a missing header and an absent one are the same refusal.
+/// [`parse_info`] on a whole request.
 ///
 /// # Errors
 /// As [`parse_info`].
@@ -277,7 +225,6 @@ pub fn parse_incoming(request: &RawMessage<'_>) -> Result<DtmfInfo, InfoRefusal>
     parse_info(request.header(HeaderName::ContentType), request.body())
 }
 
-/// `application/dtmf`: the whole body, trimmed, is the key and nothing else.
 fn parse_plain(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
     let trimmed = trim(body);
     let mut bytes = trimmed.iter();
@@ -294,8 +241,6 @@ fn parse_plain(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
     })
 }
 
-/// `application/dtmf-relay`: `Signal=` names the key, and an optional
-/// `Duration=` how long it was held, each on its own line.
 fn parse_relay(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
     let mut signal: Option<u8> = None;
     let mut held_ms: Option<u32> = None;
@@ -325,9 +270,6 @@ fn parse_relay(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
             }
             let read = digits(value).map_err(|_| InfoRefusal::Malformed)?;
             let asked = read.require().map_err(|_| InfoRefusal::Malformed)?;
-            // only the ceiling every sending form also refuses -- reading how
-            // long a peer already held a key needs no floor of its own, and
-            // zero means the peer said zero (8.3.11-bis)
             held_ms = Some(received_duration_ms(asked).map_err(|_| InfoRefusal::Malformed)?);
         }
     }
@@ -341,10 +283,6 @@ fn parse_relay(body: &[u8]) -> Result<DtmfInfo, InfoRefusal> {
     })
 }
 
-// -- sending -------------------------------------------------------------
-
-/// One key waiting to go out by INFO, with the body and length it was asked
-/// for.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct QueuedKey {
     pub(crate) key: u8,
@@ -352,66 +290,38 @@ pub(crate) struct QueuedKey {
     pub(crate) held_ms: u32,
 }
 
-/// A call's digits sent by INFO: present from the moment one goes out until
-/// the last of them has its final answer, holding the keys still waiting
-/// behind the one in flight.
-///
-/// One entry per call. A string handed to [`UserAgent::send_dtmf_info`] while
-/// the entry exists goes behind the keys already waiting rather than out at
-/// once, the same way a second `dial` in the media queues behind the digits
-/// already going, so that no two of a call's INFOs are ever outstanding
-/// together.
+/// A call's INFO digits waiting behind the one in flight. Exists from the
+/// first send until the last final answer, so no two INFOs of a call
+/// overlap.
 #[derive(Debug)]
 pub(crate) struct DtmfQueue {
     pub(crate) waiting: VecDeque<QueuedKey>,
 }
 
-/// The most one call may have outstanding at once — the digit in flight and
-/// everything [`DtmfQueue::waiting`] behind it.
-///
-/// Only the application can grow this, by handing [`UserAgent::send_dtmf_info`]
-/// strings faster than the far end answers them, and nothing else here paces
-/// it or drops a digit silently. Sixty-four is far more than one press of a
-/// keypad ever needs and far short of a mistake — a runaway loop, a whole
-/// file fed in at once — turning into a queue the size of whatever the caller
-/// handed over (8.3.11-ter(e)).
+/// Cap on the digit in flight plus [`DtmfQueue::waiting`]: plenty for a
+/// keypad, small enough to stop a runaway caller.
 const MAX_QUEUED_DIGITS: usize = 64;
 
 impl UserAgent {
     /// Send a string of digits over signalling instead of the media (RFC
     /// 6086's INFO), in whichever of the two bodies `form` names.
     ///
-    /// `digits` is validated as a whole before anything is sent: one
-    /// character no keypad has, anywhere in the string, refuses the call and
-    /// sends nothing, not even the keys ahead of it. What goes out is still
-    /// one INFO per digit, but not all at once — over UDP, overlapping
-    /// non-INVITE transactions can arrive in any order, so the first digit is
-    /// the only one sent here, and every one after it waits for the one
-    /// ahead of it to reach a final answer (8.3.11-bis). A 2xx sends the
-    /// next; a refusal, a timeout or a transport failure ends the sequence
-    /// there instead, and the digits still waiting are discarded rather than
-    /// sent out of order — the digit that ended it is what
-    /// [`UaEvent::DtmfSent`] names, and nothing is reported for the ones it
-    /// took down with it.
+    /// The whole string is validated first; one bad character sends nothing.
+    /// One INFO per digit, each sent only after the previous one's final
+    /// answer, since UDP may reorder overlapping transactions. A 2xx sends
+    /// the next; a refusal, timeout or transport failure ends the sequence
+    /// and drops the rest unreported, with [`UaEvent::DtmfSent`] naming the
+    /// digit that ended it.
     ///
-    /// A string handed over while a digit of this call is still waiting for
-    /// its answer — a keypad handing over one key per press does this all the
-    /// time — is not sent at once either: it goes behind the digits already
-    /// waiting, each key keeping its own `form` and `duration_ms`, and a
-    /// refusal, a timeout or a transport failure ahead of it discards it with
-    /// the rest.
+    /// A string given while digits are pending queues behind them, each key
+    /// keeping its own `form` and `duration_ms`.
     ///
-    /// The far end's answer to each INFO arrives as [`UaEvent::DtmfSent`],
-    /// carrying `digit` and whatever status it gave — a 415 from a switch
-    /// that does not read this `Content-Type` included, so the application
-    /// learns which of the two forms to try without guessing from silence.
+    /// Each answer arrives as [`UaEvent::DtmfSent`] with its status; a 415
+    /// tells the application to try the other form.
     ///
-    /// `duration_ms` is checked against the same bound RFC 4733 sending
-    /// reads through, and zero asks for [`DEFAULT_DTMF_MS`].
-    ///
-    /// A string that would leave the call holding more than
-    /// `MAX_QUEUED_DIGITS` is refused whole, before anything of it is sent
-    /// or queued, the same as one with a bad character in it (8.3.11-ter(e)).
+    /// `duration_ms` has the RFC 4733 bounds; zero means [`DEFAULT_DTMF_MS`].
+    /// A string that would push the queue past `MAX_QUEUED_DIGITS` is
+    /// refused whole.
     ///
     /// # Errors
     /// [`UaError::InvalidDtmf`] for a digit no keypad has, anywhere in
@@ -429,9 +339,7 @@ impl UserAgent {
         now: Instant,
     ) -> Result<(), UaError> {
         let held_ms = self::duration_ms(duration_ms).map_err(UaError::InvalidDtmf)?;
-        // the digit in flight, when there is one, plus everything already
-        // waiting behind it — what this call already holds before this
-        // string adds to it
+        // in flight plus waiting
         let occupied = self
             .dtmf_queue
             .get(&call)
@@ -452,16 +360,14 @@ impl UserAgent {
         let Some(first) = keys.pop_front() else {
             return Err(UaError::InvalidDtmf(DtmfError::UnknownDigit));
         };
-        // a digit of this call is still waiting for its answer, so the whole
-        // string goes behind it; the call and its dialog are known to exist,
-        // because `forget` takes the entry with the call
+        // pending digits: queue behind them (`forget` drops the entry with
+        // the call, so the call still exists)
         if let Some(queue) = self.dtmf_queue.get_mut(&call) {
             queue.waiting.push_back(first);
             queue.waiting.extend(keys);
             return Ok(());
         }
-        // in place before the INFO goes, so that an answer the send's own
-        // drain already brought finds the digits it has to move on or drop
+        // before sending: the send's own drain may already bring the answer
         self.dtmf_queue.insert(call, DtmfQueue { waiting: keys });
         if let Err(error) = self.send_one_dtmf_info(call, first, now) {
             self.dtmf_queue.remove(&call);
@@ -470,9 +376,7 @@ impl UserAgent {
         Ok(())
     }
 
-    /// One already-validated key, sent as one INFO. The half of
-    /// [`Self::send_dtmf_info`] that also runs when a digit's own 2xx sends
-    /// the next one waiting behind it.
+    /// One validated key as one INFO; also run when a 2xx sends the next.
     pub(crate) fn send_one_dtmf_info(
         &mut self,
         call: CallHandle,
@@ -498,37 +402,22 @@ impl UserAgent {
     }
 }
 
-// -- receiving -------------------------------------------------------------
-
 impl UserAgent {
-    /// Hand every INFO in a call that is not one of the two DTMF forms to
-    /// the application, unanswered, as
-    /// [`UaEvent::Unclaimed`](crate::UaEvent::Unclaimed) — RFC 5168's media
-    /// control, a vendor's Info Package — for it to answer through
+    /// Hand non-DTMF INFOs in a call to the application unanswered, as
+    /// [`UaEvent::Unclaimed`](crate::UaEvent::Unclaimed), to answer through
     /// [`UserAgent::endpoint`]. Off by default.
     ///
-    /// Off, each one is answered here by RFC 6086 §4.2.2: 469 when it names
-    /// an Info Package, 415 for a body this agent cannot read, 200 for one
-    /// with no body (see `crate::admission`). That is the only answer an
-    /// application with no way to answer can give, and the C ABI is one: an
-    /// INFO it counts as unclaimed and never answers is retransmitted for
-    /// thirty-two seconds, and RFC 3261 §12.2.1.2 then has the far end
-    /// terminate the call. Turn this on only with something that answers
-    /// every INFO it is handed.
+    /// Off, they are answered here per RFC 6086 §4.2.2: 469 for an Info
+    /// Package, 415 for an unreadable body, 200 with no body (see
+    /// `crate::admission`). Turn it on only if every INFO will be answered:
+    /// an unanswered INFO is retransmitted for 32 s and then the far end
+    /// ends the call (RFC 3261 §12.2.1.2). The C ABI cannot answer them.
     pub const fn hand_over_info(&mut self, handed_over: bool) {
         self.info_handed_over = handed_over;
     }
 
-    /// `None` when the event was an incoming INFO this handled; the event
-    /// back otherwise.
-    ///
-    /// Only an INFO whose `Content-Type` is `application/dtmf-relay` or
-    /// `application/dtmf` is this stack's to read (8.3.11-bis): RFC 6086
-    /// does not reserve INFO for DTMF, so every other one — RFC 5168's media
-    /// control, a vendor Info-Package, one with no body at all — is left for
-    /// the event chain below this, which answers it by RFC 6086 §4.2.2 at
-    /// its end unless [`UserAgent::hand_over_info`] gave it to the
-    /// application.
+    /// `None` when this handled a DTMF INFO; the event back otherwise. Other
+    /// INFOs go down the chain (see [`UserAgent::hand_over_info`]).
     pub(crate) fn on_dtmf_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         let Event::IncomingInDialog {
             transaction,
@@ -545,10 +434,7 @@ impl UserAgent {
         if !names_a_dtmf_body(raw.header(HeaderName::ContentType)) {
             return Some(event);
         }
-        // an INFO in a dialog that is not a call belongs to nobody here —
-        // there is no other kind of dialog this layer keeps in `by_dialog`,
-        // but a subscription's own dialog is not one, and swallowing this
-        // would leave a legitimate 481 unanswered
+        // not a call (e.g. a subscription dialog): leave it for the 481
         let Some(call) = self.by_dialog.get(&dialog).copied() else {
             return Some(event);
         };
@@ -564,10 +450,7 @@ impl UserAgent {
                 });
             }
             Err(refusal) => {
-                // never `UnsupportedType`: the gate above already turned
-                // every other `Content-Type` back before `parse_incoming`
-                // saw it, so the only refusal this arm can carry is a body
-                // of the right type this stack still could not read
+                // only `Malformed` here: the gate above filtered the type
                 let answer = OutgoingResponse::new(refusal.status());
                 self.endpoint.respond(transaction, &answer, now).ok();
             }
@@ -584,19 +467,12 @@ mod tests {
     };
     use sipral_core::msg::StatusCode;
 
-    /// RFC 4733's section 3 has only 3.1, 3.2 and 3.3; the sixteen DTMF
-    /// event codes are Table 3 in 3.2. A doc comment pointing at a section
-    /// that does not exist is a defect a generator built on this crate would
-    /// copy verbatim, so it is checked here rather than left to be noticed
-    /// by eye — this constant used to live in `sipral-ffi`, and carried this
-    /// exact test with it.
-    ///
-    /// The needle is assembled at runtime, not written as one literal, so
-    /// this test inspecting its own file does not just match itself.
+    /// The DTMF events are Table 3 in RFC 4733's 3.2; generated bindings
+    /// copy doc comments verbatim. The needle is built at runtime so the
+    /// test does not match itself.
     #[test]
     fn the_keypad_doc_cites_a_section_rfc_4733_actually_has() {
-        // the needle spans a line break, and a Windows checkout puts a CR in
-        // front of it
+        // CRLF on a Windows checkout
         let source = include_str!("dtmf.rs").replace("\r\n", "\n");
         let section = '\u{a7}';
         assert!(
@@ -605,11 +481,7 @@ mod tests {
         );
     }
 
-    /// RFC 3261 numbers 415 Unsupported Media Type as §21.4.13; three
-    /// sections further on is 421 Extension Required. A doc comment citing
-    /// the wrong one sends its reader to a status this module never answers.
-    ///
-    /// The needles are assembled at runtime for the same reason as above.
+    /// 415 is RFC 3261's 21.4.13; 21.4.16 is 421.
     #[test]
     fn the_415_is_cited_where_rfc_3261_numbers_it() {
         let source = include_str!("dtmf.rs").replace("\r\n", "\n");
@@ -685,8 +557,6 @@ mod tests {
                 held_ms: Some(160)
             })
         );
-        // parameters after the type, and a signal a keypad does not have in
-        // upper case already
         assert_eq!(
             parse_info(
                 Some(b"application/dtmf-relay;charset=utf-8"),
@@ -708,8 +578,7 @@ mod tests {
                 held_ms: None
             })
         );
-        // trailing linear whitespace some senders leave on is not a second
-        // key
+        // trailing whitespace is not a second key
         assert_eq!(
             parse_info(Some(b"application/dtmf"), b"5\r\n"),
             Ok(DtmfInfo {
@@ -778,9 +647,6 @@ mod tests {
         );
     }
 
-    /// 8.3.11-bis(c): reading how long a peer already held a key needs no
-    /// floor of its own, and zero means the peer said zero rather than the
-    /// hundred-millisecond default sending falls back to.
     #[test]
     fn a_received_duration_of_zero_is_reported_as_zero() {
         assert_eq!(
@@ -802,9 +668,6 @@ mod tests {
         );
     }
 
-    /// 8.3.11-bis(a): only the two bodies this module reads gate the
-    /// dispatch in `agent.rs`; everything else, no body at all included, is
-    /// left for the application to see and answer for itself.
     #[test]
     fn only_the_two_dtmf_content_types_are_named_a_dtmf_body() {
         assert!(names_a_dtmf_body(Some(b"application/dtmf-relay")));
@@ -818,11 +681,7 @@ mod tests {
         assert!(!names_a_dtmf_body(None));
     }
 
-    /// Nothing here indexes, unwraps or allocates without a bound the input
-    /// itself sets, so nothing here panics — tried against the inputs most
-    /// likely to trip a hand-rolled parser rather than a property test,
-    /// because the fuzz target under `fuzz/fuzz_targets/dtmf_info.rs` is the
-    /// exhaustive version of this.
+    /// Spot checks; `fuzz/fuzz_targets/dtmf_info.rs` is the exhaustive one.
     #[test]
     fn the_parser_never_panics() {
         let cases: &[&[u8]] = &[

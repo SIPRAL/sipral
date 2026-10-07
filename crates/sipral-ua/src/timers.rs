@@ -1,27 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The session timer (RFC 4028), and why a call needs one.
+//! The session timer (RFC 4028).
 //!
-//! A dialog can outlive the call it describes. A phone loses power mid-call, a
-//! NAT drops the binding, a proxy restarts: the BYE never arrives and both
-//! ends keep a session that no longer exists. On a carrier that is a line
-//! billed for nothing; on a PBX it is an extension that stays busy until
-//! somebody reboots it. RFC 4028 answers it by making the session expire
-//! unless somebody keeps saying it is still there.
+//! A dialog can outlive its call: power loss or a dropped NAT binding means
+//! the BYE never arrives. The timer makes the session expire unless it is
+//! refreshed.
 //!
-//! Two numbers and one role. `Session-Expires` is how long the session lives
-//! without a refresh, `Min-SE` is the shortest anybody on the path will accept,
-//! and the `refresher` parameter says which end sends the refresh. All three
-//! are negotiated: the UAC asks, every proxy on the path may shorten the
-//! interval or raise the floor, and the UAS settles it in the 2xx.
-//!
-//! The two ends do different things with the same interval. The refresher
-//! sends a request at half of it — §7.2's "once half the session interval has
-//! elapsed" — which leaves a whole second attempt before anything expires. The
-//! other end waits, and if nothing has arrived shortly before expiry it hangs
-//! up: §10 puts that "slightly before the session expiration", and recommends
-//! the smaller of 32 seconds and a third of the interval as how much before.
+//! The refresher sends a request at half the interval (§7.2), leaving room for
+//! a second attempt. The other end hangs up shortly before expiry, by the
+//! smaller of 32 seconds and a third of the interval (§10).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,13 +21,11 @@ use sipral_core::transaction::AnyTransactionId;
 use crate::agent::UserAgent;
 use crate::call::{Author, CallHandle, Direction, Offer};
 
-/// §4: "1800 seconds (30 minutes) is RECOMMENDED as the value for the
-/// Session-Expires header field."
+/// The recommended `Session-Expires` (§4).
 pub(crate) const RECOMMENDED: Duration = Duration::from_secs(1_800);
-/// §4 and §5 both put the floor here, and it is the default `Min-SE`.
+/// The floor and default `Min-SE` (§4, §5).
 pub(crate) const FLOOR: Duration = Duration::from_secs(90);
-/// §10: the non-refresher gives up "slightly before the session expiration",
-/// by "the minimum of 32 seconds and one third of the session interval".
+/// How early the non-refresher gives up, capped at a third of the interval (§10).
 const GIVE_UP_MARGIN: Duration = Duration::from_secs(32);
 
 /// Which end sends the refresh (§4).
@@ -52,10 +38,8 @@ pub(crate) enum Refresher {
 }
 
 impl Refresher {
-    /// The token as it goes on the wire, from the writer's point of view.
-    ///
-    /// The parameter names the two ends of the *dialog*, not of the message,
-    /// so which token means "us" depends on which end placed the call.
+    /// The wire token. It names an end of the dialog, not of the message, so
+    /// its meaning depends on which end placed the call.
     const fn token(self, we_called: bool) -> &'static [u8] {
         match (self, we_called) {
             (Self::Us, true) | (Self::Them, false) => b"uac",
@@ -63,7 +47,6 @@ impl Refresher {
         }
     }
 
-    /// And back again.
     fn read(token: &[u8], we_called: bool) -> Option<Self> {
         let uac = if token.eq_ignore_ascii_case(b"uac") {
             true
@@ -83,22 +66,17 @@ impl Refresher {
 /// What was agreed for one call, and when it next needs attention.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SessionTimer {
-    /// How long the session lives without a refresh.
     pub(crate) interval: Duration,
-    /// Which end refreshes it.
     pub(crate) refresher: Refresher,
     /// When this end acts: a refresh if it is ours, a BYE if it is not.
     pub(crate) due: Instant,
-    /// The largest `Min-SE` anyone on the path has demanded, which §7.4 makes
-    /// this end carry in every refresh from then on.
+    /// The largest `Min-SE` demanded on the path, carried in every refresh (§7.4).
     pub(crate) floor: Duration,
-    /// Whether a 422 has already raised the interval once. A second one is the
-    /// far end contradicting itself, and asking again would loop.
+    /// A 422 already raised the interval once; asking again would loop.
     pub(crate) raised: bool,
 }
 
 impl SessionTimer {
-    /// Start it, or start it again after a refresh was answered.
     pub(crate) fn armed(interval: Duration, refresher: Refresher, now: Instant) -> Self {
         Self {
             interval,
@@ -109,39 +87,30 @@ impl SessionTimer {
         }
     }
 
-    /// The clock has moved and the session is still alive.
     pub(crate) fn rearm(&mut self, now: Instant) {
         self.due = now + wait_for(self.interval, self.refresher);
     }
 
-    /// Whether this end is the one that has to send something.
     pub(crate) const fn is_ours(&self) -> bool {
         matches!(self.refresher, Refresher::Us)
     }
 
-    /// The header value to write, from the point of view of the end that
-    /// placed the call or the one that answered it.
     pub(crate) fn value(&self, we_called: bool) -> Box<[u8]> {
         write_value(self.interval, Some(self.refresher), we_called)
     }
 }
 
-/// How long this end waits before it does anything.
 fn wait_for(interval: Duration, refresher: Refresher) -> Duration {
     match refresher {
-        // §7.2: "once half the session interval has elapsed", which leaves a
-        // second attempt before the far end gives up on us
+        // §7.2
         Refresher::Us => interval / 2,
-        // §10, and the margin is what is left of the interval when it is
-        // shorter than the margin itself
+        // §10
         Refresher::Them => interval.saturating_sub(GIVE_UP_MARGIN.min(interval / 3)),
     }
 }
 
-/// `Session-Expires`, and who it says refreshes (§4).
-///
-/// The refresher is `None` when the parameter is absent, which is what §7.1
-/// recommends a UAC send so that the negotiation can settle it.
+/// `Session-Expires` and its refresher (§4); `None` when the parameter is
+/// absent, as §7.1 recommends for a UAC.
 pub(crate) fn session_expires(
     message: &RawMessage<'_>,
     we_called: bool,
@@ -163,7 +132,6 @@ pub(crate) fn min_se(message: &RawMessage<'_>) -> Option<Duration> {
     Some(Duration::from_secs(u64::from(seconds)))
 }
 
-/// The `Session-Expires` value to write.
 pub(crate) fn write_value(
     interval: Duration,
     refresher: Option<Refresher>,
@@ -177,7 +145,6 @@ pub(crate) fn write_value(
     out.into_boxed_slice()
 }
 
-/// Whole seconds, for `Min-SE`.
 pub(crate) fn seconds(interval: Duration) -> Box<[u8]> {
     interval
         .as_secs()
@@ -202,14 +169,9 @@ fn lists(message: &RawMessage<'_>, name: HeaderName<'_>) -> bool {
         .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"timer"))
 }
 
-// -- what the user agent does with them --------------------------------------
-
 impl UserAgent {
     /// The headers that negotiate a timer on an outgoing request.
-    ///
-    /// §7.1 puts `Supported: timer` on every request but ACK, whether or not
-    /// this end wants a timer, because that is what tells the far end it may
-    /// ask for one.
+    /// `Supported: timer` goes on every request but ACK, wanted or not (§7.1).
     pub(crate) fn asking_for(
         &self,
         call: CallHandle,
@@ -223,10 +185,8 @@ impl UserAgent {
         };
         let held = self.calls.get(&call);
         let we_called = held.is_none_or(|held| held.direction == Direction::Outgoing);
-        // §7.1 has the initial request leave the refresher out so that the
-        // negotiation settles it, and §7.4 has a request inside the dialog say
-        // who is doing the work now. A 422 is answered with a second attempt
-        // at the initial request, so it belongs to the first rule
+        // the initial request leaves the refresher out (§7.1), one inside the
+        // dialog names it (§7.4). A retry after a 422 is still initial
         let refresher = held
             .filter(|held| held.dialog.is_some())
             .and_then(|held| held.timer)
@@ -235,8 +195,7 @@ impl UserAgent {
             HeaderName::SessionExpires,
             write_value(interval, refresher, we_called),
         ));
-        // §7.4: once a floor has been demanded on this dialog it rides on
-        // every refresh from then on
+        // §7.4
         let floor = held.and_then(|held| held.timer).map(|timer| timer.floor);
         if let Some(floor) = floor.filter(|floor| *floor > FLOOR) {
             out.push((HeaderName::MinSe, seconds(floor)));
@@ -260,9 +219,7 @@ impl UserAgent {
 
         let (interval, refresher) = match (settled, asked) {
             (Some((interval, refresher)), _) => (interval, refresher.unwrap_or(Refresher::Us)),
-            // §7.2: a far end that does not support this drops the header, and
-            // an end that still wants a timer carries on "as if the
-            // Session-Expires header field were in the 2xx response"
+            // §7.2: no header in the 2xx, but we asked, so we refresh
             (None, Some(interval)) => (interval, Refresher::Us),
             (None, None) => return,
         };
@@ -271,10 +228,8 @@ impl UserAgent {
         }
     }
 
-    /// A 422: ask again with the interval the far end demands (§7.3).
-    ///
-    /// `true` when a second INVITE went out, which is what stops the refusal
-    /// being reported as a call that failed.
+    /// A 422: ask again with the demanded interval (§7.3). `true` when a
+    /// second INVITE went out, so the refusal is not reported as a failure.
     pub(crate) fn on_session_too_brief(
         &mut self,
         call: CallHandle,
@@ -282,16 +237,13 @@ impl UserAgent {
         now: Instant,
     ) -> bool {
         let Some(floor) = demanded(response) else {
-            // a 422 with no Min-SE is the far end refusing without saying what
-            // it would accept, and asking again would be guessing
+            // no Min-SE: retrying would be guessing
             return false;
         };
         let again = {
             let Some(held) = self.calls.get_mut(&call) else {
                 return false;
             };
-            // once. A second 422 after the first was obeyed is the far end
-            // contradicting itself
             if held.timer.is_some_and(|timer| timer.raised) {
                 return false;
             }
@@ -314,11 +266,8 @@ impl UserAgent {
         self.dial(account, &placed, call, now).is_ok()
     }
 
-    /// What the 2xx to an INVITE that came in should say about timers (§9).
-    ///
-    /// `None` when the far end said nothing about them, because §9 only has a
-    /// UAS put a `Session-Expires` in a response to a request that supports
-    /// the extension.
+    /// The timer header for the 2xx to an incoming INVITE (§9), and whether
+    /// to `Require` it. `None` when the request does not support timers.
     pub(crate) fn timer_for_answer(
         &mut self,
         call: CallHandle,
@@ -336,22 +285,18 @@ impl UserAgent {
             .and_then(|id| self.accounts.get(&id))
             .and_then(|config| config.session_interval);
         let interval = match (asked, wanted) {
-            // §9: "The UAS MUST NOT increase the value of the Session-Expires
-            // header field", so the request's interval is a ceiling
+            // §9: the UAS must not increase the interval
             (Some((theirs, _)), Some(ours)) => theirs.min(ours).max(FLOOR),
             (Some((theirs, _)), None) => theirs,
             (None, Some(ours)) => ours,
             (None, None) => return None,
         };
-        // honour a preference the far end expressed; otherwise take the work,
-        // because the end that refreshes needs a timer that runs and this one
-        // is known to
+        // without a stated preference we refresh: our timer is known to run
         let refresher = asked.and_then(|(_, who)| who).unwrap_or(Refresher::Us);
         if let Some(held) = self.calls.get_mut(&call) {
             held.timer = Some(SessionTimer::armed(interval, refresher, now));
         }
-        // §9: refresher=uac obliges a Require, refresher=uas only recommends
-        // one, and there is nothing to gain by demanding what is already agreed
+        // §9: refresher=uac obliges a Require, uas only recommends one
         let demand = matches!(refresher, Refresher::Them);
         Some((write_value(interval, Some(refresher), false), demand))
     }
@@ -410,10 +355,7 @@ impl UserAgent {
             if ours {
                 self.send_refresh(call, false, now);
             } else {
-                // §10: "it SHOULD send a BYE to terminate the session,
-                // slightly before the session expiration". Nothing has come
-                // from the far end for most of an interval, so the dialog is
-                // one nobody is in any more
+                // §10: no refresh came, BYE before expiry
                 self.expire(call, now);
             }
         }
@@ -421,22 +363,16 @@ impl UserAgent {
 
     /// Keep the session alive (§7.4).
     ///
-    /// `retried` when this is the second attempt RFC 3261 §14.1 allows after
-    /// a 491: it is built exactly as the first was — a refresh still carries
-    /// `Session-Expires` and still offers the session unchanged — and a
-    /// second 491 is reported rather than chased.
+    /// `retried` marks the one retry RFC 3261 §14.1 allows after a 491; it is
+    /// built like the first, and a second 491 is reported, not chased.
     pub(crate) fn send_refresh(&mut self, call: CallHandle, retried: bool, now: Instant) {
         let Some(state) = self.calls.get(&call) else {
             return;
         };
         let (Some(dialog), Some(timer)) = (state.dialog, state.timer) else {
-            // no dialog to send a refresh in: the retry after a 422 has not
-            // had a provisional that opened one, or the one it opened was
-            // refused while the INVITE is still being answered. The call gets
-            // a dialog or ends, and until then the timer waits a quarter of
-            // the interval at a time. Dropping it would forget the floor and
-            // the mark a second 422 is judged by; leaving `due` where it was
-            // would have fire_session_timers pick it again on every turn
+            // no dialog yet (e.g. a retry after a 422 still ringing). Keep the
+            // timer, since it holds the floor and the 422 mark, and push `due`
+            // a quarter on so it is not picked on every turn
             if let Some(timer) = self
                 .calls
                 .get_mut(&call)
@@ -447,9 +383,8 @@ impl UserAgent {
             return;
         };
         if state.changing() {
-            // something else is already renegotiating, and it will rearm the
-            // timer when it is answered; a second request now would be glare
-            // we caused ourselves
+            // another renegotiation will rearm the timer; sending now would
+            // cause our own glare
             if let Some(held) = self.calls.get_mut(&call) {
                 held.timer = Some(SessionTimer {
                     due: now + timer.interval / 4,
@@ -465,12 +400,8 @@ impl UserAgent {
         );
         let contact = self.current_contact(call, now);
         if !confirmed {
-            // not up yet: a retry after a 422 still ringing, or a 2xx this end
-            // sent whose ACK has not arrived. §7.2 and §9 run the session
-            // expiration from the 2xx and want the refresh before it, and
-            // nothing re-arms the timer when the ACK comes, so it is kept and
-            // waits a quarter of the interval, as it does when a request
-            // cannot go
+            // not confirmed yet (still ringing, or our 2xx awaits its ACK).
+            // Nothing rearms on the ACK, so wait a quarter and retry
             if let Some(held) = self.calls.get_mut(&call) {
                 held.timer = Some(SessionTimer {
                     due: now + timer.interval / 4,
@@ -480,9 +411,8 @@ impl UserAgent {
             return;
         }
 
-        // §7.4 recommends UPDATE, which carries no offer and so cannot fail on
-        // one. A re-INVITE is the fallback, and then the offer has to be the
-        // one already agreed, unchanged
+        // §7.4 prefers UPDATE without an offer; a re-INVITE must repeat the
+        // agreed offer unchanged
         let over_update = allows_update;
         let mut request = OutgoingInDialogRequest::new(if over_update {
             Method::Update
@@ -492,8 +422,6 @@ impl UserAgent {
         .contact(&contact);
         let mut asked_for = self.asking_for(call, Some(timer.interval));
         if !over_update {
-            // a refresh sent as a re-INVITE is an INVITE, and carries
-            // `Supported: gruu` the way the one that opened the call did
             self.fold_gruu(call, &mut asked_for);
         }
         for (name, value) in &asked_for {
@@ -518,8 +446,7 @@ impl UserAgent {
                 .map(AnyTransactionId::InviteClient)
         };
         let Ok(transaction) = sent else {
-            // the dialog is gone, or an INVITE is already running in it. The
-            // timer stays armed and the next turn will try again
+            // dialog gone or an INVITE already running: retry later
             if let Some(held) = self.calls.get_mut(&call) {
                 held.timer = Some(SessionTimer {
                     due: now + timer.interval / 4,
@@ -588,8 +515,6 @@ CSeq: 1 INVITE\r\n\
 
     #[test]
     fn the_refresher_token_names_an_end_of_the_dialog_not_of_the_message() {
-        // 4: the parameter is uac or uas, so which one means "us" depends on
-        // which end placed the call
         assert_eq!(
             &*write_value(RECOMMENDED, Some(Refresher::Us), true),
             b"1800;refresher=uac"
@@ -625,8 +550,7 @@ CSeq: 1 INVITE\r\n\
 
     #[test]
     fn an_interval_with_no_refresher_leaves_the_choice_open() {
-        // 7.1: "it is RECOMMENDED that the parameter be omitted so that it can
-        // be selected by the negotiation mechanisms"
+        // RFC 4028 §7.1
         let bytes = message("Session-Expires: 600\r\n");
         assert_eq!(
             with(&bytes, |m| session_expires(m, true)),
@@ -651,8 +575,7 @@ CSeq: 1 INVITE\r\n\
         assert_eq!(ours.due, t0 + Duration::from_secs(900));
 
         let theirs = SessionTimer::armed(Duration::from_secs(1_800), Refresher::Them, t0);
-        // 10: the minimum of 32 seconds and a third of the interval, before
-        // the interval runs out
+        // §10
         assert_eq!(theirs.due, t0 + Duration::from_secs(1_768));
     }
 

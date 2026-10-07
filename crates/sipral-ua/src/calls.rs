@@ -3,28 +3,18 @@
 
 //! Placing calls, answering them, and ending them from either side.
 //!
-//! The core reports what happened and decides nothing. Here the decisions get
-//! made, and there are three worth naming.
-//!
 //! **The ACK is sent, not offered.** §13.2.2.4 leaves the ACK for a 2xx to the
-//! layer above because it may have to carry an answer, and the core keeps that
-//! open. A user agent closes it: a 2xx that is not acknowledged is
-//! retransmitted for thirty-two seconds and then hung up by the far end, which
-//! is not a decision worth handing to an application. The one case that has to
-//! wait is a call placed with no offer, where the answer travels in the ACK
-//! and only the application has one.
+//! layer above; a user agent sends it, since an unacknowledged 2xx gets the
+//! call hung up by the far end. The exception is a call placed with no offer:
+//! the answer travels in the ACK and only the application has one.
 //!
-//! **A fork is not hidden.** One INVITE, three phones ringing, three early
-//! dialogs, and every 2xx among them has to be acknowledged whether it is
-//! wanted or not. So each branch becomes a call of its own, and
-//! [`ForkPolicy`] says what happens to the ones that are not kept — hang them
-//! up, or hand them all over.
+//! **A fork is not hidden.** Every 2xx has to be acknowledged, so each branch
+//! becomes a call of its own, and [`ForkPolicy`] decides what happens to the
+//! ones not kept: hang them up, or hand them all over.
 //!
-//! **Hanging up means different things at different moments.** Before the
-//! INVITE is answered it is a CANCEL, after it is a BYE, and on a call that
-//! has come in and not been answered it is a refusal. One call does all three,
-//! because an application that has to know which is an application that will
-//! get it wrong during the second it matters.
+//! **Hanging up depends on the moment.** Before the answer it is a CANCEL,
+//! after it a BYE, and on an incoming call not yet answered a refusal. One
+//! call does all three.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -71,10 +61,6 @@ const NOT_NOW: StatusCode = StatusCode::BUSY_HERE;
 
 /// Take out the parked refusals that have settled, leaving behind the ones
 /// whose retry the endpoint is still holding for want of a connection.
-///
-/// Draining the lot, which is what these used to do, turns a retry waiting on
-/// a socket into a refusal reported in the same breath as the request for the
-/// socket.
 pub(crate) fn settled<K, V>(parked: &mut HashMap<K, V>, waiting: impl Fn(&V) -> bool) -> Vec<(K, V)>
 where
     K: Copy + Eq + std::hash::Hash,
@@ -89,8 +75,6 @@ where
         .collect()
 }
 
-// -- what the application asks for -------------------------------------------
-
 impl UserAgent {
     /// Place a call.
     ///
@@ -104,14 +88,12 @@ impl UserAgent {
         now: Instant,
     ) -> Result<CallHandle, UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
-        // before anything is kept or built, so a refused field leaves no call
-        // behind and nothing on the wire
+        // a refused field leaves no call behind and nothing on the wire
         HeadersFor::Call.check_each(&outgoing.extra)?;
         let Some((_, remote)) = outgoing.destination.or_else(|| config.destination()) else {
             return Err(UaError::NotLocated);
         };
-        // neither the Contact nor the offer may hand the far end an address
-        // it cannot reach this end at
+        // no address in Contact or offer the far end cannot reach
         crate::advertise::check_contact(&config.contact, remote)?;
         if let Some(offered) = outgoing
             .offer
@@ -179,10 +161,8 @@ impl UserAgent {
             .ok_or(UaError::NotLocated)?;
         let from = config.caller_value();
         let identifying = identifying_fields(config, &outgoing.extra, remote);
-        // read fresh rather than kept from when the call was placed (RFC 5627
-        // §4.4 forbids naming a GRUU once the registration that issued it is
-        // gone), which is why a 422 asked again on the same handle still comes
-        // through here rather than repeating a value from the first attempt
+        // read fresh on every attempt: RFC 5627 §4.4 forbids a GRUU whose
+        // registration is gone
         let (call_id, cseq, asked, signed, request_uri) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
             (
@@ -202,16 +182,13 @@ impl UserAgent {
             .to(&bracketed(&outgoing.target))
             .from(&from)
             .contact(&contact)
-            // RFC 3311 §4: "a UAC compliant to this specification SHOULD
-            // also include an Allow header field in the INVITE request,
-            // listing the method UPDATE"
+            // RFC 3311 §4: the INVITE SHOULD list UPDATE in Allow
             .header(HeaderName::Allow, ALLOW)
             .cseq(cseq);
         if let Some(call_id) = call_id {
             request = request.call_id(call_id);
         }
-        // RFC 3608 §6.1: the service route is "a preloaded Route header field
-        // in outgoing initial requests", and "the UA MUST preserve the order"
+        // RFC 3608 §6.1: preloaded Route, order preserved
         if let Some(learned) = self.learned_for(account, outgoing.destination, now) {
             for hop in learned.service_route() {
                 request = request.route(hop);
@@ -224,9 +201,8 @@ impl UserAgent {
         }
         match (outgoing.offer.as_ref(), outgoing.metadata.as_deref()) {
             (Some(offer), Some(metadata)) => {
-                // RFC 7866 §6.1: "An SRC MUST include the "siprec" option tag
-                // in the Require header when initiating an RS", and §9.1 the
-                // offer and the metadata as one multipart/mixed body
+                // RFC 7866 §6.1 Require: siprec; §9.1 offer and metadata in
+                // one multipart/mixed body
                 let body = crate::siprec::written_session_body(offer, metadata)
                     .map_err(UaError::Recording)?;
                 let content_type = body.content_type().to_owned();
@@ -242,8 +218,7 @@ impl UserAgent {
         for (name, value) in &identifying.added {
             request = request.header(*name, value);
         }
-        // RFC 8224 §6.1 Steps 3 and 4: the Date the PASSporT is dated by,
-        // and the Identity carrying it
+        // RFC 8224 §6.1 Steps 3 and 4
         if let Some(signed) = signed {
             if let Some(date) = signed.date.as_deref() {
                 request = request.header(HeaderName::Date, date);
@@ -262,8 +237,7 @@ impl UserAgent {
         let invite = self.endpoint.invite(&request, now)?;
         if let Some(held) = self.calls.get_mut(&call) {
             held.invite = Some(invite);
-            // where this call's signalling goes, which is what a `Replaces`
-            // naming it is measured against (RFC 3891 §3)
+            // what a `Replaces` naming this call is checked against (RFC 3891 §3)
             held.peer = Some(remote);
         }
         self.by_invite.insert(invite, call);
@@ -272,8 +246,7 @@ impl UserAgent {
 
     /// Say the phone is ringing (180), optionally with early media (183).
     ///
-    /// A body makes it a 183 Session Progress, because 180 Ringing with a
-    /// session description is a contradiction the far end has to guess at.
+    /// A body makes it a 183 Session Progress.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] for a call this end
@@ -301,8 +274,7 @@ impl UserAgent {
             &self.application_headers(call),
         );
         if self.wants_gruu(call) {
-            // RFC 5627 §4.4 SHOULD: "a 2xx or 18x response to an INVITE which
-            // contains a To tag" is among the responses that carry it
+            // RFC 5627 §4.4: 18x and 2xx with a To tag carry it
             response = response.header(HeaderName::Supported, b"gruu");
         }
         let described = early
@@ -355,19 +327,16 @@ impl UserAgent {
         sdp: Option<Arc<[u8]>>,
         now: Instant,
     ) -> Result<(), UaError> {
-        // the INVITE's server transaction outlives its 2xx by 64*T1 (RFC 6026
-        // §7.1, Accepted), and a second 2xx through it would be sent, and would
-        // put a call that is up back to waiting for an ACK that already came:
-        // a call answered once is refused here, not answered again
+        // the server transaction outlives its 2xx (RFC 6026 §7.1), so a second
+        // answer would go out; refuse it instead
         self.not_verifying(call)?;
         if let Some(held) = self.calls.get(&call)
             && (held.awaiting_ack.is_some() || held.acknowledged)
         {
             return Err(UaError::WrongState(held.state));
         }
-        // RFC 3262 §5: a reliable provisional that carried a description holds
-        // the 2xx until it is acknowledged, or two unanswered offers are on the
-        // wire at once and nothing says which the answer belongs to
+        // RFC 3262 §5: the 2xx waits for the PRACK of a reliable provisional
+        // with a description, or two offers would be open at once
         if self.answer_is_held(call) {
             self.hold_answer(call, sdp);
             return Ok(());
@@ -377,13 +346,11 @@ impl UserAgent {
         let contact = self.current_contact(call, now);
         self.check_advertised(call, &contact, sdp.as_deref())?;
         let mut supported: Vec<u8> = b"timer".to_vec();
-        // RFC 5627 §4.4 SHOULD, folded in beside `timer`: "a 2xx ... response
-        // to an INVITE which contains a To tag" is among what carries it
+        // RFC 5627 §4.4
         if self.wants_gruu(call) {
             supported.extend_from_slice(b", gruu");
         }
-        // RFC 3311 §4: "a 2xx response SHOULD contain an Allow header field
-        // listing the UPDATE method"
+        // RFC 3311 §4: a 2xx SHOULD list UPDATE in Allow
         let mut response = OutgoingResponse::new(StatusCode::OK)
             .contact(&contact)
             .header(HeaderName::Allow, ALLOW)
@@ -394,8 +361,7 @@ impl UserAgent {
         {
             response = response.header(HeaderName::SessionExpires, &value);
             if demand {
-                // §9: refresher=uac obliges the UAS to say the far end has to
-                // understand this, because it is the one that has to act
+                // RFC 4028 §9: refresher=uac needs Require: timer
                 response = response.header(HeaderName::Require, b"timer");
             }
         }
@@ -409,14 +375,11 @@ impl UserAgent {
         let dialog = self.endpoint.respond_invite(transaction, &response, now)?;
         if let Some(held) = self.calls.get_mut(&call) {
             held.dialog = dialog;
-            // §12.1.1 confirms the dialog here, but the call is not up until
-            // the ACK arrives; until then the 2xx is still being retransmitted
+            // not up until the ACK; §13.3.1.4 wants a BYE if it never comes
             held.state = CallState::Ringing;
-            // and §13.3.1.4 wants a BYE if it never is
             held.awaiting_ack = Some(transaction);
             if let Some(described) = described {
-                // an INVITE that carried nothing is answered with an offer,
-                // and §13.2.2.4 puts the answer to it in the ACK
+                // no offer in the INVITE: the answer comes in the ACK (§13.2.2.4)
                 held.session.answer_owed = !held.session.has_remote();
                 held.session.set_local(described);
             }
@@ -424,8 +387,7 @@ impl UserAgent {
         if let Some(dialog) = dialog {
             self.by_dialog.insert(dialog, call);
         }
-        // §3891 §3: "it accepts the new INVITE by sending a 200-class
-        // response, and shuts down the replaced dialog"
+        // RFC 3891 §3: answering ends the replaced dialog
         self.shut_down_replaced(call, now);
         self.drain(now);
         Ok(())
@@ -449,17 +411,13 @@ impl UserAgent {
     /// (RFC 3261 §21.3), and, when the [`Redirect`] says why, a `Diversion`
     /// naming this end as the party that diverted the call (RFC 5806).
     ///
-    /// The `Contact` lists every target the redirect names, each with its
-    /// `q` when one was given. The `Diversion` names the address the call
-    /// was made to — the INVITE's `To` — with the reason and `counter=1`,
-    /// and the `Diversion` values the INVITE already carried follow it,
-    /// most recent first, so the next phone sees the whole chain. The
-    /// application's own header fields ride along as they do on a refusal.
+    /// The `Contact` lists every target with its `q`. The `Diversion` names
+    /// the INVITE's `To` with the reason and `counter=1`, followed by the
+    /// `Diversion` values the INVITE already carried, so the chain survives.
     ///
     /// # Errors
-    /// [`UaError::NotARedirection`] for a redirect that names nowhere to go
-    /// with any status but 380 (Alternative Service, whose alternative is in
-    /// the body rather than a `Contact`); otherwise as [`UserAgent::reject`].
+    /// [`UaError::NotARedirection`] for no targets with any status but 380;
+    /// otherwise as [`UserAgent::reject`].
     pub fn redirect(
         &mut self,
         call: CallHandle,
@@ -519,18 +477,15 @@ impl UserAgent {
 
     /// Answer an offer that arrived in a reliable provisional response.
     ///
-    /// RFC 3262 §5: "If the UAC receives an offer in a reliable provisional
-    /// response, it MUST generate an answer in the PRACK." Only for a call
-    /// placed without an offer, which is the one case a provisional carries
-    /// one, and reported by `answer_wanted` on
+    /// RFC 3262 §5: the answer goes in the PRACK. Only for a call placed
+    /// without an offer, signalled by `answer_wanted` on
     /// [`UaEvent::CallProgress`](crate::UaEvent::CallProgress).
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing is
     /// waiting for one, or [`UaError::Sdp`]. [`UaError::Send`] when the PRACK
-    /// is too large for a datagram and no stream is open (RFC 3261 §18.1.1):
-    /// the answer is still owed, and the same call sends it once the stream
-    /// the endpoint asked for is bound.
+    /// needs a stream that is not open yet (RFC 3261 §18.1.1): the answer is
+    /// still owed; call again once the stream is bound.
     pub fn answer_early(
         &mut self,
         call: CallHandle,
@@ -578,9 +533,8 @@ impl UserAgent {
 
     /// Acknowledge a 2xx whose offer is still waiting for an answer.
     ///
-    /// Only for a call placed without an offer, which is the one case the ACK
-    /// is not sent automatically: the offer arrived in the 2xx and the answer
-    /// has nowhere else to travel (§13.2.2.4).
+    /// Only for a call placed without an offer: the offer came in the 2xx and
+    /// the answer travels in the ACK (§13.2.2.4), so it is not sent for you.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when the call is not
@@ -611,10 +565,10 @@ impl UserAgent {
 
     /// End a call, whatever it is doing.
     ///
-    /// A CANCEL while the INVITE this end sent is unanswered (§9.1, held by the
-    /// endpoint until the first provisional response if it has to be), a BYE
-    /// once the call is up, and a refusal for one that came in and has not
-    /// been answered. A call that is already ending is left alone.
+    /// A CANCEL while the INVITE this end sent is unanswered (§9.1, held until
+    /// the first provisional if needed), a BYE once the call is up, a refusal
+    /// for an incoming call not yet answered. A call already ending is left
+    /// alone.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], or the error of whatever it turned into.
@@ -625,12 +579,9 @@ impl UserAgent {
 
     /// [`UserAgent::hangup`], saying why (RFC 3326).
     ///
-    /// `reasons` go in a `Reason` field on the BYE or the CANCEL the hangup
-    /// turns into, one value per protocol — a later value of a protocol
-    /// already given is left out, since §2 allows one each. On the refusal
-    /// of a call that came in and was never answered, only the Q.850
-    /// values go: RFC 6432 lets those ride on any response, and a SIP one
-    /// would repeat the status the refusal already carries.
+    /// `reasons` go in a `Reason` field on the BYE or CANCEL, one value per
+    /// protocol (§2); later duplicates are dropped. On a refusal only the
+    /// Q.850 values go (RFC 6432): a SIP one would repeat the status.
     ///
     /// # Errors
     /// As [`UserAgent::hangup`].
@@ -644,9 +595,8 @@ impl UserAgent {
         self.end_call(call, &headers, reasons, now)
     }
 
-    /// [`UserAgent::hangup`], carrying `headers` on the refusal or the BYE it
-    /// turns into: the application's own when it asked, none when this layer
-    /// decided by itself. A CANCEL carries none either way (§16.10).
+    /// [`UserAgent::hangup`], carrying `headers` on the refusal or BYE. A
+    /// CANCEL carries none (§16.10).
     pub(crate) fn end_call(
         &mut self,
         call: CallHandle,
@@ -692,9 +642,7 @@ impl UserAgent {
             }
             _ => {
                 let invite = invite.ok_or(UaError::WrongState(state))?;
-                // §9.1: a CANCEL may not go before a provisional response has
-                // arrived, and the endpoint holds it until one does. Asking
-                // too early is not a failure and needs no timer here
+                // §9.1: the endpoint holds an early CANCEL until a provisional
                 match Reason::field(reasons) {
                     Some(value) => self.endpoint.cancel_with_reason(invite, &value, now).ok(),
                     None => self.endpoint.cancel(invite, now).ok(),
@@ -709,8 +657,7 @@ impl UserAgent {
         }
     }
 
-    /// Every call this agent still holds, in handle order — for a report of
-    /// the whole agent, such as a crash report's state snapshot.
+    /// Every call this agent still holds, in handle order.
     #[must_use]
     pub fn calls(&self) -> Vec<CallHandle> {
         let mut held: Vec<CallHandle> = self.calls.keys().copied().collect();
@@ -724,16 +671,11 @@ impl UserAgent {
         self.calls.get(&call).map(|held| held.state)
     }
 
-    /// Whether this end has a session description of its own on record for
-    /// this call — for one that came in, whether [`UserAgent::ring`] or
-    /// [`UserAgent::answer`] has already sent one that parsed.
+    /// Whether this end has sent a session description of its own for this
+    /// call.
     ///
-    /// What a layer that writes an early answer of its own has to ask first.
-    /// RFC 3261 §13.2.1 allows only "that same exact answer" in any other
-    /// response to one INVITE, and RFC 6337 §3.1.1 has every description in
-    /// those responses identical, so a call whose provisional response
-    /// already carried bytes somebody else wrote cannot be given a second,
-    /// different one.
+    /// Ask before writing an early answer: RFC 3261 §13.2.1 and RFC 6337
+    /// §3.1.1 require every response to one INVITE to carry the same one.
     #[must_use]
     pub fn has_described(&self, call: CallHandle) -> bool {
         self.calls
@@ -755,14 +697,12 @@ impl UserAgent {
         self.calls.get(&call)?.account
     }
 
-    /// Whether this call's signalling travels where only the next hop can
-    /// read it: over TLS or secure WebSocket. What its dialog runs on once
-    /// there is one, and before that what its INVITE was sent or received
-    /// on; `None` once the call is gone or for one with neither.
+    /// Whether this call's signalling runs over TLS or secure WebSocket: the
+    /// dialog's transport, or the INVITE's before there is a dialog. `None`
+    /// once the call is gone.
     ///
-    /// What an SDES key written into this call's descriptions is protected
-    /// by, and nothing more (RFC 4568 §8.3): a call for which this is
-    /// `false` carries its keys in clear.
+    /// When `false`, SDES keys in its descriptions travel in clear
+    /// (RFC 4568 §8.3).
     #[must_use]
     pub fn call_signalling_secure(&self, call: CallHandle) -> Option<bool> {
         let held = self.calls.get(&call)?;
@@ -777,11 +717,9 @@ impl UserAgent {
 
     /// Whether a call placed now from `account` as `outgoing` would be
     /// signalled over TLS or secure WebSocket: the transport it would leave
-    /// on is bound, and is one of those. `None` for an account that is not
-    /// this agent's, one not yet located, or a transport not bound.
-    ///
-    /// Asked before the call is placed, because what goes in its offer —
-    /// an SDES key or not — has to be decided before the offer leaves.
+    /// on is bound, and is one of those. `None` for an unknown account, one
+    /// not yet located, or a transport not bound. Decides whether the offer
+    /// may carry an SDES key.
     #[must_use]
     pub fn placing_securely(&self, account: AccountId, outgoing: &OutgoingCall) -> Option<bool> {
         let config = self.accounts.get(&account)?;
@@ -790,9 +728,8 @@ impl UserAgent {
         Some(protocol.is_secure())
     }
 
-    /// Whether this end placed the call or answered it, which is what
-    /// decides which of [`CallIdentity`]'s two URIs is this end's own and
-    /// which is the far end's.
+    /// Whether this end placed the call or answered it, which decides which
+    /// of [`CallIdentity`]'s two URIs is this end's own.
     #[must_use]
     pub fn call_direction(&self, call: CallHandle) -> Option<Direction> {
         self.calls.get(&call).map(|held| held.direction)
@@ -801,11 +738,7 @@ impl UserAgent {
     /// The `From` and `To` of the request that opened this call, and its
     /// `Call-ID`.
     ///
-    /// `None` once the call is gone: read it while the call is still known,
-    /// not from a report that arrives after it no longer is. A branch a fork
-    /// produced answers with its parent's own, read before either had one, for
-    /// the same reason a sibling shares the request that opened it rather than
-    /// carrying its own copy.
+    /// `None` once the call is gone. A fork branch answers with its parent's.
     #[must_use]
     pub fn call_identity(&self, call: CallHandle) -> Option<CallIdentity> {
         self.identity_now(call)
@@ -838,28 +771,19 @@ impl UserAgent {
     /// The header fields to put on what this call sends at the application's
     /// request, from now until they are replaced.
     ///
-    /// They go on the 180 or 183 from [`UserAgent::ring`], on the 200 from
-    /// [`UserAgent::answer`] whether RFC 3262 §5 holds it back or not, on the
-    /// refusal from [`UserAgent::reject`], on the refusal or the BYE a
-    /// [`UserAgent::hangup`] turns into, and on the re-INVITE or UPDATE that
-    /// [`UserAgent::hold`], [`UserAgent::resume`] and [`UserAgent::reoffer`]
-    /// send, the retry after a 491 included. Kept rather than spent on the
-    /// first of those: an application that labels a call labels all of it,
-    /// and a label spent on a provisional response that left first is a label
-    /// silently missing from the 200 that mattered.
+    /// They go on [`UserAgent::ring`], [`UserAgent::answer`],
+    /// [`UserAgent::reject`], the refusal or BYE of [`UserAgent::hangup`], and
+    /// the re-INVITE or UPDATE of [`UserAgent::hold`], [`UserAgent::resume`]
+    /// and [`UserAgent::reoffer`], 491 retries included. They are kept, not
+    /// spent on the first message.
     ///
-    /// Not on a CANCEL, which is hop by hop: a proxy answers it and sends its
-    /// own to every branch (RFC 3261 §16.10), so nothing written on it reaches
-    /// the far end. Not on the answer to a change the far end offered, which
-    /// belongs to the far end's request. And not on anything this layer sends
-    /// by itself — a session refresh, the BYE for a 2xx that was never
-    /// acknowledged, for a fork that lost or for a hangup whose CANCEL lost
-    /// the race — because a field the application wrote is the application
-    /// speaking, on a message it asked for.
+    /// Not on a CANCEL (hop by hop, RFC 3261 §16.10), not on the answer to a
+    /// change the far end offered, and not on anything this layer sends by
+    /// itself (session refresh, BYE for an unacknowledged 2xx or a lost fork).
     ///
-    /// Replaces what was set before, whole; an empty list takes every field
-    /// off. Every field is checked first ([`crate::HeadersFor::Call`]), and a
-    /// refusal keeps none of the new ones and leaves the old ones in place.
+    /// Replaces the previous set whole; an empty list clears it. Every field
+    /// is checked first ([`crate::HeadersFor::Call`]); on a refusal the old
+    /// set stays.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], or [`UaError::Header`] for the first field
@@ -886,8 +810,7 @@ impl UserAgent {
         Ok(())
     }
 
-    /// The fields the application wants on what it sends for a call, copied
-    /// out so that the call can be borrowed again while they are written.
+    /// The application's fields for a call, copied out.
     pub(crate) fn application_headers(&self, call: CallHandle) -> Vec<Extra> {
         self.calls
             .get(&call)
@@ -895,8 +818,6 @@ impl UserAgent {
             .unwrap_or_default()
     }
 }
-
-// -- bookkeeping -------------------------------------------------------------
 
 impl UserAgent {
     fn keep(&mut self, call: Call) -> CallHandle {
@@ -907,9 +828,7 @@ impl UserAgent {
     }
 
     /// Refuse to ring or answer a call held back for its verdict
-    /// ([`crate::stir`]): the application has not been told about it yet,
-    /// and a call it answers before its verdict is in is one whose caller
-    /// it answered unchecked. Refusing and hanging up are still allowed.
+    /// ([`crate::stir`]). Refusing and hanging up are still allowed.
     #[cfg(feature = "stir")]
     fn not_verifying(&self, call: CallHandle) -> Result<(), UaError> {
         if self.verifying(call) {
@@ -918,7 +837,6 @@ impl UserAgent {
         Ok(())
     }
 
-    /// Without the feature no call is ever held back.
     #[cfg(not(feature = "stir"))]
     #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     const fn not_verifying(&self, _call: CallHandle) -> Result<(), UaError> {
@@ -934,21 +852,6 @@ impl UserAgent {
         held.server.ok_or(UaError::WrongState(held.state))
     }
 
-    /// The `Contact` this call names right now: this account's public GRUU
-    /// while it is registered and issued, its temporary one on an anonymous
-    /// call, or the plain contact when neither is current.
-    ///
-    /// Read fresh on every request and response a call builds rather than
-    /// kept from when the dialog opened, because RFC 5627 §4.4 forbids naming
-    /// a GRUU once the registration that issued it has expired or been
-    /// removed — which a re-INVITE, a session-timer `UPDATE`, a REFER or a
-    /// NOTIFY sent long into a call would otherwise do by repeating the
-    /// `Contact` the INVITE opened with. Subscriptions already read theirs
-    /// this way; this is the same read for a call.
-    ///
-    /// The call's feature parameters (`isfocus`, `+sip.src`) follow whichever
-    /// address it is: they say what the dialog is, which does not change with
-    /// the registration.
     /// Refuse to hand the far end of `call` a `Contact` or a session
     /// description it cannot reach this end at ([`crate::advertise`]). A call
     /// whose far end the transport never named is not checked.
@@ -970,6 +873,10 @@ impl UserAgent {
         Ok(())
     }
 
+    /// The `Contact` this call names now: the public GRUU while registered,
+    /// the temporary one on an anonymous call, else the plain contact, plus
+    /// the call's feature parameters. Read fresh every time, because RFC 5627
+    /// §4.4 forbids naming a GRUU whose registration is gone.
     pub(crate) fn current_contact(&self, call: CallHandle, now: Instant) -> Box<[u8]> {
         let Some(held) = self.calls.get(&call) else {
             return Box::from(&b""[..]);
@@ -995,11 +902,9 @@ impl UserAgent {
     }
 
     /// Say, or stop saying, that this end is the focus of a conference the
-    /// call belongs to (RFC 4579 §4.2): `isfocus` in the `Contact` of every
-    /// request and response the call sends from here on — the answer to an
-    /// INVITE not yet answered, and the next re-INVITE or UPDATE, which is
-    /// how a far end already talking to this end learns it (a target
-    /// refresh, RFC 3261 §12.2).
+    /// call belongs to (RFC 4579 §4.2): `isfocus` in every `Contact` the call
+    /// sends from here on. A far end already in the call learns it from the
+    /// next re-INVITE or UPDATE (RFC 3261 §12.2).
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`].
@@ -1023,14 +928,11 @@ impl UserAgent {
         Ok(())
     }
 
-    /// Take recording sessions (RFC 7866 §6.2): the `siprec` option tag an
-    /// SRC's INVITE requires is answered rather than refused 420, which is
-    /// what this agent does with a tag it does not implement (RFC 3261
-    /// §8.2.2.3). The recording session then arrives as an ordinary
+    /// Take recording sessions (RFC 7866 §6.2): `Require: siprec` is accepted
+    /// instead of refused 420. The session arrives as an ordinary
     /// [`UaEvent::IncomingCall`]; [`crate::siprec::read_recording_offer`]
-    /// reads its offer and metadata, and §6.2's other half — that its
-    /// `Contact` carries `+sip.src` — is
-    /// [`crate::siprec::contact_has_feature_tag`].
+    /// reads its offer and metadata, and
+    /// [`crate::siprec::contact_has_feature_tag`] checks `+sip.src`.
     pub fn accept_recording_sessions(&mut self, accept: bool) {
         self.recording_server = accept;
     }
@@ -1044,21 +946,17 @@ impl UserAgent {
             .is_some_and(|held| contains_feature(&held.contact_context.features, b";isfocus"))
     }
 
-    /// The conference the call belongs to, when its far end is a focus: the
-    /// URI of the far end's `Contact`, which carried `isfocus` (RFC 4579
-    /// §4.2: "the resulting dialog belongs to a conference, identified by the
-    /// URI in the Contact header field"). `None` for every other call.
+    /// The conference the call belongs to when its far end is a focus: the
+    /// URI of its `Contact` that carried `isfocus` (RFC 4579 §4.2).
     #[must_use]
     pub fn call_conference(&self, call: CallHandle) -> Option<Uri> {
         self.calls.get(&call)?.remote_focus.clone()
     }
 
-    /// Subscribe to the conference package of the call's focus (RFC 4579
-    /// §3.4: a conference-aware UA "SHOULD subscribe to the conference
-    /// package if the 'isfocus' parameter is in the remote target URI of a
-    /// dialog"), outside the call's dialog as §3.4 asks, from the call's own
-    /// account. The subscription outlives the call; it is kept like any
-    /// other, and [`UaEvent::ConferenceChanged`] says what it learns.
+    /// Subscribe to the conference package of the call's focus, outside the
+    /// call's dialog, from the call's account (RFC 4579 §3.4). The
+    /// subscription outlives the call; [`UaEvent::ConferenceChanged`] reports
+    /// what it learns.
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::NotAFocus`] for a call whose far
@@ -1080,10 +978,8 @@ impl UserAgent {
     }
 
     /// The headers `asking_for` wrote for an INVITE or a re-INVITE, with
-    /// `gruu` folded into their `Supported` when this call's account has asked
-    /// for GRUUs — RFC 5627 §4.4 SHOULD: "a UA SHOULD include a Supported
-    /// header field with the option tag gruu in requests and responses it
-    /// generates".
+    /// `gruu` added to `Supported` when the account asked for GRUUs (RFC 5627
+    /// §4.4).
     pub(crate) fn fold_gruu(
         &self,
         call: CallHandle,
@@ -1102,9 +998,7 @@ impl UserAgent {
         }
     }
 
-    /// Whether the account this call belongs to has asked its registrar for
-    /// GRUUs (RFC 5627 §4.1), which decides whether `Supported: gruu` goes on
-    /// what this call sends and answers.
+    /// Whether the call's account asked its registrar for GRUUs (RFC 5627 §4.1).
     pub(crate) fn wants_gruu(&self, call: CallHandle) -> bool {
         self.calls
             .get(&call)
@@ -1135,16 +1029,13 @@ impl UserAgent {
         {
             return;
         }
-        // §15.1.2: a request of theirs that is still waiting for an answer
-        // gets one before the dialog goes, or it is retransmitted at the far
-        // end until it gives up
+        // §15.1.2: answer their pending request before the dialog goes
         self.abandon_change(call, now);
         let Some(held) = self.calls.get_mut(&call) else {
             return;
         };
         held.state = CallState::Terminated;
-        // the BYE's or the CANCEL's own, kept when it arrived; otherwise
-        // whatever the refusal carried (RFC 6432)
+        // the BYE's or CANCEL's Reason, else the refusal's (RFC 6432)
         let mut causes = core::mem::take(&mut held.ended_by);
         let request = held.ended_with.take();
         if causes.is_empty()
@@ -1160,26 +1051,17 @@ impl UserAgent {
             request,
             causes,
         });
-        // §2.4.7 makes the closing NOTIFY the last word on a transfer, and
-        // that is owed whether the referred call was answered or not: a
-        // refusal reports the status that refused it, and one that never got
-        // an answer at all -- Timer B, a transport failure, this end giving
-        // up on its own -- has none to report, so it is the 408 a transaction
-        // that gave up on itself would have carried (RFC 3261 §21.4.9).
-        // `report_transfer` is a no-op for a call nothing REFERred, so this
-        // runs unconditionally rather than only after `on_call_failed`.
-        // Before `forget`: that call removes the record `report_transfer`
-        // reads to find who is owed the NOTIFY.
+        // RFC 3515 §2.4.7: a transfer always gets its closing NOTIFY; a call
+        // that never got an answer reports 408 (RFC 3261 §21.4.9). Must run
+        // before `forget`, which drops the record it reads.
         let reported = status.unwrap_or(match StatusCode::new(408) {
             Ok(timeout) => timeout,
             Err(_) => StatusCode::SERVER_ERROR,
         });
         self.report_transfer(call, reported, now);
-        // Before `forget`, for the same reason `report_transfer` is: an
-        // account that asked for an RFC 6035 quality report is answered by
-        // the facade above this crate reacting to the `CallEnded` event just
-        // queued, and by then `forget` has already taken the account and
-        // identity that report needs off this call (`quality_report.rs`).
+        // before `forget` too: the RFC 6035 report sent on `CallEnded` needs
+        // the account and identity `forget` removes
+
         self.stash_ended_call(call);
         self.forget(call);
     }
@@ -1197,8 +1079,7 @@ impl UserAgent {
             if other.consulting == Some(call) {
                 other.consulting = None;
             }
-            // the call it was placed to be handed to is gone, so there is
-            // nobody left to hand it to: an ordinary call from here on
+            // the transfer target is gone: an ordinary call from here on
             if other.consulting_for == Some(call) {
                 other.consulting_for = None;
                 if other.state == CallState::Consulting {
@@ -1214,36 +1095,20 @@ impl UserAgent {
         self.challenged_offers
             .retain(|_, parked| parked.call != call);
         self.calls.remove(&call);
-        // a digit still waiting behind the one in flight has nowhere left to
-        // go once the call is gone; without this a late 2xx to that last
-        // INFO would otherwise find the queue and try to send into a call
-        // `send_one_dtmf_info` can no longer find either -- harmless, but a
-        // queue nothing will ever empty again is a leak for the life of the
-        // process
+        // queued digits would otherwise never drain
         self.dtmf_queue.remove(&call);
-        // and a hold or a resume waiting for a change to finish has no
-        // session left to change: `CallEnded` is the last word on it
         self.holds_waiting.remove(&call);
-        // by_request is not touched: the BYE that ended the call outlives the
-        // call, and its answer is still this layer's rather than the
-        // application's. `on_transaction_over` clears the entry when the
-        // transaction it names ends, which is what bounds the map
+        // by_request stays: the BYE outlives the call, and
+        // `on_transaction_over` clears it
     }
 
     /// A call placed by this end is going, and the INVITE that placed it may
     /// still be answered.
     ///
-    /// §13.2.2.4: "If, after acknowledging any 2xx response to an INVITE, the
-    /// UAC does not want to continue with that dialog, then the UAC MUST
-    /// terminate the dialog by sending a BYE request". The client transaction
-    /// passes up every 2xx until timer M, or timer D after a refusal (RFC
-    /// 6026 §8.4), and the call it would have belonged to is found through
-    /// `by_invite` — which is about to lose it. A sibling still up takes the
-    /// INVITE over, so a later branch is minted beside it as before; with
-    /// none left, whatever answers next is let go by
-    /// [`UserAgent::let_go_late_branch`], ACK and BYE, under either
-    /// [`ForkPolicy`]. Once the transaction is retired nothing more can come,
-    /// and nothing is kept.
+    /// 2xx keep arriving until timer M (RFC 6026 §8.4) and each must be
+    /// acknowledged and ended with a BYE (§13.2.2.4). A sibling still up takes
+    /// the INVITE over; with none left, a late answer goes to
+    /// [`UserAgent::let_go_late_branch`] under either [`ForkPolicy`].
     fn let_go_of_invite(&mut self, call: CallHandle) {
         let Some(held) = self.calls.get(&call) else {
             return;
@@ -1263,9 +1128,6 @@ impl UserAgent {
             }
             return;
         }
-        // no dialog is exempt: a 2xx on one this end has acknowledged is
-        // answered with the same ACK by the core and never gets here, and one
-        // on a dialog that never was is a call nobody is on
         if self.endpoint.transaction_state(invite).is_some() {
             self.kept_branches.entry(invite).or_insert(KeptBranch {
                 dialog: None,
@@ -1301,25 +1163,11 @@ impl UserAgent {
 
     /// The account an incoming INVITE was addressed to, when it can be told.
     ///
-    /// The Request-URI is where the registrar sent it, so it is this end's
-    /// contact; the `To` is the address of record. Either identifies a line,
-    /// and the contact is the stronger of the two: a proxy forking to several
-    /// lines rewrites the Request-URI to each line's contact and leaves the
-    /// `To` as the caller wrote it (RFC 3261 §16.6), so a branch whose `To`
-    /// is one line's address of record and whose Request-URI is another's
-    /// contact is the second line's. Among the lines named alike, the one
-    /// whose requests use the transport the request arrived on wins, and then
-    /// the one whose server it came from: two accounts with the same user, on
-    /// two servers or on UDP and TLS in one stack, are each found by their
-    /// own flow. With neither matching, a line on the arrival flow whose
-    /// contact has the Request-URI's user is the one — a server that rewrote
-    /// the host still names the user it registered. None matching is not a
-    /// reason to refuse the call — a misrouted INVITE that vanishes silently
-    /// is worse than one the application can see.
-    ///
-    /// General enough for any incoming request, not only an INVITE, because
-    /// `reliable::on_require_event` needs the same answer for a request that
-    /// opens no dialog and names no call yet.
+    /// The Request-URI (this end's contact) beats the `To`: a forking proxy
+    /// rewrites the Request-URI per line and leaves `To` alone (RFC 3261
+    /// §16.6). Ties go to the arrival transport, then the source server. With
+    /// no match, a line on the arrival flow whose contact has the
+    /// Request-URI's user wins. No match at all does not refuse the call.
     pub(crate) fn line_for(&self, request: &RawMessage<'_>) -> Option<AccountId> {
         let target = request
             .request_uri_bytes()
@@ -1328,9 +1176,6 @@ impl UserAgent {
             .to()
             .ok()
             .and_then(|to| Uri::parse(to.uri_bytes()).ok());
-        // the flow it arrived on, and the peer it came from: two accounts
-        // with the same user on two servers, or one on UDP and another on
-        // TLS, are told apart by these where the URIs name both alike
         let flow = self.guard.arrived_on();
         let source = self.guard.source();
         let named = |config: &Account| {
@@ -1350,8 +1195,7 @@ impl UserAgent {
                 .max_by(|(a, one), (b, other)| {
                     closeness(one)
                         .cmp(&closeness(other))
-                        // the oldest account among equals, so that the
-                        // answer never depends on a map's order
+                        // oldest among equals, independent of map order
                         .then_with(|| b.cmp(a))
                 })
                 .map(|(id, _)| *id)
@@ -1365,9 +1209,7 @@ impl UserAgent {
         if addressed.is_some() {
             return addressed;
         }
-        // a server that rewrote the host of the Contact it was given still
-        // names the user it registered: on the flow an account's requests
-        // use, that user is the account's
+        // a server that rewrote the host still names the registered user
         let user = target
             .as_ref()
             .and_then(|uri| uri.sip().and_then(|sip| sip.user.map(str::to_owned)))?;
@@ -1388,9 +1230,8 @@ struct Identifying {
     /// `Privacy` and `P-Asserted-Identity`, when the account asked for
     /// anonymity and the application wrote neither itself.
     added: Vec<(HeaderName<'static>, Box<[u8]>)>,
-    /// Whether the application's own `P-Asserted-Identity` and
-    /// `P-Preferred-Identity` are left off: the account names a trust
-    /// domain and the INVITE is going outside it.
+    /// The application's `P-Asserted-Identity`/`P-Preferred-Identity` are
+    /// dropped: the INVITE leaves the account's trust domain.
     untrusted: bool,
 }
 
@@ -1403,12 +1244,9 @@ impl Identifying {
 }
 
 /// RFC 3323 and RFC 3325 for an INVITE from `config` to `remote`: the
-/// `Privacy` the account asked for, the account's own identity asserted
-/// only toward a peer it trusts (RFC 3325 §7 has that peer strip it before
-/// it leaves the trust domain), and an identity field of the application's
-/// own kept off a request going to a peer outside a trust domain the account
-/// named (§6). An account that names no trusted peer has made no claim about
-/// a trust domain, and the application's fields go as written.
+/// account's `Privacy`, its identity asserted only toward a trusted peer
+/// (§7), and the application's identity fields kept off a request leaving the
+/// trust domain (§6). No trusted peer named means no trust domain.
 fn identifying_fields(config: &Account, extra: &[Extra], remote: SocketAddr) -> Identifying {
     let trusted = config.trusts(remote.ip());
     let wrote = |name: &[u8]| extra.iter().any(|one| one.name.eq_ignore_ascii_case(name));
@@ -1429,8 +1267,7 @@ fn identifying_fields(config: &Account, extra: &[Extra], remote: SocketAddr) -> 
     }
 }
 
-/// `<uri>`, which is how a URI goes into `To` without its parameters being
-/// read as the header field's.
+/// `<uri>`, so its parameters are not read as the header field's.
 fn bracketed(uri: &Uri) -> Box<[u8]> {
     let mut out = Vec::with_capacity(uri.as_bytes().len() + 2);
     out.push(b'<');
@@ -1455,18 +1292,12 @@ fn display_of(addr: &NameAddrRef<'_>) -> Box<[u8]> {
 }
 
 impl CallIdentity {
-    /// Who is on the call an INVITE that arrived opens, read out of the INVITE
-    /// itself.
+    /// Who is on the call an incoming INVITE opens, read from the INVITE
+    /// alone, so it works after the call is gone (say, cancelled before the
+    /// event was taken). `None` when `From`, `To` or `Call-ID` cannot be read.
     ///
-    /// Needs nothing but the request, so it answers for a call this agent has
-    /// already let go of: [`UaEvent::IncomingCall`] carries the INVITE whole,
-    /// and a CANCEL that followed it before the event was taken out has
-    /// already ended the call behind it. `None` when the `From`, the `To` or
-    /// the `Call-ID` cannot be read.
-    ///
-    /// Read as though from a peer nobody trusts: [`CallIdentity::caller`]
-    /// carries no asserted identity. [`UaEvent::IncomingCall`]'s own
-    /// `identity` is the one read behind the account's trust gate.
+    /// Read as untrusted: [`CallIdentity::caller`] carries no asserted
+    /// identity. [`UaEvent::IncomingCall`]'s `identity` is the trusted read.
     #[must_use]
     pub fn of_request(request: &OwnedMessage) -> Option<Self> {
         Self::of_invite(request, false)
@@ -1490,8 +1321,6 @@ impl CallIdentity {
         })
     }
 }
-
-// -- what comes back ---------------------------------------------------------
 
 impl UserAgent {
     /// `None` when the event belonged to a call; the event back when it did
@@ -1557,7 +1386,6 @@ impl UserAgent {
             | Event::IncomingAck { .. }
             | Event::IncomingBye { .. } => self.on_incoming(event, now),
             Event::DialogTerminated { dialog, reason } => {
-                // whatever was waiting for a stream to go out in it will not
                 self.forget_parked_in(dialog);
                 self.on_dialog_over(dialog, reason, now)
             }
@@ -1582,9 +1410,7 @@ impl UserAgent {
                     return Some(event);
                 };
                 self.release_refer(id, false);
-                // no response arrived, and §8.1.3.1 says what stands for one;
-                // where the transaction was retired first, `on_transaction_over`
-                // has already said it
+                // no response: §8.1.3.1 says what stands for one
                 if let Some(status) = unanswered(reason) {
                     self.dtmf_info_over(id, call, status, now);
                 }
@@ -1609,10 +1435,8 @@ impl UserAgent {
         now: Instant,
     ) -> Option<Event> {
         let call = self.by_dialog.get(&dialog).copied()?;
-        // a refusal reported by the dialog layer is the same refusal the
-        // INVITE transaction is about to report, and that one knows whether
-        // the 487 was one we asked for. Wait for it rather than answer first
-        // and answer worse
+        // the INVITE transaction reports the same refusal and knows whether
+        // the 487 was ours: wait for it
         if reason == DialogEndReason::Refused && self.still_calling(call) {
             self.by_dialog.remove(&dialog);
             if let Some(held) = self.calls.get_mut(&call) {
@@ -1634,10 +1458,8 @@ impl UserAgent {
         response: &OwnedMessage,
         now: Instant,
     ) {
-        // §5: an offer here is answered in the PRACK, and only the application
-        // has an answer. Everything else is acknowledged at once, because §4
-        // makes that a MUST and a response nobody acknowledges is retransmitted
-        // until the INVITE is abandoned
+        // §5: an offer here is answered in the PRACK by the application;
+        // anything else is PRACKed at once (§4)
         let offered = !response.as_raw().body().is_empty()
             && self
                 .calls
@@ -1655,25 +1477,20 @@ impl UserAgent {
 
     /// The CANCEL lost its race and the call connected anyway.
     ///
-    /// §13.2.2.4 still wants the ACK — a 2xx is acknowledged whether or not it
-    /// is wanted — and only then can the call be hung up. The first 2xx to
-    /// cross the CANCEL also speaks for the answer window: one on any other
-    /// branch after it is [`UserAgent::let_go_late_branch`]'s, whether or not
-    /// the call it would have belonged to is still around to hang up.
+    /// §13.2.2.4: ACK first, then hang up. A 2xx on any other branch after
+    /// this one goes to [`UserAgent::let_go_late_branch`].
     fn on_cancel_lost(
         &mut self,
         invite: TransactionId<InviteClient>,
         dialog: DialogId,
         now: Instant,
     ) {
-        // none on a branch other than the first to cross it: `Established`
-        // follows for the same 2xx, and lets it go without minting a call
+        // other branches: `Established` follows and lets them go
         let Some(call) = self.branch(invite, Some(dialog)) else {
             return;
         };
-        // the same 2xx again, retransmitted while its ACK and the hangup after
-        // it wait for a stream: both are already held, and asking again would
-        // ask for another connection per retransmission
+        // a retransmitted 2xx while ACK and hangup wait for a stream
+        // must not ask for another connection
         if self.ack_parked_in(dialog) {
             return;
         }
@@ -1693,11 +1510,9 @@ impl UserAgent {
         self.hang_up_by_itself(call, now);
     }
 
-    /// §8.2.2.3 and then §8.2.3, for an INVITE that would open a call: a
-    /// `Require` this agent cannot honour is refused 420 before anything else
-    /// looks at the request, then a body it cannot read or an `Accept` that
-    /// rules out the session description every answer carries. `true` when
-    /// the INVITE was refused.
+    /// §8.2.2.3 then §8.2.3: an unsupported `Require` is refused 420 first,
+    /// then an unreadable body or an `Accept` without SDP. `true` when the
+    /// INVITE was refused.
     fn refuse_unreadable(
         &mut self,
         transaction: TransactionId<InviteServer>,
@@ -1711,8 +1526,7 @@ impl UserAgent {
             self.refuse_extension(transaction, &missing, now);
             return true;
         }
-        // a recording session's offer and metadata, to an agent that takes
-        // them: both parts are understood, which is what §8.2.3 asks
+        // a recording session's multipart body is understood (§8.2.3)
         if self.recording_server && crate::siprec::session_part(request).is_some() {
             return false;
         }
@@ -1738,9 +1552,7 @@ impl UserAgent {
 
     /// The `Contact` a call that arrived for `account` answers with.
     ///
-    /// An INVITE addressed to no account still arrives (the event says why),
-    /// and answering it still needs a `Contact`: the address it arrived on is
-    /// the one this end is sure of.
+    /// For an INVITE addressed to no account, the address it arrived on.
     fn answering_contact(&self, account: Option<AccountId>) -> Box<[u8]> {
         account
             .and_then(|id| self.accounts.get(&id))
@@ -1760,21 +1572,15 @@ impl UserAgent {
                 transaction,
                 ref request,
             } => {
-                // the line this INVITE is addressed to, found now so the
-                // Require check below can tell whether it has asked its
-                // registrar for GRUUs
+                // found first: the Require check needs its GRUU setting
                 let account = self.line_for(&request.as_raw());
                 let account_wants_gruu = account
                     .and_then(|id| self.accounts.get(&id))
                     .is_some_and(Account::wants_gruu);
-                // RFC 4028 §9: an interval below the floor is refused with the
-                // floor, and the far end asks again. There is no policy in it,
-                // so the application is not troubled with it
                 if self.refuse_unreadable(transaction, &request.as_raw(), account_wants_gruu, now) {
                     return None;
                 }
-                // RFC 3891 §3: a Replaces names one of this end's own calls,
-                // and every way it can fail to is a different status code
+                // RFC 3891 §3: each way a Replaces fails has its own status
                 let replaced = match self.replaced_by(request) {
                     Ok(replaced) => replaced,
                     Err(status) => {
@@ -1782,6 +1588,7 @@ impl UserAgent {
                         return None;
                     }
                 };
+                // RFC 4028 §9: refused with the floor; the far end asks again
                 if Self::too_brief(&request.as_raw()) {
                     let refusal = OutgoingResponse::new(StatusCode::SESSION_INTERVAL_TOO_SMALL)
                         .header(HeaderName::MinSe, &crate::timers::seconds(FLOOR));
@@ -1790,16 +1597,10 @@ impl UserAgent {
                         .ok();
                     return None;
                 }
-                // the `From` this call answers with, kept for a `Referred-By`
-                // it may write later (RFC 3892 §2.2) — the `Contact` of the
-                // answer itself is read fresh, at the moment it is sent
-                // (`current_contact`), not decided here
-                // which is this dialog's local URI, the To this INVITE came
-                // with (RFC 3261 §12.1.1), and not the account's address of
-                // record: a line found by its contact may have been called on
-                // a number or an alias the far end was never shown the record
-                // behind. The URI alone, since a display name there is the far
-                // end's own writing
+                // our local URI is the INVITE's `To` (RFC 3261 §12.1.1), not
+                // the AOR: the caller may have dialled an alias. Kept for a
+                // later `Referred-By` (RFC 3892 §2.2); URI only, the display
+                // name is the far end's
                 let from = request
                     .as_raw()
                     .to()
@@ -1813,8 +1614,6 @@ impl UserAgent {
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.invited = Some(request.clone());
                     held.replaces = replaced;
-                    // and where this one's signalling came from, and who it
-                    // says is calling
                     (held.peer, held.identity) = (source, identity.clone());
                 }
                 self.by_server.insert(transaction, call);
@@ -1833,8 +1632,7 @@ impl UserAgent {
             } => {
                 let call = self.by_server.get(&invite).copied()?;
                 self.ended_because(call, request);
-                // the endpoint has already sent the 200 and the 487; §9.2
-                // makes both unconditional, and what is left is to stop ringing
+                // the endpoint already sent the 200 and the 487 (§9.2)
                 self.finish(call, CallEndReason::Cancelled, None, None, now);
                 None
             }
@@ -1843,10 +1641,7 @@ impl UserAgent {
                 ref request,
             } => {
                 let call = self.by_dialog.get(&dialog).copied()?;
-                // a re-INVITE is acknowledged here too, and a call is only
-                // confirmed once. What "up" means is the call's to say: a
-                // consultation stays one across every change the target asks
-                // for
+                // re-INVITEs are acknowledged here too; confirm only once
                 let first = self.calls.get(&call).is_some_and(|held| !held.acknowledged);
                 if let Some(held) = self.calls.get_mut(&call) {
                     held.state = held.up();
@@ -1892,7 +1687,6 @@ impl UserAgent {
         self.screen_identity(call, account, request, identity, now);
     }
 
-    /// Without the feature, always at once.
     #[cfg(not(feature = "stir"))]
     fn deliver_incoming(
         &mut self,
@@ -1919,8 +1713,7 @@ impl UserAgent {
         now: Instant,
     ) {
         self.ended_because(call, request);
-        // §15.1.2: the dialog is over, and answering it 200 is the only
-        // thing left. There is nothing to decide, so nothing is asked
+        // §15.1.2: always 200
         self.endpoint
             .respond(transaction, &OutgoingResponse::new(StatusCode::OK), now)
             .ok();
@@ -1930,18 +1723,13 @@ impl UserAgent {
     /// The call a response on this INVITE belongs to, minting a sibling when
     /// the dialog it names is a second one.
     ///
-    /// §13.2.2: one INVITE can open several dialogs, and each of them is a
-    /// call in its own right — every 2xx among them has to be acknowledged
-    /// whether or not it is wanted.
+    /// §13.2.2: one INVITE can open several dialogs, each a call of its own.
     fn branch(
         &mut self,
         invite: TransactionId<InviteClient>,
         dialog: Option<DialogId>,
     ) -> Option<CallHandle> {
-        // a branch other than the one kept has nothing left to report: the
-        // ones that were ringing ended when it was kept, one heard of only
-        // now is not a call anybody will take, and a 2xx that crossed the
-        // CANCEL after the first one did is `let_go_late_branch`'s
+        // once a branch is kept, the others have nothing to report
         if let Some(dialog) = dialog
             && self
                 .kept_branches
@@ -1978,8 +1766,7 @@ impl UserAgent {
         Some(handle)
     }
 
-    /// What a response the far end sent says about the session and about what
-    /// the far end can be asked to do.
+    /// Record the session and capabilities a far-end response describes.
     fn note_session(&mut self, call: CallHandle, response: &OwnedMessage) {
         let raw = response.as_raw();
         self.note_far_end(call, &raw);
@@ -2009,8 +1796,7 @@ impl UserAgent {
         response: Option<&OwnedMessage>,
         now: Instant,
     ) -> Option<Event> {
-        // RFC 4028 §7.3: a 422 says the session interval was too short, not
-        // that the call cannot happen
+        // RFC 4028 §7.3: a 422 means retry with a longer interval
         if status.map(StatusCode::get) == Some(422)
             && let Some(call) = self.by_invite.get(&invite).copied()
             && let Some(refusal) = response
@@ -2022,13 +1808,10 @@ impl UserAgent {
         }
         let ended = match reason {
             FailureReason::Refused => CallEndReason::Refused,
-            // the enum is non-exhaustive across crate versions, and anything
-            // new is still a call that did not connect
             _ => CallEndReason::Unreachable,
         };
-        // §22.2 and §22.3: a challenge is a refusal that says how to ask
-        // again, and the core reports the refusal before it reports that.
-        // Ending the call here would leave nothing to retry
+        // §22.2, §22.3: the core reports the refusal before the challenge;
+        // keep the call for the retry
         if matches!(status.map(StatusCode::get), Some(401 | 407))
             && self.by_invite.contains_key(&invite)
         {
@@ -2043,8 +1826,7 @@ impl UserAgent {
             );
             return None;
         }
-        // RFC 3261 §8.1.3.4: a 3xx names where to ask instead, and a target
-        // that then fails is followed by the next one the 3xx named
+        // RFC 3261 §8.1.3.4: try the next target a 3xx named
         if let Some(call) = self.by_invite.get(&invite).copied()
             && self.follow_redirect(call, invite, status, response, now)
         {
@@ -2055,10 +1837,8 @@ impl UserAgent {
 
     /// A refusal that carried a challenge and got no retry was a refusal.
     ///
-    /// The core answers a challenge once: the same nonce coming back without
-    /// `stale` is §22.1's way of saying the password was wrong, and repeating
-    /// it is how a client locks an account. So nothing follows the refusal in
-    /// that case, and the silence is the answer.
+    /// The core answers a challenge once: a repeat without `stale` means a
+    /// wrong password (§22.1), and retrying would lock the account.
     pub(crate) fn settle_call_challenges(&mut self, now: Instant) {
         let refused: Vec<(TransactionId<InviteClient>, Refusal)> =
             settled(&mut self.challenged, |refusal| refusal.waiting_for_stream);
@@ -2074,42 +1854,19 @@ impl UserAgent {
     }
 
     /// The same, for the requests a call sends inside its dialog.
-    ///
-    /// This is the half that did not exist. A BYE whose retry never went left
-    /// the call in `Terminating` with nothing said to anybody, and a REFER
-    /// left the seat taken so `refer` refused every later transfer on that
-    /// call for the life of the call.
     pub(crate) fn settle_request_challenges(&mut self, now: Instant) {
         let refused: Vec<(AnyTransactionId, RequestRefusal)> =
             settled(&mut self.challenged_requests, |refusal| {
                 refusal.waiting_for_stream
             });
         for (id, refusal) in refused {
-            // whatever the method, the seat goes back: nothing more is coming
-            // on this transaction. A no-op unless the call was holding it
             self.release_refer(id, false);
             self.by_request.remove(&id);
             self.account_of.remove(&id);
-            // Only the REFER and an INFO carrying a digit need an event of
-            // their own; the INFO's follows this one. RFC 3515 §2.4.2 has
-            // only a 2xx oblige the far end to open the subscription that
-            // would have reported how the transfer went, so a REFER that was
-            // never authenticated leaves nothing that will ever report it:
-            // without this the application waits for news that cannot come,
-            // on a transfer that did not happen.
-            //
-            // The other four are already covered, each by something that was
-            // going to happen anyway, and saying it twice here would be a
-            // second event for one outcome. A BYE: the dialog ends when its
-            // transaction gets a final answer, whatever the answer was, and
-            // `on_dialog_over` reports the call ended — checked, not assumed.
-            // A CANCEL: the INVITE it was trying to stop resolves through its
-            // own path, and `hangup_wanted` sends a BYE if the call is
-            // answered anyway. A PRACK: the provisional goes unacknowledged
-            // and the INVITE's own Timer B reports that. A NOTIFY: it is this
-            // end telling a referrer how a transfer went, and the local
-            // bookkeeping was final before it was sent — the referrer is left
-            // uninformed, and nothing at this end can reach them.
+            // Only REFER and a DTMF INFO need an event here. A refused REFER
+            // opens no subscription (RFC 3515 §2.4.2), so nothing else would
+            // ever report it. BYE, CANCEL, PRACK and NOTIFY are reported by
+            // the dialog ending, the INVITE's own path, or Timer B.
             if refusal.method == Method::Refer
                 && let Some(status) = refusal.status
             {
@@ -2118,9 +1875,6 @@ impl UserAgent {
                     status,
                 });
             }
-            // an INFO carrying a digit, for the reason its 415 is reported at
-            // all: the refusal is news the application gets no other way.
-            // Whatever the method, a digit this was carrying goes with it
             if refusal.method == Method::Info
                 && let Some(status) = refusal.status
             {
@@ -2132,9 +1886,8 @@ impl UserAgent {
 
     /// End every branch of one INVITE.
     ///
-    /// A refusal names the transaction, not a dialog, and one transaction can
-    /// have opened several: a proxy that forked to three phones and then gave
-    /// up has refused all three.
+    /// A refusal names the transaction, which may have opened several dialogs
+    /// through a fork.
     fn end_branches(
         &mut self,
         invite: TransactionId<InviteClient>,
@@ -2189,9 +1942,8 @@ impl UserAgent {
         self.report_transfer(call, status, now);
     }
 
-    /// A 2xx for one of our INVITEs, on whichever branch it came from. One on
-    /// a branch other than the one kept is let go before it can be minted a
-    /// call of its own.
+    /// A 2xx for one of our INVITEs. One on a branch other than the kept one
+    /// is let go before it becomes a call.
     fn on_established(
         &mut self,
         invite: TransactionId<InviteClient>,
@@ -2215,33 +1967,26 @@ impl UserAgent {
         response: &OwnedMessage,
         now: Instant,
     ) {
-        // the same 2xx again, retransmitted while its ACK waits for a stream:
-        // the call was reported up the first time, and the ACK goes when the
-        // stream does
+        // a retransmitted 2xx while its ACK waits for a stream
         if self.ack_parked_in(dialog) {
             return;
         }
         let Some(held) = self.calls.get(&call) else {
             return;
         };
-        // the 2xx a CANCEL lost its race to: `on_cancel_lost` has just
-        // acknowledged it and hung up, and a second pass would acknowledge it
-        // again and report up a call that is on its way down
+        // `on_cancel_lost` already acknowledged it and hung up
         if held.acknowledged {
             return;
         }
         let (offered, forks, invite) = (held.session.has_local(), held.forks, held.invite);
-        // the user put the call down before any branch answered: whichever
-        // branch this is, nothing of it is kept
+        // hung up before any branch answered: keep nothing
         let giving_up = held.hangup_wanted
             || invite
                 .and_then(|invite| self.by_invite.get(&invite))
                 .and_then(|placed| self.calls.get(placed))
                 .is_some_and(|placed| placed.hangup_wanted);
-        // the first branch to answer, under the policy that keeps one: the
-        // later ones never get here (`let_go_late_branch`). A call put down
-        // keeps nothing, and its first answer speaks for the window all the
-        // same, so that a later one is let go even after this one has gone
+        // the first answer is recorded even when giving up, so later ones are
+        // let go (`let_go_late_branch`)
         let kept = match invite {
             Some(invite) if giving_up => {
                 self.kept_branches.entry(invite).or_insert(KeptBranch {
@@ -2259,11 +2004,8 @@ impl UserAgent {
         self.note_session(call, response);
         self.on_timer_answer(call, &response.as_raw(), now);
 
-        // §13.2.2.4: the ACK goes now unless it has to carry an answer that
-        // only the application has. A 2xx nobody acknowledges is retransmitted
-        // for 64*T1 and then hung up at the other end. One that §18.1.1 holds
-        // back for a stream is still this layer's to send, not an answer the
-        // application owes
+        // §13.2.2.4: ACK now unless it must carry the application's answer.
+        // An ACK held for a stream (§18.1.1) is still ours to send
         let acknowledged = offered && self.ack_by_itself(dialog, now);
         if let Some(held) = self.calls.get_mut(&call) {
             held.acknowledged = acknowledged;
@@ -2275,25 +2017,20 @@ impl UserAgent {
             response: Some(response.clone()),
             answer_wanted: !acknowledged,
         });
-        // a call placed because of a REFER owes the referrer a last word
         self.report_transfer(call, StatusCode::OK, now);
-        // after the branch kept is reported up, so that whatever follows the
-        // call from one branch to another — the relay a description named,
-        // in the facade above — has somewhere to go before its old branch ends
+        // after `CallConfirmed`, so the facade can move state to the kept
+        // branch before the others end
         if let Some(invite) = kept {
             self.let_go_other_branches(call, invite, now);
         }
-        // a CANCEL that lost its race leaves the call up and the wish to end it
         if giving_up {
             self.hang_up_by_itself(call, now);
         }
     }
 
-    /// The first branch of a fork to answer is the one
-    /// [`ForkPolicy::KeepFirst`] keeps, and when it is not the call that was
-    /// placed it becomes that call: what belonged to the attempt rather than
-    /// to one of its dialogs — a transfer to report on, the call it is a
-    /// consultation for — moves onto it before the branch it came from ends.
+    /// [`ForkPolicy::KeepFirst`] keeps the first branch to answer. When that
+    /// is a sibling, the placed call's transfer and consultation links move
+    /// onto it.
     fn keep_branch(
         &mut self,
         call: CallHandle,
@@ -2311,8 +2048,6 @@ impl UserAgent {
         let Some(placed) = self.calls.get(&call).and_then(|held| held.forked_from) else {
             return;
         };
-        // the INVITE names the call it placed, and that is this one now: the
-        // mapping stays when the branch it named ends
         self.by_invite.insert(invite, call);
         let (reporting_to, consulting_for) = self
             .calls
@@ -2335,11 +2070,9 @@ impl UserAgent {
         }
     }
 
-    /// Every branch of the INVITE but the one kept, over: they had not
-    /// answered, and the proxy that forked them is cancelling them (RFC 3261
-    /// §16.7 step 10). Their early dialogs stay with the core until the answer
-    /// window closes, and a 2xx that still arrives on one of them is
-    /// [`UserAgent::let_go_late_branch`]'s.
+    /// End every branch but the kept one; the proxy cancels them (RFC 3261
+    /// §16.7 step 10). A late 2xx on one goes to
+    /// [`UserAgent::let_go_late_branch`].
     fn let_go_other_branches(
         &mut self,
         kept: CallHandle,
@@ -2361,14 +2094,9 @@ impl UserAgent {
     /// or than the first to answer a call the user had put down. `true` when
     /// it was one, and has been dealt with.
     ///
-    /// §13.2.2.4 has every 2xx acknowledged whether it is wanted or not, and
-    /// then the dialog it confirmed is ended with a BYE. There is no call to
-    /// report it on: the branch ended when another was kept, is heard of
-    /// only now, or belongs to a call that is over or on its way down. A
-    /// branch still ringing when the user put the call down ends when that
-    /// BYE is answered. A 2xx that carries the offer, to an INVITE that carried
-    /// none, would need an answer in its ACK that only the application could
-    /// write, so it is left for its sender to give up on (§13.3.1.4).
+    /// §13.2.2.4: ACK, then BYE, with no event. A 2xx carrying the offer would
+    /// need the application's answer in the ACK, so it is left for its sender
+    /// to give up on (§13.3.1.4).
     fn let_go_late_branch(
         &mut self,
         invite: TransactionId<InviteClient>,
@@ -2381,14 +2109,11 @@ impl UserAgent {
         if kept.dialog == Some(dialog) {
             return false;
         }
-        // the same 2xx again, while its ACK waits for a stream: the BYE is
-        // already waiting behind it
+        // a retransmission; the BYE already waits behind the ACK
         if self.ack_parked_in(dialog) {
             return true;
         }
-        // RFC 3326 §3.1: the phone that answered too late is told another
-        // branch of the call was answered, which it shows as answered
-        // elsewhere rather than as a call hung up on it
+        // RFC 3326 §3.1: "call completed elsewhere"
         if kept.offered && self.ack_by_itself(dialog, now) {
             self.bye_by_itself_for(dialog, Some(&Reason::completed_elsewhere()), now);
         }
@@ -2397,12 +2122,8 @@ impl UserAgent {
 
     /// Remember a request this layer sent inside a call.
     ///
-    /// The account goes into a map of its own rather than being read back off
-    /// the call, because the BYE that ends a call outlives it and a challenge
-    /// to that BYE still has to be answered.
-    /// The method travels with it, because what a request leaves behind when
-    /// its answer never arrives depends on which one it was, and the bytes
-    /// are not kept.
+    /// The account is kept apart from the call: a BYE outlives its call and
+    /// may still be challenged.
     pub(crate) fn remember_request(
         &mut self,
         call: CallHandle,
@@ -2418,8 +2139,7 @@ impl UserAgent {
     /// A challenge to something this layer sent. `true` when it was ours.
     fn on_challenge_in_call(&mut self, transaction: AnyTransactionId, now: Instant) -> bool {
         match transaction {
-            // an INVITE this layer did not place is a re-INVITE, and that
-            // belongs to the session layer. Claiming it here would drop it
+            // a re-INVITE belongs to the session layer
             AnyTransactionId::InviteClient(invite) => {
                 let Some(call) = self.by_invite.get(&invite).copied() else {
                     return false;
@@ -2427,8 +2147,7 @@ impl UserAgent {
                 self.on_call_challenged(call, transaction, now);
                 true
             }
-            // a BYE, a CANCEL, a PRACK, a REFER or the NOTIFY that reports one.
-            // An UPDATE is not in this map and goes on to the session layer
+            // an UPDATE is not in this map and goes to the session layer
             AnyTransactionId::NonInviteClient(_) if self.by_request.contains_key(&transaction) => {
                 self.on_request_challenged(transaction, now);
                 true
@@ -2437,23 +2156,16 @@ impl UserAgent {
         }
     }
 
-    /// A request this layer sent inside a call was challenged (§22.2).
-    ///
-    /// Everything that is not the INVITE opening the call arrives here: BYE,
-    /// CANCEL, PRACK, REFER, and the NOTIFY that says how a transfer is going.
+    /// BYE, CANCEL, PRACK, REFER or NOTIFY inside a call was challenged
+    /// (§22.2).
     fn on_request_challenged(&mut self, transaction: AnyTransactionId, now: Instant) {
         let Some((call, method)) = self.by_request.get(&transaction).copied() else {
             return;
         };
         let account = self.account_of.get(&transaction).copied();
         let credentials = self.credentials_for_challenge(account, transaction);
-        // With no password the request is unsent for good, so a REFER that
-        // took the call's seat has to give it back on the way past. RFC 3515
-        // §2.4.2 obliges the far end to open a subscription on a 2xx and on
-        // nothing else, so a REFER refused for want of a password opened
-        // none, and a record of one left standing would accept notifications
-        // nobody promised. `release_refer` reads the seat itself, so it is a
-        // no-op for the BYE, CANCEL, PRACK and NOTIFY that also arrive here.
+        // no password: a REFER gives its seat back, as no subscription was
+        // opened (RFC 3515 §2.4.2); a no-op for other methods
         let Some(credentials) = credentials else {
             self.release_refer(transaction, false);
             return;
@@ -2463,9 +2175,7 @@ impl UserAgent {
             .retry_with_credentials(transaction, &credentials, now)
         {
             Ok(retried) => retried,
-            // §18.1.1 wants a connection first and the endpoint still holds
-            // the challenge, so the seat is not given back: the retry that
-            // will keep it has not been sent, not refused
+            // waiting for a stream (§18.1.1): the seat stays
             Err(error) if crate::agent::wants_a_stream(&error) => {
                 if let Some(parked) = self.challenged_requests.get_mut(&transaction) {
                     parked.waiting_for_stream = true;
@@ -2490,7 +2200,6 @@ impl UserAgent {
         retried: AnyTransactionId,
         account: Option<AccountId>,
     ) {
-        // the refusal that came with the challenge was the first half of this
         self.challenged_requests.remove(&transaction);
         self.by_request.remove(&transaction);
         self.account_of.remove(&transaction);
@@ -2510,11 +2219,8 @@ impl UserAgent {
         {
             return;
         }
-        // §22.2 makes the retry a new request with a new number, and the
-        // subscription that REFER opened is named by whichever number
-        // actually went out: RFC 3515 §2.4.6's `id` is the `CSeq` of the
-        // REFER, so a record still holding the refused one would refuse the
-        // notifications that follow the accepted one.
+        // the retry has a new CSeq, and RFC 3515 §2.4.6 names the
+        // subscription by it
         let id = self
             .calls
             .get(&call)
@@ -2532,16 +2238,9 @@ impl UserAgent {
     /// A REFER that will never open a subscription has been answered, so the
     /// call is free to ask again.
     ///
-    /// `accepted` says whether the answer was a 2xx, which is the one case
-    /// this function has nothing to do for: RFC 3515 §2.4.2 has a 2xx oblige
-    /// the far end to "create a subscription and send notifications of the
-    /// status of the refer", so the seat it took stays taken — a second
-    /// REFER while the first's subscription is still open would leave a
-    /// NOTIFY with nothing to say which one it is about. `on_notify` gives it
-    /// back when the terminating NOTIFY says the subscription itself is over
-    /// (§2.4.7), which is the only event that actually frees this call to
-    /// ask again. A REFER that was refused opened no subscription, so there
-    /// is nothing left to wait for and the seat is given back here instead.
+    /// On a 2xx (`accepted`) the seat stays: the far end opened a
+    /// subscription (RFC 3515 §2.4.2), and `on_notify` frees it on the
+    /// terminating NOTIFY (§2.4.7). A refusal opened none, so it is freed here.
     fn release_refer(&mut self, id: AnyTransactionId, accepted: bool) {
         if accepted {
             return;
@@ -2557,13 +2256,9 @@ impl UserAgent {
         }
     }
 
-    /// A REFER of this end's was refused, or gave up unanswered, while it
-    /// still held its call's seat: RFC 3515 §2.4.2 has such an answer open
-    /// no subscription, so no NOTIFY will ever say how the transfer went,
-    /// and [`UaEvent::TransferDone`] carrying the refusal's status is the
-    /// application's only news of it. A no-op for any other request, and for
-    /// a REFER whose seat has already been given back, so the outcome is
-    /// told once.
+    /// A REFER of ours was refused or gave up while holding its seat: no
+    /// NOTIFY will follow (RFC 3515 §2.4.2), so [`UaEvent::TransferDone`]
+    /// reports it. Told once; a no-op for other requests.
     fn refer_refused(&mut self, id: AnyTransactionId, status: StatusCode) {
         let Some(&(call, method)) = self.by_request.get(&id) else {
             return;
@@ -2580,14 +2275,8 @@ impl UserAgent {
             .push_back(UaEvent::TransferDone { call, status });
     }
 
-    /// The last word on an INFO carrying a digit, told to the application
-    /// once: whichever of its answer, a challenge nothing could answer, or a
-    /// transaction that gave up without either gets here first takes the
-    /// digit with it.
-    ///
-    /// This is also where a string handed to [`UserAgent::send_dtmf_info`]
-    /// moves on: a 2xx here sends the digit waiting behind this one, and
-    /// anything else ends the sequence and drops it (8.3.11-bis).
+    /// Report a DTMF INFO's outcome once, whichever path gets here first, and
+    /// move the [`UserAgent::send_dtmf_info`] queue on.
     fn dtmf_info_over(
         &mut self,
         id: AnyTransactionId,
@@ -2606,11 +2295,8 @@ impl UserAgent {
         self.continue_dtmf_queue(call, status, now);
     }
 
-    /// After one digit of a string [`UserAgent::send_dtmf_info`] sent reaches
-    /// its final answer: the next one waiting goes out on a 2xx, and
-    /// anything else — a refusal, a timeout, a transport failure — discards
-    /// whatever is still queued rather than send it out of order
-    /// (8.3.11-bis).
+    /// On a 2xx the next queued digit goes out; anything else drops the rest
+    /// rather than send it out of order.
     fn continue_dtmf_queue(&mut self, call: CallHandle, status: StatusCode, now: Instant) {
         if !status.is_success() {
             self.dtmf_queue.remove(&call);
@@ -2619,24 +2305,15 @@ impl UserAgent {
         let Some(queue) = self.dtmf_queue.get_mut(&call) else {
             return;
         };
-        // the entry stays while the next digit is in flight, and only an
-        // answer to the last one, with nothing waiting behind it, retires it:
-        // a key handed over before then has to wait its turn
+        // the entry stays while a digit is in flight, so new keys queue
         let Some(next) = queue.waiting.pop_front() else {
             self.dtmf_queue.remove(&call);
             return;
         };
-        // with nothing in flight, nothing would ever move the rest on, and a
-        // key handed over later would wait behind them for the life of the
-        // call
         let digit = char::from(next.key);
         if self.send_one_dtmf_info(call, next, now).is_err() {
             self.dtmf_queue.remove(&call);
-            // this digit never went out at all, and §8.1.3.1 is what a
-            // request that could not even be sent stands for: nobody else
-            // will ever tell the application this one is over, and dropping
-            // it silently would leave `send_dtmf_info` looking like it never
-            // returned for the rest of the string
+            // never sent: nothing else would report it (§8.1.3.1)
             self.events.push_back(UaEvent::DtmfSent {
                 call,
                 digit,
@@ -2663,9 +2340,7 @@ impl UserAgent {
             Ok(AnyTransactionId::InviteClient(retried)) => {
                 self.call_retry_went(call, transaction, retried);
             }
-            // §18.1.1 wants a connection first. The endpoint keeps the
-            // challenge, so this is a call still being placed rather than one
-            // that was refused
+            // waiting for a connection (§18.1.1): still being placed
             Err(error) if crate::agent::wants_a_stream(&error) => {
                 if let AnyTransactionId::InviteClient(old) = transaction
                     && let Some(parked) = self.challenged.get_mut(&old)
@@ -2673,8 +2348,7 @@ impl UserAgent {
                     parked.waiting_for_stream = true;
                 }
             }
-            // an INVITE retried is an INVITE, so the first cannot happen; any
-            // other failure is the refusal the settle pass already holds
+            // the settle pass reports the refusal
             Ok(_) | Err(_) => {}
         }
     }
@@ -2689,8 +2363,6 @@ impl UserAgent {
     ) {
         if let AnyTransactionId::InviteClient(old) = transaction {
             self.by_invite.remove(&old);
-            // the refusal that came with the challenge was the first half of
-            // this, not news
             self.challenged.remove(&old);
         }
         self.by_invite.insert(retried, call);
@@ -2770,9 +2442,8 @@ impl UserAgent {
 
     /// A request this layer sent inside a call was answered.
     ///
-    /// Its answer changes nothing the application has not already been told,
-    /// save that a REFER which was refused frees the call to try again.
-    /// Anything that is not ours goes back to the caller untouched.
+    /// A refused REFER frees the call to try again; anything not ours is
+    /// returned untouched.
     fn on_request_answered(
         &mut self,
         transaction: TransactionId<NonInviteClient>,
@@ -2784,10 +2455,7 @@ impl UserAgent {
         let Some(&(call, method)) = self.by_request.get(&id) else {
             return Some(event);
         };
-        // A challenge is not a refusal yet, and the retry which follows keeps
-        // the seat it is holding. But it is only not a refusal while a retry
-        // is still possible, so it is parked here: a drain that ends without
-        // one then has something to report, which used to be nothing at all.
+        // parked: a refusal only if no retry follows in this drain
         if matches!(status.get(), 401 | 407) {
             self.challenged_requests.insert(
                 id,
@@ -2805,10 +2473,7 @@ impl UserAgent {
                 self.refer_refused(id, status);
             }
             self.release_refer(id, status.is_success());
-            // an INFO carrying a digit is the one request in this map whose
-            // answer the application is owed: BYE, CANCEL, PRACK, REFER and
-            // NOTIFY are all this layer's own business, but a 415 to a digit
-            // is news the caller cannot get any other way
+            // the one answer here the application is owed
             if method == Method::Info {
                 self.dtmf_info_over(id, call, status, now);
             }
@@ -2816,7 +2481,7 @@ impl UserAgent {
         None
     }
 
-    /// A transaction has ended. Most of that is plumbing; one case is not.
+    /// A transaction has ended.
     fn on_transaction_over(
         &mut self,
         transaction: AnyTransactionId,
@@ -2828,55 +2493,34 @@ impl UserAgent {
             TerminationReason::TransportFailed => unanswered(FailureReason::TransportFailed),
             _ => None,
         };
-        // a REFER that gave up here without ever being answered opened no
-        // subscription (§2.4.2 obliges that only on a 2xx), so the seat it
-        // took has to go back -- read before `by_request` forgets which call
-        // held it, because on the timer and the transport paths the core
-        // raises `TransactionTerminated` before `RequestFailed`, and the
-        // release that arm would otherwise do finds nothing left to key on.
-        // A transaction that instead completed normally (`reason` is
-        // `Completed`) already had its answer seen by `on_request_answered`,
-        // which is the one place a 2xx REFER's seat may be kept, so nothing
-        // here may re-run for it.
+        // an unanswered REFER frees its seat and reports 408/503 (§8.1.3.1).
+        // Before `by_request` forgets the call: the core raises this before
+        // `RequestFailed` on the timer and transport paths
         if let Some(status) = failed {
-            // and the application is told the transfer did not happen, as
-            // RFC 3261 §8.1.3.1 has a transaction that gave up read: a 408
-            // when its timer ran out, a 503 when its transport failed
             self.refer_refused(transaction, status);
             self.release_refer(transaction, false);
         }
-        // a REFER the far end sent that nobody took or refused: the endpoint
-        // answered it 408 when 64·T1 ran out, and the seat it held has to go
-        // back here, since this arm is where its end is reported and
-        // `transfer` never sees it
+        // an incoming REFER nobody answered; the endpoint sent 408
         if let AnyTransactionId::NonInviteServer(server) = transaction {
             self.forget_unanswered_refer(server);
         }
         let call = self.by_request.remove(&transaction).map(|(call, _)| call);
         self.account_of.remove(&transaction);
         match (call, failed) {
-            // the timer or the transport that ended it retires the
-            // transaction before it reports why, so this is where an INFO
-            // that got no answer is first seen to be over
             (Some(call), Some(status)) => self.dtmf_info_over(transaction, call, status, now),
-            // a challenge still parked is `settle_request_challenges`' to
-            // report, and a reliable transport's zero Timer K retires the
-            // transaction before that settle has run
+            // still parked: `settle_request_challenges` reports it (Timer K
+            // is zero on reliable transports)
             _ if self.challenged_requests.contains_key(&transaction) => {}
             _ => {
                 self.by_dtmf_info.remove(&transaction);
             }
         }
-        // the answer window has closed (§13.2.2.4, RFC 6026 §7.2): the core
-        // passes up no 2xx for this INVITE from here on, so there is no late
-        // branch left to tell from the one kept
+        // the answer window has closed (RFC 6026 §7.2)
         if let AnyTransactionId::InviteClient(invite) = transaction {
             self.kept_branches.remove(&invite);
         }
         let AnyTransactionId::InviteServer(id) = transaction else {
-            // the INVITE this end sent keeps its mapping until the call goes:
-            // a fork's late 2xx is reported after the transaction is retired,
-            // and the branch it names still has to be found
+            // client INVITEs keep their mapping: a late fork 2xx may follow
             return;
         };
         if let Some(call) = self.by_server.remove(&id)
@@ -2891,11 +2535,7 @@ impl UserAgent {
 
     /// A 2xx this end sent was never acknowledged.
     ///
-    /// §13.3.1.4, and §14.2 says the same about a re-INVITE: "If a UAS
-    /// generates a 2xx response and never receives an ACK, it SHOULD generate
-    /// a BYE to terminate the dialog." Nothing else will — the far end is not
-    /// answering, and a dialog left standing here would keep a line busy for
-    /// as long as the process runs.
+    /// §13.3.1.4 and §14.2: send a BYE to end the dialog.
     fn on_unacknowledged(&mut self, id: TransactionId<InviteServer>, now: Instant) {
         let Some(call) = self
             .calls
@@ -2903,8 +2543,7 @@ impl UserAgent {
             .find(|(_, held)| held.awaiting_ack == Some(id))
             .map(|(handle, _)| *handle)
         else {
-            // a non-2xx that went unacknowledged is the transaction's own
-            // business, and there is no dialog to end
+            // a non-2xx: no dialog to end
             return;
         };
         let dialog = self.calls.get(&call).and_then(|held| held.dialog);
@@ -2914,16 +2553,13 @@ impl UserAgent {
         if let Some(dialog) = dialog {
             self.bye_by_itself(dialog, now);
         }
-        // reported before the BYE's own dialog event arrives, so the reason
-        // says what happened rather than who sent the last message
+        // before the BYE's dialog event, so the reason is Unreachable
         self.finish(call, CallEndReason::Unreachable, None, None, now);
     }
 }
 
-/// The status RFC 3261 §8.1.3.1 has a request that got no response treated
-/// as: a timeout "as if a 408 (Request Timeout) status code has been
-/// received", a fatal transport error "as a 503 (Service Unavailable) status
-/// code". `None` for a failure that was a response after all.
+/// RFC 3261 §8.1.3.1: a timeout counts as 408, a transport error as 503.
+/// `None` for a real response.
 const fn unanswered(reason: FailureReason) -> Option<StatusCode> {
     match reason {
         FailureReason::Timeout => Some(StatusCode::REQUEST_TIMEOUT),

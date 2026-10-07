@@ -8,41 +8,33 @@
 //! # Signing
 //!
 //! An account given a [`StirSigning`] signs every call it places: a full-form
-//! PASSporT (RFC 8225) with the SHAKEN claims of RFC 8588, for the number
-//! the account signs as and the number the call is to, dated by the agent's
-//! wall clock ([`UserAgent::set_wall_clock`]), in an `Identity` header field
-//! beside the `Date` §6.1 Step 3 has the authentication service add. The
-//! full form, because §4.1 requires it of a signer that takes `iat` from its
-//! own clock; a call to something that is not a number is signed for the
-//! URI it is to (§4.1's `dest.uri`), in the canonical form of §8.5.
+//! PASSporT (RFC 8225) with the SHAKEN claims of RFC 8588, dated by the
+//! agent's wall clock ([`UserAgent::set_wall_clock`]), beside the `Date`
+//! §6.1 Step 3 adds. Full form because §4.1 requires it when `iat` comes from
+//! the signer's own clock. A call to a non-number is signed for its
+//! canonical URI (§8.5).
 //!
 //! # Verifying
 //!
 //! An INVITE for an account whose [`StirVerification`] is in force is held
-//! back from the application until its verdict is in: the verdict rides on
-//! [`UaEvent::IncomingCall`]'s identity and is announced just before it by
-//! [`UaEvent::CallerVerified`]. The certificate is the application's to
-//! fetch — the cache, the HTTP client and its timeouts belong there — so a
-//! PASSporT that needs one raises [`UaEvent::CertificateWanted`] with the URL,
-//! and the call waits for [`UserAgent::stir_certificate`], or for the wait
-//! [`StirConfig::certificate_wait`] sets, after which the certificate counts
-//! as one that could not be had.
+//! back until its verdict is in: [`UaEvent::CallerVerified`], then
+//! [`UaEvent::IncomingCall`] carrying it. The application fetches the
+//! certificate (cache, HTTP client and timeouts are its own):
+//! [`UaEvent::CertificateWanted`] gives the URL, and the call waits for
+//! [`UserAgent::stir_certificate`] or [`StirConfig::certificate_wait`], after
+//! which the certificate counts as unavailable.
 //!
-//! What the crate below leaves to its caller is done here: the calling
-//! number the request names (the asserted identity from a trusted peer,
-//! otherwise `From`) must be the PASSporT's `orig`, and one of its `dest`
-//! must name the called party — the number or the SIP URI in `To` or in the
-//! Request-URI, each compared in the canonical form of §8.3 or §8.5 (§6.2
-//! Step 2, §6.2.4). A certificate has authority over the numbers its
-//! TNAuthList names; one that names a service provider code covers any
-//! number only when [`StirConfig::accept_service_provider_codes`] says so.
-//! Of several `Identity` header fields the first that can be started on is
-//! verified; one naming a `ppt` this end does not support is ignored (§6.2
-//! Step 1).
+//! Done here, not in `sipral-stir`: the calling number (asserted identity
+//! from a trusted peer, otherwise `From`) must be `orig`, and some `dest`
+//! must name the number or SIP URI in `To` or the Request-URI, canonical per
+//! §8.3/§8.5 (§6.2 Step 2, §6.2.4). A service provider code in TNAuthList
+//! covers any number only with
+//! [`StirConfig::accept_service_provider_codes`]. Of several `Identity`
+//! fields the first usable one is verified; an unsupported `ppt` is ignored
+//! (§6.2 Step 1).
 //!
-//! An account set to [`StirVerification::Strict`] refuses a call that does
-//! not verify with the response §6.2.2 prescribes; every other call is
-//! delivered, whatever its verdict.
+//! [`StirVerification::Strict`] refuses a failing call with the §6.2.2
+//! response; otherwise every call is delivered.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -64,29 +56,21 @@ use crate::{AccountId, CallEndReason, CallHandle, CallIdentity, UaError, UaEvent
 
 /// How long a call waits for its certificate unless told otherwise.
 ///
-/// Four seconds: RFC 8224 sets no figure, and the caller hears nothing
-/// while the call waits — no ringing is sent before the verdict — so the
-/// wait is sized against a fetch that goes to the network, not a cache hit,
-/// and kept under the five a person waits for a ring before redialling.
+/// RFC 8224 sets no figure. The caller hears no ringing while the call
+/// waits, so four seconds covers a network fetch and stays under the five a
+/// person waits before redialling.
 pub const DEFAULT_CERTIFICATE_WAIT: Duration = Duration::from_secs(4);
 
 /// How a number written without a leading `+` becomes one in international
-/// form, for the canonical form of RFC 8224 §8.3 — the deployment's dialling
-/// plan, which this stack cannot guess.
+/// form (RFC 8224 §8.3): the deployment's dialling plan.
 ///
-/// Handed a number with its visual separators already gone (`0721234567`
-/// for `0721 234 567`), the plan gives back the number in international form
-/// (`40721234567`), or `None` to keep it as written, which §8.3 allows when
-/// an implementation "cannot determine how to convert the number". A number
-/// written with `+` is international already and the plan is not asked. What
-/// it gives back is held to the same rules as any number, and one that is not
-/// a number leaves the URI with none.
+/// Given a number without separators (`0721234567`), it returns the
+/// international form (`40721234567`), or `None` to keep it as written
+/// (§8.3 allows that). Numbers with `+` are not passed to it. A result that
+/// is not a number leaves the URI with none.
 ///
-/// The agent applies it everywhere it reads a number for STIR
-/// ([`UserAgent::set_number_plan`]): the calling and called numbers of a
-/// request it verifies, and the called number of a call it signs. Signer and
-/// verifier have to convert alike, or the number one signs is not the number
-/// the other checks.
+/// Applied to every number STIR reads ([`UserAgent::set_number_plan`]).
+/// Signer and verifier must convert alike, or they check different numbers.
 #[derive(Clone)]
 pub struct NumberPlan(Arc<Conversion>);
 
@@ -115,10 +99,7 @@ impl fmt::Debug for NumberPlan {
     }
 }
 
-/// The verification service's configuration, one per agent: the trust
-/// anchors, how fresh a PASSporT has to be, how long a call waits for the
-/// application to fetch a certificate, and how many verified PASSporTs it
-/// remembers to refuse one presented again.
+/// The verification service's configuration, one per agent.
 #[derive(Clone)]
 pub struct StirConfig {
     pub(crate) anchors: TrustAnchors,
@@ -129,10 +110,8 @@ pub struct StirConfig {
 }
 
 impl StirConfig {
-    /// Verify against `anchors` — the STI-PA's approved roots, in a SHAKEN
-    /// deployment — with the sixty seconds of freshness RFC 8224 §6.2 Step 4
-    /// recommends and [`DEFAULT_CERTIFICATE_WAIT`], a certificate having
-    /// authority only over the numbers its TNAuthList names.
+    /// Verify against `anchors` (the STI-PA roots in SHAKEN), with the 60 s
+    /// freshness of RFC 8224 §6.2 Step 4 and [`DEFAULT_CERTIFICATE_WAIT`].
     #[must_use]
     pub fn new(anchors: TrustAnchors) -> Self {
         Self {
@@ -144,13 +123,10 @@ impl StirConfig {
         }
     }
 
-    /// How many verified PASSporTs the agent remembers, so that one
-    /// presented again inside its freshness window is refused as a replay
-    /// (RFC 8224 §12.1) — as `Stale`, with a detail that says it was already
-    /// verified. 1024 unless this says otherwise, and at least one; an entry
-    /// is forgotten once its `iat` has left the window anyway. Only a
-    /// PASSporT whose signature verified is remembered, so only a signer the
-    /// anchors trust can fill it.
+    /// How many verified PASSporTs the agent remembers, so that a replay
+    /// inside the freshness window is refused as `Stale` (RFC 8224 §12.1).
+    /// Default 1024, at least one. Only verified PASSporTs are stored, so
+    /// only a trusted signer can fill it.
     #[must_use]
     pub const fn remember(mut self, passports: usize) -> Self {
         self.remembered = passports;
@@ -158,11 +134,9 @@ impl StirConfig {
     }
 
     /// Whether a certificate whose TNAuthList carries a service provider
-    /// code (RFC 8226 §9) has authority over every calling number. Off
-    /// unless this says otherwise: a code names a provider, not numbers, and
-    /// taking it as covering any number is a trust decision about the
-    /// providers the anchors certify — the one a SHAKEN deployment, whose
-    /// certificates carry codes and no numbers, makes by turning this on.
+    /// code (RFC 8226 §9) has authority over every calling number. Off by
+    /// default: a code names a provider, not numbers. A SHAKEN deployment,
+    /// whose certificates carry only codes, turns it on.
     #[must_use]
     pub const fn accept_service_provider_codes(mut self, accept: bool) -> Self {
         self.accept_service_provider_codes = accept;
@@ -213,9 +187,8 @@ pub struct StirSigning {
 
 impl StirSigning {
     /// Sign as `orig`, the canonical number (RFC 8224 §8.3) the certificate
-    /// behind `signer` has authority over, with full attestation — what a
-    /// user agent signing for its own user knows — and an origination
-    /// identifier the agent draws once for the account.
+    /// behind `signer` covers, with full attestation and an origination
+    /// identifier drawn once for the account.
     #[must_use]
     pub fn new(signer: Signer, orig: Tn) -> Self {
         Self {
@@ -248,9 +221,6 @@ impl StirSigning {
     }
 }
 
-/// The verification service's state: what it was configured with, the
-/// calls waiting for a certificate, the PASSporTs it has found valid, and
-/// the dialling plan numbers are read under.
 #[derive(Debug, Default)]
 pub(crate) struct Service {
     config: Option<StirConfig>,
@@ -267,7 +237,6 @@ struct Waiting {
     held: Held,
 }
 
-/// What delivering a held call needs.
 #[derive(Debug)]
 struct Held {
     account: Option<AccountId>,
@@ -277,22 +246,17 @@ struct Held {
     numbers: Numbers,
 }
 
-/// The numbers a request names: who it says is calling, and who it is for.
 #[derive(Debug, Clone, Default)]
 struct Numbers {
     orig: Option<Tn>,
-    /// Who the request is for, as its `To` names it and then as its
-    /// Request-URI does: each as a number when it is one (RFC 8224 §8.1),
-    /// and a SIP URI also as its canonical URI (§8.5).
+    /// `To` first, then the Request-URI.
     called: Vec<Called>,
 }
 
-/// One way a request names who it is for.
+/// One canonical form of the called party (RFC 8224 §8.3, §8.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Called {
-    /// A telephone number, canonical (RFC 8224 §8.3).
     Number(Tn),
-    /// A URI, canonical (RFC 8224 §8.5).
     Uri(String),
 }
 
@@ -316,11 +280,8 @@ impl Numbers {
     }
 }
 
-/// The request a held INVITE is and the line it reached, as the replay
-/// check reads them: its `Call-ID`, `From` tag and `CSeq` number — what
-/// every branch of one forked INVITE shares and a new request does not (RFC
-/// 3261 §8.2.2.2) — and its account, or a line of its own for an INVITE
-/// addressed to none.
+/// The replay check's key: `Call-ID`, `From` tag and `CSeq`, which every
+/// fork of one INVITE shares (RFC 3261 §8.2.2.2), plus the account line.
 fn arrival_of(held: &Held) -> Arrival {
     let raw = held.request.as_raw();
     let call_id = raw.call_id().unwrap_or_default();
@@ -350,14 +311,12 @@ enum Gate {
 }
 
 impl UserAgent {
-    /// Verify the calls that arrive against `config` from now on, for every
-    /// account whose [`StirVerification`] asks for it.
+    /// Verify incoming calls against `config` from now on, for accounts
+    /// whose [`StirVerification`] asks for it.
     ///
-    /// The wall clock must be set too ([`UserAgent::set_wall_clock`]): a
-    /// verifier with no idea of the time finds every PASSporT stale.
-    ///
-    /// The PASSporTs already found valid are forgotten when the number this
-    /// remembers changes ([`StirConfig::remember`]), and kept otherwise.
+    /// Needs the wall clock too ([`UserAgent::set_wall_clock`]), or every
+    /// PASSporT is stale. The replay memory is kept unless
+    /// [`StirConfig::remember`] changes.
     pub fn set_stir(&mut self, config: StirConfig) {
         let resized = self
             .stir
@@ -371,23 +330,20 @@ impl UserAgent {
     }
 
     /// Read every number STIR signs or verifies under `plan` from now on
-    /// ([`NumberPlan`]); `None` keeps a number written without `+` as it is
-    /// written, which is the default.
+    /// ([`NumberPlan`]); `None`, the default, keeps numbers as written.
     pub fn set_number_plan(&mut self, plan: Option<NumberPlan>) {
         self.stir.plan = plan;
     }
 
-    /// The certificate chain the `info` URL of a call's `Identity` yielded —
-    /// PEM or DER, the signing certificate first — or `None` for one that
-    /// could not be fetched, in answer to [`UaEvent::CertificateWanted`].
+    /// Answer [`UaEvent::CertificateWanted`]: the chain the `info` URL
+    /// yielded (PEM or DER, signing certificate first), or `None` if it
+    /// could not be fetched.
     ///
-    /// The call's verdict is reached here, and the call delivered or
-    /// refused as its account asks ([`UaEvent::CallerVerified`], then
-    /// [`UaEvent::IncomingCall`] or the refusal's [`UaEvent::CallEnded`]).
+    /// Emits [`UaEvent::CallerVerified`], then [`UaEvent::IncomingCall`] or,
+    /// when refused, [`UaEvent::CallEnded`].
     ///
     /// # Errors
-    /// [`UaError::NoSuchCall`] for a call that is not waiting for one: it
-    /// never was, it was already answered, the wait ran out, or it ended.
+    /// [`UaError::NoSuchCall`] for a call not waiting for a certificate.
     pub fn stir_certificate(
         &mut self,
         call: CallHandle,
@@ -396,10 +352,8 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         let waiting = self.stir.waiting.remove(&call).ok_or(UaError::NoSuchCall)?;
         let unix = self.unix_at(now).unwrap_or(0);
-        // RFC 8224 §12.1: a PASSporT already found valid inside its window
-        // is a replay, and is refused as stale -- unless it was found valid
-        // in this same request on another of this agent's lines, which is a
-        // proxy's fork of one INVITE and not a replay of it
+        // RFC 8224 §12.1: a replay is refused as stale, unless it is the same
+        // request forked to another of our lines
         let seen = &mut self.stir.seen;
         let arrival = arrival_of(&waiting.held);
         let verdict = match (chain, self.stir.config.as_ref()) {
@@ -421,8 +375,7 @@ impl UserAgent {
         Ok(())
     }
 
-    /// The calls whose wait for a certificate ran out: verified as having
-    /// none.
+    /// Calls whose certificate wait ran out are verified as having none.
     pub(crate) fn fire_stir_timers(&mut self, now: Instant) {
         let due: Vec<CallHandle> = self
             .stir
@@ -454,13 +407,11 @@ impl UserAgent {
         self.stir.waiting.contains_key(&call)
     }
 
-    /// A call that ended while it waited has nothing left to wait for.
     pub(crate) fn stop_verifying(&mut self, call: CallHandle) {
         self.stir.waiting.remove(&call);
     }
 
-    /// An INVITE that has just become `call`: delivered at once, held for its
-    /// certificate, or refused, as its account's verification asks.
+    /// A new INVITE: delivered, held for its certificate, or refused.
     pub(crate) fn screen_identity(
         &mut self,
         call: CallHandle,
@@ -595,8 +546,7 @@ impl UserAgent {
         }
     }
 
-    /// The verdict is in: say so, then deliver the call, or refuse it when
-    /// its account is strict and the verdict is not valid.
+    /// Announce the verdict, then deliver or (strict, not valid) refuse.
     fn release(
         &mut self,
         call: CallHandle,
@@ -631,8 +581,7 @@ impl UserAgent {
             Some((status, reason)) => {
                 if let Ok(transaction) = self.answerable(call) {
                     let response = OutgoingResponse::new(status).reason(reason.as_bytes());
-                    // a refusal that cannot be sent leaves the transaction to
-                    // time out on its own, and the call is over either way
+                    // unsendable refusal: the transaction times out, call ends anyway
                     let _ = self.endpoint.respond_invite(transaction, &response, now);
                 }
                 self.finish(call, CallEndReason::LocalHangup, Some(status), None, now);
@@ -649,9 +598,8 @@ impl UserAgent {
     /// Sign what `account` places toward `target`, when it signs anything.
     ///
     /// # Errors
-    /// [`UaError::NoWallClock`] when the account signs and the agent was
-    /// never told the time, and [`UaError::Signing`] when the PASSporT cannot
-    /// be made.
+    /// [`UaError::NoWallClock`] without a wall clock, [`UaError::Signing`]
+    /// when the PASSporT cannot be made.
     pub(crate) fn sign_for(
         &self,
         account: AccountId,
@@ -691,9 +639,7 @@ impl UserAgent {
         }))
     }
 
-    /// An origination identifier for an account that signs and named none:
-    /// sixteen octets off the endpoint's own stream, as a version 4 UUID
-    /// (RFC 4122 §4.4), drawn once when the account is added.
+    /// A version 4 UUID origid (RFC 4122 §4.4), drawn once per account.
     pub(crate) fn draw_origid(&mut self) -> OrigId {
         let token = self.endpoint.token();
         let mut bytes = [0u8; 16];
@@ -738,10 +684,8 @@ const fn attestation_of(attest: Attest) -> Attestation {
     }
 }
 
-/// The numbers a request names, canonical: the caller the application will
-/// be shown — the asserted identity from a trusted peer, otherwise `From` —
-/// and who the request is for, from `To` and the Request-URI — each number
-/// under the agent's dialling plan.
+/// The request's canonical numbers: the caller as shown (asserted identity
+/// from a trusted peer, else `From`) and the called party.
 fn numbers_of(
     request: &RawMessage<'_>,
     identity: Option<&CallIdentity>,
@@ -786,10 +730,8 @@ fn numbers_of(
     }
 }
 
-/// Who `uri` names as the called party: its number when it has one, and a
-/// SIP or SIPS URI also as the canonical URI of RFC 8224 §8.5, since a
-/// signer that did not take its user part for a number (§8.1 leaves that to
-/// local policy) signed the URI instead.
+/// The called party in `uri`: its number, and a SIP URI also as its §8.5
+/// canonical URI, since a signer may not have read the user part as a number.
 fn called_of(uri: &Uri, plan: Option<&NumberPlan>) -> Vec<Called> {
     let mut called = Vec::new();
     if let Some(number) = number_of(uri, plan) {
@@ -802,11 +744,8 @@ fn called_of(uri: &Uri, plan: Option<&NumberPlan>) -> Vec<Called> {
 }
 
 /// The telephone number a URI names, canonical (RFC 8224 §8.1, §8.3): a
-/// `tel:` URI's number, or a SIP URI's user part when it is made of digits
-/// and visual separators — `user=phone` or not, which §8.1 leaves to local
-/// policy, since a PBX's extensions are numbers without it. A number
-/// written without `+` is put in international form by `plan` when there
-/// is one (§8.3).
+/// `tel:` URI's number, or a SIP user part of digits and separators, with
+/// or without `user=phone` (a PBX's extensions lack it).
 pub(crate) fn number_of(uri: &Uri, plan: Option<&NumberPlan>) -> Option<Tn> {
     let written = match uri.as_uri_ref() {
         UriRef::Sip(sip) => sip.user?,
@@ -879,14 +818,8 @@ fn judged(verdict: &Verdict, numbers: &Numbers) -> CallerVerification {
 }
 
 /// Which of the request's parties a valid PASSporT was not signed for, and
-/// the words that say so.
-///
-/// The caller is the request's (RFC 8224 §6.2.4). The called party is
-/// compared in every case, whatever the request names it with: a number
-/// against `dest.tn`, a SIP URI against `dest.uri`, both canonical (§8.3,
-/// §8.5), from `To` or from the Request-URI. A PASSporT whose `dest` names
-/// none of them was signed for another call, and a request that names no
-/// called party at all cannot be one it was signed for.
+/// the words that say so (RFC 8224 §6.2.4). A request naming no called
+/// party matches no `dest`.
 fn mismatch(verified: &Verified, numbers: &Numbers) -> Option<(VerificationFailure, String)> {
     if numbers.orig.as_ref() != Some(&verified.orig) {
         let failure = VerificationFailure::OrigMismatch;
@@ -1011,10 +944,8 @@ pub(crate) fn http_date(unix: u64) -> String {
 /// The time a `Date` header field names, as seconds since the Unix epoch;
 /// `None` for anything but the `rfc1123-date` RFC 3261 §25.1 allows.
 ///
-/// Each number is held to the digits the grammar gives it — `2DIGIT` for
-/// the day and the three fields of the time, `4DIGIT` for the year — which
-/// is also what keeps the arithmetic below inside a `u64` whatever a
-/// request says: the header field is the far end's.
+/// Holding fields to `2DIGIT`/`4DIGIT` also keeps the arithmetic inside a
+/// `u64`, whatever the far end writes.
 pub(crate) fn date_of(value: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(value).ok()?.trim();
     let (_weekday, rest) = text.split_once(", ")?;
@@ -1073,9 +1004,7 @@ mod tests {
         assert_eq!(date_of(b"Sat, 13 Nov 2010 24:29:00 GMT"), None);
     }
 
-    /// The header field is the far end's: a year, day or time field wider
-    /// than RFC 3261 §25.1's `4DIGIT` and `2DIGIT` is refused rather than
-    /// multiplied past what a `u64` holds.
+    /// Fields wider than RFC 3261 §25.1 allows are refused, not overflowed.
     #[test]
     fn a_date_with_a_field_too_wide_for_the_grammar_is_not_a_date() {
         for bad in [

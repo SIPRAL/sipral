@@ -3,33 +3,22 @@
 
 //! Header fields the application adds, and the ones it may not.
 //!
-//! An application's fields reach the wire three ways:
-//! [`OutgoingCall::header`](crate::OutgoingCall::header) on the INVITE,
-//! [`Account::header`](crate::Account::header) on every REGISTER, and
-//! [`UserAgent::respond_with_headers`](crate::UserAgent::respond_with_headers)
-//! on what a call sends afterwards at the application's request. All three
-//! are checked here, before anything is built.
+//! Fields come from [`OutgoingCall::header`](crate::OutgoingCall::header),
+//! [`Account::header`](crate::Account::header) and
+//! [`UserAgent::respond_with_headers`](crate::UserAgent::respond_with_headers),
+//! and are checked here before anything is built.
 //!
-//! A field is refused for one of three reasons. Its name is not a token, so it
-//! is not a name at all (RFC 3261 §25.1). Its value holds a control byte: CR or
-//! LF would end the line and start a field the application never wrote, and
-//! NUL, the rest of C0 and DEL are not `TEXT-UTF8char` and are read
-//! differently by every hop on the way. Or it is a field this stack writes
-//! itself on those messages, from state it keeps, and a second line of one of
-//! those is not a second opinion the far end weighs: it is a malformed message,
-//! or one that goes somewhere, ends somewhere or promises something the stack
-//! did not mean. [`ENDPOINT_FIELDS`] are the endpoint's; the two lists below
-//! are this layer's, each with its reason.
+//! Refused: a name that is not a token (RFC 3261 §25.1); a value with a
+//! control byte (CR/LF would inject a field, the rest of C0 and DEL are not
+//! `TEXT-UTF8char`); and a field the stack writes itself, since a second copy
+//! makes a malformed or misleading message. [`ENDPOINT_FIELDS`] are the
+//! endpoint's; the lists below are this layer's.
 //!
-//! Left open on purpose: `Replaces` and `Referred-By`, which this layer writes
-//! only on the INVITE an accepted transfer places — and refuses among the
-//! fields `UserAgent::accept_transfer` is given, since that INVITE takes both
-//! from the REFER — while an application that writes `Replaces` on a call it
-//! places itself is taking over a dialog it learned about some other way
-//! (RFC 3891 §1); `Expires` on an INVITE, which
-//! limits how long the invitation stands (§13.2.1); and `Supported` on a
-//! REGISTER, where this layer writes none and a registration that wants a
-//! GRUU has to (RFC 5627 §4.1).
+//! Left open on purpose: `Replaces` and `Referred-By` on a call the
+//! application places (taking over a dialog learned elsewhere, RFC 3891 §1;
+//! refused for `UserAgent::accept_transfer`, which takes both from the
+//! REFER); `Expires` on an INVITE (§13.2.1); and `Supported` on a REGISTER,
+//! which a GRUU registration needs (RFC 5627 §4.1).
 
 use core::fmt;
 
@@ -39,42 +28,30 @@ use sipral_core::msg::HeaderName;
 use crate::account::Extra;
 use crate::error::UaError;
 
-/// The fields this layer writes on a call beyond the endpoint's: on the INVITE,
-/// on the responses to it, on the re-INVITE or UPDATE that changes the session
-/// and on the BYE that ends it.
+/// The fields this layer writes on a call beyond the endpoint's.
 const CALL_FIELDS: &[HeaderName<'static>] = &[
-    // §20.5, RFC 3311 §4: the methods this end answers, written on the INVITE,
-    // on its 1xx and 2xx and on every re-INVITE. A method listed here that the
-    // stack does not implement is a request the far end sends and this end
-    // refuses
+    // §20.5, RFC 3311 §4: a method listed but not implemented would be invited
+    // and then refused
     HeaderName::Allow,
-    // §20.37, RFC 3262 §4, RFC 4028 §7.1: the extensions this end supports.
-    // The far end acts on a token it reads here, so one the stack does not
-    // implement is a promise nothing keeps
+    // §20.37, RFC 3262 §4, RFC 4028 §7.1: the far end acts on these tokens
     HeaderName::Supported,
-    // §20.32, RFC 3262 §3, RFC 4028 §9: an extension the far end has to
-    // follow, written on a reliable provisional and on a 2xx that hands the
-    // refresh over
+    // §20.32, RFC 3262 §3, RFC 4028 §9
     HeaderName::Require,
-    // RFC 3262 §7.1: the number of a reliable provisional, which the PRACK
-    // acknowledges by
+    // RFC 3262 §7.1: the PRACK acknowledges by this number
     HeaderName::RSeq,
-    // RFC 4028 §4, §5: the session timer this end negotiates and then runs;
-    // a second interval is a refresh nobody is doing
+    // RFC 4028 §4, §5: the stack runs the timer it negotiates
     HeaderName::SessionExpires,
     HeaderName::MinSe,
-    // §22.2, §22.3: the answer to a challenge, drawn from the account's
-    // credentials, with a nonce count that only one writer may keep
+    // §22.2, §22.3: the nonce count has only one writer
     HeaderName::Authorization,
     HeaderName::ProxyAuthorization,
 ];
 
 /// The fields this layer writes on a REGISTER beyond the endpoint's.
 const REGISTRATION_FIELDS: &[HeaderName<'static>] = &[
-    // §10.2.1, §20.19: how long the binding is asked for, which is the
-    // account's expiry and what the refresh schedule is computed from
+    // §10.2.1, §20.19: the refresh schedule is computed from it
     HeaderName::Expires,
-    // §22.2, §22.3: as on a call
+    // §22.2, §22.3
     HeaderName::Authorization,
     HeaderName::ProxyAuthorization,
 ];
@@ -92,10 +69,8 @@ pub enum HeadersFor {
 
 impl HeadersFor {
     /// Whether one field may go out on these messages, and the field it names
-    /// when it may.
-    ///
-    /// The name is compared as a field, so a compact form is refused where its
-    /// long form is: `m` is `Contact` (§7.3.3).
+    /// when it may. Compact forms count as their long form: `m` is `Contact`
+    /// (§7.3.3).
     ///
     /// # Errors
     /// [`HeaderRefused`], saying why not.
@@ -137,8 +112,7 @@ impl HeadersFor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HeaderRefused {
-    /// The name is not a token, and a header field name is one (§25.1). A
-    /// space or a colon in it would be read as the start of the value.
+    /// The name is not a token (§25.1).
     NotAName,
     /// The value carries a control byte other than a horizontal tab.
     ControlByte {

@@ -1,29 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! End-of-call voice quality reporting: the SIP event package RFC 6035
-//! defines, carried by a PUBLISH (RFC 3903) rather than the NOTIFY that
-//! document's own examples use — SS3 leaves the choice of transport to the
-//! implementation ("this document does not mandate ... a specific method of
-//! communicating the [event package's] data"), and a one-shot report on
-//! call end has no subscriber to notify, only a collector to tell.
+//! End-of-call voice quality reports (RFC 6035), sent by PUBLISH (RFC 3903)
+//! rather than NOTIFY: §3 leaves the method open, and a one-shot report has
+//! no subscriber, only a collector.
 //!
-//! One report per call, sent once its media has stopped and never retried:
-//! §5's own security section already expects "a burst of ... event
-//! notifications" at the end of a call and asks a collector to be built for
-//! it, and a report queued for retry would be exactly the burst multiplied.
-//! The figures it carries are RFC 3611's own VoIP Metrics block — this
-//! crate depends on nothing that measures RTP, so every number in
-//! [`QualityReportMetrics`] is the caller's to supply.
+//! One report per call, never retried: §5 already warns of a burst of
+//! reports at call end, and retries would multiply it. The figures are
+//! RFC 3611 VoIP Metrics, all supplied by the caller since this crate does
+//! not measure RTP.
 //!
-//! The `LocalMetrics` set is always written. `RemoteMetrics` is "the same
-//! metrics ... but reported for or by the node connected via the
-//! interface" (SS4.6), i.e. what the *far end* measured about *this*
-//! stream, and the far end says so in its own RTCP XR VoIP Metrics block
-//! (RFC 3611 SS4.7) about this end's source: the set is written from the
-//! last such block when the call received one
-//! ([`QualityReportMetrics::remote`]), and left out when it did not, since
-//! a set of zeros under that name would claim a measurement nobody made.
+//! `LocalMetrics` is always written. `RemoteMetrics` (§4.6) is what the far
+//! end measured of our stream, from its last RTCP XR VoIP Metrics block
+//! ([`QualityReportMetrics::remote`]); left out when none arrived, since
+//! zeros would claim a measurement nobody made.
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -39,33 +29,20 @@ use crate::agent::UserAgent;
 use crate::call::{CallHandle, CallIdentity, Direction};
 use crate::error::UaError;
 
-/// RFC 6035 SS4.1: the event package this report is published under.
+/// RFC 6035 §4.1.
 const EVENT_PACKAGE: &[u8] = b"vq-rtcpxr";
 
-/// RFC 6035 SS4.5: the body's MIME type.
+/// RFC 6035 §4.5.
 const CONTENT_TYPE: &[u8] = b"application/vq-rtcpxr";
 
-/// How many calls' worth of [`EndedCall`] snapshot [`UserAgent::finish`]
-/// (`calls.rs`) is allowed to hold onto at once. A call whose account asked
-/// for a report but that this stack never calls
-/// [`UserAgent::send_quality_report`] about — refused before it was
-/// answered, cancelled, any call the facade above this crate never gave a
-/// media session — leaves its entry here unconsumed, so the count is capped
-/// and the oldest entry evicted rather than kept for the rest of the
-/// process's life.
+/// Cap on [`EndedCall`] snapshots. A call never reported on (refused,
+/// cancelled, no media) leaves its entry unconsumed, so the oldest is
+/// evicted.
 const SNAPSHOT_CAP: usize = 32;
 
-/// What [`UserAgent::send_quality_report`] needs to know about a call that
-/// [`UserAgent::calls`] no longer does.
-///
-/// `finish` (`calls.rs`) queues the `CallEnded` event a call's end is
-/// reported through and then, in the same breath, forgets the call: `From`,
-/// `To`, `Call-ID` and which account it belonged to are gone from
-/// [`UserAgent::calls`] before the facade above this crate ever gets to
-/// react to that event by calling `send_quality_report` about it. This is
-/// the snapshot of exactly those few facts, taken the moment before they
-/// would otherwise be lost, and only for a call whose account has
-/// something to publish to at all (`stash_ended_call`, below).
+/// What [`UserAgent::send_quality_report`] needs about a call already gone
+/// from [`UserAgent::calls`]: `finish` forgets the call in the same step that
+/// queues `CallEnded`, before the application can react to it.
 #[derive(Clone, Debug)]
 pub(crate) struct EndedCall {
     pub(crate) account: AccountId,
@@ -73,29 +50,25 @@ pub(crate) struct EndedCall {
     pub(crate) direction: Direction,
 }
 
-/// The RFC 3611 VoIP Metrics figures this crate has no way to measure
-/// itself, exactly as `sipral_rtp::VoipMetricsBlock` and the codec that was
-/// active carry them. Kept as plain scalars rather than a dependency on
-/// `sipral-rtp`'s own types: this crate is signalling, and nothing in it
-/// otherwise names an RTP concept.
+/// The RFC 3611 VoIP Metrics figures, supplied by the caller. Plain scalars
+/// so this signalling crate does not depend on `sipral-rtp`.
 #[derive(Clone, Debug)]
 pub struct QualityReportMetrics {
-    /// Where this end's RTP arrived, and the SSRC it was sent under.
+    /// Where this end's RTP arrived.
     pub local_addr: SocketAddr,
-    /// Ours.
+    /// Our SSRC.
     pub local_ssrc: u32,
-    /// Where this end sent RTP, and the SSRC the far end used.
+    /// Where this end sent RTP.
     pub remote_addr: SocketAddr,
-    /// Theirs.
+    /// The far end's SSRC.
     pub remote_ssrc: u32,
     /// When the stream started.
     pub start: SystemTime,
-    /// When it ended — normally "now" at the point the call went down.
+    /// When it ended.
     pub stop: SystemTime,
-    /// The RTP payload type in use, most recently.
+    /// The last RTP payload type in use.
     pub payload_type: u8,
-    /// A short codec name, e.g. `"PCMU"` — RFC 6035 SS4.6.1's `PayloadDesc`,
-    /// which "SHOULD use the IANA registry for media-type names".
+    /// IANA media-type name, e.g. `"PCMU"` (RFC 6035 §4.6.1 `PayloadDesc`).
     pub payload_desc: &'static str,
     /// The codec's clock rate, in Hertz.
     pub sample_rate: u32,
@@ -124,31 +97,24 @@ pub struct QualityReportMetrics {
     pub jitter_buffer_rate: u8,
     /// RFC 3611 SS4.7.7's nominal jitter buffer delay, in milliseconds.
     pub jitter_buffer_nominal_ms: u16,
-    /// RFC 3611 SS4.7.7's current maximum jitter buffer delay, in
-    /// milliseconds.
+    /// RFC 3611 §4.7.7's current maximum jitter buffer delay, in ms.
     pub jitter_buffer_maximum_ms: u16,
-    /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay, in
-    /// milliseconds.
+    /// RFC 3611 §4.7.7's absolute maximum jitter buffer delay, in ms.
     pub jitter_buffer_abs_max_ms: u16,
-    /// RFC 3611 SS4.7.5's R factor, `0..=100`, or `None` for its own `127`
-    /// "unavailable" sentinel.
+    /// RFC 3611 §4.7.5's R factor, `0..=100`; `None` for "unavailable".
     pub r_factor: Option<u8>,
-    /// RFC 3611 SS4.7.5's MOS-LQ, in tenths of a mean opinion score
-    /// (`14..=50`), or `None` for "unavailable".
+    /// RFC 3611 §4.7.5's MOS-LQ in tenths (`14..=50`); `None` for
+    /// "unavailable".
     pub mos_lq_x10: Option<u8>,
-    /// RFC 3611 SS4.7.5's MOS-CQ, in tenths, or `None` for "unavailable".
+    /// RFC 3611 §4.7.5's MOS-CQ in tenths; `None` for "unavailable".
     pub mos_cq_x10: Option<u8>,
-    /// What the far end measured of the stream this end sent it, from the
-    /// last RTCP XR VoIP Metrics block it sent about this end's source
-    /// (`local_ssrc`): the `RemoteMetrics` set. `None` when no such block
-    /// arrived in the call, and the set is left out.
+    /// The far end's last XR VoIP Metrics block about `local_ssrc`, written
+    /// as `RemoteMetrics`. `None` leaves that set out.
     pub remote: Option<RemoteQualityMetrics>,
 }
 
-/// The far end's own RFC 3611 SS4.7 VoIP Metrics block about the stream this
-/// end sent, as scalars for the same reason [`QualityReportMetrics`] is. The
-/// session's span and its codec are the call's, and are written from
-/// [`QualityReportMetrics`].
+/// The far end's RFC 3611 §4.7 VoIP Metrics block about our stream. Span
+/// and codec come from [`QualityReportMetrics`].
 #[derive(Clone, Debug)]
 pub struct RemoteQualityMetrics {
     /// RFC 3611 SS4.7.1's loss rate, as its own 256ths.
@@ -165,8 +131,7 @@ pub struct RemoteQualityMetrics {
     pub gap_duration_ms: u16,
     /// RFC 3611 SS4.7.2's `Gmin`.
     pub gmin: u8,
-    /// RFC 3611 SS4.7.3's round-trip delay, in milliseconds, as the far end
-    /// measured it.
+    /// RFC 3611 §4.7.3's round-trip delay, in ms, as the far end saw it.
     pub round_trip_delay_ms: u16,
     /// RFC 3611 SS4.7.3's end-system delay, in milliseconds.
     pub end_system_delay_ms: u16,
@@ -183,13 +148,11 @@ pub struct RemoteQualityMetrics {
     pub jitter_buffer_rate: u8,
     /// RFC 3611 SS4.7.7's nominal jitter buffer delay, in milliseconds.
     pub jitter_buffer_nominal_ms: u16,
-    /// RFC 3611 SS4.7.7's current maximum jitter buffer delay, in
-    /// milliseconds.
+    /// RFC 3611 §4.7.7's current maximum jitter buffer delay, in ms.
     pub jitter_buffer_maximum_ms: u16,
-    /// RFC 3611 SS4.7.7's absolute maximum jitter buffer delay, in
-    /// milliseconds.
+    /// RFC 3611 §4.7.7's absolute maximum jitter buffer delay, in ms.
     pub jitter_buffer_abs_max_ms: u16,
-    /// RFC 3611 SS4.7.5's R factor, or `None` for "unavailable".
+    /// RFC 3611 §4.7.5's R factor, or `None` for "unavailable".
     pub r_factor: Option<u8>,
     /// RFC 3611 SS4.7.5's external R factor, or `None`.
     pub ext_r_factor: Option<u8>,
@@ -199,7 +162,7 @@ pub struct RemoteQualityMetrics {
     pub mos_cq_x10: Option<u8>,
 }
 
-/// One `Metrics` set's figures (SS4.6.1), whichever end measured them.
+/// One `Metrics` set (§4.6.1), from either end.
 struct Figures {
     jitter_buffer: [u16; 5],
     loss_rate: u8,
@@ -237,8 +200,7 @@ impl Figures {
             gmin: metrics.gmin,
             round_trip_delay_ms: metrics.round_trip_delay_ms,
             end_system_delay_ms: metrics.end_system_delay_ms,
-            // nothing upstream of this crate reports a signal or noise level
-            // or a residual echo return loss for this end
+            // nobody measures these for this end
             signal: (None, None, None),
             r_factor: metrics.r_factor,
             ext_r_factor: None,
@@ -282,33 +244,22 @@ impl UserAgent {
     /// Send `call`'s end-of-session voice quality report, if the account it
     /// belongs to asked for one ([`crate::Account::quality_report_uri`]).
     ///
-    /// `Ok(false)` for the no-op — the call is not known, has no account,
-    /// or the account named no collector — so the caller does not have to
-    /// check first. `Ok(true)` once a PUBLISH has actually gone out: it
-    /// closes its own published state at once (RFC 3903 SS3's initial
-    /// `Expires: 0`), since this report describes a call that has already
-    /// ended and nothing here refreshes it, and this method neither waits
-    /// for nor reports on whatever answers it — a collector that never
-    /// answers has cost this end one UDP datagram, not a retry loop.
+    /// `Ok(false)` when there is nothing to do: unknown call, no account, or
+    /// no collector. `Ok(true)` once the PUBLISH went out, with
+    /// `Expires: 0` (RFC 3903 §3) since nothing will refresh it. Its answer
+    /// is not reported and nothing is retried.
     ///
     /// # Errors
     /// Whatever [`sipral_core::endpoint::Endpoint::request`] refuses the
-    /// PUBLISH for: a transport this end no longer has bound, most likely.
-    /// The caller decides whether that is worth surfacing; a call that has
-    /// already ended is not going to un-end over it.
+    /// PUBLISH for, most likely a transport no longer bound.
     pub fn send_quality_report(
         &mut self,
         call: CallHandle,
         metrics: &QualityReportMetrics,
         now: Instant,
     ) -> Result<bool, UaError> {
-        // The ordinary case is the call already forgotten: `finish`
-        // (`calls.rs`) queues the `CallEnded` event that tells the facade
-        // above this crate to call this method, and forgets the call in the
-        // same breath, before that event is ever drained. `self.calls` is
-        // still checked first rather than only the snapshot, so that a call
-        // asked about while it is still up — a test, or a future mid-call
-        // report — reads the live state rather than a stale copy of it.
+        // usually the call is already gone and only the snapshot is left;
+        // a live call is read first so it is never stale
         let (account_id, identity, direction) = if let Some(held) = self.calls.get(&call) {
             let Some(account_id) = held.account else {
                 return Ok(false);
@@ -350,19 +301,10 @@ impl UserAgent {
         Ok(true)
     }
 
-    /// Keep what [`UserAgent::send_quality_report`] will need about `call`
-    /// past the `forget` (`calls.rs`) that is about to remove it from
-    /// [`UserAgent::calls`] — called from `finish`, immediately before that.
-    ///
-    /// A no-op unless there is a reason not to be one: a call with no
-    /// account, or one whose account never asked for a report
+    /// Called from `finish` just before the call is forgotten. Only for
+    /// accounts with a collector
     /// ([`Account::quality_report`](crate::account::Account::quality_report)),
-    /// has nothing this cache should remember, since nothing will ever ask
-    /// it. Every account that did ask is still bounded by [`SNAPSHOT_CAP`],
-    /// the oldest entry evicted first: a call that is rejected, cancelled,
-    /// or otherwise never reaches a media session for the facade above this
-    /// crate to call `send_quality_report` about leaves its entry here
-    /// unconsumed, and nothing else here ever removes it.
+    /// bounded by [`SNAPSHOT_CAP`].
     pub(crate) fn stash_ended_call(&mut self, call: CallHandle) {
         let Some(held) = self.calls.get(&call) else {
             return;
@@ -398,10 +340,8 @@ impl UserAgent {
     }
 }
 
-/// One party's identity for the `LocalID`/`RemoteID` lines: which of
-/// [`CallIdentity`]'s two URIs is ours depends on which end placed the
-/// call, since it always carries the `From` and `To` of the request that
-/// opened it, whichever side wrote that request.
+/// (local, remote) for `LocalID`/`RemoteID`. [`CallIdentity`] holds the
+/// opening request's `From`/`To`, so which is ours depends on direction.
 fn parties(identity: &CallIdentity, direction: Direction) -> (&[u8], &[u8]) {
     match direction {
         Direction::Outgoing => (&identity.from_uri, &identity.to_uri),
@@ -409,9 +349,7 @@ fn parties(identity: &CallIdentity, direction: Direction) -> (&[u8], &[u8]) {
     }
 }
 
-/// The RFC 6035 SS4.6.1 body: one `VQSessionReport:CallTerm`, its
-/// `SessionInfo`, a `LocalMetrics` block built from `metrics`, and a
-/// `RemoteMetrics` block from what the far end reported, when it did.
+/// The RFC 6035 §4.6.1 `VQSessionReport: CallTerm` body.
 fn body(identity: &CallIdentity, direction: Direction, metrics: &QualityReportMetrics) -> Vec<u8> {
     let (local, remote) = parties(identity, direction);
     let mut out = String::new();
@@ -423,9 +361,7 @@ fn body(identity: &CallIdentity, direction: Direction, metrics: &QualityReportMe
     );
     write_header(&mut out, "LocalID", &String::from_utf8_lossy(local));
     write_header(&mut out, "RemoteID", &String::from_utf8_lossy(remote));
-    // OrigID: "identifies the endpoint which originated the session" --
-    // the `From` of the request that opened it, whichever end sent that
-    // request, which is exactly what `CallIdentity::from_uri` already is.
+    // OrigID is the originator: the opening request's `From`
     write_header(
         &mut out,
         "OrigID",
@@ -444,9 +380,7 @@ fn body(identity: &CallIdentity, direction: Direction, metrics: &QualityReportMe
     out.push_str("LocalMetrics:\r\n");
     write_metrics(&mut out, metrics, &Figures::local(metrics));
     if let Some(remote) = &metrics.remote {
-        // the same session and the same codec: this stack sends what it
-        // negotiated to receive, and the far end measured it over the
-        // same span
+        // same session span and codec as ours
         out.push_str("RemoteMetrics:\r\n");
         write_metrics(&mut out, metrics, &Figures::remote(remote));
     }
@@ -460,19 +394,13 @@ fn write_header(out: &mut String, name: &str, value: &str) {
     out.push_str("\r\n");
 }
 
-/// `LocalAddr`/`RemoteAddr`'s value (SS4.6.1's `IPAddress WSP Port WSP
-/// Ssrc`): the address and SSRC of one end of the RTP stream being
-/// measured.
+/// `LocalAddr`/`RemoteAddr` value (§4.6.1).
 fn addr_line(addr: SocketAddr, ssrc: u32) -> String {
     format!("IP={} PORT={} SSRC=0x{:x}", addr.ip(), addr.port(), ssrc)
 }
 
-/// One `Metrics` block (SS4.6.1): `Timestamps` and `SessionDesc` from the
-/// session, then every optional line there is a figure for in `figures`,
-/// in the order the worked example of SS4.7.1 uses. A line with no figure
-/// at all, `Signal` for this end's own set, is left out, as the grammar
-/// allows and SS4.6 asks ("exclude any parameters for which values are not
-/// available").
+/// One `Metrics` block (§4.6.1), lines in §4.7.1's order. A line with no
+/// value at all is left out, as §4.6 asks.
 fn write_metrics(out: &mut String, metrics: &QualityReportMetrics, figures: &Figures) {
     let _ = write!(
         out,
@@ -535,9 +463,7 @@ fn write_metrics(out: &mut String, metrics: &QualityReportMetrics, figures: &Fig
         let _ = write!(quality, "RCQ={r}");
         wrote = true;
     }
-    // SS4.6.1's `ExternalR-In` is "measured by the local endpoint for
-    // incoming connection on the 'other' side of this endpoint", which is
-    // what RFC 3611 SS4.7.5's external R factor is for the end reporting it
+    // §4.6.1 `ExternalR-In` is RFC 3611 §4.7.5's external R factor
     if let Some(r) = figures.ext_r_factor {
         push_wsp(&mut quality, &mut wrote);
         let _ = write!(quality, "EXTRI={r}");
@@ -563,27 +489,20 @@ fn push_wsp(out: &mut String, wrote: &mut bool) {
     *wrote = true;
 }
 
-/// RFC 6035 SS4.6.2.1: "divide by 256 and take the integer part" to turn an
-/// RFC 3611 8-bit fixed-point fraction back into the percentage `NLR`,
-/// `JDR`, `BLD` and `GLD` are defined in. One decimal digit, which is all
-/// a value out of 256 can ever need (`256ths` is already finer than a
-/// hundredth).
+/// An RFC 3611 fraction in 256ths as a one-decimal percentage, for `NLR`,
+/// `JDR`, `BLD` and `GLD` (RFC 6035 §4.6.2.1).
 fn percent_from_256ths(value: u8) -> String {
     let tenths = u32::from(value) * 1000 / 256;
     format!("{}.{}", tenths / 10, tenths % 10)
 }
 
-/// A MOS field's `x10` wire units (`14..=50`) as the `D["."1*3DIGIT]` MOS
-/// text RFC 6035 SS4.6.1 wants, one decimal place.
+/// MOS in tenths as `D.D` text (§4.6.1).
 fn tenths(value_x10: u8) -> String {
     format!("{}.{}", value_x10 / 10, value_x10 % 10)
 }
 
-/// `time` as an RFC 3339 UTC timestamp, second resolution, always `Z`
-/// (SS4.6.1: "Time zones other than 'Z' are not allowed"). Before the Unix
-/// epoch, which no RTP stream this stack ever opens is, this reads
-/// `1970-01-01T00:00:00Z` rather than propagating an error nothing here
-/// could act on.
+/// RFC 3339 UTC, whole seconds, always `Z` (§4.6.1). Pre-epoch times clamp
+/// to the epoch.
 fn rfc3339(time: SystemTime) -> String {
     let secs = time
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -600,34 +519,22 @@ fn rfc3339(time: SystemTime) -> String {
     )
 }
 
-/// The proleptic Gregorian calendar date `days` days after the Unix epoch
-/// (1970-01-01), correct for every day the Gregorian calendar defines in
-/// either direction, including every leap year the 400/100/4-year rule
-/// gives one.
+/// Proleptic Gregorian date `days` after 1970-01-01, either direction.
 ///
-/// This is the standard "days from/to civil" transformation: shift the
-/// epoch to 1 March of year 0, which puts the extra day of a leap year at
-/// the *end* of the shifted year instead of in the middle of February,
-/// then read the date off by successive division through the Gregorian
-/// cycle lengths — 146097 days to a 400-year cycle, 36524 to a (non-leap)
-/// century, 1460 to a four-year cycle, 365 to a common year — and shift
-/// the month numbering back so the result names March as month 3 again.
-/// The identity is calendar mathematics, not one implementation's code, and
-/// is reproduced here from its own derivation rather than copied from any.
+/// Shift the epoch to 0000-03-01 so a leap day falls at the end of the
+/// shifted year, then divide down through the cycle lengths (146097 days
+/// per 400 years, 36524 per century, 1460 per four years, 365 per year).
+/// Derived from the calendar rules, not copied.
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
-    // 1970-01-01 is 719468 days after 0000-03-01 in the shifted calendar.
+    // 1970-01-01 is day 719468 of the March-first calendar
     let z = days_since_epoch + 719_468;
     let era = z.div_euclid(146_097);
-    // days since the start of this 400-year era, 0..=146096
     let day_of_era = z.rem_euclid(146_097);
-    // year within the era, 0..=399, read off the century/four-year/year
-    // cycle lengths in the shifted (March-first) calendar
     let year_of_era =
         (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let year = year_of_era + era * 400;
-    // day within the shifted year, 0..=365
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    // month within the shifted year, 0 = March .. 11 = January/February
+    // 0 = March .. 11 = February
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = u32::try_from(day_of_year - (153 * shifted_month + 2) / 5 + 1).unwrap_or(1);
     let month = u32::try_from(if shifted_month < 10 {
@@ -636,8 +543,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
         shifted_month - 9
     })
     .unwrap_or(1);
-    // January and February belong to the calendar year after the one the
-    // shifted (March-first) year names
+    // January and February belong to the next calendar year
     let year = if month <= 2 { year + 1 } else { year };
     (year, month, day)
 }
@@ -688,8 +594,7 @@ mod tests {
         }
     }
 
-    /// RFC 6035 SS4.7.1's worked example's own `RemoteMetrics` figures, as
-    /// the far end's RTCP XR VoIP Metrics block would carry them.
+    /// RFC 6035 §4.7.1's example `RemoteMetrics`.
     fn far_end() -> RemoteQualityMetrics {
         RemoteQualityMetrics {
             loss_rate: 12,
@@ -744,18 +649,13 @@ mod tests {
 
     #[test]
     fn a_known_leap_day_reads_back_correctly() {
-        // 2004-02-29: 2004 is divisible by 4 and not by 100, so it is a
-        // Gregorian leap year, and this is the extra day in it.
         let days = days_for(2004, 2, 29);
         assert_eq!(civil_from_days(days), (2004, 2, 29));
     }
 
     #[test]
     fn a_century_that_is_not_a_leap_year_has_no_february_29th() {
-        // 1900 is divisible by 100 but not 400, so the 400-year rule takes
-        // the leap day away again: 31 January days plus 28 February ones
-        // (offsets 0..=58) reach the 59th offset, day index 59, at March
-        // 1st rather than a February 29th that year never has.
+        // 31 + 28 days after 1 January is 1 March in 1900
         assert_eq!(civil_from_days(days_for(1900, 1, 1) + 59), (1900, 3, 1));
     }
 
@@ -764,10 +664,8 @@ mod tests {
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
 
-    /// The day count [`civil_from_days`] would need to read back `(y, m,
-    /// d)`, found by searching outward from the epoch until it agrees --
-    /// deliberately not the arithmetic the function itself uses, so the
-    /// test cannot share its bug.
+    /// Found by search, not by the function's own arithmetic, so the test
+    /// cannot share its bug.
     fn days_for(y: i64, m: u32, d: u32) -> i64 {
         for days in -60_000_i64..60_000 {
             if civil_from_days(days) == (y, m, d) {
@@ -779,10 +677,7 @@ mod tests {
 
     #[test]
     fn a_256th_reproduces_the_rfc_6035_worked_examples_percentage() {
-        // RFC 6035 SS4.6.2.1's own reversal: divide by 256, take the
-        // integer part; 256 * 5 / 100 = 12.8 -> 12 is the RFC 3611 field a
-        // report of "5.0" (SS4.7.1's own worked example) would have come
-        // from converting.
+        // RFC 6035 §4.6.2.1
         assert_eq!(percent_from_256ths(12), "4.6");
         assert_eq!(percent_from_256ths(0), "0.0");
         assert_eq!(percent_from_256ths(255), "99.6");
@@ -796,8 +691,6 @@ mod tests {
 
     #[test]
     fn an_rfc3339_timestamp_matches_a_known_instant() {
-        // 2005-10-10T18:23:43Z, read off https://www.epochconverter.com and
-        // matching the SS4.7.1 worked example's own date, one year later.
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_128_968_623);
         assert_eq!(rfc3339(time), "2005-10-10T18:23:43Z");
     }
@@ -867,7 +760,6 @@ mod tests {
             .expect("the body is ASCII");
         assert!(!text.contains("RemoteMetrics"));
 
-        // and a far end that measured no signal says nothing about one
         let mut quiet = far_end();
         quiet.signal_level_dbm0 = None;
         quiet.noise_level_dbm0 = None;
@@ -902,9 +794,6 @@ mod tests {
 
     #[test]
     fn an_account_that_asked_for_no_collector_is_also_a_no_op() {
-        // `account()` above never calls `quality_report_uri`, so an
-        // account built from it is exactly this case: known, but silent
-        // by default about where a report would go.
         assert!(account().quality_report().is_none());
     }
 }

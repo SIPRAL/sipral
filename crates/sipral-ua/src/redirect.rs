@@ -4,17 +4,14 @@
 //! Sending a call somewhere else: a 3xx answer with the places to try
 //! (RFC 3261 §21.3), and the `Diversion` that says why (RFC 5806).
 //!
-//! What a phone's call forwarding does when the phone does it itself rather
-//! than the switch: the INVITE is answered 302 with a `Contact` naming the
-//! new target, the caller's proxy — or the caller — sends the INVITE there,
-//! and the `Diversion` carried back names this end as the one that diverted
-//! the call and says why, so the phone that finally rings can show "forwarded
-//! from Alice, no answer". The `Diversion` values the INVITE already carried
-//! follow this end's own, most recent first (RFC 5806 §3).
+//! Phone-side call forwarding: the INVITE is answered 302 with a `Contact`
+//! naming the new target, and the `Diversion` names this end and the reason,
+//! so the phone that rings can show "forwarded from Alice, no answer".
+//! Earlier `Diversion` values follow this end's own, most recent first (RFC
+//! 5806 §3).
 //!
-//! And the other side of it: a call this end placed that comes back 3xx is
-//! sent on to the targets the answer names ([`Redirection`]), when it was
-//! placed asking for that.
+//! A placed call that comes back 3xx is sent on to the targets it names
+//! ([`Redirection`]) when it was placed asking for that.
 
 use std::time::Instant;
 
@@ -125,25 +122,19 @@ impl Redirect {
     }
 }
 
-/// How many INVITEs one call places on the strength of redirects before it
-/// gives up: §8.1.3.4 leaves the bound to the client, and it only has to
-/// stop a pair of servers that send a call back and forth between them.
+/// How many INVITEs one call places on redirects before it gives up
+/// (RFC 3261 §8.1.3.4 leaves the bound to the client).
 pub(crate) const MOST_REDIRECTS: usize = 8;
 
-/// Where a 3xx sent a call this end placed (RFC 3261 §8.1.3.4): "the
-/// client SHOULD use the Contact header field values of the response to
-/// generate a new request".
+/// Where a 3xx sent a call this end placed (RFC 3261 §8.1.3.4).
 ///
-/// The target set is kept on the call, so a target that fails is followed by
-/// the next one before the call is given up on, and a target already tried
-/// is never tried again — the loop §8.1.3.4 warns of ends at the second
-/// visit, not at the bound.
+/// A failed target is followed by the next one, and a target already tried
+/// is never tried again, so a redirect loop ends at the second visit.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Redirection {
-    /// The Request-URI the call's INVITE goes to now, once a 3xx moved it.
-    /// `To` stays the address the application called.
+    /// The Request-URI after a 3xx moved it; `To` stays unchanged.
     pub(crate) target: Option<Uri>,
-    /// Every Request-URI already tried, the one placed first among them.
+    /// Every Request-URI already tried, the first one included.
     tried: Vec<Uri>,
     /// What is left of the target set, best first.
     pending: Vec<Uri>,
@@ -209,23 +200,17 @@ fn requestable(contact: &str) -> Option<Uri> {
 }
 
 impl UserAgent {
-    /// A call this end placed was refused. Whether the refusal is a
-    /// redirect to follow, or the failure of one target in a set a redirect
-    /// gave with others still to try, and if so the INVITE that goes next:
-    /// the same `Call-ID`, `From` and `To`, the next number, and the target
-    /// as the Request-URI (§8.1.3.4). `true` when one went, and the refusal
-    /// is then not the call's end.
+    /// A placed call was refused. If the refusal is a redirect to follow, or
+    /// one failed target with others left, send the next INVITE: same
+    /// `Call-ID`, `From` and `To`, next CSeq, the target as Request-URI
+    /// (§8.1.3.4). `true` when one went, so the refusal does not end the call.
     ///
-    /// Only for a call placed with [`crate::OutgoingCall::follow_redirects`];
-    /// any other ends with the 3xx, its `Contact` addresses left for the
-    /// application to read.
+    /// Only with [`crate::OutgoingCall::follow_redirects`]; otherwise the
+    /// call ends with the 3xx and the application reads its `Contact`.
     ///
-    /// A 380 names its alternative in its body and is not followed; a 6xx
-    /// is a global failure, which §8.1.3.4 has end the search. A call that
-    /// forked is not followed either: its branches are calls of their own
-    /// already. Where the INVITE goes is where every INVITE of the account
-    /// goes — its outbound proxy or server, or the destination the call was
-    /// placed to — since resolving a name is the application's.
+    /// Not followed: 380 (alternative is in the body), 6xx (§8.1.3.4 ends
+    /// the search), a forked call (its branches are calls already). The
+    /// INVITE goes where every INVITE of the account goes.
     pub(crate) fn follow_redirect(
         &mut self,
         call: CallHandle,

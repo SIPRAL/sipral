@@ -5,15 +5,10 @@
 //! (RFC 5373), and `Alert-Info` (RFC 3261 §20.4, RFC 7462) with the
 //! auto-answer conventions phones and switches built on it.
 //!
-//! An intercom, a paging group or a click-to-call from a CRM wants the phone
-//! to pick up by itself; a switch wants the ring to say whether the caller is
-//! a colleague or the outside world. None of that changes what the stack
-//! does — "the UAS MUST NOT" answer automatically without a policy of its
-//! own (RFC 5373 §4.2), and the policy is the application's — so it is read,
-//! typed, and handed up with the call.
+//! The stack never answers by itself: RFC 5373 §4.2 leaves that to a local
+//! policy, which is the application's. It only reads and hands up.
 //!
-//! Three shapes are in use for "answer this by yourself", and all three are
-//! read into [`Answering::answer_after`]:
+//! Three auto-answer forms are read into [`Answering::answer_after`]:
 //!
 //! - `Answer-Mode: Auto` (RFC 5373), the standard one, as zero;
 //! - `answer-after=N` on `Call-Info` or `Alert-Info`, N seconds;
@@ -41,8 +36,7 @@ pub enum AnswerMode {
     Manual,
     /// Answer without waiting for the user.
     Auto,
-    /// Any other token, as written — §3: "implementations MUST ignore
-    /// unknown values", and ignoring it is the application's to do.
+    /// Any other token, as written; §3 says to ignore it.
     Other(Box<str>),
 }
 
@@ -51,8 +45,7 @@ pub enum AnswerMode {
 pub struct AnswerModeField {
     /// What the caller asked for.
     pub mode: AnswerMode,
-    /// `;require`: the caller would rather the call be refused — with a 403,
-    /// §4.2 says — than answered any other way.
+    /// `;require`: refuse (403, §4.2) rather than answer another way.
     pub required: bool,
 }
 
@@ -97,13 +90,10 @@ pub enum RingSource {
 pub struct Answering {
     /// `Answer-Mode` (RFC 5373 §3).
     pub answer_mode: Option<AnswerModeField>,
-    /// `Priv-Answer-Mode` (RFC 5373 §3): the same, asked with the privilege
-    /// of overriding the user's own settings — §4.2 has a UAS apply "a
-    /// stricter authorization policy" to it.
+    /// `Priv-Answer-Mode` (RFC 5373 §3): overrides user settings, so §4.2
+    /// wants stricter authorization.
     pub priv_answer_mode: Option<AnswerModeField>,
-    /// After how long the caller asked the call to be answered without the
-    /// user, whichever of the three conventions said so (see the module
-    /// note). `None` when nothing asked.
+    /// Auto-answer delay from any of the three forms. `None` when not asked.
     pub answer_after: Option<Duration>,
     /// Where the ring says the caller is, when it said.
     pub source: Option<RingSource>,
@@ -135,9 +125,7 @@ impl Answering {
         let mut names: Vec<Box<str>> = Vec::new();
         for value in request.field_values(ALERT_INFO) {
             let value = trim(value);
-            // `info=alert-autoanswer` with no URI before it is out of §20.4's
-            // grammar and common enough to be read anyway: the whole value
-            // is then parameters
+            // a bare `info=...` breaks §20.4's grammar but is common
             let own = if value.first() == Some(&b'<') {
                 let (head, params) = Params::split(value);
                 if let Some(uri) = head
@@ -214,8 +202,7 @@ fn owned(params: Params<'_>) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         .collect()
 }
 
-/// `value` with a `;` in front, so that a value whose head is itself a
-/// parameter splits into parameters and nothing else.
+/// `value` with a `;` in front, so it splits into parameters only.
 fn value_with_leading_semicolon(value: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.len() + 1);
     out.push(b';');

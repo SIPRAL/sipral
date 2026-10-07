@@ -4,38 +4,25 @@
 //! SIPREC: the metadata of a recorded call, and the pieces of the INVITE that
 //! offers it to a recorder.
 //!
-//! A session recording client (SRC) sends a session recording server (SRS) a
-//! recording session: an INVITE whose SDP carries the recorded media and whose
-//! second body part says what that media is (RFC 7866 §6.1). The model of
-//! that second part is RFC 7865's — a recording session records communication
-//! sessions, grouped, with participants who send and receive streams — and so
-//! is its format: the XML of RFC 7865's schema, in the
-//! `urn:ietf:params:xml:ns:recording:1` namespace, carried as
-//! `application/rs-metadata+xml`.
+//! A recording client (SRC) sends the recording server (SRS) an INVITE whose
+//! SDP carries the media and whose second part, `application/rs-metadata+xml`
+//! (RFC 7865), describes it (RFC 7866 §6.1).
 //!
-//! [`RecordingMetadata`](crate::siprec::RecordingMetadata) is that
-//! document, one field per element. It is written with
+//! [`RecordingMetadata`](crate::siprec::RecordingMetadata) is that document,
+//! written with
 //! [`RecordingMetadata::to_xml`](crate::siprec::RecordingMetadata::to_xml)
 //! and read with
 //! [`RecordingMetadata::parse`](crate::siprec::RecordingMetadata::parse);
-//! [`RecordedCall`](crate::siprec::RecordedCall) builds the usual one, a
-//! single call and its parties, with every association filled in. The helpers
-//! at the bottom are the INVITE's: the `multipart/mixed` body with the SDP and
-//! the metadata, `Content-Disposition: recording-session`, the `+sip.src`
-//! feature tag in `Contact` and the `siprec` option tag.
+//! [`RecordedCall`](crate::siprec::RecordedCall) builds the usual one-call
+//! case. The helpers at the bottom build the INVITE's body and tags.
 //!
-//! **The reader is the one `application/dialog-info+xml` goes through**, for
-//! the same reason: the bytes come from the network, and a reader that has no
-//! document type declaration, no entities beyond XML's five and no CDATA has
-//! nothing in it to exploit. Elements this module does not know are skipped
-//! with their content, which is where RFC 7865's extension data lives. As with
-//! dialog information, namespaces are matched by local name, except that a
-//! root that declares a default namespace other than the recording one is not
-//! a recording document.
+//! The reader is the dialog-info one: no DTD, no entities beyond XML's five,
+//! no CDATA, so untrusted bytes have nothing to exploit. Unknown elements are
+//! skipped (that is where extension data lives). Namespaces match by local
+//! name, but a root with another default namespace is rejected.
 //!
-//! **Partial metadata is read, not merged.** A `partial` document carries only
-//! what changed since the last one (RFC 7866), so its references may name
-//! elements it does not hold.
+//! Partial metadata is read, not merged: a `partial` document carries only
+//! changes (RFC 7866), so its references may dangle.
 //! [`RecordingMetadata::validate`](crate::siprec::RecordingMetadata::validate)
 //! resolves references for `complete` documents only.
 
@@ -653,12 +640,9 @@ pub fn with_src_feature_tag(contact: &str) -> String {
     }
 }
 
-/// Whether a request's `Require` carries the `siprec` option tag, as an
-/// SRC's or an SRS's INVITE of a recording session must (RFC 7866 §6.1,
-/// §6.2). It is half of what makes one: RFC 7866 §6.2 has an SRS treat a
-/// new INVITE as a recording session only when its `Contact` also carries
-/// [`SRC_FEATURE_TAG`] ([`contact_has_feature_tag`]), and §6.1 has an SRC
-/// ask the same of [`SRS_FEATURE_TAG`].
+/// Whether `Require` carries `siprec` (RFC 7866 §6.1, §6.2). A recording
+/// session also needs [`SRC_FEATURE_TAG`] (or [`SRS_FEATURE_TAG`]) in
+/// `Contact`; see [`contact_has_feature_tag`].
 #[must_use]
 pub fn requires_siprec(message: &RawMessage<'_>) -> bool {
     message.require().has(OPTION_TAG)
@@ -722,11 +706,9 @@ pub struct RecordingOffer<'a> {
 /// Read the body of a recording session's INVITE: the SDP part and the
 /// `recording-session` metadata part (RFC 7866 §9.1).
 ///
-/// A metadata part is found by its disposition, and failing that by its
-/// type, `application/rs-metadata+xml` (RFC 7865 §5) or the
-/// `application/rs-metadata` RFC 7866 §9 writes. Only `multipart` bodies
-/// are read; an INVITE with the SDP alone carries its metadata later, if at
-/// all (RFC 7866 §9.1).
+/// The metadata part is found by disposition, else by type
+/// (`application/rs-metadata+xml` or `application/rs-metadata`). Only
+/// `multipart` bodies are read.
 ///
 /// # Errors
 /// [`SiprecError::MissingPart`] when either part is absent, and whatever the

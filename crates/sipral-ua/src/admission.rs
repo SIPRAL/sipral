@@ -3,29 +3,18 @@
 
 //! What a request has to be before this agent acts on it (RFC 3261 §8.2).
 //!
-//! §8.2 asks a UAS its questions in an order, and each one that fails ends
-//! the request with its own status: the method (§8.2.1, 405), the
-//! Request-URI's scheme (§8.2.2.1, 416), the `Require` header (§8.2.2.3,
-//! 420, in [`crate::reliable`]) and then the body (§8.2.3, 415). None of them
-//! has a policy in it, so none of them is handed to the application: a peer
-//! that is told nothing retransmits until its own timer gives up, and one
-//! that is told 200 believes it was understood.
+//! The checks run in §8.2's order, each with its own status: method
+//! (§8.2.1, 405), Request-URI scheme (§8.2.2.1, 416), `Require` (§8.2.2.3,
+//! 420, in [`crate::reliable`]), body (§8.2.3, 415). None involves policy,
+//! so none reaches the application.
 //!
-//! The method question is asked twice. REGISTER is refused before anything
-//! else reads the request; any other method is refused only after every
-//! handler that claims one has passed it over, because only then is it known
-//! that nothing here implements it — outside a dialog, and inside one, where
-//! RFC 5057 §5.3 says which usage the request belongs to and so which
-//! refusal it gets.
+//! REGISTER is refused first. Any other method is refused only after every
+//! handler has passed it over, inside a dialog by the usage RFC 5057 §5.3
+//! matches it to.
 //!
-//! One question more comes from the other direction. An INVITE whose
-//! `Accept` rules out `application/sdp` asks for an answer this agent cannot
-//! write, since every 2xx to an INVITE carries a session description, and
-//! RFC 4475 §3.3.15 has it refused with a 406 rather than rung and answered
-//! against the peer's own terms.
-//!
-//! RFC 4475 §3.3 is the test of all of it: each of its messages goes through
-//! this agent in `rfc4475_tests`, received the way a peer would send it.
+//! An INVITE whose `Accept` rules out `application/sdp` gets a 406 (RFC 4475
+//! §3.3.15): every 2xx to an INVITE carries SDP. `rfc4475_tests` runs all of
+//! RFC 4475 §3.3 through this agent.
 
 use std::time::Instant;
 
@@ -38,48 +27,40 @@ use crate::agent::UserAgent;
 use crate::renegotiate::ALLOW;
 use crate::transfer::{FORBIDDEN, names_a_dialog};
 
-/// §21.4.6, which §8.2.1 answers a method this agent does not implement
-/// with.
+/// §21.4.6, for a method this agent does not implement (§8.2.1).
 const METHOD_NOT_ALLOWED: StatusCode = match StatusCode::new(405) {
     Ok(code) => code,
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// §21.5.2, which §8.2.1 answers a method this agent does not recognise
-/// with.
+/// §21.5.2, for a method this agent does not recognise (§8.2.1).
 const NOT_IMPLEMENTED: StatusCode = match StatusCode::new(501) {
     Ok(code) => code,
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// §21.4.7: "only capable of generating response entities that have content
-/// characteristics not acceptable according to the Accept header field sent
-/// in the request".
+/// §21.4.7, for an `Accept` that rules out every body this agent writes.
 const NOT_ACCEPTABLE: StatusCode = match StatusCode::new(406) {
     Ok(code) => code,
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// §21.4.14, which §8.2.2.1 answers a Request-URI scheme this agent does not
-/// support with.
+/// §21.4.14, for an unsupported Request-URI scheme (§8.2.2.1).
 const UNSUPPORTED_URI_SCHEME: StatusCode = match StatusCode::new(416) {
     Ok(code) => code,
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// The one body type this agent reads in an INVITE, a re-INVITE, an UPDATE
-/// or a PRACK, which is also what a 415 lists in `Accept` (§8.2.3: "the
-/// response MUST contain an Accept header field listing the types of all
-/// bodies it understands").
+/// The only body read in an INVITE, re-INVITE, UPDATE or PRACK; a 415 lists
+/// it in `Accept` (§8.2.3).
 const ACCEPT: &[u8] = b"application/sdp";
 
-/// The one content coding this agent reads, which is none at all.
 const ACCEPT_ENCODING: &[u8] = b"identity";
 
-/// §20.2, which the core's list of header names does not carry.
+/// §20.2.
 const ACCEPT_ENCODING_FIELD: HeaderName<'static> = HeaderName::Extension("Accept-Encoding");
 
-/// §20.11, which the core's list of header names does not carry either.
+/// §20.11.
 const CONTENT_DISPOSITION_FIELD: HeaderName<'static> = HeaderName::Extension("Content-Disposition");
 
 /// RFC 6086 §11.6: "469 Bad Info Package".
@@ -88,25 +69,19 @@ const BAD_INFO_PACKAGE: StatusCode = match StatusCode::new(469) {
     Err(_) => StatusCode::SERVER_ERROR,
 };
 
-/// RFC 6086 §7.2, the field an INFO names its Info Package in.
+/// RFC 6086 §7.2.
 const INFO_PACKAGE_FIELD: HeaderName<'static> = HeaderName::Extension("Info-Package");
 
-/// RFC 6086 §7.3, the field a 469 lists the packages it would take in —
-/// empty here, since this agent takes none: `Recv-Info = "Recv-Info" HCOLON
-/// [info-package-list]`.
+/// RFC 6086 §7.3. Sent empty in a 469: this agent takes no package.
 const RECV_INFO_FIELD: HeaderName<'static> = HeaderName::Extension("Recv-Info");
 
-/// The bodies this agent reads in an INFO, which is what a 415 to one lists
-/// in `Accept` (§8.2.3): the two DTMF forms of [`crate::dtmf`].
+/// The INFO bodies [`crate::dtmf`] reads; a 415 to an INFO lists them.
 const INFO_ACCEPT: &[u8] = b"application/dtmf-relay, application/dtmf";
 
 impl UserAgent {
-    /// §8.2.1 and §8.2.2.1, before anything else acts on a request that
-    /// opens nothing yet: an initial INVITE, or a request outside a dialog.
-    ///
-    /// Inside a dialog neither question is asked again. The method of a
-    /// request there is one the dialog's own handlers claim or leave, and its
-    /// Request-URI is the `Contact` this end wrote.
+    /// §8.2.1 and §8.2.2.1 for an initial INVITE or a request outside a
+    /// dialog. Inside a dialog the Request-URI is our own `Contact`, so
+    /// neither check applies.
     pub(crate) fn on_admission_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::IncomingInvite {
@@ -136,24 +111,14 @@ impl UserAgent {
         }
     }
 
-    /// §8.2.1 for a request outside a dialog that every handler of this
-    /// agent passed over: it is answered here rather than handed to the
-    /// application, which has no way to answer it through the C ABI and
-    /// would otherwise leave the peer retransmitting until the endpoint's
-    /// own 408 thirty-two seconds later.
+    /// Answers a request every handler passed over (§8.2.1). Runs last.
     ///
-    /// Run last, after every handler that claims a method outside a dialog
-    /// (OPTIONS, NOTIFY, MESSAGE) has had its turn, so nothing a handler
-    /// takes is ever refused here. See [`unclaimed_refusal`] for the status.
-    ///
-    /// Inside a dialog it is the same question with one fact more — whether
-    /// the dialog is a call's — and the same reason to answer it here: a
-    /// request nobody answers is retransmitted until the far end's own
-    /// timer gives up, and RFC 3261 §12.2.1.2 has a UAC whose request inside
-    /// a dialog timed out "terminate the dialog", which is the call hung up
-    /// over a SUBSCRIBE it sent in passing. See [`in_dialog_answer`] for the
-    /// status. The one exception is an INFO in a call that the application
-    /// said it answers itself ([`UserAgent::hand_over_info`]).
+    /// The application cannot answer it through the C ABI, and an
+    /// unanswered request is retransmitted until the peer times out; inside
+    /// a dialog that timeout terminates the dialog (§12.2.1.2), hanging up
+    /// the call. Statuses: [`unclaimed_refusal`], [`in_dialog_answer`]. The
+    /// exception is an INFO in a call when the application answers INFO
+    /// itself ([`UserAgent::hand_over_info`]).
     pub(crate) fn on_unclaimed_request(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::IncomingOutOfDialog {
@@ -178,21 +143,15 @@ impl UserAgent {
                 self.endpoint.respond(transaction, &answer, now).ok();
                 None
             }
-            // a re-INVITE in a dialog that holds no call: RFC 5057 §5.3 puts
-            // an INVITE in the dialog's invite usage, and there is none here
-            // — a subscription's dialog, or a call that has just gone. 481
-            // says the usage does not exist and destroys nothing else (§5.1,
-            // note 8)
+            // re-INVITE in a dialog with no call: 481 ends the missing invite
+            // usage and nothing else (RFC 5057 §5.1 note 8, §5.3)
             Event::IncomingReinvite { transaction, .. } => {
                 let gone = OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST);
                 self.endpoint.respond_invite(transaction, &gone, now).ok();
                 None
             }
-            // a PRACK the endpoint matched to a reliable provisional response
-            // of a call this layer no longer holds — one a CANCEL ended while
-            // the response was still unacknowledged. RFC 3262 §3: "If the
-            // PRACK does match an unacknowledged reliable provisional
-            // response, it MUST be responded to with a 2xx response"
+            // PRACK for a call a CANCEL already ended: it still matches an
+            // unacknowledged reliable 1xx, so it gets a 2xx (RFC 3262 §3)
             Event::IncomingPrack { transaction, .. } => {
                 let taken = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
                 self.endpoint.respond(transaction, &taken, now).ok();
@@ -206,30 +165,17 @@ impl UserAgent {
 /// What a request inside a dialog that nothing here claimed is answered
 /// with, by the usage RFC 5057 §5.3 matches it to.
 ///
-/// - **An INFO in a call** is legacy INFO usage (RFC 6086 §3) of a kind
-///   this agent does not read — anything but `application/dtmf-relay` and
-///   `application/dtmf`, which [`crate::dtmf`] claims first — and is
-///   answered by RFC 6086 §4.2.2: **469** with an empty `Recv-Info` when it
-///   names an `Info-Package`, since this agent indicated willingness to
-///   receive none; **415** with an `Accept` naming the two DTMF types for a
-///   body it cannot read that its sender did not mark optional (RFC 3261
-///   §8.2.3); and **200** for one with no body, or an optional one: "if the
-///   INFO request is syntactically correct and well structured, the UA MUST
-///   send a 200 (OK) response". Refusing those would answer the INFO some
-///   equipment sends as a keepalive with an error.
-/// - **481** for the other methods of an invite usage (UPDATE, PRACK, INFO,
-///   BYE) in a dialog that holds no call: the usage they belong to does not
-///   exist, and RFC 5057 §5.1 has a 481 destroy that usage and nothing more.
-/// - **403** for a REFER, as outside a dialog: a new usage refused on
-///   policy, which RFC 5057 §5.1 counts against the transaction alone.
-/// - **501** for a method this agent does not recognise (RFC 3261 §21.5.2),
-///   which RFC 5057 §5.3 expects of a server and which affects the
-///   transaction only.
-/// - **405** with [`ALLOW`] for any other method it recognises and does
-///   not take here: a SUBSCRIBE (other than the `refer` package, which
-///   [`crate::transfer`] claims), a PUBLISH, a REGISTER. RFC 5057 §5.1, note
-///   3: for a request "not integral to the usage ... only the transaction
-///   will be affected".
+/// - **INFO in a call** that [`crate::dtmf`] did not claim (RFC 6086
+///   §4.2.2): 469 with an empty `Recv-Info` if it names an `Info-Package`;
+///   415 for a non-optional body it cannot read; otherwise 200. Some
+///   equipment sends a bodiless INFO as a keepalive.
+/// - **481** for UPDATE, PRACK, INFO, BYE in a dialog with no call: it ends
+///   only the missing invite usage (RFC 5057 §5.1).
+/// - **403** for a REFER: a new usage refused on policy.
+/// - **501** for an unrecognised method (§21.5.2).
+/// - **405** with [`ALLOW`] for any other known method (SUBSCRIBE other than
+///   `refer`, PUBLISH, REGISTER); it affects only the transaction (RFC 5057
+///   §5.1 note 3).
 fn in_dialog_answer(request: &RawMessage<'_>, in_call: bool) -> OutgoingResponse {
     match request.method() {
         Some(Method::Info) if in_call => legacy_info_answer(request),
@@ -242,8 +188,7 @@ fn in_dialog_answer(request: &RawMessage<'_>, in_call: bool) -> OutgoingResponse
     }
 }
 
-/// RFC 6086 §4.2.2 for an INFO in a call that is not one of this agent's
-/// DTMF forms. See [`in_dialog_answer`].
+/// RFC 6086 §4.2.2; see [`in_dialog_answer`].
 fn legacy_info_answer(request: &RawMessage<'_>) -> OutgoingResponse {
     if request.header(INFO_PACKAGE_FIELD).is_some() {
         return OutgoingResponse::new(BAD_INFO_PACKAGE).header(RECV_INFO_FIELD, b"");
@@ -258,30 +203,14 @@ fn legacy_info_answer(request: &RawMessage<'_>) -> OutgoingResponse {
 /// What a request outside a dialog that nothing here claimed is answered
 /// with.
 ///
-/// - **481** when it names a dialog — a tag in its `To` — that this agent
-///   does not have (§12.2.2: "it MUST respond to the request with a 481
-///   (Call/Transaction Does Not Exist) status code"), whatever its method.
-/// - **481** for a method this agent implements only inside a dialog —
-///   BYE (§15.1.2), UPDATE, INFO and PRACK — since a request that names no
-///   dialog has none of this agent's to act in. All but INFO are in
-///   [`ALLOW`], so a 405 would list the very method it refused.
-/// - **403** for a REFER, which names no dialog and asks this end to place
-///   a call of its own (RFC 3515 §4.1's own example is one). It reaches here
-///   only when the application has not taken them on
-///   ([`crate::referral`]), and then it is refused on policy: "the server
-///   understood the request, but is refusing to fulfill it" (§21.4.4). Not
-///   481, which would claim it names a dialog, and not 405, which would
-///   claim this agent does not do REFER at all when it does inside a call.
-/// - **405** with [`ALLOW`] for any other method RFC 3261 and its
-///   extensions define that this agent does not take outside a dialog:
-///   SUBSCRIBE (it is no notifier) and PUBLISH (it is no event state
-///   compositor). "If the UAS recognizes but does not support the method of
-///   a request, it MUST generate a 405 (Method Not Allowed) response", and
-///   §21.4.6 makes the `Allow` compulsory. REGISTER is refused the same
-///   way, earlier ([`method_refusal`]).
-/// - **501** for a method it does not recognise at all: "If the method is
-///   not recognized ... the UAS SHOULD generate a 501 (Not Implemented)"
-///   (§21.5.2).
+/// - **481** when its `To` tag names a dialog this agent lacks (§12.2.2).
+/// - **481** for BYE, UPDATE, INFO, PRACK: they only work inside a dialog,
+///   and a 405 would list in `Allow` the method it refused.
+/// - **403** for a REFER the application has not opted into
+///   ([`crate::referral`]). Not 405: REFER works inside a call.
+/// - **405** with [`ALLOW`] for SUBSCRIBE and PUBLISH (§8.2.1, §21.4.6);
+///   REGISTER gets the same earlier, in [`method_refusal`].
+/// - **501** for an unrecognised method (§21.5.2).
 fn unclaimed_refusal(request: &RawMessage<'_>) -> OutgoingResponse {
     match request.method() {
         _ if names_a_dialog(request) => OutgoingResponse::new(StatusCode::CALL_DOES_NOT_EXIST),
@@ -294,30 +223,16 @@ fn unclaimed_refusal(request: &RawMessage<'_>) -> OutgoingResponse {
     }
 }
 
-/// §8.2.1: "If the UAS recognizes but does not support the method of a
-/// request, it MUST generate a 405 (Method Not Allowed) response", with the
-/// `Allow` §21.4.6 makes compulsory.
-///
-/// REGISTER is the method it is written for here. A registrar keeps
-/// bindings, and this agent keeps none of anyone else's: RFC 4475 §3.3.7 has
-/// "endpoints choosing not to act as registrars ... simply reject the
-/// request", with a 405. It is refused here, before the Request-URI, because
-/// §8.2 asks about the method first. Every other method that reaches this
-/// point out of a dialog is either claimed by a handler further on or, if
-/// none claims it, refused by [`UserAgent::on_unclaimed_request`].
+/// 405 with `Allow` for REGISTER (§8.2.1, §21.4.6): this agent is no
+/// registrar (RFC 4475 §3.3.7). Asked before the Request-URI, as §8.2 orders.
 fn method_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     (request.method() == Some(Method::Register))
         .then(|| OutgoingResponse::new(METHOD_NOT_ALLOWED).header(HeaderName::Allow, ALLOW))
 }
 
-/// §8.2.2.1: "If the Request-URI uses a scheme not supported by the UAS, it
-/// SHOULD reject the request with a 416 (Unsupported URI Scheme) response."
-///
-/// `sip` and `sips` are what this agent is addressed by. `tel` is let through
-/// as well: §19.1.6 has a proxy hand one on, and a line reached on a number
-/// is still a line. Anything else is an address this agent can never be,
-/// which is RFC 4475 §3.3.3's reason for answering an IANA-registered scheme
-/// the same way as one nobody has heard of (§3.3.2).
+/// 416 for a scheme other than `sip`, `sips` or `tel` (§8.2.2.1). `tel`
+/// passes because a proxy may forward one (§19.1.6); registered and unknown
+/// schemes are treated alike (RFC 4475 §3.3.2, §3.3.3).
 fn scheme_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     let target = request.request_uri()?.ok()?;
     match target.scheme() {
@@ -326,36 +241,21 @@ fn scheme_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     }
 }
 
-/// §8.2.3 for an INVITE that opens a call, and then the `Accept` it came
-/// with: `None` when the request can be acted on, the refusal when it cannot.
-///
-/// Asked after §8.2.2.3's `Require`, which is the order §8.2 puts them in.
+/// §8.2.3, then `Accept`, for an initial INVITE; `None` if it can proceed.
+/// Called after the `Require` check (§8.2 order).
 pub(crate) fn content_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
     body_refusal(request)
         .or_else(|| (!takes_sdp(request)).then(|| OutgoingResponse::new(NOT_ACCEPTABLE)))
 }
 
-/// §8.2.3 alone, for every request whose body this agent reads: the INVITE
-/// that opens a call, and the re-INVITE, UPDATE and PRACK that carry an offer
-/// inside one. `None` when the body is one this agent understands, or there
-/// is none, or its sender said it may be ignored.
+/// §8.2.3 for any request whose body this agent reads (INVITE, re-INVITE,
+/// UPDATE, PRACK). `None` for SDP, no body, or an optional body.
 ///
-/// §8.2 is what a UAS asks of any request before it acts on it, not only of
-/// the first: a re-INVITE whose body is not a session description cannot be
-/// answered as an offer, and handing it on had it answered later with
-/// whatever the application made of it — a 488 at best, which says the
-/// session was read and refused.
+/// A non-SDP re-INVITE must get a 415 here; passed on, it would end up as a
+/// 488, which claims the session was read.
 pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse> {
-    // "If there are any bodies whose type (indicated by the Content-Type),
-    // language (indicated by the Content-Language) or encoding (indicated by
-    // the Content-Encoding) are not understood, and that body part is not
-    // optional (as indicated by the Content-Disposition header field), the
-    // UAS MUST reject the request with a 415". A request with no body has
-    // nothing to understand, whatever `Content-Type` it names
+    // an empty body has nothing to understand, whatever its Content-Type
     let refusable = !request.body().is_empty() && !optional_body(request);
-    // "If the request contained content encodings not understood by the
-    // UAS, the response MUST contain an Accept-Encoding header field listing
-    // the encodings understood by the UAS"
     let encoded = request
         .content_encoding()
         .any(|coding| !coding.eq_ignore_ascii_case(ACCEPT_ENCODING));
@@ -365,8 +265,6 @@ pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse>
                 .header(ACCEPT_ENCODING_FIELD, ACCEPT_ENCODING),
         );
     }
-    // "The response MUST contain an Accept header field listing the types of
-    // all bodies it understands"
     let unreadable = refusable
         && !request
             .content_type()
@@ -376,9 +274,7 @@ pub(crate) fn body_refusal(request: &RawMessage<'_>) -> Option<OutgoingResponse>
     })
 }
 
-/// Whether the body is one the sender marked as safe to ignore: §20.11's
-/// `handling=optional`, which is what §8.2.3 means by a body part that "is
-/// not optional (as indicated by the Content-Disposition header field)".
+/// `handling=optional` in `Content-Disposition` (§20.11, §8.2.3).
 fn optional_body(request: &RawMessage<'_>) -> bool {
     request
         .header(CONTENT_DISPOSITION_FIELD)
@@ -392,22 +288,13 @@ fn optional_body(request: &RawMessage<'_>) -> bool {
 
 /// Whether the peer will take a session description in the answer.
 ///
-/// §20.1: an absent `Accept` means `application/sdp`, and "an empty Accept
-/// header field means that no formats are acceptable". The ranges that
-/// cover SDP are `application/sdp`, `application/*` and `*/*`, and §20.1
-/// keeps HTTP's semantics for them: "Media ranges can be overridden by more
-/// specific media ranges or specific media types. If more than one media
-/// range applies to a given type, the most specific reference has
-/// precedence" (RFC 2616 §14.1), whose own example ranks `text/html;level=1`
-/// above `text/html`. So a range is as specific as its type and subtype
-/// say, and then more so for each media-type parameter it names. SDP is
-/// taken when the most specific of those present does not carry a `q` of
-/// zero, which is how those rules say "not this".
+/// §20.1: absent means `application/sdp`, empty means nothing. The most
+/// specific covering range decides (RFC 2616 §14.1): type and subtype first,
+/// then the number of media-type parameters. SDP is refused when that range
+/// has `q=0`.
 ///
-/// A parameter on `application/sdp` is read as naming the SDP this agent
-/// writes: RFC 4566 §8.1 registers the type with no parameters at all, so
-/// none can single out a description this one is not, and §20.1's own
-/// example, `application/sdp;level=1`, is a peer asking for SDP.
+/// Any parameter on `application/sdp` still means our SDP: RFC 4566 §8.1
+/// defines none.
 fn takes_sdp(request: &RawMessage<'_>) -> bool {
     if request.header_count(HeaderName::Accept) == 0 {
         return true;
@@ -427,9 +314,7 @@ fn takes_sdp(request: &RawMessage<'_>) -> bool {
         } else {
             continue;
         };
-        // `accept-params = ";" "q" "=" qvalue *( accept-extension )`: what
-        // comes before the `q` belongs to the media type, and what comes
-        // after it says nothing about which type this is
+        // parameters after `q` are accept-extensions, not the media type's
         let mut parameters = 0_usize;
         let mut taken = true;
         for (name, value) in kind.params() {
@@ -449,9 +334,8 @@ fn takes_sdp(request: &RawMessage<'_>) -> bool {
     deciding.is_some_and(|(_, taken)| taken)
 }
 
-/// How specific a media range is, compared field by field in this order:
-/// `application/sdp` over `application/*` over `*/*`, and then a range that
-/// names more media-type parameters over one that names fewer.
+/// Ordered by tier, `application/sdp` over `application/*` over `*/*`, then
+/// by parameter count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Specificity {
     tier: u8,
@@ -551,12 +435,7 @@ Contact: <sip:bob@192.0.2.9>\r\n\
 
     #[test]
     fn the_most_specific_range_in_an_accept_decides() {
-        // §20.1 keeps the semantics of HTTP's Accept, and RFC 2616 §14.1 has
-        // "Media ranges can be overridden by more specific media ranges or
-        // specific media types. If more than one media range applies to a
-        // given type, the most specific reference has precedence." A wider
-        // range that takes everything does not take back what a narrower one
-        // ruled out, and the other way round
+        // RFC 2616 §14.1: the narrower range wins either way
         for refused in [
             "Accept: application/sdp;q=0, */*\r\n",
             "Accept: */*\r\nAccept: application/sdp;q=0\r\n",
@@ -577,10 +456,7 @@ Contact: <sip:bob@192.0.2.9>\r\n\
 
     #[test]
     fn a_media_type_parameter_makes_a_range_more_specific() {
-        // RFC 2616 §14.1, which §20.1 keeps: "text/html;level=1" takes
-        // precedence over "text/html". So `application/sdp;level=1;q=0` is
-        // the more specific word on SDP than a bare `application/sdp`, and
-        // the other way round
+        // RFC 2616 §14.1: "text/html;level=1" outranks "text/html"
         for refused in [
             "Accept: application/sdp;level=1;q=0, application/sdp\r\n",
             "Accept: application/sdp\r\nAccept: application/sdp;level=1;q=0\r\n",
@@ -596,8 +472,7 @@ Contact: <sip:bob@192.0.2.9>\r\n\
             "Accept: application/sdp;level=1, application/x-private, text/html\r\n",
             // what follows the q is an accept-extension, not the type's
             "Accept: application/sdp;q=0;ext=1;more=2, application/sdp;level=1\r\n",
-            // however many parameters a wider range names, a narrower type
-            // outranks it
+            // a narrower type outranks any number of parameters
             "Accept: application/*;a=1;b=2;q=0, application/sdp\r\n",
         ] {
             assert!(accepts_sdp(taken), "{taken}");
@@ -630,8 +505,7 @@ Contact: <sip:bob@192.0.2.9>\r\n\
             ),
             None
         );
-        // a body its sender said may be ignored is ignored rather than
-        // refused (§8.2.3, §20.11), and one it said is required is not
+        // §8.2.3, §20.11: an optional body is ignored, a required one is not
         assert_eq!(
             refused_with(
                 "Content-Type: application/unknownformat\r\n\

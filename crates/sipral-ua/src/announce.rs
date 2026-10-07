@@ -3,45 +3,22 @@
 
 //! A call that was announced before it arrived.
 //!
-//! On a phone the order of events is inverted. A push notification wakes the
-//! process and the platform gives it one run loop to raise the system call
-//! screen — no delay, no exceptions, and an application that misses the
-//! deadline stops being woken at all. So the user is looking at a ringing call
-//! before there is a transport, before the registration has been refreshed, and
-//! long before an INVITE exists. Everything here follows from that one
-//! sentence.
+//! On a phone, a push wakes the process and the platform demands the call
+//! screen at once, so the user sees a ringing call before there is a
+//! transport, a fresh registration or an INVITE. This module refreshes the
+//! binding at once, recognises the INVITE as the announced call, and reports
+//! when nothing came.
 //!
-//! What the application can say at that moment is all it knows: a call is
-//! expected on this account, from this caller, announced now. What this module
-//! owes it back is three things — the binding refreshed at once so the network
-//! will deliver the INVITE, the INVITE recognised as the one that was
-//! announced, and a plain statement when nothing ever came.
+//! **Matching.** A push carries no `Call-ID` (RFC 8599 §13, §5.6.2), so the
+//! match is the account plus the user and host of the `From` URI. Nothing
+//! else: proxies rewrite parameters and display names, and a missed match
+//! means a second call screen for a call the user already sees.
 //!
-//! **The matching rule, and why it is this one.** RFC 8599 gives a push no
-//! payload to carry: §13 says the mechanism "does not require a proxy to
-//! insert any payload", and §5.6.2 has the proxy hold the SIP request in a
-//! bucket and forward it only after the REGISTER it triggered has been
-//! answered. There is no `Call-ID` in a push, and there is no way to put one
-//! there. What is left is the account and the caller, so that is what is
-//! matched: the account, and the user and host of the `From` URI.
+//! Time is only a tie-break. Different callers are matched by caller, not
+//! arrival order. For the same caller on the same account the oldest goes
+//! first; nothing tells them apart and both sides keep the proxy's order.
 //!
-//! Nothing else about the URI is compared. A proxy rewrites the parameters and
-//! the display name on the way through, and requiring §19.1.4 equivalence
-//! would fail to match almost every real call — which sounds like the safe
-//! direction and is not, because the failure mode is a second call screen for
-//! a call the user is already looking at.
-//!
-//! Time is only a tie-break. Two announcements outstanding for two different
-//! callers are told apart by who is calling, whichever arrived first; matching
-//! first-come would show the user the wrong name half the time. Two
-//! announcements that name the *same* caller on the *same* account are
-//! genuinely indistinguishable, and there the oldest is taken first — not
-//! because it is more likely to be right, but because when nothing
-//! distinguishes them there is no wrong answer about who is calling, and the
-//! pushes and the INVITEs are both in the order the proxy made them.
-//!
-//! An announcement is used once and then gone. Two calls from the same person
-//! in ten seconds need two pushes, which is what the proxy sends.
+//! An announcement is used once. Two calls need two pushes.
 
 use std::time::{Duration, Instant};
 
@@ -55,20 +32,11 @@ use crate::error::UaError;
 use crate::event::{RegistrationState, UaEvent};
 
 /// How long an announced call is waited for before it is called missing.
-///
-/// The far end's own INVITE transaction gives up after 64·T1, thirty-two
-/// seconds, so a window longer than that would be waiting for a caller who has
-/// already hung up. Twenty leaves room for the whole cold path — a name
-/// resolved, a connection built, a challenge answered, a REGISTER
-/// retransmitted on a radio that was idle — and still ends while somebody is
-/// looking at the screen rather than after they have given up on it.
+/// Under the caller's 64·T1 (32 s) INVITE timeout, with room for a cold
+/// start: DNS, connection, challenge, REGISTER retransmits.
 pub(crate) const WINDOW: Duration = Duration::from_secs(20);
 
-/// The name of one announcement inside one [`UserAgent`].
-///
-/// Minted by [`UserAgent::announce`] and never reused, so a handle to an
-/// announcement that has been fulfilled or has expired names nothing rather
-/// than naming the next one.
+/// One announcement. Never reused, so a stale handle names nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnnouncementId(pub(crate) u32);
 
@@ -82,7 +50,7 @@ pub struct Announcement {
 }
 
 impl Announcement {
-    /// Its name.
+    /// Its id.
     #[must_use]
     pub const fn id(&self) -> AnnouncementId {
         self.id
@@ -100,11 +68,7 @@ impl Announcement {
         &self.caller
     }
 
-    /// When the application said it had been announced.
-    ///
-    /// The instant the wake-up was handled, not the instant the push was sent:
-    /// the delay between those two is the notification service's and nothing
-    /// here can see it.
+    /// When the application handled the wake-up, not when the push was sent.
     #[must_use]
     pub const fn at(&self) -> Instant {
         self.at
@@ -118,18 +82,13 @@ pub enum Announced {
     /// [`UaEvent::CallAnnounced`] naming this announcement, immediately before
     /// the [`UaEvent::IncomingCall`] for the same call.
     Waiting(AnnouncementId),
-    /// The INVITE beat the push, and this is the call it announced.
-    ///
-    /// Nothing further is coming: the call screen the application has just
-    /// raised belongs to this handle, and no announcement was recorded.
+    /// The INVITE beat the push; the raised screen belongs to this call.
+    /// Nothing was recorded and no further event comes.
     Arrived(CallHandle),
 }
 
-/// An incoming call, as much of it as matching needs.
-///
-/// Kept beside the call rather than inside it, because none of this is
-/// anything the call itself does: it exists so that a push arriving a moment
-/// late can still find the INVITE that beat it.
+/// What matching needs of an incoming call, so a late push can still find
+/// the INVITE that beat it.
 #[derive(Clone, Debug)]
 pub(crate) struct Arrival {
     at: Instant,
@@ -141,26 +100,16 @@ pub(crate) struct Arrival {
 impl UserAgent {
     /// A call is expected on `account`, from `caller`, announced now.
     ///
-    /// Two things happen. The binding is refreshed at once, on whatever path
-    /// exists — RFC 8599 §4.1.3 makes that a MUST for a woken UA, and it is
-    /// also what tells the proxy holding the INVITE in its bucket (§5.6.2)
-    /// that this device is here. And the announcement is remembered, so that
-    /// the INVITE which follows is reported as the one that was expected
-    /// rather than as a second call.
+    /// The binding is refreshed at once (RFC 8599 §4.1.3), which also tells
+    /// the proxy holding the INVITE (§5.6.2) that this device is back; an
+    /// account without a registrar skips this. The announcement is kept so
+    /// the INVITE that follows is reported as this call, not a second one.
     ///
-    /// The caller is not optional and cannot be. An announcement with nobody
-    /// in it could only match whatever arrived next, and a wrong match puts
-    /// somebody else's name on the screen the user is already looking at.
+    /// The caller is required: without one any next call would match and
+    /// show the wrong name.
     ///
-    /// If the INVITE got here first — which happens, and RFC 8599 §4.1.3 says
-    /// so: "depending on which transport protocol is used, the SIP request
-    /// might reach the UA before the REGISTER response" — the answer is
-    /// [`Announced::Arrived`] with the call that is already ringing, and
-    /// nothing is recorded.
-    ///
-    /// An account with no registrar has no binding to refresh, so for one of
-    /// those only the second half happens: matching the INVITE that follows
-    /// is about the account and the caller, not about a binding.
+    /// If the INVITE already arrived (§4.1.3 allows it), the answer is
+    /// [`Announced::Arrived`] and nothing is recorded.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`].
@@ -186,10 +135,8 @@ impl UserAgent {
             self.announcements.push(announcement);
             Announced::Waiting(id)
         };
-        // §4.1.3 asks for the refresh whatever else happened, and a transport
-        // that is not up yet is the ordinary shape of a wake-up: the
-        // application is still opening a socket. The REGISTER is owed and goes
-        // the moment it hands one over, and the announcement stands either way
+        // no transport yet is normal on wake-up: the REGISTER is owed and
+        // goes when one is bound
         self.refresh_binding(account, now).ok();
         Ok(answer)
     }
@@ -197,27 +144,18 @@ impl UserAgent {
     /// Send a binding-refresh REGISTER now, without waiting for the scheduled
     /// one (RFC 8599 §4.1.3).
     ///
-    /// For a push that announces nothing — the periodic wake-up a proxy sends
-    /// to keep a suspended device's binding alive (§5.5). A push is evidence
-    /// that the path to the proxy is working, so a back-off earned by an
-    /// earlier outage is not what to wait for now and is dropped.
-    ///
-    /// Nothing is sent when a REGISTER is already in flight, which is already
-    /// the fastest path, or when the registration has failed in a way that
-    /// trying again cannot fix — repeating a password that was refused is how
-    /// an account gets locked out, and a push does not change that.
+    /// For a keep-alive push (§5.5). A push proves the path works, so any
+    /// back-off is dropped. Nothing is sent while a REGISTER is in flight or
+    /// after a permanent failure: retrying a refused password risks a
+    /// lockout.
     ///
     /// # Errors
     /// [`UaError::NoSuchAccount`]; [`UaError::NoRegistrar`] for an account
-    /// that never registers, which has no binding to refresh and is owed
-    /// nothing; or [`UaError::Send`] when there is no transport yet. The last
-    /// is not fatal: the refresh is remembered and sent when a transport is
-    /// bound.
+    /// that never registers; or [`UaError::Send`] with no transport yet, in
+    /// which case the refresh is sent when one is bound.
     pub fn refresh_binding(&mut self, account: AccountId, now: Instant) -> Result<(), UaError> {
         let config = self.accounts.get(&account).ok_or(UaError::NoSuchAccount)?;
-        // turned away before the refresh can be remembered as owed: one owed
-        // to an account with no registrar would be tried again, and refused
-        // again, on every transport the application ever binds
+        // before marking it owed, or it would be retried on every bind
         if config.registrar.is_none() {
             return Err(UaError::NoRegistrar);
         }
@@ -243,7 +181,7 @@ impl UserAgent {
         }
     }
 
-    /// What was announced and has not been answered by an INVITE yet.
+    /// An announcement still waiting for its INVITE.
     #[must_use]
     pub fn announcement(&self, id: AnnouncementId) -> Option<&Announcement> {
         self.announcements
@@ -251,10 +189,7 @@ impl UserAgent {
             .find(|announcement| announcement.id == id)
     }
 
-    /// Stop expecting a call: the user dismissed the screen, or the
-    /// application decided the wake-up was stale.
-    ///
-    /// `false` when it had already been fulfilled or had already expired.
+    /// Stop expecting a call. `false` if already fulfilled or expired.
     pub fn forget_announcement(&mut self, id: AnnouncementId) -> bool {
         let before = self.announcements.len();
         self.announcements
@@ -262,14 +197,9 @@ impl UserAgent {
         self.announcements.len() != before
     }
 
-    /// How long an announced call is waited for. Twenty seconds unless this
-    /// says otherwise: inside the 64·T1 the caller's own INVITE transaction
-    /// gives up after, and long enough for the whole cold path.
-    ///
-    /// Worth changing while a wake-up chain is being tuned, and worth changing
-    /// in only one direction afterwards: a long window keeps a call screen up
-    /// for a call that will never come, and a short one reports a call missing
-    /// that is still on its way.
+    /// How long an announced call is waited for; 20 s by default. Too long
+    /// keeps a screen up for a call that never comes; too short reports a
+    /// call missing that is still on its way.
     pub const fn expect_within(&mut self, window: Duration) {
         self.announce_window = window;
     }
@@ -285,11 +215,8 @@ impl UserAgent {
         }
     }
 
-    /// A call that is already ringing and that this announcement names.
-    ///
-    /// Only one that arrived inside the window and that no earlier
-    /// announcement has claimed. Oldest first, for the reason in the module
-    /// note.
+    /// An unclaimed call ringing within the window from this caller, oldest
+    /// first.
     fn ringing_already(
         &self,
         account: AccountId,
@@ -316,15 +243,9 @@ impl UserAgent {
         best.map(|(_, call)| call)
     }
 
-    /// Say that `call` is what `announcement` announced.
-    ///
-    /// The event goes in front of the [`UaEvent::IncomingCall`] for the same
-    /// call when that one has not been read yet, so an application walking the
-    /// queue in order knows the call belongs to a screen it has already raised
-    /// before it is told the call exists. When the application has already
-    /// read it — which is the only way the INVITE can have beaten the push —
-    /// the answer from [`UserAgent::announce`] is what told it, and repeating
-    /// the news afterwards would say nothing new.
+    /// Queue [`UaEvent::CallAnnounced`] just before the call's unread
+    /// [`UaEvent::IncomingCall`]. If that was already read,
+    /// [`UserAgent::announce`]'s answer said it, so nothing is queued.
     fn attach(&mut self, call: CallHandle, announcement: Announcement) {
         let at = self.events.iter().position(|event| {
             matches!(*event, UaEvent::IncomingCall { call: waiting, .. } if waiting == call)
@@ -336,17 +257,10 @@ impl UserAgent {
             .insert(at, UaEvent::CallAnnounced { call, announcement });
     }
 
-    /// Match every incoming call that has just been reported to whatever
-    /// announced it.
-    ///
-    /// This runs at the end of the drain rather than where the INVITE becomes
-    /// a call, because matching is not a property of the call: it is a
-    /// question about everything outstanding, and asking it once per drain is
-    /// the only place where the answer cannot depend on the order two INVITEs
-    /// happened to be parsed in.
+    /// Match newly reported incoming calls to announcements. Done once per
+    /// drain so the result does not depend on INVITE parse order.
     pub(crate) fn settle_announcements(&mut self, now: Instant) {
-        // an arrival is only ever needed while a push could still be late, and
-        // only while the call it is about exists
+        // keep arrivals only while a push could still be late
         let window = self.announce_window;
         self.arrivals
             .retain(|call, arrival| arrival.at + window >= now && self.calls.contains_key(call));
@@ -368,8 +282,7 @@ impl UserAgent {
             })
             .collect();
 
-        // back to front, so that inserting an event does not move the ones
-        // that have not been looked at yet
+        // back to front so insertions do not shift pending indices
         for (at, call, account, caller) in fresh.into_iter().rev() {
             let matched = account
                 .zip(caller.as_ref())
@@ -390,7 +303,6 @@ impl UserAgent {
         }
     }
 
-    /// Take the announcement an INVITE from `caller` on `account` fulfils.
     fn claim(&mut self, account: AccountId, caller: &Uri, now: Instant) -> Option<Announcement> {
         let window = self.announce_window;
         let mut best: Option<usize> = None;
@@ -413,7 +325,6 @@ impl UserAgent {
         best.map(|at| self.announcements.remove(at))
     }
 
-    /// The announcements whose window has run out.
     pub(crate) fn fire_announce_timers(&mut self, now: Instant) {
         let window = self.announce_window;
         let mut missed = Vec::new();
@@ -434,7 +345,6 @@ impl UserAgent {
             .retain(|call, arrival| arrival.at + window >= now && self.calls.contains_key(call));
     }
 
-    /// When the earliest outstanding announcement stops being one.
     pub(crate) fn announce_deadline(&self) -> Option<Instant> {
         self.announcements
             .iter()
@@ -442,17 +352,11 @@ impl UserAgent {
             .min()
     }
 
-    /// A transport has been bound: send whatever a push asked for and could
-    /// not have.
-    ///
-    /// This is the other half of the pre-warm. The stack cannot open a socket
-    /// — it has none of the platform's opinions about which interface, which
-    /// certificate or which of them survived the sleep — so the fastest it can
-    /// be is to have the REGISTER ready and send it in the same call in which
-    /// the application hands it a transport.
+    /// A transport was bound: send what waited for one. The stack cannot
+    /// open sockets, so the fastest it can be is to send the owed REGISTER
+    /// in the same call.
     pub(crate) fn on_transport_bound(&mut self, transport: TransportId, now: Instant) {
-        // an account waiting for a connection of its own takes this one when
-        // it reaches the account's server (`crate::flow`)
+        // an account waiting for its own connection may take this one
         self.adopt_flows(now);
         let owed: Vec<AccountId> = self
             .accounts
@@ -466,21 +370,14 @@ impl UserAgent {
         for account in owed {
             self.refresh_binding(account, now).ok();
         }
-        // And the retries RFC 3261 §18.1.1 would not let out over a datagram.
-        // This runs before the drain that follows it, which is what keeps a
-        // parked retry from being settled as a refusal in the same round: by
-        // the time the settle passes look, the answer is already in flight.
-        //
-        // None of them filters on `transport`. At the moment a retry parks
-        // there is no bound stream — that is why it parked — so which one
-        // will carry it is not known until one exists. Anything the endpoint
-        // still will not send simply parks again.
+        // RFC 3261 §18.1.1 retries, before the drain so they are not settled
+        // as refusals this round. Not filtered on `transport`: when a retry
+        // parks no stream exists yet; one that still cannot go parks again.
         self.resume_what_waited_for_a_stream(now);
     }
 
-    /// Send again everything §18.1.1 held back for want of a stream: what
-    /// answered a challenge, then what this layer sends inside a dialog by
-    /// itself, last because hanging a call up drains on its way out.
+    /// Resend what §18.1.1 held for a stream: challenge answers first, then
+    /// this layer's own in-dialog sends last, since a hangup drains.
     pub(crate) fn resume_what_waited_for_a_stream(&mut self, now: Instant) {
         self.resume_parked_registrations(now);
         self.resume_parked_calls(now);
@@ -493,8 +390,6 @@ impl UserAgent {
     }
 }
 
-/// The `From` URI of an INVITE, which is the only identity a push can be
-/// matched against.
 fn caller_of(request: &OwnedMessage) -> Option<Uri> {
     let raw = request.as_raw();
     let from = raw.from().ok()?;
@@ -503,21 +398,10 @@ fn caller_of(request: &OwnedMessage) -> Option<Uri> {
 
 /// Whether a push and an INVITE name the same caller.
 ///
-/// User and host, and deliberately nothing else. §19.1.4's full equivalence is
-/// wrong here in both directions: it insists that a parameter present in one
-/// URI be present in the other, which a proxy breaks on the way through, and
-/// it says nothing about the display name, which is the part a push payload
-/// usually carries instead of a URI. The user part is compared unescaped and
-/// case-sensitively, as §19.1.4 requires; the host without regard to case, as
-/// §19.1.4 also requires. `sip:` and `sips:` are not told apart either,
-/// although §19.1.4 says they are never equivalent: whether the leg that
-/// reached us was encrypted says nothing about who is on it, and refusing the
-/// match would put a second screen in front of the user rather than a wrong
-/// name.
-///
-/// A URI of any other scheme falls back to whole-URI equivalence, because
-/// there is no user and host to take apart and guessing at one would be the
-/// wrong-caller failure again.
+/// User and host only, not §19.1.4 equivalence: proxies change parameters.
+/// User unescaped and case-sensitive, host case-insensitive (§19.1.4).
+/// `sip:` and `sips:` match each other: encryption on the last leg says
+/// nothing about who is calling. Other schemes use whole-URI equivalence.
 fn same_caller(announced: &Uri, invited: &Uri) -> bool {
     match (announced.as_uri_ref(), invited.as_uri_ref()) {
         (UriRef::Sip(a), UriRef::Sip(b)) => {
@@ -588,8 +472,7 @@ mod tests {
         )
     }
 
-    /// The same address of record with no registrar, whose requests go to a
-    /// proxy.
+    /// The same AOR with no registrar.
     fn trunk() -> Account {
         Account::unregistered(
             uri("sip:alice@example.com"),
@@ -599,8 +482,7 @@ mod tests {
         )
     }
 
-    /// A user agent with nothing bound yet, which is what a phone woken by a
-    /// push actually has.
+    /// Nothing bound yet, as on a phone woken by a push.
     fn asleep(seed: u8) -> UserAgent {
         UserAgent::new(EndpointConfig::default(), [seed; 32]).unwrap()
     }
@@ -695,8 +577,7 @@ mod tests {
             .expect("a well formed datagram");
     }
 
-    /// An INVITE from `from`, which is the identity a push has to be matched
-    /// against.
+    /// An INVITE from `from`.
     fn invite_from(from: &str, branch: &str) -> Vec<u8> {
         format!(
             "INVITE sip:alice@192.0.2.1 SIP/2.0\r\n\
@@ -712,8 +593,7 @@ Content-Length: 0\r\n\r\n"
         .into_bytes()
     }
 
-    /// An agent with a live binding, and everything it said on the way there
-    /// drained.
+    /// Registered, with its output drained.
     fn registered(now: Instant) -> (UserAgent, AccountId) {
         let mut agent = awake(now);
         let id = agent.add_account(account());
@@ -855,9 +735,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn a_call_the_far_end_gave_up_on_before_the_wake_up_matches_nothing_afterwards() {
-        // the first race: the caller hung up while the phone was still waking,
-        // so the announcement is fulfilled by nothing. The INVITE that arrives
-        // later is a different call and must not inherit the dead screen
+        // the caller hung up during wake-up: a later INVITE is another call
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         agent
@@ -888,10 +766,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn an_announcement_past_its_window_is_not_claimed_by_an_invite_that_woke_us_first() {
-        // the same race, on the path where nothing has expired anything yet:
-        // a datagram can arrive before the timeout the agent asked for, so the
-        // window has to be checked where the match is made and not only where
-        // the sweep runs
+        // before the sweep ran: the window is checked at match time too
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let stale = waiting(
@@ -919,9 +794,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn two_calls_in_quick_succession_each_find_the_announcement_that_named_them() {
-        // the second race, and the reason matching is not first-come: Carol's
-        // INVITE arrives first and must take Carol's announcement even though
-        // Bob's was made earlier
+        // Carol's INVITE takes Carol's announcement although Bob's is older
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         let bob = waiting(
@@ -992,8 +865,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn an_invite_that_beats_its_push_is_attached_rather_than_counted_twice() {
-        // the third race. The application wakes, raises a screen and tells the
-        // stack about it, and the stack already has the call
+        // the INVITE is already here when the push is handled
         let t0 = Instant::now();
         let (mut agent, id) = registered(t0);
         deliver(&mut agent, &invite_from("sip:bob@example.com", "b1"), t0);
@@ -1071,9 +943,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn a_wake_up_with_no_transport_yet_registers_the_moment_one_arrives() {
-        // what C1 says actually happens: the screen is up before the network
-        // session exists, so the pre-warm has nowhere to go and must not be
-        // lost
+        // no transport yet: the refresh must wait, not be lost
         let t0 = Instant::now();
         let mut agent = asleep(23);
         let id = agent.add_account(account());
@@ -1243,9 +1113,7 @@ Content-Length: 0\r\n\r\n"
         let echo = agent.push_echo(id).expect("an account that asked");
         assert!(echo.accepted());
         assert_eq!(echo.refresh_lead(), Some(Duration::from_secs(121)));
-        // 0.85 of four hundred seconds is three hundred and forty, which is
-        // inside the lead the network demanded; the refresh moves back to meet
-        // it
+        // 0.85 * 400 s = 340 s is inside the requested lead, so it moves back
         agent.handle_timeout(t0 + Duration::from_secs(278));
         assert!(transmits(&mut agent).is_empty());
         agent.handle_timeout(t0 + Duration::from_secs(279));
@@ -1532,8 +1400,7 @@ Content-Length: 0\r\n\r\n"
             &uri("sip:bob@example.com"),
             &uri("sip:bob@example.com;user=phone;transport=tcp")
         ));
-        // the host without regard to case, §19.1.4. On a URI with no user
-        // part, so that nothing in this file reads as an address to harvest
+        // host case-insensitive (§19.1.4); no user part, nothing to harvest
         assert!(same_caller(
             &uri("sip:example.com"),
             &uri("sip:EXAMPLE.COM")

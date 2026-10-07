@@ -4,13 +4,7 @@
 //! What this end's own verification service concluded about who is calling
 //! (RFC 8224 §6.2), and what an account asks of it.
 //!
-//! The types are here in every build, so that what a call carries has the
-//! same shape whether or not this build can verify anything; the service
-//! that fills them in is `crate::stir`, behind the `stir` feature.
-//! [`CallerIdentity::verification`](crate::CallerIdentity::verification) is
-//! where a call carries its verdict, and
-//! [`UaEvent::CallerVerified`](crate::UaEvent::CallerVerified) is where it is
-//! announced.
+//! The types exist in every build; `crate::stir` (feature `stir`) fills them in.
 
 use std::fmt;
 
@@ -19,28 +13,22 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StirVerification {
-    /// Verify nothing. The calls arrive as they would with no verification
-    /// service at all.
+    /// Verify nothing.
     Off,
-    /// Verify, and report: the verdict rides on the call and every call is
-    /// delivered, whatever it says. What deciding to show a warning, or a
-    /// badge, or to send a call to voicemail needs, and nothing more.
+    /// Verify and report: the verdict rides on the call, every call is
+    /// delivered.
     ///
-    /// The default, and only in force once the agent has trust anchors to
-    /// verify against ([`UserAgent::set_stir`](crate::UserAgent::set_stir)):
-    /// without any, nothing is fetched and nothing is verified, because
-    /// every verdict would be the same failure.
+    /// The default. Only in force once the agent has trust anchors
+    /// ([`UserAgent::set_stir`](crate::UserAgent::set_stir)); without them
+    /// nothing is fetched, since every verdict would be the same failure.
     #[default]
     Report,
-    /// Verify, and refuse a call that does not verify with the response RFC
-    /// 8224 §6.2.2 prescribes for why: 428 for none (or only unsupported
-    /// ones, "Use Supported PASSporT Format"), 436 for a certificate that
-    /// cannot be had, 437 for one this end does not trust, 438 for a
-    /// signature that does not hold, 403 "Stale Date" for one too old.
+    /// Verify and refuse a call that fails, with the RFC 8224 §6.2.2
+    /// response: 428 for none or only unsupported ones, 436 for a
+    /// certificate that cannot be had, 437 for an untrusted one, 438 for a
+    /// bad signature, 403 "Stale Date" for one too old.
     ///
-    /// In force whether or not the agent has trust anchors: an account that
-    /// asked to refuse what does not verify refuses it, and with no anchors
-    /// nothing verifies.
+    /// In force even without trust anchors, so then every call is refused.
     Strict,
 }
 
@@ -167,11 +155,11 @@ pub struct CallerVerification {
     /// Where the certificate came from: the `info` of the header field that
     /// was verified.
     pub certificate_url: Option<Box<str>>,
-    /// The response RFC 8224 §6.2.2 prescribes for this failure, status and
-    /// reason phrase, whether or not it was sent. `None` for a valid one.
+    /// The RFC 8224 §6.2.2 response for this failure, sent or not. `None`
+    /// for a valid one.
     pub response: Option<(u16, Box<str>)>,
-    /// Whether the call was refused with that response, which only an
-    /// account set to [`StirVerification::Strict`] does.
+    /// Whether the call was refused with it ([`StirVerification::Strict`]
+    /// only).
     pub refused: bool,
 }
 

@@ -3,39 +3,27 @@
 
 //! Who is calling, as far as the network will say, and how far to believe it.
 //!
-//! `From` is what the caller wrote about itself. What the network knows is in
-//! other fields, and a phone wants those: `P-Asserted-Identity` is the
-//! identity a trusted proxy authenticated (RFC 3325 §9.1), `Remote-Party-ID`
-//! the draft it replaced and many switches still send
-//! (draft-ietf-sip-privacy-04), `verstat` the verdict a terminating network
-//! reached on the caller's telephone number (3GPP TS 24.229 §7.2A.20, the
-//! mark STIR/SHAKEN puts on a call), `Diversion` (RFC 5806) and
-//! `History-Info` (RFC 7044) the numbers a call was forwarded from, and
-//! `Privacy` (RFC 3323 §4.2) what the caller asked to be kept from whom.
+//! `From` is what the caller wrote about itself. The network's view is in
+//! `P-Asserted-Identity` (RFC 3325 §9.1), `Remote-Party-ID`
+//! (draft-ietf-sip-privacy-04), `verstat` (3GPP TS 24.229 §7.2A.20),
+//! `Diversion` (RFC 5806), `History-Info` (RFC 7044) and `Privacy`
+//! (RFC 3323 §4.2).
 //!
 //! # The trust gate
 //!
-//! RFC 3325 §8: "if a User Agent Server receives a message from a previous
-//! element that it does not trust, it MUST NOT use the P-Asserted-Identity
-//! header field in any way." Anybody can write the field; what makes it worth
-//! reading is that the element that sent it is inside the trust domain. So an
-//! account names the peers it trusts ([`Account::trust`]), by the address the
-//! request arrives from, and an INVITE from anywhere else is read with the
-//! asserted identity, the `Remote-Party-ID` and the `verstat` left out:
-//! [`CallerIdentity::trusted`] says which it was. `Diversion` and
-//! `History-Info` have no trust model of their own and are read either way.
+//! RFC 3325 §8: a UAS MUST NOT use `P-Asserted-Identity` from an element it
+//! does not trust. An account names its trusted peers by source address
+//! ([`Account::trust`]); from anywhere else the asserted identity,
+//! `Remote-Party-ID` and `verstat` are left out. `Diversion` and
+//! `History-Info` have no trust model and are read either way.
 //!
 //! # Outgoing anonymity
 //!
-//! [`Account::privacy`] asks for RFC 3323's user-provided privacy on every
-//! call the account places: `From` becomes `"Anonymous"
-//! <sip:anonymous@anonymous.invalid>` (§4.1.1.3), `Privacy` carries what was
-//! asked for, and the account's own identity goes in `P-Asserted-Identity`
-//! only toward a trusted peer — which is the one that can still bill the call
-//! and must strip the field on the way out (RFC 3325 §7). Toward any other
-//! peer a `P-Asserted-Identity` or `P-Preferred-Identity` the application
-//! wrote itself is left off too: §6 has a UA send one "only ... to proxy
-//! servers in a Trust Domain".
+//! [`Account::privacy`] makes `From` anonymous (RFC 3323 §4.1.1.3) and fills
+//! `Privacy`. The account's identity goes in `P-Asserted-Identity` only toward
+//! a trusted peer, which can still bill the call and strips it (RFC 3325 §7).
+//! Toward any other peer, an application-written `P-Asserted-Identity` or
+//! `P-Preferred-Identity` is dropped too (§6).
 //!
 //! [`Account::trust`]: crate::Account::trust
 //! [`Account::privacy`]: crate::Account::privacy
@@ -80,10 +68,7 @@ impl Party {
 }
 
 /// What a `Privacy` field asked for (RFC 3323 §4.2, and RFC 3325 §9.3's
-/// `id`). All false is no privacy asked for.
-///
-/// One flag per `priv-value`, because that is what the field is: a set of
-/// independent tokens, any of which may be present with any other.
+/// `id`), one flag per `priv-value`. All false is no privacy asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Privacy {
@@ -124,9 +109,8 @@ impl Privacy {
         self.header || self.session || self.user || self.id || self.critical
     }
 
-    /// Every `Privacy` field of a message, read together. Values are
-    /// separated by `;` (§4.2); a `,` is read the same, since some senders
-    /// write one, and a value this build has no word for is ignored.
+    /// Every `Privacy` field of a message, read together. `,` is accepted
+    /// like `;` since some senders write it; unknown values are ignored.
     #[must_use]
     pub fn of_message(message: &RawMessage<'_>) -> Self {
         let mut out = Self::default();
@@ -240,8 +224,7 @@ pub struct Diversion {
 /// on its way here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HistoryEntry {
-    /// The target, its URI as written — escaped headers such as `?Reason=`
-    /// included.
+    /// The target, URI as written, escaped headers included.
     pub party: Party,
     /// `index`: where the entry sits in the tree of retargetings, `1.1.2`.
     pub index: Box<str>,
@@ -306,10 +289,8 @@ pub struct CallerIdentity {
     /// This end's own verdict on the caller (RFC 8224 §6.2), for an account
     /// whose verification is in force
     /// ([`Account::stir_verification`](crate::Account::stir_verification)).
-    /// `None` when nothing was verified. Unlike `verstat`, which is what a
-    /// network before this end concluded, this is what this end checked
-    /// itself, and it is not behind the trust gate: a signature is its own
-    /// proof.
+    /// `None` when nothing was verified. Not behind the trust gate: a
+    /// signature is its own proof.
     pub verification: Option<crate::CallerVerification>,
 }
 

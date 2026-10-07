@@ -3,29 +3,18 @@
 
 //! Never handing a far end an address it cannot reach.
 //!
-//! An application that binds its sockets to `127.0.0.1` — every binding's
-//! default, and the easiest thing to leave unchanged — writes that address in
-//! the `Contact` it registers and in the `c=` line of every call. A registrar
-//! on another machine accepts the binding, a PBX answers the call, and then
-//! every request meant for this end and every packet of audio goes to the
-//! far end's own loopback interface: a phone that registers, rings nobody and
-//! hears nothing, and no error anywhere to say why.
+//! A socket bound to `127.0.0.1` would put loopback in `Contact` and `c=`:
+//! the remote registrar accepts it, and then no request or audio ever
+//! arrives, with no error.
 //!
-//! So the address this end advertises is checked against the peer it is
-//! advertised to, where the two meet: a REGISTER's `Contact` against the
-//! registrar's address, a call's `Contact` and session description against
-//! the address the call is placed to or came from. A loopback address (RFC
-//! 1122 §3.2.1.3's `127/8`, RFC 4291 §2.5.3's `::1`) handed to a peer that is
-//! not itself a loopback address is refused with
-//! [`UaError::UnreachableAddress`], before anything is sent; so is the
-//! unspecified address in a `Contact`, which reaches nobody. Two processes on
-//! one machine talking over loopback are unaffected, and so is a
-//! `c=0.0.0.0`, which RFC 2543 used to mean "on hold" and some peers still
-//! send.
+//! A loopback address (RFC 1122 §3.2.1.3 `127/8`, RFC 4291 §2.5.3 `::1`)
+//! advertised to a non-loopback peer is refused with
+//! [`UaError::UnreachableAddress`] before anything is sent; so is an
+//! unspecified address in a `Contact`. Loopback-to-loopback is fine, and so is
+//! `c=0.0.0.0` (the RFC 2543 hold).
 //!
-//! What the application should advertise instead is the address of the
-//! interface its traffic leaves on toward the peer — `sipral::route_to`
-//! finds it without sending anything — or the public address STUN found.
+//! Advertise the interface toward the peer instead (`sipral::route_to`), or
+//! the public address STUN found.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -35,9 +24,7 @@ use sipral_core::sdp::SessionDescription;
 use crate::error::UaError;
 
 /// Whether `advertised` reaches this end from `peer`: not when it is loopback
-/// and the peer is not. An IPv4-mapped IPv6 address (`::ffff:127.0.0.1`, how
-/// a dual-stack socket writes an IPv4 one) is read as the IPv4 address it
-/// carries, on either side.
+/// and the peer is not. IPv4-mapped IPv6 is read as IPv4 on either side.
 fn loopback_to_elsewhere(advertised: IpAddr, peer: IpAddr) -> bool {
     advertised.to_canonical().is_loopback() && !peer.to_canonical().is_loopback()
 }
@@ -88,9 +75,8 @@ pub(crate) fn check_contact_value(value: &[u8], peer: SocketAddr) -> Result<(), 
     }
 }
 
-/// Refuse a session description whose connection address `peer` would send
-/// its media to and never reach this end: a loopback address at session
-/// level or on any stream.
+/// Refuse a session description with a loopback connection address, at
+/// session level or on any stream, that `peer` could not reach.
 ///
 /// # Errors
 /// [`UaError::UnreachableAddress`].
@@ -172,8 +158,7 @@ mod tests {
         assert!(check_description(&described("192.0.2.1"), pbx).is_ok());
     }
 
-    /// An IPv4-mapped IPv6 address is the IPv4 address as a dual-stack socket
-    /// writes it: `::ffff:127.0.0.1` is loopback, on either side.
+    /// `::ffff:127.0.0.1` is loopback, on either side.
     #[test]
     fn an_ipv4_mapped_loopback_is_loopback_on_either_side() {
         let pbx = at("192.0.2.9:5060");
@@ -190,8 +175,6 @@ mod tests {
         assert!(check_description(&described("127.0.0.1"), at("[::ffff:127.0.0.1]:5060")).is_ok());
         assert!(check_contact(&uri("sip:alice@[::ffff:192.0.2.1]"), pbx).is_ok());
     }
-
-    // -- where the user agent writes the address ------------------------------
 
     use crate::event::{RegistrationFailure, UaEvent};
     use crate::tests::{
@@ -216,8 +199,6 @@ t=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 
     #[test]
     fn a_register_with_a_loopback_contact_to_a_registrar_elsewhere_is_refused_unsent() {
-        // the trial: an application that never set bindHost registered
-        // 127.0.0.1, the PBX took it, and every call in went nowhere
         let t0 = Instant::now();
         let mut agent = agent(t0);
         let id = agent.add_account(on_loopback());

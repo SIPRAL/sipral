@@ -5,20 +5,14 @@
 //! without calling anybody: an `OPTIONS` (RFC 3261 §11) on the account's own
 //! transport, timed.
 //!
-//! §11 describes `OPTIONS` as the way to query a server's capabilities "without
-//! ringing" anyone, and any final response proves the same thing a network
-//! test wants proved: a request left on the transport the account uses, the
-//! server read it, and its answer found the way back. The status says nothing
-//! more and is reported as it came. A 401 or 407 is a server that is there and
-//! wants credentials, and it is not answered: a probe that spent a challenge
-//! would be counted against the account by a server that locks accounts after
-//! a number of failures, and would prove nothing the challenge itself did not.
+//! Any final response proves the path works and is reported as it came. A
+//! 401 or 407 is not answered: spending a challenge could count against the
+//! account on a server that locks accounts after failures.
 //!
-//! The request goes to the registrar's URI, or, for an account that never
-//! registers, to its address of record, which is what the outbound proxy
-//! routes for it. Both leave by the account's destination
-//! ([`Account::destination`](crate::Account)), so the probe takes exactly the
-//! path a `REGISTER` or an `INVITE` would.
+//! The request goes to the registrar's URI, or the address of record for an
+//! unregistered account, via the account's destination
+//! ([`Account::destination`](crate::Account)): the same path as a REGISTER or
+//! an INVITE.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -33,18 +27,15 @@ use crate::agent::UserAgent;
 use crate::error::UaError;
 use crate::event::UaEvent;
 
-/// One probe of an account's server, named before the request reaches a
-/// transport so that one that never leaves still has a name to be reported
-/// under.
+/// One probe of an account's server, named before the request is sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProbeHandle(pub(crate) u32);
 
 /// What became of a probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// The server answered with a final `status` after `round_trip`, the time
-    /// from the request being handed to the transport to its answer arriving.
-    /// Retransmissions over a datagram transport are inside it.
+    /// The server answered with a final `status` after `round_trip`
+    /// (retransmissions included).
     Answered {
         /// The final status, whatever it was.
         status: StatusCode,

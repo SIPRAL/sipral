@@ -4,46 +4,25 @@
 //! Changing a session that is already running: hold, resume, and whatever
 //! either end offers afterwards.
 //!
-//! **Which request carries it.** A confirmed dialog uses a re-INVITE, because
-//! RFC 3311 §5.1 says so in as many words — "although UPDATE can be used on
-//! confirmed dialogs, it is RECOMMENDED that a re-INVITE be used instead" —
-//! and the reason it gives is that an UPDATE has to be answered at once, which
-//! rules out asking a person first. Before the call is answered there is no
-//! choice in the other direction: §14.1 forbids a second INVITE while the
-//! first is running, so an early session changes by UPDATE, and only when the
-//! far end listed UPDATE in an `Allow` (RFC 3311 §4).
+//! A confirmed dialog changes by re-INVITE (RFC 3311 §5.1); an early one by
+//! UPDATE, only if the far end allows it (RFC 3311 §4), since a second INVITE
+//! cannot run beside the first (RFC 3261 §14.1).
 //!
-//! **What this layer answers by itself.** An offer that keeps the streams and
-//! the formats that were negotiated is a hold, a resume, or a peer moving its
-//! media address, and answering it needs nothing this layer does not have: the
-//! answer is this end's own ports and formats, with the direction RFC 3264
-//! §6.1 leaves. An offer that changes the codecs, adds a stream or drops one
-//! needs a device, so it goes to the application whole — with the transaction
-//! kept open, because a re-INVITE nobody answers is retransmitted and then
-//! ends the call.
+//! An offer that keeps the negotiated streams and formats (hold, resume, a
+//! moved address) is answered here. Anything else goes to the application
+//! with the transaction kept open, since an unanswered re-INVITE ends the
+//! call.
 //!
-//! **Glare.** Both ends pressing hold in the same instant is the ordinary way
-//! two offers cross. The refusal is a 491, the wait is drawn from two ranges
-//! that do not overlap, and the change is offered once more — §14.1 says "once
-//! more", not "until it works". The far end's own retry lands in that wait and
-//! is answered; the change offered once more is then written against the
-//! session it left.
+//! Glare: 491, a wait from non-overlapping ranges, and one retry (§14.1),
+//! rewritten against the session the far end's change left.
 //!
-//! **One change at a time.** §14.1 forbids a new INVITE "while another INVITE
-//! transaction is in progress in either direction", and RFC 3264 §4 a new
-//! offer before the last one is answered. A hold or a resume asked for in
-//! that window waits and goes when the running change is over — it is a
-//! state, derivable at any moment, so the latest one asked for is the one
-//! that goes. A description the application wrote is refused instead: it
-//! was written against a session the running change is about to move.
+//! One change at a time (§14.1, RFC 3264 §4). A hold or resume asked
+//! meanwhile waits, and only the latest goes. An application-written
+//! description is refused instead, as it targets a session about to move.
 //!
-//! One judgement call, and it is RFC 3311 §5.2's: an UPDATE "MUST be responded
-//! to promptly", and a UAS that "cannot change the session parameters without
-//! prompting the user ... SHOULD reject the request with a 504". An
-//! application here is not a person being prompted — a voice agent answers in
-//! microseconds — so an UPDATE this layer cannot answer is still handed over
-//! rather than refused on its behalf. An application that does ask a person
-//! should answer 504 itself.
+//! An UPDATE we cannot answer is still handed over, not refused 504
+//! (RFC 3311 §5.2): an application answers quickly. One that prompts a
+//! person should answer 504 itself.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,91 +45,64 @@ use crate::session::Hold;
 
 /// An offer refused with a challenge, kept until the drain round ends.
 ///
-/// The core reports the refusal before it reports the challenge, so acting on
-/// the refusal at once would tear down the offer the retry needs. This is that
-/// refusal, held back; `settle_offer_challenges` delivers it if no retry took
-/// its place.
+/// The core reports the refusal before the challenge, so acting at once would
+/// tear down the offer the retry needs; `settle_offer_challenges` delivers it
+/// if no retry replaced it.
 #[derive(Debug)]
 pub(crate) struct ParkedOffer {
     pub(crate) call: CallHandle,
     pub(crate) status: Option<StatusCode>,
     pub(crate) response: Option<OwnedMessage>,
-    /// The retry is built and the endpoint is holding it until there is a
-    /// connection to send it over (§18.1.1). Until then this is not a refusal
-    /// and `settle_offer_challenges` leaves it alone.
+    /// The retry waits for a connection (§18.1.1); not a refusal yet.
     pub(crate) waiting_for_stream: bool,
 }
 
-/// What an offer about to go asks for, besides the description it carries.
 #[derive(Clone, Copy, Debug)]
 struct Asked {
-    /// The hold it asks for.
     held: bool,
-    /// Whether it is the second attempt §14.1 allows after a 491.
+    /// The one retry §14.1 allows after a 491.
     retried: bool,
-    /// Who wrote the description.
     author: Author,
 }
 
-/// What this agent will answer, advertised so that the far end knows an UPDATE
-/// is worth sending (RFC 3311 §4).
-///
-/// It lists what is answered here and nothing more: MESSAGE outside a dialog
-/// and INFO inside one are handled too (RFC 3428, RFC 6086), so they are
-/// listed with the rest.
+/// Advertised so the far end knows UPDATE is usable (RFC 3311 §4).
 pub(crate) const ALLOW: &[u8] =
     b"INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, PRACK, REFER, NOTIFY, MESSAGE, INFO";
 
-/// §14.1 and RFC 3311 §5.3: the wait for the end that generated the `Call-ID`,
-/// in milliseconds.
+/// Glare wait in ms for the `Call-ID` owner (§14.1, RFC 3311 §5.3).
 const OWNER_BACKOFF: (u64, u64) = (2_100, 4_000);
-/// And for the end that did not.
 const GUEST_BACKOFF: (u64, u64) = (0, 2_000);
-/// Both are drawn "in units of 10 ms".
 const BACKOFF_STEP: u64 = 10;
-/// RFC 3311 §5.2 wants a `Retry-After` "between 0 and 10 seconds".
+/// `Retry-After` within 0-10 s (RFC 3311 §5.2).
 const RETRY_AFTER_CEILING: u32 = 11;
-/// §14.2 and RFC 3311 §5.2 both say a 488 "SHOULD include a Warning header
-/// field". 399 is §20.43's miscellaneous code, which is what this is.
+/// A 488 should carry a `Warning` (§14.2); 399 is miscellaneous (§20.43).
 pub(crate) const WHY_488: &[u8] = b"399 sipral \"the session description could not be read\"";
-
-// -- what the application asks for -------------------------------------------
 
 impl UserAgent {
     /// Put a call on hold (RFC 3264 §8.4).
     ///
-    /// The description is this layer's to write: the one already negotiated,
-    /// with every stream's direction changed to say this end will not receive,
-    /// and an `o=` version that has moved. Asking for a hold that is already
-    /// in place, or already on its way, sends nothing.
+    /// The description is written here from the negotiated one. A hold
+    /// already in place or on its way sends nothing.
     ///
-    /// Asked for while another session change is running in the call — one
-    /// of ours not yet answered, one of the far end's not yet answered here,
-    /// or an offer of ours whose answer the ACK has still to bring — it
-    /// waits, and goes once that change is over (RFC 3261 §14.1). What waits
-    /// is the state asked for last: a resume asked for behind a hold that is
-    /// still on its way goes after it, and a hold asked for again before
-    /// then takes that resume back. Either way the outcome is the
-    /// [`UaEvent::SessionChanged`] or [`UaEvent::SessionChangeFailed`] of the
-    /// request that carries it.
+    /// While another session change runs in the call, it waits and goes
+    /// after (RFC 3261 §14.1); only the last state asked for goes. The
+    /// outcome is the [`UaEvent::SessionChanged`] or
+    /// [`UaEvent::SessionChangeFailed`] of the request that carries it.
     ///
     /// # Errors
-    /// [`UaError::NoSuchCall`], [`UaError::NoSession`] when nothing has been
-    /// described yet, [`UaError::CannotRenegotiate`] when the call is not up
-    /// and the far end never advertised UPDATE, or [`UaError::Send`] — all
-    /// of them when the request would go at once. One that waits and then
-    /// cannot go is reported as [`UaEvent::SessionChangeFailed`] with no
-    /// status, and one still waiting when the call ends is never sent:
-    /// [`UaEvent::CallEnded`] is the last word on it.
+    /// When sent at once: [`UaError::NoSuchCall`], [`UaError::NoSession`]
+    /// when nothing is described yet, [`UaError::CannotRenegotiate`] when the
+    /// call is not up and the far end never allowed UPDATE, or
+    /// [`UaError::Send`]. A waiting one that cannot go is reported as
+    /// [`UaEvent::SessionChangeFailed`] with no status; one still waiting
+    /// when the call ends is dropped.
     pub fn hold(&mut self, call: CallHandle, now: Instant) -> Result<(), UaError> {
         self.change_hold(call, true, now)
     }
 
     /// Take it off hold again.
     ///
-    /// Every stream goes back to the direction it had before the hold, which
-    /// is not always `sendrecv`: a stream that was offered `recvonly` is
-    /// resumed to `recvonly`.
+    /// Each stream returns to its pre-hold direction, not always `sendrecv`.
     ///
     /// # Errors
     /// As [`UserAgent::hold`].
@@ -166,27 +118,16 @@ impl UserAgent {
 
     /// Offer a new session description inside a call.
     ///
-    /// For a media address that moved, or anything else the application
-    /// decides, sent as it is written — direction attributes included. Hold
-    /// and resume have their own calls because the description they need is
-    /// derivable and writing it out by hand is how the direction attributes
-    /// get wrong, and a change that is not about direction at all has
-    /// [`UserAgent::change_formats`].
+    /// Sent as written, directions included. Prefer [`UserAgent::hold`],
+    /// [`UserAgent::resume`] or [`UserAgent::change_formats`] where they fit.
     ///
-    /// Which way the call is held is read back out of what this sends rather
-    /// than kept from before it: a description that resumes a held call has
-    /// resumed it, and [`UserAgent::hold_state`] says so once it is agreed. A
-    /// flag kept from before would leave the next [`UserAgent::hold`] sending
-    /// nothing, because it would find the call already held.
+    /// The hold state is read back from what this sends, so
+    /// [`UserAgent::hold_state`] follows it once agreed.
     ///
-    /// Unlike a hold, this does not wait for a change already running. The
-    /// description was written against the session as it stands, which that
-    /// change is about to move, so sending it afterwards would offer
-    /// something nobody wrote; it is refused instead, and can be written
-    /// again once the running change is reported. For the same reason one
-    /// told to wait by a 491 is not offered again if the far end's own
-    /// change was answered in that wait: it is reported as
-    /// [`UaEvent::SessionChangeFailed`] with no status instead.
+    /// It does not wait behind a running change: it is refused, since it was
+    /// written against a session about to move. After a 491, if the far
+    /// end's change was answered during the wait, it is reported as
+    /// [`UaEvent::SessionChangeFailed`] with no status rather than resent.
     ///
     /// # Errors
     /// As [`UserAgent::hold`], plus [`UaError::ChangeInProgress`] when a
@@ -209,21 +150,12 @@ impl UserAgent {
         self.send_offer(call, description, asked, &fields, now)
     }
 
-    /// Offer a change to what a call's streams carry — the formats, chiefly
-    /// (RFC 3264 §8.3.2) — that is not a change to which way they flow.
+    /// Offer new formats (RFC 3264 §8.3.2) without changing direction.
     ///
-    /// The description is taken whole, but every stream's direction in it is
-    /// this layer's to write, from which way the call is held, exactly as
-    /// [`UserAgent::hold`] and [`UserAgent::resume`] write it: a held call
-    /// stays held through a codec change, and one that started `recvonly`
-    /// stays `recvonly`. Whoever wrote the description does not need to know
-    /// either, which is the point — the direction the last exchange left on
-    /// this end's side is an answer to the far end, not a statement of what
-    /// this end wants, and copying it into an offer is how a call held from
-    /// the far end would end up held from both.
-    ///
-    /// Refused while another change is running, for the reason
-    /// [`UserAgent::reoffer`] gives.
+    /// Directions are rewritten from the hold state, so a held call stays
+    /// held. Copying the last answer's directions would turn a hold by the
+    /// far end into a hold from both. Refused while another change runs, as
+    /// [`UserAgent::reoffer`].
     ///
     /// # Errors
     /// As [`UserAgent::reoffer`].
@@ -253,33 +185,20 @@ impl UserAgent {
 
     /// Answer a [`UaEvent::Reoffer`] the far end sent.
     ///
-    /// `sdp` is the answer to the offer it carried, and it is not optional:
-    /// every [`UaEvent::Reoffer`] carries an offer — a re-INVITE that came
-    /// without one is answered with this end's own offer before anything is
-    /// handed over (RFC 3261 §14.1), and an UPDATE without one only
-    /// refreshes the target — and RFC 3264 §5 has an offer answered, so a
-    /// 2xx with no body is not an answer this layer can be asked to send.
+    /// `sdp` is required: every [`UaEvent::Reoffer`] carries an offer
+    /// (RFC 3264 §5). For an offer that came in a PRACK, the answer goes in
+    /// the PRACK's 2xx (RFC 3262 §5), and a 2xx to the INVITE held behind it
+    /// goes right after.
     ///
-    /// For an offer that arrived in a PRACK (RFC 3262 §5: "If the UAS
-    /// receives a PRACK with an offer, it MUST place the answer in the 2xx
-    /// to the PRACK") the 2xx is the PRACK's and carries only the answer,
-    /// and a 2xx to the INVITE that was waiting for the provisional response
-    /// to be acknowledged goes as soon as it has.
-    ///
-    /// Two things the answer gets from this layer rather than from whoever
-    /// wrote it. A hold this end asked for is kept: a stream the answer has
-    /// listening again is narrowed back to what the hold allows, so that a
-    /// codec change or a session refresh from the far end does not quietly
-    /// take the call off hold (see `Session::keep_hold`). An answer with
-    /// nothing held here goes out byte for byte. And the `Session-Expires`
-    /// a refresh is owed (RFC 4028 §9) goes on the response, as it does on
-    /// every answer this layer writes itself.
+    /// A hold this end asked for is kept: streams the answer reopens are
+    /// narrowed back (`Session::keep_hold`); otherwise the answer goes byte
+    /// for byte. `Session-Expires` is added when owed (RFC 4028 §9).
     ///
     /// # Errors
     /// [`UaError::NoSuchCall`], [`UaError::WrongState`] when nothing is
-    /// waiting to be answered, [`UaError::Sdp`], or [`UaError::Respond`]. An
-    /// answer that cannot be read is refused before the request is touched,
-    /// so it can still be answered or refused afterwards.
+    /// waiting, [`UaError::Sdp`], or [`UaError::Respond`]. An unreadable
+    /// answer is refused before the request is touched, so it can still be
+    /// answered.
     pub fn accept_reoffer(
         &mut self,
         call: CallHandle,
@@ -300,10 +219,8 @@ impl UserAgent {
             sdp.to_vec()
         };
         let mut response = OutgoingResponse::new(StatusCode::OK).header(HeaderName::Allow, ALLOW);
-        // a PRACK is no target refresh and no session refresh — RFC 3262 §6,
-        // Table 1, marks `Contact` "-" in its 2xx, and RFC 4028 §1 refreshes
-        // "through re-INVITEs or UPDATEs" only — so its 2xx carries the
-        // answer alone
+        // a PRACK's 2xx has no Contact (RFC 3262 §6) and refreshes no
+        // session (RFC 4028 §1)
         if answering.prack.is_none() {
             let contact = self.current_contact(call, now);
             response = response.contact(&contact);
@@ -313,10 +230,8 @@ impl UserAgent {
         }
         let response = response.body(b"application/sdp", Arc::from(body));
         if let Err(error) = self.answer_with(call, answering.transaction, &response, now) {
-            // the far end's change is over here even so — the transaction it
-            // named is gone — and a hold waiting behind it goes now rather
-            // than at whatever drain comes next, a long way off on a quiet
-            // call
+            // the far end's change is over anyway; send a waiting hold now,
+            // not at the next drain
             self.send_waiting_holds(now);
             return Err(error);
         }
@@ -333,10 +248,8 @@ impl UserAgent {
         Ok(())
     }
 
-    /// Refuse one instead.
-    ///
-    /// §14.1: the session stands, exactly as it was. 488 is the status that
-    /// says the description was the problem rather than the request.
+    /// Refuse a [`UaEvent::Reoffer`]; the session stays as it was (§14.1).
+    /// Use 488 when the description is the problem.
     ///
     /// # Errors
     /// As [`UserAgent::accept_reoffer`].
@@ -354,9 +267,8 @@ impl UserAgent {
             response = response.header(HeaderName::Warning, WHY_488);
         }
         let sent = match (answering.prack, answering.transaction) {
-            // a PRACK refused acknowledged nothing: the response it named
-            // goes back on the list, for the PRACK the far end sends again
-            // without the offer (RFC 3262 §3, RFC 3261 §8.1.3.5)
+            // a refused PRACK acknowledged nothing; the far end resends it
+            // (RFC 3262 §3, RFC 3261 §8.1.3.5)
             (Some(provisional), AnyTransactionId::NonInviteServer(transaction)) => self
                 .endpoint
                 .refuse_prack(transaction, provisional, &response, now)
@@ -364,7 +276,6 @@ impl UserAgent {
             _ => self.answer_with(call, answering.transaction, &response, now),
         };
         if let Err(error) = sent {
-            // as in accept_reoffer
             self.send_waiting_holds(now);
             return Err(error);
         }
@@ -373,8 +284,6 @@ impl UserAgent {
     }
 }
 
-// -- sending -----------------------------------------------------------------
-
 impl UserAgent {
     fn change_hold(&mut self, call: CallHandle, held: bool, now: Instant) -> Result<(), UaError> {
         {
@@ -382,15 +291,13 @@ impl UserAgent {
             if !call_state.session.has_local() {
                 return Err(UaError::NoSession);
             }
-            // measured against where the call is headed, not where it was
-            // last agreed: a hold still on its way has not moved the second,
-            // and a resume measured against it would find nothing to do
+            // compare with where the call is headed, not the last agreed state
             let heading = call_state
                 .offering
                 .as_ref()
                 .map_or(call_state.session.hold.local, |offer| offer.held);
             if call_state.changing() {
-                // §14.1 has the new INVITE wait for the one in progress
+                // §14.1
                 if held == heading {
                     self.holds_waiting.remove(&call);
                 } else {
@@ -398,9 +305,7 @@ impl UserAgent {
                 }
                 return Ok(());
             }
-            // nothing is running, so this is the latest word, and one still
-            // waiting from before — its change ended outside a drain — is
-            // not to go after it
+            // this supersedes a stale waiting one
             self.holds_waiting.remove(&call);
             if heading == held {
                 return Ok(());
@@ -421,24 +326,19 @@ impl UserAgent {
         self.send_offer(call, offer, asked, &fields, now)
     }
 
-    /// Give a recording session's recording server new metadata (RFC 7866
-    /// §9.1: "The SRC SHOULD send metadata as soon as it becomes available
-    /// and whenever it changes").
+    /// Send new metadata to the recording server (RFC 7866 §9.1).
     ///
-    /// It goes in an offer — a re-INVITE, or an UPDATE on a session not up
-    /// yet — that repeats the session as it stands, because the metadata's
-    /// streams name the SDP labels and §9.1 has "the request containing the
-    /// metadata ... also contain an SDP offer that defines those labels".
-    /// Every offer the session makes after this carries it too.
+    /// It goes with an offer repeating the current session, since the
+    /// metadata names SDP labels the offer must define. Later offers carry
+    /// it too.
     ///
     /// # Errors
-    /// [`UaError::NoSuchCall`]; [`UaError::WrongState`] for a call that is
-    /// not a recording session ([`crate::OutgoingCall::recording_session`]);
-    /// [`UaError::Recording`] for metadata that cannot be written;
-    /// [`UaError::ChangeInProgress`] while another change is running in the
-    /// call, after which the metadata is kept for the next offer and the
-    /// caller asks again once that change is reported; and what
-    /// [`UserAgent::hold`] answers when nothing can carry an offer.
+    /// [`UaError::NoSuchCall`]; [`UaError::WrongState`] if not a recording
+    /// session ([`crate::OutgoingCall::recording_session`]);
+    /// [`UaError::Recording`] for unwritable metadata;
+    /// [`UaError::ChangeInProgress`] while another change runs (the metadata
+    /// is kept for the next offer; ask again once it is reported); and what
+    /// [`UserAgent::hold`] returns when no offer can be sent.
     pub fn update_recording_metadata(
         &mut self,
         call: CallHandle,
@@ -454,7 +354,6 @@ impl UserAgent {
         if recording.changing() {
             return Err(UaError::ChangeInProgress);
         }
-        // the session as it stands, held as it is held
         let as_held = recording.session.hold.local;
         self.carrier(call)?;
         let offer = self
@@ -471,13 +370,10 @@ impl UserAgent {
         self.send_offer(call, offer, asked, &fields, now)
     }
 
-    /// The request that would carry an offer in this call now, and the dialog
-    /// it goes in — or why none can.
+    /// The method and dialog that would carry an offer now, or why none can.
     ///
-    /// Asked before an offer is written as well as when it is sent, because
-    /// writing one moves the `o=` version and RFC 3264 §8 has each new offer
-    /// "increment by one from the previous SDP": an offer refused here was
-    /// never said, and the next one written must not skip a number for it.
+    /// Checked before writing an offer too: writing moves the `o=` version,
+    /// which must not skip a number (RFC 3264 §8).
     fn carrier(&self, call: CallHandle) -> Result<(Method<'static>, DialogId), UaError> {
         let call_state = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
         if call_state.changing() {
@@ -491,12 +387,8 @@ impl UserAgent {
         }
     }
 
-    /// Send the holds and resumes that were waiting for a change to finish.
-    ///
-    /// One that can no longer be sent — the call is not up any more, or the
-    /// transport refused it — is reported as a session change that failed,
-    /// exactly as the same refusal would have been had it come back from
-    /// [`UserAgent::hold`] itself.
+    /// Send holds and resumes that waited for a change to finish. One that
+    /// cannot go is reported as [`UaEvent::SessionChangeFailed`].
     pub(crate) fn send_waiting_holds(&mut self, now: Instant) {
         if self.holds_waiting.is_empty() {
             return;
@@ -509,8 +401,7 @@ impl UserAgent {
             .copied()
             .collect();
         for call in ready {
-            // sending one drains, and the drain may have sent the next one
-            // already
+            // a drain inside the loop may have sent it already
             let Some(held) = self.holds_waiting.remove(&call) else {
                 continue;
             };
@@ -537,8 +428,7 @@ impl UserAgent {
 
         let contact = self.current_contact(call, now);
         let sdp = offer.to_bytes();
-        // a recording session's offer goes with its metadata, whose streams
-        // name the labels the offer defines (RFC 7866 §9.1)
+        // RFC 7866 §9.1
         let recording = self
             .calls
             .get(&call)
@@ -554,8 +444,7 @@ impl UserAgent {
             }
             None => (b"application/sdp".to_vec(), Arc::from(sdp)),
         };
-        // §8.1.1.8 makes Contact a MUST on anything that can refresh a target,
-        // and both of these can
+        // §8.1.1.8: target refreshes carry Contact
         let mut request = onto_request(
             OutgoingInDialogRequest::new(method)
                 .contact(&contact)
@@ -564,9 +453,7 @@ impl UserAgent {
         )
         .body(&content_type, body);
         if method == Method::Invite && self.wants_gruu(call) {
-            // RFC 5627 §4.4 SHOULD, on a re-INVITE as on the INVITE that
-            // opened the call: "a UA SHOULD include a Supported header field
-            // with the option tag gruu in requests and responses it generates"
+            // RFC 5627 §4.4
             request = request.header(HeaderName::Supported, b"gruu");
         }
         let transaction = if method == Method::Invite {
@@ -592,21 +479,13 @@ impl UserAgent {
         Ok(())
     }
 
-    /// A change that was told to wait is offered again (§14.1).
+    /// Retry a change told to wait by a 491 (§14.1). If it needs a stream
+    /// (§18.1.1) it is parked, not failed.
     ///
-    /// Or held back again, when §18.1.1 wants a stream for it: that retry has
-    /// not been sent rather than refused, so it is not reported as a change
-    /// that failed, and it goes once the stream is bound.
-    ///
-    /// The wait after a 491 does not hold the far end off, so its own change
-    /// may have arrived in it. One still being answered here is an INVITE in
-    /// progress, which §14.1 has this one wait for in turn. One already
-    /// answered has moved the session the retry was written against: a hold
-    /// or a resume is written again from the session as it now stands, one
-    /// `o=` version past the answer (RFC 3264 §8), and a refresh repeats it;
-    /// a description the application wrote would undo the far end's change,
-    /// so it is not sent and is reported as a change that failed, exactly as
-    /// [`UserAgent::reoffer`] refuses one while a change runs.
+    /// The far end's change may have arrived during the wait. Still being
+    /// answered: wait again. Already answered: a hold or resume is rewritten
+    /// from the new session (RFC 3264 §8), a refresh is repeated, and an
+    /// application description is reported failed, as [`UserAgent::reoffer`].
     pub(crate) fn retry_offer(&mut self, call: CallHandle, now: Instant) {
         let Some(held) = self.calls.get_mut(&call) else {
             return;
@@ -626,15 +505,12 @@ impl UserAgent {
             return;
         };
         if offer.author == Author::Refresh {
-            // a refresh is this layer's own message, and it is a refresh on
-            // its second attempt too: RFC 4028 §7.4's Session-Expires, and
-            // the session as it stands now, unchanged
+            // RFC 4028 §7.4
             self.send_refresh(call, true, now);
             return;
         }
         let description = match offer.description {
-            // nothing has been said since: the same bytes under the same
-            // version, which is what §8 means by an unchanged number
+            // nothing said since: same bytes, same version (§8)
             Some(ref description) if !offer.overtaken => Some(description.clone()),
             // asked first, because writing one moves the version
             Some(_) if offer.author == Author::Session && self.carrier(call).is_ok() => self
@@ -685,8 +561,7 @@ impl UserAgent {
         }
     }
 
-    /// Whatever this layer scheduled for a call: the second attempt after a
-    /// 491, and the session timer.
+    /// Glare retries and session timers.
     pub(crate) fn fire_call_timers(&mut self, now: Instant) {
         self.fire_session_timers(now);
         let due: Vec<CallHandle> = self
@@ -703,7 +578,6 @@ impl UserAgent {
         }
     }
 
-    /// When this layer next has something to do about a call.
     pub(crate) fn call_deadline(&self) -> Option<Instant> {
         self.calls
             .values()
@@ -721,8 +595,7 @@ impl UserAgent {
     ) -> Result<(), UaError> {
         match transaction {
             AnyTransactionId::InviteServer(id) => {
-                // RFC 5627 §4.4 names "a 2xx or 18x response to an INVITE
-                // which contains a To tag", and a 2xx to a re-INVITE is one
+                // RFC 5627 §4.4
                 let with_gruu = (response.status().is_success() && self.wants_gruu(call))
                     .then(|| response.clone().header(HeaderName::Supported, b"gruu"));
                 self.endpoint
@@ -744,8 +617,8 @@ impl UserAgent {
         Ok(())
     }
 
-    /// A refusal that says when to come back, with the interval drawn rather
-    /// than fixed so that two peers do not repeat the collision.
+    /// A refusal with a random `Retry-After`, so two peers do not collide
+    /// again.
     pub(crate) fn too_soon(&mut self, status: StatusCode) -> OutgoingResponse {
         let seconds = (spread(&self.endpoint.token()) % RETRY_AFTER_CEILING).to_string();
         OutgoingResponse::new(status).header(HeaderName::RetryAfter, seconds.as_bytes())
@@ -761,19 +634,14 @@ impl UserAgent {
         }
     }
 
-    /// What a message that can set or move the dialog's remote target says
-    /// about the far end: whether it takes UPDATE, and whether it is a
-    /// conference focus.
+    /// From a target-refreshing message: UPDATE support and conference focus.
     pub(crate) fn note_far_end(&mut self, call: CallHandle, message: &RawMessage<'_>) {
         self.note_allow(call, message);
         self.note_focus(call, message);
     }
 
-    /// Whether the far end's `Contact` says it is a conference focus (RFC
-    /// 4579 §4.2), and the conference's URI when it does: "the resulting
-    /// dialog belongs to a conference, identified by the URI in the Contact
-    /// header field". A message with no `Contact` moves nothing, and leaves
-    /// what was known.
+    /// `isfocus` in the far end's `Contact` names the conference URI
+    /// (RFC 4579 §4.2). No `Contact` leaves what was known.
     fn note_focus(&mut self, call: CallHandle, message: &RawMessage<'_>) {
         let Ok(sipral_core::msg::Contacts::Addrs(addrs)) = message.contact() else {
             return;
@@ -806,11 +674,8 @@ impl UserAgent {
     }
 }
 
-// -- what comes back ---------------------------------------------------------
-
 impl UserAgent {
-    /// `None` when the event was about a session change; the event back when
-    /// it was not.
+    /// `None` when the event was about a session change and was handled.
     pub(crate) fn on_session_event(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::ReinviteProgress { invite, .. } => {
@@ -818,8 +683,7 @@ impl UserAgent {
                 if !self.by_offer.contains_key(&id) {
                     return Some(event);
                 }
-                // §14.2 lets a UAS skip provisionals to a re-INVITE, and one
-                // that arrives says nothing the 2xx will not say again
+                // provisionals to a re-INVITE add nothing (§14.2)
                 None
             }
             Event::ReinviteAnswered {
@@ -832,9 +696,7 @@ impl UserAgent {
                 let Some(call) = self.by_offer.get(&id).copied() else {
                     return Some(event);
                 };
-                // this end offered, so §13.2.2.4 leaves the ACK nothing to
-                // carry — but it still has to go, and go again for every
-                // retransmission of the 2xx
+                // an empty ACK, resent for every 2xx retransmission (§13.2.2.4)
                 self.ack_reinvite_by_itself(invite, dialog, now);
                 let answer = response.as_raw().body().to_vec();
                 self.on_offer_taken(call, id, &answer);
@@ -886,13 +748,11 @@ impl UserAgent {
                 let Some(call) = self.by_offer.get(&id).copied() else {
                     return Some(event);
                 };
-                // §12.2.1.2 treats no answer as a 408, and the dialog goes
-                // with it; the call layer hears that separately
+                // a 408 (§12.2.1.2); the call layer handles the dialog
                 self.on_offer_refused(call, id, None, None);
                 None
             }
-            // §22.2: an offer refused with a challenge is asked again with the
-            // credentials, whether it went as a re-INVITE or as an UPDATE
+            // §22.2
             Event::Challenged { transaction, .. } | Event::TokenChallenged { transaction, .. } => {
                 if !self.by_offer.contains_key(&transaction) {
                     return Some(event);
@@ -904,7 +764,6 @@ impl UserAgent {
         }
     }
 
-    /// A re-INVITE or an UPDATE the far end sent.
     fn on_change_arriving(&mut self, event: Event, now: Instant) -> Option<Event> {
         match event {
             Event::IncomingReinvite {
@@ -945,7 +804,6 @@ impl UserAgent {
         }
     }
 
-    /// The far end took the change this end offered.
     fn on_offer_taken(&mut self, call: CallHandle, id: AnyTransactionId, answer: &[u8]) {
         self.by_offer.remove(&id);
         let Some(held) = self.calls.get_mut(&call) else {
@@ -955,8 +813,7 @@ impl UserAgent {
             return;
         };
         held.retry_at = None;
-        // a session-timer refresh changes nothing but the clock (RFC 4028
-        // §7.4), so there is no session to commit and nothing to report
+        // a refresh changes only the clock (RFC 4028 §7.4)
         if offer.author == Author::Refresh {
             return;
         }
@@ -970,12 +827,8 @@ impl UserAgent {
         self.report_session(call);
     }
 
-    /// It did not — but a refusal that carries a challenge is not one yet.
-    ///
-    /// §22.2 makes a 401 or a 407 a request to ask again with credentials, and
-    /// the core reports the refusal before it reports the challenge. Delivering
-    /// the refusal here would take the offer with it and leave the retry
-    /// nothing to send, so it waits for the round to end.
+    /// A 401/407 is parked until the round ends: the core reports it before
+    /// the challenge, and failing now would drop the offer the retry needs.
     fn on_offer_refused_or_challenged(
         &mut self,
         call: CallHandle,
@@ -998,8 +851,6 @@ impl UserAgent {
         self.on_offer_refused(call, id, status, response);
     }
 
-    /// A proxy or a registrar challenged the offer. The account has the
-    /// password.
     fn on_offer_challenged(&mut self, id: AnyTransactionId, now: Instant) {
         let Some(call) = self.by_offer.get(&id).copied() else {
             return;
@@ -1010,9 +861,7 @@ impl UserAgent {
         };
         match self.endpoint.retry_with_credentials(id, &credentials, now) {
             Ok(retried) => self.offer_retry_went(id, call, retried),
-            // §18.1.1 wants a connection first. The endpoint keeps the
-            // challenge, so this waits rather than being reported as a
-            // session change that failed
+            // needs a connection first (§18.1.1); wait, do not fail
             Err(error) if crate::agent::wants_a_stream(&error) => {
                 if let Some(parked) = self.challenged_offers.get_mut(&id) {
                     parked.waiting_for_stream = true;
@@ -1022,8 +871,6 @@ impl UserAgent {
         }
     }
 
-    /// The retry is a transaction now, so everything that named the refused
-    /// one names this one.
     fn offer_retry_went(
         &mut self,
         id: AnyTransactionId,
@@ -1031,7 +878,6 @@ impl UserAgent {
         retried: AnyTransactionId,
     ) {
         self.by_offer.remove(&id);
-        // the refusal that came with the challenge was the first half of this
         self.challenged_offers.remove(&id);
         self.by_offer.insert(retried, call);
         if let Some(offer) = self
@@ -1043,8 +889,7 @@ impl UserAgent {
         }
     }
 
-    /// Send the offer retries §18.1.1 held back, now that there is a
-    /// connection.
+    /// Send offer retries that waited for a connection (§18.1.1).
     pub(crate) fn resume_parked_offers(&mut self, now: Instant) {
         let waiting: Vec<(AnyTransactionId, CallHandle)> = self
             .challenged_offers
@@ -1066,22 +911,15 @@ impl UserAgent {
         }
     }
 
-    /// Stop holding one back, so the next settle reports the refusal it
-    /// still carries.
     fn stop_waiting_for_offer(&mut self, id: AnyTransactionId) {
         if let Some(parked) = self.challenged_offers.get_mut(&id) {
             parked.waiting_for_stream = false;
         }
     }
 
-    /// An offer refused with a challenge that got no retry was refused.
-    ///
-    /// The core answers a challenge once; the same nonce coming back is §22.1
-    /// saying the password is wrong, and repeating it is how an account gets
-    /// locked. So the silence after it is the answer.
-    ///
-    /// Except one the endpoint is holding until a connection exists: its
-    /// retry has not been sent yet, so there is no silence to read.
+    /// A challenged offer that got no retry is reported as refused. The core
+    /// answers a challenge once, since repeating a wrong password locks
+    /// accounts (§22.1). Ones waiting for a connection are skipped.
     pub(crate) fn settle_offer_challenges(&mut self) {
         let parked: Vec<(AnyTransactionId, ParkedOffer)> =
             crate::calls::settled(&mut self.challenged_offers, |offer| {
@@ -1092,10 +930,7 @@ impl UserAgent {
         }
     }
 
-    /// It did not.
-    ///
-    /// §14.1: "the session parameters MUST remain unchanged, as if no
-    /// re-INVITE had been issued".
+    /// The session stays unchanged (§14.1).
     fn on_offer_refused(
         &mut self,
         call: CallHandle,
@@ -1169,8 +1004,7 @@ impl UserAgent {
             return;
         }
         if status == StatusCode::REQUEST_PENDING {
-            // §5.3 repeats §14.1's timer for UPDATE, ranges included, and the
-            // end that generated the Call-ID is the end that placed the call
+            // §5.3 reuses §14.1's ranges; the caller owns the Call-ID
             let owner = self
                 .calls
                 .get(&call)
@@ -1182,7 +1016,6 @@ impl UserAgent {
         self.on_offer_refused_or_challenged(call, id, Some(status), Some(response.clone()));
     }
 
-    /// A request the far end sent to change the session.
     fn on_offer_in(
         &mut self,
         call: CallHandle,
@@ -1191,13 +1024,9 @@ impl UserAgent {
         now: Instant,
     ) {
         let raw = request.as_raw();
-        // RFC 3261 §8.2.3 before anything acts on it, a session timer
-        // included: a body this agent cannot read is refused 415 with the
-        // `Accept` that says what it can, and a refused request refreshed
-        // nothing: RFC 4028 §9 times the session from "the most recent 2xx
-        // response to a session refresh request"
-        // new metadata for a recording session this agent takes arrives
-        // beside the offer that defines its labels (RFC 7866 §9.1)
+        // RFC 3261 §8.2.3 runs first: a 415 refreshes no session timer
+        // (RFC 4028 §9). Recording metadata rides beside the offer
+        // (RFC 7866 §9.1)
         let recorded = self
             .recording_server
             .then(|| crate::siprec::session_part(&raw))
@@ -1209,8 +1038,7 @@ impl UserAgent {
             return;
         }
         self.note_far_end(call, &raw);
-        // RFC 4028 §7.4: any request inside the dialog that carries a
-        // Session-Expires is a refresh, whatever else it is doing
+        // RFC 4028 §7.4
         self.on_refresh_in(call, &raw, now);
         let arriving = match recorded {
             Some(described) => sdp::parse_with_limits(described, self.sdp_limits)
@@ -1221,28 +1049,18 @@ impl UserAgent {
         };
         let invite = matches!(transaction, AnyTransactionId::InviteServer(_));
 
-        // an UPDATE with no description only refreshes the target: there is
-        // nothing to answer, and nothing it could collide with
+        // an UPDATE without SDP only refreshes the target
         if matches!(arriving, Arriving::Nothing) && !invite {
             self.acknowledge_only(call, transaction, now);
             return;
         }
 
-        // RFC 3311 §5.2, generalised to both requests: an offer that crossed
-        // one of ours earns a 491, and one that arrives while an earlier offer
-        // of theirs is still unanswered earns a 500 saying when to come back.
-        // A re-INVITE with no description is not exempt — §14.1 has it ask
-        // *this* end to offer, which is the same exchange starting over.
-        // Ours crosses only while it is on the wire: §14.2's 491 is for an
-        // INVITE "in progress", and one already refused with a 491 is over.
-        // The far end's retry lands in exactly that wait — §14.1 draws the
-        // two ends' intervals so that it does — and refusing it would leave
-        // its change failed for good. An offer this end put in a 2xx is one
-        // of ours too, unanswered until the ACK brings the answer (§5.2's
-        // "an offer (in an UPDATE, PRACK or INVITE) to which it has not yet
-        // received an answer"): a request that overtakes that ACK is told to
-        // wait, rather than answered with a second offer RFC 3264 §4 forbids
-        // or taken as an offer the ACK's answer would then land on
+        // RFC 3311 §5.2 for both methods: crossing our offer gets 491, an
+        // earlier far-end offer still pending gets 500 with Retry-After. A
+        // re-INVITE without SDP counts too. Ours crosses only while on the
+        // wire; one already refused 491 is over, so the far end's retry in
+        // that wait is accepted. An offer we put in a 2xx is pending until
+        // the ACK, so a request overtaking that ACK is told to wait
         if self.calls.get(&call).is_some_and(|held| {
             held.session.answer_owed
                 || held
@@ -1266,7 +1084,6 @@ impl UserAgent {
 
         match arriving {
             Arriving::Nothing => self.offer_in_answer(call, transaction, now),
-            // a body that says it is a session description and is not one
             Arriving::Unreadable => {
                 let refusal = OutgoingResponse::new(StatusCode::NOT_ACCEPTABLE_HERE)
                     .header(HeaderName::Warning, WHY_488);
@@ -1280,13 +1097,8 @@ impl UserAgent {
         }
     }
 
-    /// A change the far end offered will not be answered after all, because
-    /// the dialog it was in has ended.
-    ///
-    /// §15.1.2: "The UAS MUST still respond to any pending requests received
-    /// for that dialog. It is RECOMMENDED that a 487 (Request Terminated)
-    /// response be generated to those pending requests." Left alone, that
-    /// transaction is retransmitted at the far end until it gives up.
+    /// The dialog ended with a far-end change pending: answer it 487
+    /// (§15.1.2) so the far end stops retransmitting.
     pub(crate) fn abandon_change(&mut self, call: CallHandle, now: Instant) {
         let Some(answering) = self
             .calls
@@ -1300,25 +1112,14 @@ impl UserAgent {
             .ok();
     }
 
-    /// A change the far end offered in an UPDATE or a PRACK that the
-    /// application never answered, and that the endpoint has answered 408
-    /// itself after 64·T1, or whose transaction is gone.
+    /// Clear far-end UPDATE/PRACK offers the application never answered and
+    /// the endpoint closed (408 after 64·T1). Left pending, every later offer
+    /// would get 500 (RFC 3311 §5.2). The session is unchanged. For a PRACK
+    /// the held 2xx to the INVITE goes now, as its provisional was already
+    /// matched (RFC 3262 §3).
     ///
-    /// RFC 3311 §5.2 refuses a second offer only while the first is still
-    /// unanswered; this one has been answered now, by the timeout, so it
-    /// stops counting — left in place, every later offer on the call would
-    /// be told 500 to come back after a change nobody is ever going to
-    /// finish. The session stands as it was (RFC 3261 §14.1). A PRACK is
-    /// different in one way: the endpoint matched it to the reliable
-    /// provisional response it names when it arrived and stopped that
-    /// response's retransmissions (RFC 3262 §3), so the 2xx to the INVITE
-    /// that response was holding back goes now rather than waiting on a
-    /// PRACK the far end has no reason to send again.
-    ///
-    /// Read from the transaction's state rather than from its
-    /// `TransactionTerminated`: on a datagram transport the 408 is followed
-    /// by Timer J's 32 seconds in `Completed` (RFC 3261 §17.2.2), all of
-    /// them spent refusing offers the far end is entitled to make.
+    /// Read from transaction state, not `TransactionTerminated`: on UDP
+    /// Timer J keeps it `Completed` 32 s longer (RFC 3261 §17.2.2).
     pub(crate) fn settle_unanswered_changes(&mut self, now: Instant) {
         let endpoint = &self.endpoint;
         let settled: Vec<(CallHandle, bool)> = self
@@ -1346,8 +1147,8 @@ impl UserAgent {
         }
     }
 
-    /// Answer an offer that changes nothing this layer would have to ask
-    /// about. `false` when it is not one, or cannot be answered from here.
+    /// Answer a same-media offer here; `false` when it must go to the
+    /// application.
     fn take_offer(
         &mut self,
         call: CallHandle,
@@ -1417,7 +1218,6 @@ impl UserAgent {
         }
     }
 
-    /// Answer a request that only refreshed the target.
     fn acknowledge_only(&mut self, call: CallHandle, transaction: AnyTransactionId, now: Instant) {
         let contact = self.current_contact(call, now);
         let mut response = OutgoingResponse::new(StatusCode::OK)
@@ -1459,11 +1259,8 @@ impl UserAgent {
         if !held.session.answer_owed {
             return;
         }
-        // owed either way: this ACK is the only place §13.2.2.4 lets the
-        // answer travel, so one that is missing or cannot be read is not
-        // going to arrive a second time. Leaving the flag set would have the
-        // next ACK on this dialog read as one, and every change this end asks
-        // for waiting on an answer that is never coming
+        // cleared even if the answer is missing or bad: only this ACK may
+        // carry it (§13.2.2.4), and a stuck flag would block every change
         held.session.answer_owed = false;
         let body = request.as_raw().body();
         if body.is_empty() {
@@ -1477,13 +1274,10 @@ impl UserAgent {
     }
 }
 
-/// What a request that could change the session actually carried.
 enum Arriving {
-    /// No body, or none this agent has to read.
     Nothing,
-    /// A session description, boxed because it dwarfs the other two.
     Offer(Box<SessionDescription>),
-    /// Bytes that claim to be one and are not.
+    /// Labelled SDP that does not parse.
     Unreadable,
 }
 
@@ -1497,25 +1291,14 @@ fn arriving(request: &RawMessage<'_>, limits: sdp::Limits) -> Arriving {
             .map_or(Arriving::Unreadable, |offer| {
                 Arriving::Offer(Box::new(offer))
             }),
-        // a body of any other type got past `body_refusal` only because its
-        // sender marked it optional (RFC 3261 §20.11), and §8.2.3 refuses
-        // only the bodies that are not: one that is, this agent ignores.
-        // Ignored, not handed to the application: RFC 3204 §6, which
-        // defines the parameter §20.11 points to, has "the UAS MUST ignore
-        // the message body" when it is `optional`, so the request is the one
-        // it would be without it — a re-INVITE asking for an offer, an
-        // UPDATE refreshing the target — and is answered as that
+        // an optional body (RFC 3261 §20.11) is ignored (RFC 3204 §6): the
+        // request is answered as if it had none
         _ => Arriving::Nothing,
     }
 }
 
-/// How long to wait before offering the same change again (§14.1, RFC 3311
-/// §5.3).
-///
-/// The two ranges do not overlap, which is the whole point: if both ends drew
-/// from the same one they would collide again as often as they did the first
-/// time. Which one applies is decided by who generated the `Call-ID`, and that
-/// is whoever placed the call.
+/// The glare wait (§14.1, RFC 3311 §5.3). The caller and callee draw from
+/// non-overlapping ranges so they do not collide again.
 fn glare_backoff(owner: bool, entropy: &[u8]) -> Duration {
     let (low, high) = if owner { OWNER_BACKOFF } else { GUEST_BACKOFF };
     let steps = (high - low) / BACKOFF_STEP + 1;

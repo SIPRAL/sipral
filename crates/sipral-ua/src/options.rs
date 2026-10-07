@@ -3,26 +3,12 @@
 
 //! Answering `OPTIONS`, which is not optional.
 //!
-//! §11.2 says a UAS receiving an OPTIONS outside a dialog "MUST respond", and
-//! that the response is built as though the request had been an INVITE: the
-//! same `Allow`, `Accept` and `Supported` the endpoint would have offered.
+//! §11.2: a UAS MUST respond, with the `Allow`, `Accept` and `Supported` an
+//! INVITE would get, inside a dialog or outside it.
 //!
-//! It reads like a courtesy and it is not. Asterisk and every PBX built on it
-//! send an OPTIONS to each registered contact on a timer, and a contact that
-//! does not answer is marked unreachable — after which inbound calls to it are
-//! refused with 503 without ever being sent. A stack that ignores OPTIONS
-//! registers successfully, places calls happily, and silently never receives
-//! one. That is what this stack did until an Asterisk was asked to ring it.
-//!
-//! It is answered here rather than handed to the application because there is
-//! no decision in it. The application cannot know the answer better than the
-//! stack does, and one that forgot to reply would look like this one did.
-//!
-//! Inside a dialog too, and with the same answer: "An OPTIONS request
-//! received within a dialog generates a 200 (OK) response that is identical
-//! to one constructed outside a dialog and does not have any impact on the
-//! dialog" (§11.2). A peer that checks a call is still there sends one, and
-//! an OPTIONS left unanswered there is one §12.2.1.2 has it end the call over.
+//! Asterisk qualifies each registered contact with OPTIONS and stops sending
+//! calls to one that does not answer, so this is answered here, with no
+//! application decision involved.
 
 use std::time::Instant;
 
@@ -33,8 +19,7 @@ use crate::agent::UserAgent;
 use crate::reliable::UNDERSTOOD;
 use crate::renegotiate::ALLOW;
 
-/// The body types this end will take in a request. SDP, and nothing else:
-/// there is no other body this stack knows how to read.
+/// The body types this end accepts: SDP only.
 const ACCEPT: &[u8] = b"application/sdp";
 
 impl UserAgent {
@@ -61,8 +46,7 @@ impl UserAgent {
             .header(HeaderName::Allow, ALLOW)
             .header(HeaderName::Accept, ACCEPT)
             .header(HeaderName::Supported, &supported);
-        // nothing useful to do if the transaction has gone: the far end will
-        // ask again on its own timer, which is the whole point of asking
+        // a gone transaction is fine: the far end asks again on its timer
         self.endpoint.respond(transaction, &response, now).ok();
         None
     }

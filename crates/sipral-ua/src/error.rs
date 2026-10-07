@@ -3,10 +3,8 @@
 
 //! Why something the application asked for could not be done.
 //!
-//! Nothing here is a registrar refusing, a password being wrong or a network
-//! being down. Those are not failures of a call the application made — they
-//! arrive later, as events, because they arrive later in reality. What is here
-//! is a handle that names nothing, and a request that cannot be built.
+//! A refusing registrar, a wrong password or a dead network arrive later, as
+//! events. What is here is a stale handle or a request that cannot be built.
 
 use core::fmt;
 
@@ -31,8 +29,8 @@ pub enum UaError {
     /// placed from here, acknowledging one that is not waiting for it.
     WrongState(CallState),
     /// The account has no registrar
-    /// ([`Account::unregistered`](crate::Account::unregistered)), so there is
-    /// nothing to register with and no binding to give up. Nothing was built.
+    /// ([`Account::unregistered`](crate::Account::unregistered)). Nothing was
+    /// built.
     NoRegistrar,
     /// The request could not be assembled or handed to a transport.
     Send(SendError),
@@ -43,11 +41,10 @@ pub enum UaError {
     /// Nothing has been described yet, so there is nothing to hold, resume or
     /// re-offer.
     NoSession,
-    /// A session change is already running. §14.1 allows one INVITE at a time
-    /// inside a dialog, and RFC 3311 §5.2 says the same for UPDATE.
+    /// A session change is already running (§14.1; RFC 3311 §5.2 for UPDATE).
     ChangeInProgress,
-    /// Nothing can carry the change: the call is not up, so §14.1 rules out a
-    /// re-INVITE, and the far end never advertised UPDATE (RFC 3311 §4).
+    /// The call is not up, so no re-INVITE (§14.1), and the far end never
+    /// advertised UPDATE (RFC 3311 §4).
     CannotRenegotiate,
     /// The session description could not be read.
     Sdp(SdpError),
@@ -57,8 +54,8 @@ pub enum UaError {
     /// A digit no keypad has, or a duration nothing holds a key for: see
     /// [`UserAgent::send_dtmf_info`](crate::UserAgent::send_dtmf_info).
     InvalidDtmf(DtmfError),
-    /// A MESSAGE body is larger than RFC 3428 §8 lets this end send without
-    /// positive knowledge of a congestion-safe hop: see
+    /// A MESSAGE body over the RFC 3428 §8 limit for a path not known to be
+    /// congestion-safe: see
     /// [`Account::transport_protocol`](crate::Account::transport_protocol).
     MessageTooLarge {
         /// How large the body is.
@@ -66,25 +63,19 @@ pub enum UaError {
         /// The ceiling it was checked against.
         limit: usize,
     },
-    /// §8: "A UAC MUST NOT initiate a new out-of-dialog MESSAGE transaction
-    /// to a given URI if there is a previous out-of-dialog transaction
-    /// pending for the same URI." One is still waiting for its final answer.
-    /// The same section's next sentence gives an in-dialog MESSAGE the same
-    /// refusal on a route not known to be congestion-controlled: "A UAC
-    /// SHOULD NOT initiate overlapping MESSAGE transactions inside a
-    /// dialog, and MUST NOT do so unless the route set for that dialog uses
-    /// a congestion-controlled transport at every hop."
+    /// A MESSAGE to the same target is still waiting for its final answer
+    /// (RFC 3428 §8). In a dialog the same applies unless every hop is known
+    /// to be congestion-controlled.
     MessagePending,
     /// A registrar keep-alive interval outside what
     /// [`UserAgent::keep_registrar_flows_alive`](crate::UserAgent::keep_registrar_flows_alive)
     /// takes: under a second, or over the two minutes RFC 4787 REQ-5 has a
     /// NAT keep a UDP flow for.
     InvalidKeepalive(core::time::Duration),
-    /// This end was about to advertise an address the peer cannot reach it
-    /// at: a loopback address in a `Contact` or a session description handed
-    /// to a peer that is not on this machine, or the unspecified address in a
-    /// `Contact` ([`crate::advertise`]). Nothing was sent. Bind to, and
-    /// advertise, the address of the interface that routes to the peer.
+    /// The address about to be advertised cannot be reached by the peer:
+    /// loopback to a remote peer, or unspecified in a `Contact`
+    /// ([`crate::advertise`]). Nothing was sent. Use the address of the
+    /// interface that routes to the peer.
     UnreachableAddress {
         /// What would have been advertised.
         advertised: std::net::IpAddr,
@@ -93,20 +84,18 @@ pub enum UaError {
     },
     /// The account finds its server by RFC 3263
     /// ([`Account::located`](crate::Account::located)) and no lookup has
-    /// answered yet, so a request that names no destination of its own has
-    /// nowhere to go. Nothing was sent.
+    /// answered yet. Nothing was sent.
     NotLocated,
     /// A redirect was asked for with a status outside 300 to 399, or one
     /// other than 380 with nowhere to redirect to (RFC 3261 §21.3).
     NotARedirection(sipral_core::msg::StatusCode),
-    /// The account signs its calls (RFC 8224 §6.1) and the agent was never
-    /// told the time, which a PASSporT has to carry:
+    /// The account signs its calls (RFC 8224 §6.1) and the PASSporT needs the
+    /// time, never given with
     /// [`UserAgent::set_wall_clock`](crate::UserAgent::set_wall_clock).
     /// Nothing was sent.
     NoWallClock,
-    /// The account signs its calls and this one's PASSporT could not be
-    /// made: a target too long for an `Identity` header field. Nothing was
-    /// sent.
+    /// The PASSporT could not be made: the target is too long for an
+    /// `Identity` header field. Nothing was sent.
     Signing,
     /// The handle names a publication whose state was removed, or never
     /// existed.
@@ -120,8 +109,8 @@ pub enum UaError {
     /// A recording session could not be written: see
     /// [`SiprecError`](crate::siprec::SiprecError).
     Recording(crate::siprec::SiprecError),
-    /// An access token that is not RFC 6750 §2.1's `b64token`, the only
-    /// shape a `Bearer` field carries. Nothing was changed.
+    /// An access token that is not an RFC 6750 §2.1 `b64token`. Nothing was
+    /// changed.
     InvalidAccessToken,
 }
 

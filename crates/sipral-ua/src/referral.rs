@@ -4,58 +4,39 @@
 //! A REFER outside any dialog: somebody asking this end to place a call it is
 //! not already in (RFC 3515).
 //!
-//! RFC 3515 §4.1 is written around exactly this case — "this particular
-//! REFER occurs outside a session (there is no To tag in the REFER
-//! request)" — and it is what click-to-dial is: a CRM, a switchboard or an
-//! operator console tells a phone to ring somebody, and the phone does it
-//! from its own line. §2.4.2 asks the UA to "request approval from the user
-//! to proceed (this request could be satisfied with an interactive query or
-//! through accessing configured policy)", so every one is the application's
-//! to take or refuse, and none is taken on its behalf.
+//! This is click-to-dial: a CRM or operator console tells a phone to ring
+//! somebody from its own line (RFC 3515 §4.1, a REFER with no To tag).
+//! §2.4.2 asks the UA to get the user's approval, so each one is the
+//! application's to take or refuse.
 //!
-//! **Off unless the application turns it on, and a decision per request when
-//! it does.** A peer that can make a phone dial is a peer that can make it
-//! dial a premium-rate number at three in the morning, which is toll fraud
-//! with this stack's name on the call records. This stack issues no
-//! challenges, so it has no authenticated peer to hold the request to, and
-//! `Referred-By` is a header field the sender wrote. With
-//! [`UserAgent::allow_referrals`] left alone a REFER outside a dialog is
-//! refused 403 before anything reads it — "the server understood the
-//! request, but is refusing to fulfill it" (RFC 3261 §21.4.4), which is this
-//! end's answer rather than 405's claim that it does not do REFER (it does,
-//! inside a call), 481's that it names a dialog (it names none) or 603's
-//! that a person declined. Turned on, it meets the same screening an INVITE
-//! does before anybody hears of it ([`crate::Screen`] and the rate limit
-//! per source, in this crate's `screening` module), and what survives is
-//! [`UaEvent::ReferralRequested`], answered with
+//! **Off unless the application turns it on.** A peer that can make a phone
+//! dial can make it dial a premium-rate number at 3 a.m.: toll fraud. This
+//! stack issues no challenges, and `Referred-By` is whatever the sender
+//! wrote. With [`UserAgent::allow_referrals`] off, the REFER is refused 403
+//! before anything reads it (RFC 3261 §21.4.4; not 405, since REFER works in
+//! a call, not 481, since it names no dialog). On, it meets the same
+//! screening as an INVITE ([`crate::Screen`] and the per-source rate limit),
+//! and what passes becomes [`UaEvent::ReferralRequested`], answered with
 //! [`UserAgent::accept_transfer`] or [`UserAgent::reject_transfer`].
 //!
-//! **The referral is a [`CallHandle`] of its own, and not a call.** It is
-//! drawn from the same count every call's handle is, so it never names a
-//! call and a call never names it, and it is taken and refused through the
-//! two methods an in-dialog REFER already is — which is what lets a layer
-//! above place the call it asks for with media of its own exactly as it does
-//! for a transfer. What it is not is a call: [`UserAgent::call_state`] knows
-//! nothing of it, and nothing but those two methods takes it. It names
-//! something from [`UaEvent::ReferralRequested`] until it is answered, or
-//! until [`UaEvent::ReferralLapsed`] says nobody answered it in time.
+//! **The referral is a [`CallHandle`], not a call.** It comes from the same
+//! counter as call handles, so the two never collide, and the transfer
+//! methods take it, so a layer above places the call with its own media as
+//! for a transfer. [`UserAgent::call_state`] knows nothing of it. It is
+//! valid from [`UaEvent::ReferralRequested`] until answered, or until
+//! [`UaEvent::ReferralLapsed`].
 //!
-//! **Taking one is taking a transfer.** The 202 carries the tag that makes
-//! the dialog of the implicit subscription (§2.4.4: the NOTIFYs match the
-//! REFER "as they would if the REFER had been a SUBSCRIBE request"), and
-//! from there it is the machinery an in-dialog transfer uses, unchanged
-//! ([`crate::UserAgent::accept_transfer`]): a NOTIFY
-//! with §2.4.5's 100 at once, the call placed with the REFER's own
-//! `Replaces` and `Referred-By` and never the caller's, one NOTIFY per
-//! provisional and the last one `terminated` with the final answer. RFC
-//! 4488's `Refer-Sub: false` is granted here too: no dialog, no NOTIFY.
+//! **Taking one is taking a transfer.** The 202 carries the tag of the
+//! implicit subscription's dialog (§2.4.4), and from there the in-dialog
+//! transfer machinery runs unchanged: a NOTIFY with 100 at once (§2.4.5),
+//! the call placed with the REFER's `Replaces` and `Referred-By`, one NOTIFY
+//! per provisional, the last one `terminated`. RFC 4488's `Refer-Sub: false`
+//! is granted: no dialog, no NOTIFY.
 //!
-//! **Nothing waits past the transaction.** §2.4.2 has the answer go "before
-//! the REFER transaction expires", so one the application leaves alone for
-//! 64·T1 is given up: the endpoint has answered it 408 by then, and
-//! [`UaEvent::ReferralLapsed`] tells the application its handle is spent.
-//! And there is a ceiling on how many are held at once, since the table is
-//! one anybody on the internet can write to.
+//! **Nothing waits past the transaction.** One left unanswered for 64·T1 is
+//! given up (§2.4.2): the endpoint has sent 408, and
+//! [`UaEvent::ReferralLapsed`] says the handle is spent. The number held at
+//! once is capped, since anybody on the internet can fill the table.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -73,55 +54,41 @@ use crate::event::UaEvent;
 use crate::registration::dialog_contact;
 use crate::transfer::{FORBIDDEN, REFER_SUB, ReferTo, Referred, refer_to};
 
-/// How many referrals are held at once, waiting or running.
-///
-/// A person is asked about one at a time, and a switchboard that has sixteen
-/// of its own clicks outstanding at one phone has lost track of them. It is a
-/// fixed cost for the reason [`crate::screening`]'s table of sources is: past
-/// it the next is refused, rather than a table a stranger can grow.
+/// How many referrals are held at once, waiting or running. Past it the
+/// next is refused, so a stranger cannot grow the table.
 const HELD: usize = 16;
 
-/// What one past [`HELD`] is refused with: RFC 3261 §21.4.24's "the callee's
-/// end system was contacted successfully but the callee is currently not
-/// willing or able to take additional calls".
+/// What one past [`HELD`] is refused with (RFC 3261 §21.4.24).
 const BUSY: StatusCode = StatusCode::BUSY_HERE;
 
-/// RFC 3261 §8.2.2.1: "If the Request-URI does not identify an address that
-/// the UAS is willing to accept requests for, it SHOULD reject the request
-/// with a 404 (Not Found) response." A referral that names no account here
-/// has no line to place its call from.
+/// A referral naming no account here has no line to call from (RFC 3261
+/// §8.2.2.1).
 const NOT_FOUND: StatusCode = match StatusCode::new(404) {
     Ok(status) => status,
-    // 404 is in range, so this arm never runs; it exists because `new` is
-    // fallible and nothing in this crate panics to say otherwise
+    // unreachable, but `new` is fallible and this crate does not panic
     Err(_) => StatusCode::BAD_REQUEST,
 };
 
 /// The referrals this agent holds, and whether it takes any at all.
 #[derive(Debug, Default)]
 pub(crate) struct Referrals {
-    /// Whether a REFER outside a dialog reaches the application. Off by
-    /// default: see the note at the top of this module.
+    /// Whether a REFER outside a dialog reaches the application.
     pub(crate) allowed: bool,
-    /// Every one waiting for the application or reporting on the call it
-    /// placed, by its handle.
+    /// Every one waiting or reporting on its call, by handle.
     pub(crate) held: HashMap<CallHandle, Referral>,
 }
 
 /// One REFER outside a dialog.
 #[derive(Debug)]
 pub(crate) struct Referral {
-    /// The line it arrived for, which the call it asks for is placed from.
+    /// The line it arrived for, and calls from.
     pub(crate) account: AccountId,
     /// What it asked for, until the application answers.
     pub(crate) asked: Option<ReferTo>,
-    /// The notifier's half of the subscription, as a transfer has it.
     pub(crate) notifier: Referred,
-    /// The dialog the 202 made, once it has gone and unless `Refer-Sub:
-    /// false` was granted.
+    /// The dialog the 202 made, unless `Refer-Sub: false` was granted.
     pub(crate) dialog: Option<DialogId>,
-    /// When one nobody answered is given up: the REFER's own transaction
-    /// is answered 408 by the endpoint at the same moment.
+    /// When an unanswered one is given up; the endpoint sends 408 then.
     pub(crate) answer_by: Instant,
 }
 
@@ -129,12 +96,10 @@ impl UserAgent {
     /// Whether a REFER outside any dialog is handed to the application
     /// ([`UaEvent::ReferralRequested`]) rather than refused 403.
     ///
-    /// Off by default, and on only when the application says so, because a
-    /// peer that can make a phone dial is a toll-fraud vector: see
-    /// [`crate::referral`]. Turned on, each one is still screened as an
-    /// INVITE is and is still the application's to take or refuse.
-    /// Turning it off again refuses what arrives from then on and leaves
-    /// alone the ones already handed over.
+    /// Off by default: a peer that can make a phone dial is a toll-fraud
+    /// vector (see [`crate::referral`]). On, each one is still screened as
+    /// an INVITE is. Turning it off refuses new ones and leaves alone those
+    /// already handed over.
     pub const fn allow_referrals(&mut self, allowed: bool) {
         self.referrals.allowed = allowed;
     }
@@ -169,27 +134,20 @@ impl UserAgent {
         request: &OwnedMessage,
         now: Instant,
     ) {
-        // the same floor and the same policy an INVITE meets, and before
-        // anything else reads it: a REFER here is a call this end would
-        // place, which is what both of them exist to ration
+        // screened like an INVITE: it is a call this end would place
         if let Some(refused) = self.guard.decide(request, now) {
             self.refuse_referral(transaction, refused, now);
             return;
         }
         let raw = request.as_raw();
-        // §2.4.2: "An agent responding to a REFER method MUST return a 400
-        // (Bad Request) if the request contained zero or more than one
-        // Refer-To header field values"; and §2: "REFER creates a dialog ...
-        // hence MUST contain a single Contact header field value", without
-        // which there is nowhere to send the NOTIFYs
+        // §2.4.2: exactly one Refer-To or 400; §2: exactly one Contact,
+        // where the NOTIFYs go
         let wanted = refer_to(&raw);
         let Some(wanted) = wanted.filter(|_| raw.header_count(HeaderName::Contact) == 1) else {
             self.refuse_referral(transaction, StatusCode::BAD_REQUEST, now);
             return;
         };
-        // §2.4.2: "A UA not capable of accessing non-SIP URIs SHOULD NOT
-        // accept REFER requests to them", and a call is all this end can
-        // place
+        // §2.4.2: no REFER to a non-SIP URI
         if matches!(wanted.target.scheme(), UriScheme::Other(_)) {
             self.refuse_referral(transaction, FORBIDDEN, now);
             return;
@@ -278,16 +236,13 @@ impl UserAgent {
             let wanted = held.asked.clone().ok_or(UaError::NoSuchCall)?;
             (transaction, wanted, held.account)
         };
-        // the line it arrived for is the one it calls from, and one removed
-        // since has no `Contact` to answer with: refused before anything is
-        // sent, so the referral is still there to refuse
+        // a removed line has no `Contact`; fail before sending anything so
+        // the referral can still be refused
         if !self.accounts.contains_key(&account) {
             return Err(UaError::NoSuchAccount);
         }
-        // RFC 4488 §4: granting `Refer-Sub: false` means "no new dialog is
-        // created if this REFER was issued outside any existing dialog".
-        // Otherwise the dialog is opened before the answer, whose tag it is
-        // built around, goes: on a reliable transport the answer retires the
+        // RFC 4488 §4: `Refer-Sub: false` makes no dialog. Otherwise open it
+        // before the 202: on a reliable transport the answer retires the
         // transaction the dialog is read from
         let dialog = if wanted.quiet {
             None
@@ -295,24 +250,20 @@ impl UserAgent {
             self.endpoint.open_dialog_answering(transaction)
         };
         if dialog.is_none() && !wanted.quiet {
-            // a REFER whose dialog cannot be made, from a `Contact` that
-            // arrived and would not parse, has nowhere for its NOTIFYs to go
+            // unparsable `Contact`: nowhere for the NOTIFYs to go
             self.refuse_referral(transaction, StatusCode::BAD_REQUEST, now);
             self.referrals.held.remove(&referral);
             return Err(UaError::NoSuchCall);
         }
-        // §2.4.2's 202, with the `Contact` §12.1.1 has a response that makes
-        // a dialog carry, and RFC 4488 §4's `Refer-Sub: false` back when that
-        // was asked for: "it MUST insert the "Refer-Sub" header field set to
-        // "false" in the 2xx response"
+        // §2.4.2's 202 with a `Contact` (§12.1.1), and `Refer-Sub: false`
+        // echoed when granted (RFC 4488 §4)
         let contact = self.referral_contact(account, now);
         let mut response = OutgoingResponse::new(StatusCode::ACCEPTED).contact(&contact);
         if wanted.quiet {
             response = response.header(REFER_SUB, b"false");
         }
         if let Err(error) = self.endpoint.respond(transaction, &response, now) {
-            // the transaction is gone -- the endpoint answered it already, or
-            // its transport went -- so there is no referral left to take
+            // the transaction is gone: nothing left to take
             if let Some(dialog) = dialog {
                 self.endpoint.close_dialog(dialog);
             }
@@ -361,9 +312,8 @@ impl UserAgent {
         if let Some(held) = self.referrals.held.remove(&owner)
             && let Some(dialog) = held.dialog
         {
-            // RFC 6665 §4.4.1: "the destruction of a subscription results in
-            // the termination of its associated dialog", and nothing on the
-            // wire says so
+            // RFC 6665 §4.4.1: the dialog ends with the subscription,
+            // silently
             self.endpoint.close_dialog(dialog);
         }
     }
@@ -394,9 +344,8 @@ impl UserAgent {
             .collect();
         for (referral, transaction) in lapsed {
             self.referrals.held.remove(&referral);
-            // the endpoint's own 408 went at this same instant, since its
-            // deadline and this one are the same 64·T1 from the same
-            // arrival; this one is for the rare transaction it missed
+            // the endpoint's 408 normally went at the same 64·T1; this
+            // covers a transaction it missed
             self.refuse_referral(transaction, StatusCode::REQUEST_TIMEOUT, now);
             self.events.push_back(UaEvent::ReferralLapsed {
                 referral,

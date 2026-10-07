@@ -3,19 +3,11 @@
 
 //! RFC 4475 §3.2 to §3.4, received the way a peer would send them.
 //!
-//! `sipral-core/tests/rfc4475.rs` holds the parser to the corpus: every
-//! message there either parses or is refused. That says nothing about what
-//! the stack *does* with a message that parses, and the "semantic" groups
-//! of the RFC are about exactly that: which status a UAS answers an unknown
-//! scheme with, what it does with a body it cannot read, which messages it
-//! drops. Each test here feeds one of those messages, byte for byte from
-//! `fixtures/rfc4475/`, to a user agent over the transport its own `Via`
-//! names, and holds what goes back out to the paragraph of the RFC that
-//! says what should.
-//!
-//! The expected values are the RFC's, not this stack's: where the RFC
-//! offers a choice the test says which one was taken and why, and where
-//! the stack does less than the RFC asks the test says that too.
+//! `sipral-core/tests/rfc4475.rs` covers parsing; these cover what the agent
+//! does with a parsed message. Each fixture from `fixtures/rfc4475/` is fed
+//! byte for byte over the transport its `Via` names, and the reply is
+//! checked against the RFC paragraph. Where the RFC offers a choice, the
+//! test says which one and why.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -191,11 +183,9 @@ fn with_line(bytes: &[u8], old: &str, new: &str) -> Vec<u8> {
 
 #[test]
 fn badbranch_is_answered_by_the_old_rule_and_its_neighbour_is_not_taken_for_it() {
-    // §3.2.1: "An element receiving this request could reject the request
-    // with a 400 Response ..., or it could fall back to the RFC 2543-style
-    // transaction identifier." This one falls back, so it answers, and a
-    // second request from the same place with the same empty identifier is
-    // a request of its own rather than a retransmission of the first
+    // §3.2.1 allows a 400 or the RFC 2543 transaction identifier. This
+    // agent falls back, so a second request with the same empty identifier
+    // is a new request, not a retransmission
     let now = Instant::now();
     let mut agent = agent(now);
     let first = fixture("3.2-transaction/badbranch.dat");
@@ -239,14 +229,9 @@ fn badbranch_is_answered_by_the_old_rule_and_its_neighbour_is_not_taken_for_it()
 
 #[test]
 fn insuf_is_refused_400_without_breaking_anything() {
-    // §3.3.1: "An element receiving this message must not break because of
-    // the missing information. Ideally, it will respond with a 400". It
-    // does, statelessly: a response copies `From`, `To` and `Call-ID` from
-    // the request (§8.2.6.2) and this one has none of them, so the 400
-    // carries what it had — the `Via` it is routed by (§18.2.2) and the
-    // `CSeq` the client matches it on (§17.1.3) — and invents nothing for
-    // the rest. Nothing reaches the application, and the next request is
-    // served as though this one had never come
+    // §3.3.1: ideally a 400. Sent statelessly with only the `Via`
+    // (§18.2.2) and `CSeq` (§17.1.3) it had; nothing reaches the
+    // application and the next request is served normally
     let now = Instant::now();
     let mut agent = agent(now);
     receive(
@@ -374,15 +359,9 @@ fn multi01_is_refused_400() {
 
 #[test]
 fn mcl01_is_refused_as_a_whole_and_on_a_stream_takes_the_connection_with_it() {
-    // §3.3.9: "An element receiving this message should respond with an
-    // error. This request appeared over UDP, so the remainder of the
-    // datagram can simply be discarded. If a request like this arrives over
-    // TCP, the framing error is not recoverable, and the connection should
-    // be closed."
-    //
-    // Over UDP the datagram is refused as a message, and the refusal still
-    // goes to the caller of `receive`; the peer gets the RFC's error, built
-    // statelessly from the fields that can still be read.
+    // §3.3.9: over UDP answer with an error and discard the rest; over TCP
+    // close the connection. The UDP refusal also goes to the caller of
+    // `receive`.
     let now = Instant::now();
     let mut agent = agent(now);
     let bytes = fixture("3.3-application/mcl01.dat");
@@ -433,11 +412,7 @@ fn zeromf_is_answered_as_though_max_forwards_were_still_positive() {
     let answer = only_answer("3.3-application/zeromf.dat", Over::Udp);
     assert_eq!(status(&answer), 200);
     assert_eq!(header(&answer, HeaderName::CSeq), "39234321 OPTIONS");
-    // and it is the answer RFC 3261 §11.2 describes: "Allow, Accept,
-    // Accept-Encoding, Accept-Language, and Supported header fields SHOULD be
-    // present in a 200 (OK) response to an OPTIONS request". The methods
-    // are the ones §11.2 and §8.2.1 have this agent answer, the body type
-    // the one it reads, and the options the ones it implements
+    // with the headers RFC 3261 §11.2 asks of a 200 to OPTIONS
     let allow = header(&answer, HeaderName::Allow);
     let methods: Vec<&str> = allow.split(',').map(str::trim).collect();
     for method in ["INVITE", "ACK", "CANCEL", "BYE", "OPTIONS"] {
@@ -457,10 +432,7 @@ fn zeromf_is_answered_as_though_max_forwards_were_still_positive() {
 
 #[test]
 fn the_three_registrations_are_refused_405_by_an_agent_that_keeps_no_bindings() {
-    // §3.3.12 to §3.3.14 say what a registrar makes of these: a contact
-    // parameter kept apart from a URI parameter, and an escaped header kept
-    // in the binding. This agent is not a registrar, and §3.3.7 is the rule
-    // for an endpoint: 405
+    // §3.3.12 to §3.3.14 are for registrars; an endpoint answers 405 (§3.3.7)
     for file in [
         "3.3-application/cparam01.dat",
         "3.3-application/cparam02.dat",
@@ -477,8 +449,7 @@ fn sdp01_is_refused_406_rather_than_answered_against_its_accept() {
     // §3.3.15: "since the Accept header field does not contain
     // application/sdp, the response may not contain an SDP body. The
     // recipient of this request could respond with a 406 Not Acceptable".
-    // Every 2xx to an INVITE carries a session description, so a call rung
-    // here could only ever be answered with one the peer said it cannot take
+    // Every 2xx to an INVITE carries SDP, so 406 it is
     let (out, reported) = fed("3.3-application/sdp01.dat", Over::Udp);
     let refusal = out
         .iter()
@@ -497,13 +468,10 @@ fn sdp01_is_refused_406_rather_than_answered_against_its_accept() {
 fn inv2543_is_refused_400_for_the_contact_it_does_not_name() {
     // §3.4.1: legal RFC 2543 and "should be accepted by RFC 3261 elements
     // that want to maintain backwards compatibility": no branch, no From
-    // tag, no Content-Length, no Max-Forwards. It has no Contact either,
-    // which the RFC's list does not mention and RFC 3261 §8.1.1.8 makes
-    // compulsory on a request that opens a dialog: without one there is no
-    // remote target (§12.1.1) for an ACK's dialog or a BYE to be sent to.
-    // This stack takes the other four and refuses the fifth, out loud:
-    // before, the whole INVITE was dropped without a word, and a call rung
-    // and answered with no dialog behind it would be worse than either
+    // tag, no Content-Length, no Max-Forwards. It also lacks a Contact,
+    // which RFC 3261 §8.1.1.8 requires: without a remote target (§12.1.1)
+    // there is nowhere to send a BYE. The first four are accepted, the
+    // missing Contact is refused with an answer
     let (out, reported) = fed("3.4-backward-compat/inv2543.dat", Over::Udp);
     let refusal = out
         .iter()
@@ -525,12 +493,8 @@ fn inv2543_is_refused_400_for_the_contact_it_does_not_name() {
 
 #[test]
 fn inv2543_with_a_contact_is_taken_as_a_call_whose_dialog_has_no_from_tag() {
-    // The same INVITE with the one field RFC 3261 cannot do without, and
-    // still with no branch and no From tag. §12.1.1: "A UAS MUST be prepared
-    // to receive a request without a tag in the From field, in which case
-    // the tag is considered to have a value of null." Before this was
-    // checked, the missing tag alone made the INVITE unmatchable by the old
-    // transaction rule and it was dropped
+    // The same INVITE with a Contact, still with no branch and no From tag:
+    // a missing tag counts as null (§12.1.1)
     let now = Instant::now();
     let mut agent = agent(now);
     let invite = with_line(
@@ -625,11 +589,8 @@ Content-Length: 0\r\n\
 
 #[test]
 fn a_call_for_no_account_over_a_stream_names_the_stream_in_its_contact() {
-    // The Contact above names the address the INVITE arrived on. Over a
-    // stream it must also say which kind: §19.1.2 makes UDP the default for
-    // a `sip:` URI with no `transport`, so a peer that called over TCP or TLS
-    // and is handed a bare address would send its ACK and its BYE over UDP,
-    // to a socket this end may not even have
+    // Over a stream the Contact must name its transport: a bare `sip:` URI
+    // defaults to UDP (§19.1.2), and the ACK and BYE would go there
     for (over, via, parameter) in [(Over::Tcp, "TCP", "tcp"), (Over::Tls, "TLS", "tls")] {
         let now = Instant::now();
         let mut agent = agent(now);
@@ -716,11 +677,8 @@ fn methods(allow: &str) -> Vec<String> {
 
 #[test]
 fn a_method_this_agent_knows_but_does_not_take_outside_a_dialog_is_405_with_allow() {
-    // §8.2.1: "If the UAS recognizes but does not support the method of a
-    // request, it MUST generate a 405 (Method Not Allowed) response", and
-    // §21.4.6 makes the Allow compulsory. It lists what this agent takes,
-    // the same list its answer to OPTIONS gives (§20.5), and never the
-    // method it refused
+    // §8.2.1, §21.4.6: 405 with the same Allow as OPTIONS (§20.5), which
+    // never lists the refused method
     let options = answered(&out_of_dialog("OPTIONS", "<sip:user@example.com>", "opt"));
     assert_eq!(status(&options), 200);
     let advertised = methods(&header(&options, HeaderName::Allow));
@@ -824,13 +782,10 @@ fn what_a_handler_claims_outside_a_dialog_is_still_its_own() {
 
 #[test]
 fn an_unclaimed_request_is_answered_as_it_arrives_and_left_to_no_timer() {
-    // §8.2.1 on the wire, end to end: a PUBLISH or a method nobody knows,
-    // outside a dialog, is answered the moment it arrives rather than left
-    // until the endpoint's own 408 at 64·T1. Its retransmission is answered
-    // from the transaction (§17.2.2), and when 64·T1 has passed nothing else
-    // is written: the answer given was the last word. A SUBSCRIBE carrying a
-    // body this agent cannot read is still a 405 and not a 415, because §8.2
-    // asks about the method before it asks about the body
+    // §8.2.1 end to end: answered on arrival, not by a 408 at 64·T1; a
+    // retransmission gets the same answer (§17.2.2) and nothing follows. A
+    // SUBSCRIBE with an unreadable body is 405, not 415: §8.2 asks about
+    // the method first
     for (method, body, expected) in [
         ("PUBLISH", None, 405),
         ("FOO", None, 501),
