@@ -14,7 +14,7 @@ from sipral.enums import AudioMode
 from sipral_agents import wait_for_media
 from sipral_agents.demo import run
 
-from .harness import LOUD, rms, tone
+from .harness import PATIENCE, echoed
 
 
 class DemoTest(unittest.IsolatedAsyncioTestCase):
@@ -24,21 +24,13 @@ class DemoTest(unittest.IsolatedAsyncioTestCase):
         demo = asyncio.create_task(run("127.0.0.1", 0, {}, started))
         caller = Stack(loop=loop, audio=AudioMode.APPLICATION)
         try:
-            address = await asyncio.wait_for(started, 5)
+            address = await asyncio.wait_for(started, PATIENCE)
             account = caller.add_account("sip:caller@sipral.invalid", registrar_address=address)
             call = caller.place_call(account, f"sip:agent@{address}")
-            self.assertTrue(await wait_for_media(call, 5), "the call never got media")
-            await asyncio.sleep(0.5)
-            call.media.send_audio(tone(call.media.sample_rate, 1.0))
-            loud = 0
-            deadline = loop.time() + 2.0
-            while (left := deadline - loop.time()) > 0:
-                try:
-                    frame = await asyncio.wait_for(call.media.frames.get(), left)
-                except TimeoutError:
-                    break
-                loud += rms(frame) > LOUD
-            self.assertGreaterEqual(loud, 25, "less than half the tone came back")
+            self.assertTrue(await wait_for_media(call, PATIENCE), "the call never got media")
+            # the demo's agent connects on its own time, which this test
+            # does not see
+            self.assertTrue(await echoed(call, again=True), "less than half the tone came back")
             call.hangup()
             call.close()
         finally:

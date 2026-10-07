@@ -22,7 +22,7 @@ from sipral.enums import AudioMode, EventKind
 from sipral_agents.__main__ import main
 from sipral_agents.runner import Bridge, ConfigError, load_config, parse_config
 
-from .harness import LOUD, rms, tone
+from .harness import PATIENCE, echoed
 from .test_openai_realtime import FakeRealtime
 
 EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "examples", "bridge.toml")
@@ -199,52 +199,36 @@ uri = "sip:support-agent@{self.vendor.bind_address}"
     async def dial(self, user: str):
         call = self.caller.place_call(self.caller_account, f"sip:{user}@{self.stack.bind_address}")
         self.calls.append(call)
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(PATIENCE):
             while call.media is None:
                 await asyncio.sleep(0.01)
         return call
-
-    async def hears_itself(self, call) -> int:
-        """Send a second of tone and count the loud frames that come back."""
-        while not call.media.frames.empty():
-            call.media.frames.get_nowait()
-        call.media.send_audio(tone(call.media.sample_rate, 1.0))
-        loud = 0
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 1.6
-        while (left := deadline - loop.time()) > 0:
-            try:
-                frame = await asyncio.wait_for(call.media.frames.get(), left)
-            except TimeoutError:
-                break
-            if rms(frame) > LOUD:
-                loud += 1
-        return loud
 
     async def test_each_account_reaches_its_own_agent(self) -> None:
         sales = await self.dial("sales")
         update = await self.service.next(lambda b: b.get("type") == "session.update")
         self.assertEqual(update["session"]["audio"]["input"]["format"]["rate"], 24000)
         self.assertEqual(self.service.requests[0][1].get("authorization"), "Bearer test-key")
-        self.assertGreaterEqual(await self.hears_itself(sales), 25)
+        # the bridge's agent connects on its own time, which this test does
+        # not see
+        self.assertTrue(await echoed(sales, again=True), "less than half the tone came back")
         self.assertTrue(self.answered.empty(), "the SIP agent got a call meant for OpenAI")
 
         support = await self.dial("support")
-        bridged = await asyncio.wait_for(self.answered.get(), 5)
-        async with asyncio.timeout(5):
+        bridged = await asyncio.wait_for(self.answered.get(), PATIENCE)
+        async with asyncio.timeout(PATIENCE):
             while bridged.media is None:
                 await asyncio.sleep(0.01)
         # past the ringback, the caller hears its own tone through the agent
-        await asyncio.sleep(0.5)
-        self.assertGreaterEqual(await self.hears_itself(support), 25)
+        self.assertTrue(await echoed(support, again=True), "less than half the tone came back")
         self.assertEqual(len(self.service.connections), 1, "the SIP call reached the WebSocket agent")
 
         support.hangup()
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(PATIENCE):
             while not bridged.ended:
                 await asyncio.sleep(0.02)
         sales.hangup()
-        self.assertEqual(await asyncio.wait_for(self.service.closed.get(), 5), 1000)
+        self.assertEqual(await asyncio.wait_for(self.service.closed.get(), PATIENCE), 1000)
 
 
 if __name__ == "__main__":

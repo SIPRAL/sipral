@@ -378,6 +378,12 @@ class AgentCall:
             await ws.close()
             raise
         self._ws = ws
+        # what the caller said while there was no connection is stale; what
+        # it says from the moment the session counts as connected is not,
+        # and the uplink may start well after that on a loaded machine
+        frames = self.call.media.frames
+        while not frames.empty():
+            frames.get_nowait()
         self._emit(AgentEventKind.CONNECTED, resumed=bool(resumed))
         return ws
 
@@ -406,8 +412,6 @@ class AgentCall:
 
     async def _uplink(self, ws: ClientConnection) -> None:
         frames = self.call.media.frames
-        while not frames.empty():
-            frames.get_nowait()
         while True:
             pcm = await frames.get()
             try:

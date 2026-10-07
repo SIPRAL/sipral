@@ -24,6 +24,8 @@ from sipral_agents import AgentCall, AgentEvent, AgentEventKind, Backoff, serve,
 
 TONE_HZ = 1000
 LOUD = 1000
+# how long anything may take on a machine loaded by everything else on it
+PATIENCE = 30
 
 
 def tone(sample_rate: int, seconds: float, amplitude: int = 8000) -> bytes:
@@ -39,6 +41,41 @@ def tone(sample_rate: int, seconds: float, amplitude: int = 8000) -> bytes:
 def rms(pcm: bytes) -> float:
     values = [int.from_bytes(pcm[at : at + 2], "little", signed=True) for at in range(0, len(pcm), 2)]
     return math.sqrt(sum(v * v for v in values) / max(len(values), 1))
+
+
+async def echoed(call, again: bool = False) -> bool:
+    """Whether a second of tone the caller sends comes back, half of its
+    frames at least.
+
+    Counted in the frames the caller hears rather than in seconds: a loaded
+    machine delays them, it does not make the call carry fewer. An agent
+    drops what the caller said before its session counted as connected, and
+    a test that only sees the call cannot tell when that was: ``again``
+    sends the tone again once two seconds of frames brought too little of
+    it back, and each one is counted on its own. A test that waited for the
+    agent's ``CONNECTED`` leaves it off, since from then on nothing the
+    caller says may be lost.
+    """
+    rate = call.media.sample_rate
+    frames = rate // call.media.frame_samples
+    while not call.media.frames.empty():
+        call.media.frames.get_nowait()
+    try:
+        async with asyncio.timeout(PATIENCE):
+            while True:
+                call.media.send_audio(tone(rate, 1.0))
+                loud = 0
+                heard = 0
+                while not again or heard < 2 * frames:
+                    loud += rms(await call.media.frames.get()) > LOUD
+                    heard += 1
+                    if loud >= frames // 2:
+                        return True
+                    # a queue that is never empty never suspends the task,
+                    # and the timeout can only cancel one that does
+                    await asyncio.sleep(0)
+    except TimeoutError:
+        return False
 
 
 class FakeService(abc.ABC):
@@ -155,12 +192,14 @@ class AgentCallTest(unittest.IsolatedAsyncioTestCase):
     async def dial(self):
         call = self.caller.place_call(self.caller_account, f"sip:agent@{self.agent.bind_address}")
         self.calls.append(call)
-        self.assertTrue(await wait_for_media(call, 5), "the call never got media")
-        agent = await asyncio.wait_for(self.agent_calls.get(), 5)
+        self.assertTrue(await wait_for_media(call, PATIENCE), "the call never got media")
+        agent = await asyncio.wait_for(self.agent_calls.get(), PATIENCE)
         await self.event(agent, AgentEventKind.CONNECTED)
         return call, agent
 
-    async def event(self, agent: AgentCall, kind: AgentEventKind, timeout: float = 5.0) -> AgentEvent:
+    async def event(
+        self, agent: AgentCall, kind: AgentEventKind, timeout: float = PATIENCE
+    ) -> AgentEvent:
         async with asyncio.timeout(timeout):
             while True:
                 event = await agent.events.get()
@@ -184,31 +223,92 @@ class AgentCallTest(unittest.IsolatedAsyncioTestCase):
             while not call.ended:
                 await asyncio.sleep(0.02)
 
+    async def hear(self, call, loud: int = 0, quiet: int = 0, frames: int = 0) -> list[bytes]:
+        """What the caller hears until ``loud`` loud frames in all, ``quiet``
+        silent frames in a row and ``frames`` frames in all came.
+
+        Counted in frames rather than in seconds: a loaded machine delays
+        them, it does not make the call carry fewer.
+        """
+        heard: list[bytes] = []
+        louds = silence = 0
+        async with asyncio.timeout(PATIENCE):
+            while louds < loud or silence < quiet or len(heard) < frames:
+                pcm = await call.media.frames.get()
+                heard.append(pcm)
+                if rms(pcm) > LOUD:
+                    louds += 1
+                    silence = 0
+                else:
+                    silence += 1
+                # a queue that is never empty never suspends the task, and
+                # the timeout can only cancel one that does
+                await asyncio.sleep(0)
+        return heard
+
+    @staticmethod
+    def drain(call) -> None:
+        """What the caller heard before the test speaks is not its answer."""
+        while not call.media.frames.empty():
+            call.media.frames.get_nowait()
+
     async def assert_echo(self, call) -> None:
-        """A tone the caller sends comes back through the service."""
-        call.media.send_audio(tone(call.media.sample_rate, 1.0))
-        heard = await self.listen(call, 1.6)
-        loud = [pcm for _, pcm in heard if rms(pcm) > LOUD]
-        self.assertGreaterEqual(len(loud), 25, "less than half the tone came back")
+        """A tone the caller sends comes back through the service: half of
+        its frames at least."""
+        self.assertTrue(await echoed(call), "less than half the tone came back")
 
     async def assert_barge_in(self, call, agent: AgentCall, cut) -> AgentEvent:
         """Three seconds of the agent's tone, cut by ``cut()`` once the caller
-        hears it: the caller stops hearing it soon after."""
-        heard: list = []
-        listening = asyncio.create_task(self.listen(call, 30, heard))
-        self.addCleanup(listening.cancel)
+        hears it.
+
+        Timed from the moment the agent's side drops what it queued -- the
+        ``INTERRUPTED`` event -- not from when the test cut it: the service's
+        message reaches it late on a loaded machine, and the caller's jitter
+        buffer grows. What the agent's side promises is exact: no tone is
+        handed to the call's media after that moment, and what the media held
+        then is at most ``send_ahead_ms``. The caller then hears the tone stop
+        short of its three seconds, and silence after it.
+        """
+        media = agent.call.media
+        frame_seconds = media.frame_samples / media.sample_rate
+        sent: list[tuple[float, bool]] = []
+        send_audio = media.send_audio
+
+        def recording_send(pcm: bytes) -> None:
+            sent.append((time.monotonic(), rms(pcm) > LOUD))
+            send_audio(pcm)
+
+        media.send_audio = recording_send
+        silenced_at: list[float] = []
+        silence = agent._silence
+
+        def timed_silence():
+            silenced_at.append(time.monotonic())
+            return silence()
+
+        agent._silence = timed_silence
         self.service.echo = False
+        self.drain(call)
         await self.service.send_agent_audio(tone(24000, 3.0))
-        async with asyncio.timeout(5):
-            while not any(rms(pcm) > LOUD for _, pcm in heard):
-                await asyncio.sleep(0.005)
+        heard = await self.hear(call, loud=1)
         await asyncio.sleep(0.3)
-        cut_at = time.monotonic()
         await cut()
         interrupted = await self.event(agent, AgentEventKind.INTERRUPTED)
-        await asyncio.sleep(1.0)
-        late = [at for at, pcm in heard if at > cut_at + 0.4 and rms(pcm) > LOUD]
-        self.assertEqual(late, [], "the agent's audio went on after the barge-in")
-        quiet = [pcm for at, pcm in heard if at > cut_at + 0.4]
-        self.assertGreater(len(quiet), 20, "the call stopped carrying audio altogether")
+        cut_at = silenced_at[0]
+
+        late = [at for at, loud in sent if loud and at >= cut_at]
+        self.assertEqual(late, [], "tone went to the call after the interruption reached the agent")
+        toned = [at for at, loud in sent if loud]
+        held = len(toned) * frame_seconds - (cut_at - toned[0])
+        self.assertLessEqual(
+            held,
+            agent._ahead + 0.005,
+            f"the call's media held {held * 1000:.0f} ms of tone when interrupted",
+        )
+
+        heard += await self.hear(call, quiet=25)
+        tail = await self.hear(call, frames=25)
+        self.assertTrue(all(rms(pcm) < LOUD for pcm in tail), "the tone came back")
+        tone_heard = sum(rms(pcm) > LOUD for pcm in heard) * frame_seconds
+        self.assertLess(tone_heard, 3.0, "the interruption did not cut the tone")
         return interrupted
