@@ -77,13 +77,13 @@ Q2 2027, planned.
 - A call as a participant in a LiveKit room, as an example *(done)*
 - A phone voice agent that runs in five minutes, speech to speech, from one command *(done)*
 - Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published *(done)*
-- Calls held for a day and for a week with no growth in memory or processor time, measured and published
+- Calls held for a day and for a week with no growth in memory or processor time, measured and published *(in progress)*
 
 ### 1.3 — More platforms
 
 Q3 2027, planned.
 
-- Node.js and TypeScript package
+- Node.js and TypeScript package *(in progress)*
 - .NET MAUI package for iOS and Android
 - A network test before the call *(done)*
 - Answering-machine detection on calls the agent places *(done)*
@@ -103,7 +103,7 @@ Every release.
 
 - Every published figure measured again by the gate on each change *(in progress)*
 - An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations
-- More PBXs proven in the lab, and caller identity, diversion, redirection and failover between servers shown working
+- More PBXs proven in the lab, and caller identity, diversion, redirection and failover between servers shown working *(in progress)*
 - Interop with carriers and a commercial SBC
 <!-- releases: end -->
 
