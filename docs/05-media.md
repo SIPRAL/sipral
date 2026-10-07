@@ -81,6 +81,17 @@ source address of the first valid packet. This single behaviour, together with
 latch follows the far end until a pair is selected, and holds from then on
 (`docs/06-nat.md`, ICE in the full role).
 
+A re-negotiation that moves the far end's media address opens the latch
+again, and the next valid packet from the new address closes it. A packet
+from the address it left that is read afterwards — in flight when the
+re-INVITE was — is played but does not close the latch, until half a second
+of them says the far end is sending from there still. Nor does it decide the
+stream's source for good: what sends from the new address may be another
+sender altogether — a PBX handing a call's media to the phone at the other end
+of it, as Asterisk's `direct_media` does — and when the latch closes there
+under another SSRC, the stream starts again under that one rather than
+refusing all of it as a second source.
+
 Validation before anything else: version, payload type in the negotiated set,
 plausible SSRC, length. The one widening of that set is G.711's other law: a
 call agreed on one companding law also takes the other's static payload type,

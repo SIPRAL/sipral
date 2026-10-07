@@ -337,6 +337,14 @@ struct Inbound {
     /// still, as one behind a NAT that kept its mapping while its own
     /// address changed does, and the latch closes on it after all.
     left: Option<(SocketAddr, u16)>,
+    /// Whether `source` was taken from such a packet, from the address the
+    /// far end left. What sends from the address it moved to need not be
+    /// the same source: a PBX that hands a call's media to the phone at the
+    /// other end of it (Asterisk's `direct_media`) moves it to a different
+    /// sender altogether, and holding the old SSRC would refuse every packet
+    /// of the new one as a second source. So when the latch closes on the
+    /// new address under another SSRC, the stream starts again under it.
+    source_where_left: bool,
     /// Whether the latch follows the far end rather than holding: a packet
     /// from another address is taken, and moves the latch there, once it has
     /// passed everything a packet from the latched address would have to.
@@ -435,6 +443,7 @@ impl RtpSession {
                 signalled: config.remote,
                 latch: None,
                 left: None,
+                source_where_left: false,
                 following: false,
                 rtcp_latch: None,
                 source: None,
@@ -712,8 +721,9 @@ impl RtpSession {
         // very end, for a packet the stream took. Not onto the address a
         // re-INVITE moved the far end away from, though, unless the far end
         // turns out to be sending from there still (`Inbound::left`)
+        let mut stale = false;
         if self.inbound.latch.is_none() {
-            let stale = match &mut self.inbound.left {
+            stale = match &mut self.inbound.left {
                 Some((was, heard)) if *was == from => {
                     *heard = heard.saturating_add(1);
                     *heard < STILL_THERE
@@ -721,6 +731,15 @@ impl RtpSession {
                 _ => false,
             };
             if !stale {
+                // a source heard only from where the far end left, and not
+                // the one sending from here: the stream starts again under
+                // this one (`Inbound::source_where_left`)
+                if self.inbound.source_where_left
+                    && self.inbound.source.is_some_and(|known| known != header.ssrc)
+                {
+                    self.resync();
+                }
+                self.inbound.source_where_left = false;
                 self.inbound.latch = Some(from);
                 self.inbound.left = None;
             }
@@ -735,7 +754,10 @@ impl RtpSession {
                 return Received::Dropped(Discard::SecondSource(header.ssrc));
             }
             Some(_) => {}
-            None => self.inbound.source = Some(header.ssrc),
+            None => {
+                self.inbound.source = Some(header.ssrc);
+                self.inbound.source_where_left = stale;
+            }
         }
 
         match self.inbound.sequence.update(header.sequence) {
@@ -2809,6 +2831,44 @@ mod tests {
             session.receive(&mut datagram(7, 104, 8), addr(PEER), Duration::ZERO),
             Received::Dropped(Discard::ForeignAddress),
             "and once it is, the old address is a stranger like any other"
+        );
+    }
+
+    #[test]
+    fn a_far_end_that_moved_to_another_sender_is_heard_after_a_packet_from_where_it_left() {
+        // a PBX handing the call's media to the phone at the other end of it
+        // (Asterisk's direct_media): its own last packet is read after the
+        // re-INVITE, and then the phone's, under an SSRC of its own. Taking
+        // the PBX's SSRC as the stream's refused every packet of the phone's
+        // as a second source, for the rest of the call
+        let mut session = session();
+        establish(&mut session, 7, addr(PEER));
+        session.relocate(addr(IMPOSTOR));
+        session.resync();
+
+        session.receive(&mut datagram(7, 102, 8), addr(PEER), Duration::ZERO);
+        assert_eq!(session.latched(), None);
+
+        let mut heard = Vec::new();
+        for sequence in 5000..5004_u16 {
+            heard.push(session.receive(
+                &mut datagram(9, sequence, 8),
+                addr(IMPOSTOR),
+                Duration::ZERO,
+            ));
+        }
+        assert_eq!(session.latched(), Some(addr(IMPOSTOR)));
+        assert!(
+            !heard
+                .iter()
+                .any(|received| matches!(received, Received::Dropped(Discard::SecondSource(_)))),
+            "{heard:?}"
+        );
+        assert_eq!(heard.last(), Some(&Received::Queued));
+        assert_eq!(
+            session.receive(&mut datagram(7, 103, 8), addr(PEER), Duration::ZERO),
+            Received::Dropped(Discard::ForeignAddress),
+            "and the address it left is a stranger like any other"
         );
     }
 
