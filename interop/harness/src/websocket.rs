@@ -14,6 +14,17 @@
 //! other, the echo is heard, the call is hung up, the binding given back,
 //! and the WebSocket closed from this end and answered (RFC 6455 §7.1.2).
 //!
+//! # Over TLS
+//!
+//! The `wss` flow is the same call over Asterisk's TLS listener on 8089
+//! (`interop/wss/`), as `labuser-wss`. The TLS is the application's, as the
+//! stack has it: here a `socat` beside the harness that checks Asterisk's
+//! certificate against the lab authority and hands the harness a plain
+//! connection on loopback. The harness binds that connection as `Wss` with
+//! Asterisk's own address named, and the account names the `Host` and
+//! resource (`Account::websocket_target`), the way an application reaching a
+//! server by name does.
+//!
 //! # What fails it
 //!
 //! The connection refused, the registration never granted, the call never
@@ -30,6 +41,24 @@ use sipral::{
     Account, CallMedia, Credentials, Event, Input, MediaConfig, MediaEvent, OutgoingCall,
     TransportId, TransportProtocol, UaEvent, WebSocketTarget,
 };
+
+/// Where one run of the flow goes.
+pub(crate) struct Lab<'a> {
+    /// The SIP domain, `asterisk`.
+    pub(crate) server: &'a str,
+    /// Asterisk's WebSocket listener: the far end the transport is bound to.
+    pub(crate) websocket: SocketAddr,
+    /// Where the connection is made: `websocket` itself, or the local end
+    /// of whatever secures it.
+    pub(crate) connect: SocketAddr,
+    /// `Ws`, or `Wss` over a connection secured below.
+    pub(crate) protocol: TransportProtocol,
+    /// The `Host` the account names for the handshake, or `None` to set the
+    /// target for the address (`UserAgent::set_websocket_target`).
+    pub(crate) host: Option<&'a str>,
+    pub(crate) user: &'a str,
+    pub(crate) pass: &'a str,
+}
 
 use crate::{Endpoint, catalog, place_call, route_to, run_folded, uri};
 
@@ -123,12 +152,16 @@ impl Connection {
 /// # Errors
 /// The first thing that was not as it has to be.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn run(
-    server: &str,
-    websocket: SocketAddr,
-    user: &str,
-    pass: &str,
-) -> Result<String, String> {
+pub(crate) fn run(lab: &Lab<'_>) -> Result<String, String> {
+    let Lab {
+        server,
+        websocket,
+        connect,
+        protocol,
+        host,
+        user,
+        pass,
+    } = *lab;
     let now = Instant::now();
     let mut endpoint = Endpoint::bind(
         run_folded([SEED; 32]),
@@ -138,8 +171,8 @@ pub(crate) fn run(
         now,
     )
     .map_err(|error| format!("cannot bind: {error}"))?;
-    let socket = TcpStream::connect_timeout(&websocket, Duration::from_secs(5))
-        .map_err(|error| format!("cannot connect to {websocket}: {error}"))?;
+    let socket = TcpStream::connect_timeout(&connect, Duration::from_secs(5))
+        .map_err(|error| format!("cannot connect to {connect}: {error}"))?;
     socket
         .set_nonblocking(true)
         .map_err(|error| format!("cannot make the connection non-blocking: {error}"))?;
@@ -152,26 +185,36 @@ pub(crate) fn run(
         inbox: vec![0_u8; 65_535],
     };
 
-    let target = WebSocketTarget::new(&format!("{server}:{}", websocket.port()), "/ws")
-        .map_err(|error| format!("a target the stack refused: {error}"))?;
-    endpoint.agent.set_websocket_target(websocket, target);
-    let account = endpoint.agent.add_account(
-        Account::new(
-            uri(&format!("sip:{user}@{server}"))?,
-            uri(&format!("sip:{server};transport=ws"))?,
-            uri(&format!("sip:{user}@{local}"))?,
-            WS,
-            websocket,
-        )
-        .credentials(Credentials::new(user, pass))
-        .expires(Duration::from_secs(300)),
-    );
+    let scheme = if protocol == TransportProtocol::Wss {
+        "wss"
+    } else {
+        "ws"
+    };
+    let mut account = Account::new(
+        uri(&format!("sip:{user}@{server}"))?,
+        uri(&format!("sip:{server};transport={scheme}"))?,
+        uri(&format!("sip:{user}@{local}"))?,
+        WS,
+        websocket,
+    )
+    .credentials(Credentials::new(user, pass))
+    .expires(Duration::from_secs(300));
+    if let Some(host) = host {
+        account = account
+            .websocket_target(Some(host), Some("/ws"))
+            .map_err(|error| format!("a target the account refused: {error}"))?;
+    } else {
+        let target = WebSocketTarget::new(&format!("{server}:{}", websocket.port()), "/ws")
+            .map_err(|error| format!("a target the stack refused: {error}"))?;
+        endpoint.agent.set_websocket_target(websocket, target);
+    }
+    let account = endpoint.agent.add_account(account);
     endpoint
         .agent
         .receive(
             Input::TransportBound {
                 transport: WS,
-                protocol: TransportProtocol::Ws,
+                protocol,
                 local,
                 remote: Some(websocket),
             },
@@ -248,7 +291,12 @@ pub(crate) fn run(
                     }
                     story.push("the WebSocket closed both ways".to_owned());
                     return Ok(format!(
-                        "   ({heard} audible frames back over a WebSocket call; {})",
+                        "   ({heard} audible frames back over a {} call; {})",
+                        if protocol == TransportProtocol::Wss {
+                            "secure WebSocket"
+                        } else {
+                            "WebSocket"
+                        },
                         story.join(", ")
                     ));
                 }

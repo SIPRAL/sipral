@@ -738,14 +738,21 @@ export class SipralClient {
         if (named.length !== 1) {
           throw new SipralError('invalidArgument', 'an account names its server by registrarAddress or by serverUri, one of the two');
         }
-        if (options.streamProtocol !== undefined && options.streamProtocol !== 'tcp' && options.streamProtocol !== 'tls') {
-          throw new SipralError('invalidArgument', 'streamProtocol is "tcp" or "tls"');
+        if (options.streamProtocol !== undefined && !['tcp', 'tls', 'ws', 'wss'].includes(options.streamProtocol)) {
+          throw new SipralError('invalidArgument', 'streamProtocol is "tcp", "tls", "ws" or "wss"');
         }
         if (options.streamProtocol !== undefined && this.signalling !== 'udp') {
           throw new SipralError('invalidArgument', 'an account on a connection of its own sits beside a client signalling over "udp"');
         }
-        if (options.tlsPin !== undefined && options.streamProtocol !== 'tls') {
-          throw new SipralError('invalidArgument', 'tlsPin is the certificate the account\'s own TLS connection trusts: it needs streamProtocol "tls"');
+        if (options.tlsPin !== undefined && options.streamProtocol !== 'tls' && options.streamProtocol !== 'wss') {
+          throw new SipralError('invalidArgument', 'tlsPin is the certificate the account\'s own TLS connection trusts: it needs streamProtocol "tls" or "wss"');
+        }
+        if (
+          (options.websocketHost !== undefined || options.websocketResource !== undefined) &&
+          options.streamProtocol !== 'ws' &&
+          options.streamProtocol !== 'wss'
+        ) {
+          throw new SipralError('invalidArgument', 'websocketHost and websocketResource are for an account whose streamProtocol is "ws" or "wss"');
         }
         tlsPin = options.tlsPin === undefined ? undefined : pinDigest(options.tlsPin);
         if (options.realms !== undefined && options.realms.some((realm) => realm === '' || realm.includes('\n'))) {

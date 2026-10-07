@@ -807,9 +807,12 @@ public final class SipralStack: @unchecked Sendable {
                 sayNoStream(id, .connectionRefused, "to \(destination) not tried: streamFallback is off")
                 continue
             }
-            let over: SipralTransport = wanted.protocolRaw == SipralTransport.tls.rawValue ? .tls : .tcp
+            // a WebSocket is a TCP or TLS connection bound as WS or WSS, whose
+            // handshake and frames are the stack's
+            let bound = SipralTransport(rawValue: wanted.protocolRaw) ?? .tcp
+            let over: SipralTransport = bound == .tls || bound == .wss ? .tls : .tcp
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.openStreamLink(id, to: destination, over: over)
+                self?.openStreamLink(id, to: destination, over: over, boundAs: bound)
             }
         }
     }
@@ -817,7 +820,10 @@ public final class SipralStack: @unchecked Sendable {
     /// The account's pin for that server if it has one, else `tlsTrust`.
     private func streamTrust(to destination: String) -> TLSTrust {
         let pinned = movingQueue.sync {
-            accounts.values.first { $0.streamProtocol == .tls && $0.registrarAddress == destination && $0.tlsPin != nil }
+            accounts.values.first {
+                ($0.streamProtocol == .tls || $0.streamProtocol == .wss) && $0.registrarAddress == destination
+                    && $0.tlsPin != nil
+            }
         }
         if let pin = pinned?.tlsPin, let trust = try? TLSTrust.pinned(pin) {
             return trust
@@ -826,9 +832,12 @@ public final class SipralStack: @unchecked Sendable {
     }
 
     /// Connect (TCP, or TLS for such an account) to `destination` or to
-    /// `streamServer`, and bind it under `id`. A failure is reported under
-    /// the same id, which ends whatever waited for it.
-    private func openStreamLink(_ id: UInt32, to destination: String, over: SipralTransport = .tcp) {
+    /// `streamServer`, and bind it under `id` as `boundAs` (`.ws`/`.wss` for
+    /// a WebSocket). A failure is reported under the same id, which ends
+    /// whatever waited for it.
+    private func openStreamLink(
+        _ id: UInt32, to destination: String, over: SipralTransport = .tcp, boundAs: SipralTransport? = nil
+    ) {
         let made: SignallingConnection
         let server = over == .tcp ? streamServer ?? destination : destination
         do {
@@ -863,7 +872,7 @@ public final class SipralStack: @unchecked Sendable {
         do {
             _ = try retryingBusy {
                 try Sipral.stackTransportBind(
-                    stack: handle, transport: id, protocol: over.rawValue,
+                    stack: handle, transport: id, protocol: (boundAs ?? over).rawValue,
                     local: made.local, remote: destination, nowMs: nowMs()
                 )
             }
@@ -1183,12 +1192,14 @@ public final class SipralStack: @unchecked Sendable {
     /// application running TLS itself
     /// (`Account.checkCertificate(_:unixSeconds:)`).
     ///
-    /// `streamProtocol` (`.tcp` or `.tls`) gives the account its own
-    /// connection to its server, beside UDP accounts on the same stack; its
-    /// REGISTER and calls go over it. TLS checks `tlsPin` if set, else the
+    /// `streamProtocol` (`.tcp`, `.tls`, `.ws` or `.wss`) gives the account its
+    /// own connection to its server, beside UDP accounts on the same stack;
+    /// its REGISTER and calls go over it. TLS checks `tlsPin` if set, else the
     /// stack's `tlsTrust`. A closed connection is reopened; until open, a
     /// call throws `.transportDown`. Only on a UDP stack; other values throw
-    /// `.invalidArgument`.
+    /// `.invalidArgument`. `.ws`/`.wss` run a WebSocket (RFC 7118) asking for
+    /// `websocketResource` (`/ws`) with `websocketHost` as `Host` (the
+    /// server's address).
     ///
     /// `realms` are the realms the password answers (RFC 3261 §22.1). Empty
     /// means the server's first realm and those its REGISTERs are challenged
@@ -1203,6 +1214,8 @@ public final class SipralStack: @unchecked Sendable {
         keepaliveMs: UInt64 = 0,
         tlsPin: String? = nil,
         streamProtocol: SipralTransport? = nil,
+        websocketHost: String? = nil,
+        websocketResource: String? = nil,
         registrar: String? = nil,
         contact: String? = nil,
         displayName: String? = nil,
@@ -1222,10 +1235,10 @@ public final class SipralStack: @unchecked Sendable {
             )
         }
         if let streamProtocol {
-            guard streamProtocol == .tcp || streamProtocol == .tls, signalling == .udp else {
+            guard [.tcp, .tls, .ws, .wss].contains(streamProtocol), signalling == .udp else {
                 throw SipralError(
                     status: .invalidArgument,
-                    message: "streamProtocol is .tcp or .tls, on a stack that signals over UDP"
+                    message: "streamProtocol is .tcp, .tls, .ws or .wss, on a stack that signals over UDP"
                 )
             }
         }
@@ -1242,6 +1255,8 @@ public final class SipralStack: @unchecked Sendable {
             keepaliveMs: keepaliveMs,
             tlsPin: tlsPin,
             streamProtocol: streamProtocol,
+            websocketHost: websocketHost,
+            websocketResource: websocketResource,
             advertised: advertised,
             registrar: registrar,
             contact: contact,

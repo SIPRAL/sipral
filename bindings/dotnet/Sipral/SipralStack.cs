@@ -795,13 +795,16 @@ public sealed partial class SipralStack : IDisposable
     /// the SHA-256 fingerprint of the one certificate trusted, for an
     /// application running its own TLS; see <see cref="Account.CheckCertificate"/>.
     ///
-    /// <paramref name="streamProtocol"/> (TCP or TLS) gives the account its own
-    /// connection, beside UDP accounts in the same stack. This class opens it
-    /// on <see cref="SipralEventKind.TransportWanted"/> regardless of
+    /// <paramref name="streamProtocol"/> (TCP, TLS, WS or WSS) gives the account
+    /// its own connection, beside UDP accounts in the same stack. This class
+    /// opens it on <see cref="SipralEventKind.TransportWanted"/> regardless of
     /// <c>streamFallback</c>, and reopens it if it closes. TLS is checked
     /// against <paramref name="tlsPin"/> if set, else the stack's
     /// <c>tlsTrust</c>. Until open, placing a call throws with
-    /// <see cref="SipralStatus.TransportDown"/>. UDP stacks only.
+    /// <see cref="SipralStatus.TransportDown"/>. UDP stacks only. WS/WSS run a
+    /// WebSocket (RFC 7118) asking for <paramref name="websocketResource"/>
+    /// (<c>/ws</c>) with <paramref name="websocketHost"/> as <c>Host</c> (the
+    /// server's address).
     ///
     /// <paramref name="realms"/> are the realms the password answers (RFC
     /// 3261 §22.1). By default: the server's first challenge realm and every
@@ -827,15 +830,20 @@ public sealed partial class SipralStack : IDisposable
         ulong keepaliveMs = 0,
         string? tlsPin = null,
         SipralTransport streamProtocol = 0,
-        IEnumerable<string>? realms = null)
+        IEnumerable<string>? realms = null,
+        string? websocketHost = null,
+        string? websocketResource = null)
     {
         if ((registrarAddress is null) == (serverUri is null))
         {
             throw new ArgumentException("an account names its server by registrarAddress or by serverUri, one of the two");
         }
-        if (streamProtocol != 0 && (streamProtocol is not (SipralTransport.Tcp or SipralTransport.Tls) || Streamed))
+        if (streamProtocol != 0
+            && (streamProtocol is not (SipralTransport.Tcp or SipralTransport.Tls or SipralTransport.Ws
+                    or SipralTransport.Wss) || Streamed))
         {
-            throw new ArgumentException("streamProtocol is Tcp or Tls, on a stack that signals over UDP", nameof(streamProtocol));
+            throw new ArgumentException(
+                "streamProtocol is Tcp, Tls, Ws or Wss, on a stack that signals over UDP", nameof(streamProtocol));
         }
         var advertised = contact is null && registrarAddress is not null && PicksAddress
             ? AdvertiseToward(registrarAddress)
@@ -843,7 +851,8 @@ public sealed partial class SipralStack : IDisposable
         var account = Account.Add(
             this, aor, registrarAddress, registrar, contact, displayName, authUser, authPassword, expiresSeconds,
             sessionTimer, sessionIntervalSeconds, privacy, trustedPeers, security,
-            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms));
+            new AccountLocation(serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
+                websocketHost, websocketResource));
         lock (_accounts)
         {
             _accounts.Add(account);

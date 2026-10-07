@@ -343,6 +343,50 @@ void main() {
     },
   );
 
+  test(
+    'an account over a WebSocket asks for its resource and Host',
+    () async {
+      final server = await StreamRegistrar.open();
+      addTearDown(server.close);
+      final client = await stack();
+      final account = client.addAccount(
+        'sip:alice@$serverName',
+        registrarAddress: server.address,
+        registrar: 'sip:$serverName',
+        streamProtocol: SipralTransport.ws,
+        websocketHost: 'pbx.sipral.test',
+        websocketResource: '/sip?tenant=7',
+      );
+      expect(account.streamProtocol, SipralTransport.ws);
+      account.register();
+      await reach.until(
+        () => server.requests.any((one) => one.$2.startsWith('GET ')),
+        within: const Duration(seconds: 10),
+      );
+      final handshake =
+          server.requests.firstWhere((one) => one.$2.startsWith('GET ')).$2;
+      expect(handshake, startsWith('GET /sip?tenant=7 HTTP/1.1\r\n'));
+      expect(reach.header('Host', handshake), 'pbx.sipral.test');
+      expect(reach.header('Sec-WebSocket-Protocol', handshake), 'sip');
+      expect(
+        () => client.addAccount(
+          'sip:bob@example.com',
+          registrarAddress: server.address,
+          streamProtocol: SipralTransport.tcp,
+          websocketResource: '/ws',
+        ),
+        throwsA(
+          isA<SipralException>().having(
+            (refused) => refused.status,
+            'status',
+            SipralStatus.invalidArgument,
+          ),
+        ),
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
+
   test('the settings are read back with the defaults filled in', () async {
     final plain = await stack();
     final defaults = plain.settings();

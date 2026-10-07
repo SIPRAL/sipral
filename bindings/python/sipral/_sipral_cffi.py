@@ -4738,6 +4738,28 @@ struct sipral_account_config {
      * How many bytes of it.
      */
     size_t realms_len;
+    /**
+     * The `Host` of the WebSocket handshake (RFC 6455 §4.1) when
+     * `stream_protocol` is `SIPRAL_TRANSPORT_WS` or `_WSS`, as
+     * `host[:port]`, or null for the server's address. ABI 1.2.
+     */
+    const char *websocket_host;
+    /**
+     * How many bytes of it.
+     */
+    size_t websocket_host_len;
+    /**
+     * The resource the handshake asks for, a path from `/` with any
+     * query (`/ws`, `/sip?tenant=7`), no space or fragment, or null for
+     * `/ws`. Refused with `SIPRAL_STATUS_INVALID_ARGUMENT` like a host
+     * that cannot go in the request, and when `stream_protocol` is not a
+     * WebSocket. ABI 1.2.
+     */
+    const char *websocket_resource;
+    /**
+     * How many bytes of it.
+     */
+    size_t websocket_resource_len;
 };
 
 /**
@@ -11044,7 +11066,7 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_poll_result_t": (48, 28, 32),
     "sipral_stack_settings_t": (136, 128, 136),
     "sipral_header_t": (32, 16, 16),
-    "sipral_account_config_t": (464, 256, 264),
+    "sipral_account_config_t": (496, 272, 280),
     "sipral_call_config_t": (160, 92, 92),
     "sipral_codec_info_t": (32, 28, 28),
     "sipral_codec_candidate_t": (24, 20, 20),

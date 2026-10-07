@@ -277,6 +277,31 @@ describe('accounts', () => {
     expect((await refusal(tlsClient.addAccount({...base, streamProtocol: 'tcp'}))).code).toBe('invalidArgument');
   });
 
+  it('crosses a WebSocket account with its resource and Host, and refuses them on another protocol', async () => {
+    const {client, native} = await opened();
+    await client.addAccount({
+      aor: 'sip:bob@carrier.example',
+      registrarAddress: '198.51.100.20:443',
+      streamProtocol: 'wss',
+      websocketHost: 'sip.carrier.example',
+      websocketResource: '/sip?tenant=7',
+    });
+    expect(native.calls[1].args[0]).toMatchObject({
+      streamProtocol: 'wss',
+      websocketHost: 'sip.carrier.example',
+      websocketResource: '/sip?tenant=7',
+    });
+    const before = native.calls.length;
+    const base = {aor: 'sip:bob@carrier.example', registrarAddress: '198.51.100.20:5060'};
+    expect((await refusal(client.addAccount({...base, streamProtocol: 'tcp', websocketResource: '/ws'}))).code).toBe(
+      'invalidArgument',
+    );
+    expect((await refusal(client.addAccount({...base, websocketHost: 'sip.carrier.example'}))).code).toBe(
+      'invalidArgument',
+    );
+    expect(native.calls).toHaveLength(before);
+  });
+
   it('crosses the realms a password answers one per line, and refuses an empty one before crossing', async () => {
     const {client, native} = await opened();
     await client.addAccount({

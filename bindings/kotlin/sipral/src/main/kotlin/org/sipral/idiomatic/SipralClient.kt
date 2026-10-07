@@ -70,7 +70,7 @@ private const val PACKET_BYTES = 1500
 private const val FIRST_LINK = 64L
 
 /** The protocols an account on a connection of its own may speak. */
-private val STREAMS = setOf(SipralTransport.TCP, SipralTransport.TLS)
+private val STREAMS = setOf(SipralTransport.TCP, SipralTransport.TLS, SipralTransport.WS, SipralTransport.WSS)
 
 internal fun formatAddress(host: String, port: Int): String = "$host:$port"
 
@@ -938,14 +938,16 @@ class SipralClient private constructor(
      * for an application running the account's TLS itself;
      * [SipralAccount.checkCertificate] gives the verdict.
      *
-     * [streamProtocol] ([SipralTransport.TCP] or [SipralTransport.TLS]) puts
+     * [streamProtocol] (TCP, TLS, WS or WSS) puts
      * the account on its own connection to its server, alongside UDP accounts
      * in the same stack. The stack asks for it with
      * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, this client opens and binds it
      * regardless of `streamFallback`, and the account's REGISTER and calls use
      * it. TLS is held to [tlsPin] if set, else to the client's `tlsTrust`. A
      * closed connection is reopened; until it is open a call throws
-     * `TRANSPORT_DOWN`. Only on a client signalling over UDP.
+     * `TRANSPORT_DOWN`. Only on a client signalling over UDP. WS/WSS run a
+     * WebSocket (RFC 7118) asking for [websocketResource] (`/ws`) with
+     * [websocketHost] as `Host` (the server's address).
      */
     fun addAccount(
         aor: String,
@@ -967,12 +969,14 @@ class SipralClient private constructor(
         tlsPin: String? = null,
         streamProtocol: SipralTransport? = null,
         realms: List<String> = emptyList(),
+        websocketHost: String? = null,
+        websocketResource: String? = null,
     ): SipralAccount {
         require((registrarAddress == null) != (serverUri == null)) {
             "an account names its server by registrarAddress or by serverUri, one of the two"
         }
         require(streamProtocol == null || (streamProtocol in STREAMS && link == null)) {
-            "streamProtocol is TCP or TLS, on a client that signals over UDP"
+            "streamProtocol is TCP, TLS, WS or WSS, on a client that signals over UDP"
         }
         val advertised = if (contact == null && registrarAddress != null && picksAddress) {
             advertiseToward(registrarAddress)
@@ -985,6 +989,7 @@ class SipralClient private constructor(
             registrarAddress = registrarAddress,
             location = SipralAccount.Location(
                 serverUri, serverNaptr, keepaliveMs, tlsPin, advertised, streamProtocol, realms,
+                websocketHost, websocketResource,
             ),
             registrar = registrar,
             contact = contact,
@@ -1015,6 +1020,8 @@ class SipralClient private constructor(
         val parameters = when (stream) {
             SipralTransport.TLS -> ";transport=tls"
             SipralTransport.TCP -> ";transport=tcp"
+            SipralTransport.WS -> ";transport=ws"
+            SipralTransport.WSS -> ";transport=wss"
             else -> link?.contactParameters ?: ""
         }
         return if (user.isEmpty()) "$scheme:$at$parameters" else "$scheme:$user@$at$parameters"
@@ -1478,7 +1485,15 @@ class SipralClient private constructor(
             // an account on its own connection asks with nothing outgrown, and is
             // opened whatever streamFallback says
             val opens = streamFallback || (wanted.requestBytes == 0L && wanted.limitBytes == 0L)
-            val over = if (wanted.protocol == SipralTransport.TLS.value.toLong()) SipralTransport.TLS else SipralTransport.TCP
+            // a WebSocket is a TCP or TLS connection bound as WS or WSS, whose
+            // handshake and frames are the stack's
+            val bound = SipralTransport.entries.firstOrNull { it.value.toLong() == wanted.protocol }
+                ?.takeIf { it in STREAMS } ?: SipralTransport.TCP
+            val over = if (bound == SipralTransport.TLS || bound == SipralTransport.WSS) {
+                SipralTransport.TLS
+            } else {
+                SipralTransport.TCP
+            }
             if (!opens) {
                 sayNoStream(
                     nextLink.getAndIncrement(),
@@ -1491,7 +1506,7 @@ class SipralClient private constructor(
                 continue
             }
             val id = nextLink.getAndIncrement()
-            Thread({ openStreamLink(id, destination, over) }, "sipral-stream-$id").apply {
+            Thread({ openStreamLink(id, destination, over, bound) }, "sipral-stream-$id").apply {
                 isDaemon = true
                 start()
             }
@@ -1503,16 +1518,23 @@ class SipralClient private constructor(
     private fun streamTrust(destination: String): SipralTlsTrust {
         val pinned = synchronized(movingLock) {
             accounts.values.firstOrNull {
-                it.streamProtocol == SipralTransport.TLS && it.registrarAddress == destination && it.tlsPin != null
+                (it.streamProtocol == SipralTransport.TLS || it.streamProtocol == SipralTransport.WSS) &&
+                    it.registrarAddress == destination && it.tlsPin != null
             }
         }
         return pinned?.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
     }
 
     /** Connect over TCP or TLS to [destination] (or `streamServer` for TCP),
-     * bind it under [id] and read it until it closes. A failed connection is
-     * reported under the same id, which ends whatever waited for it. */
-    private fun openStreamLink(id: Long, destination: String, over: SipralTransport = SipralTransport.TCP) {
+     * bind it under [id] as [bound] (WS/WSS for a WebSocket) and read it
+     * until it closes. A failed connection is reported under the same id,
+     * which ends whatever waited for it. */
+    private fun openStreamLink(
+        id: Long,
+        destination: String,
+        over: SipralTransport = SipralTransport.TCP,
+        bound: SipralTransport = over,
+    ) {
         val tls = over == SipralTransport.TLS
         val server = if (tls) destination else streamServer ?: destination
         val socket: Socket
@@ -1551,7 +1573,7 @@ class SipralClient private constructor(
         val local = formatAddress(socket.localAddress.hostAddress, socket.localPort)
         try {
             retryBusy {
-                Sipral.stackTransportBind(handle, id, over.value.toLong(), local, destination, nowMs())
+                Sipral.stackTransportBind(handle, id, bound.value.toLong(), local, destination, nowMs())
             }
         } catch (refused: SipralException) {
             loseStreamLink(id, tell = false)

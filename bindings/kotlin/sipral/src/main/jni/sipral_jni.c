@@ -2435,7 +2435,7 @@ Java_org_sipral_SipralNative_sipral_1account_1push_1echo(JNIEnv *env, jobject se
 }
 
 JNIEXPORT jint JNICALL
-Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlong configKeepaliveMs, jbyteArray configServerUri, jbyteArray configTlsPinSha256, jlong configServerNaptr, jlong configReserved, jlong configStreamProtocol, jlong configReserved35, jbyteArray configRealms, jlongArray account)
+Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlong stack, jbyteArray configAor, jbyteArray configRegistrar, jbyteArray configContact, jbyteArray configRegistrarAddress, jbyteArray configDisplayName, jbyteArray configAuthUser, jbyteArray configAuthPassword, jbyteArray configInstanceId, jlong configExpiresSeconds, jbyteArray configHeadersBytes, jlongArray configHeadersLengths, jlong configTransport, jbyteArray configPushProvider, jbyteArray configPushPrid, jbyteArray configPushParam, jlong configPushWakesItself, jbyteArray configQualityReportUri, jlong configSessionTimer, jlong configSessionIntervalSeconds, jlong configPrivacy, jbyteArray configTrustedPeers, jlong configSrtp, jbyteArray configSrtpSuites, jlong configStirVerification, jbyteArray configStirKey, jbyteArray configStirCertificateUrl, jbyteArray configStirOrig, jbyteArray configStirOrigid, jlong configStirAttestation, jlong configRecordingInClear, jlong configKeepaliveMs, jbyteArray configServerUri, jbyteArray configTlsPinSha256, jlong configServerNaptr, jlong configReserved, jlong configStreamProtocol, jlong configReserved35, jbyteArray configRealms, jbyteArray configWebsocketHost, jbyteArray configWebsocketResource, jlongArray account)
 {
     (void)env;
     (void)self;
@@ -2541,6 +2541,14 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     jsize configRealms_size = configRealms ? (*env)->GetArrayLength(env, configRealms) : 0;
     config_value.realms = (const char *)configRealms_data;
     config_value.realms_len = (size_t)configRealms_size;
+    jbyte *configWebsocketHost_data = configWebsocketHost ? (*env)->GetByteArrayElements(env, configWebsocketHost, NULL) : NULL;
+    jsize configWebsocketHost_size = configWebsocketHost ? (*env)->GetArrayLength(env, configWebsocketHost) : 0;
+    config_value.websocket_host = (const char *)configWebsocketHost_data;
+    config_value.websocket_host_len = (size_t)configWebsocketHost_size;
+    jbyte *configWebsocketResource_data = configWebsocketResource ? (*env)->GetByteArrayElements(env, configWebsocketResource, NULL) : NULL;
+    jsize configWebsocketResource_size = configWebsocketResource ? (*env)->GetArrayLength(env, configWebsocketResource) : 0;
+    config_value.websocket_resource = (const char *)configWebsocketResource_data;
+    config_value.websocket_resource_len = (size_t)configWebsocketResource_size;
     sipral_handle_t account_value = 0;
     int ready = 1;
     jbyte *configHeaders_pinned = NULL;
@@ -2619,6 +2627,12 @@ Java_org_sipral_SipralNative_sipral_1account_1add(JNIEnv *env, jobject self, jlo
     }
     if (configRealms) {
         (*env)->ReleaseByteArrayElements(env, configRealms, configRealms_data, JNI_ABORT);
+    }
+    if (configWebsocketHost) {
+        (*env)->ReleaseByteArrayElements(env, configWebsocketHost, configWebsocketHost_data, JNI_ABORT);
+    }
+    if (configWebsocketResource) {
+        (*env)->ReleaseByteArrayElements(env, configWebsocketResource, configWebsocketResource_data, JNI_ABORT);
     }
     if (ready) {
         {

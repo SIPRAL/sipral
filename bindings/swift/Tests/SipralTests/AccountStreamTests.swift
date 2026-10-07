@@ -99,6 +99,36 @@ final class AccountStreamTests: XCTestCase {
         XCTAssertTrue(again, "the account did not register again over a new connection")
     }
 
+    func testAnAccountOverAWebSocketAsksForItsResourceAndHost() async throws {
+        let server = try FakeRegistrar()
+        defer { server.stop() }
+        let stack = try SipralStack(audio: .application, bindHost: "127.0.0.1")
+        defer { stack.close() }
+        let account = try stack.addAccount(
+            aor: "sip:alice@\(SignallingTests.serverName)", registrarAddress: server.address, streamProtocol: .ws,
+            websocketHost: "pbx.sipral.test", websocketResource: "/sip?tenant=7",
+            registrar: "sip:\(SignallingTests.serverName)"
+        )
+        XCTAssertEqual(account.streamProtocol, .ws)
+        XCTAssertTrue(account.contact.hasSuffix(";transport=ws"), account.contact)
+        try account.register()
+        let asked = await arrived(5) { server.requests.contains { $0.message.hasPrefix("GET ") } }
+        XCTAssertTrue(asked, "no WebSocket handshake reached the server")
+        let handshake = try XCTUnwrap(server.requests.first { $0.message.hasPrefix("GET ") }).message
+        XCTAssertTrue(handshake.hasPrefix("GET /sip?tenant=7 HTTP/1.1\r\n"), handshake)
+        XCTAssertEqual(FakeRegistrar.header("Host", handshake), "pbx.sipral.test")
+        XCTAssertEqual(FakeRegistrar.header("Sec-WebSocket-Protocol", handshake), "sip")
+
+        XCTAssertThrowsError(
+            try stack.addAccount(
+                aor: "sip:bob@example.com", registrarAddress: server.address, streamProtocol: .tcp,
+                websocketResource: "/ws"
+            )
+        ) { error in
+            XCTAssertEqual((error as? SipralError)?.status, .invalidArgument)
+        }
+    }
+
     func testOnlyAStreamOnAStackThatSignalsOverUdpIsTaken() throws {
         let stack = try SipralStack(audio: .application, bindHost: "127.0.0.1")
         defer { stack.close() }

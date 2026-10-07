@@ -105,7 +105,12 @@ public sealed partial class SipralStack
             // an account's own connection (no sizes) opens regardless of
             // streamFallback
             var opens = _streamFallback || (wanted.RequestBytes == 0 && wanted.LimitBytes == 0);
-            var over = wanted.Protocol == SipralTransport.Tls ? SipralTransport.Tls : SipralTransport.Tcp;
+            // a WebSocket is a TCP or TLS connection bound as WS or WSS, whose
+            // handshake and frames are the stack's
+            var bound = wanted.Protocol is SipralTransport.Tls or SipralTransport.Ws or SipralTransport.Wss
+                ? wanted.Protocol
+                : SipralTransport.Tcp;
+            var over = bound is SipralTransport.Tls or SipralTransport.Wss ? SipralTransport.Tls : SipralTransport.Tcp;
             uint transport;
             lock (_streamLock)
             {
@@ -126,7 +131,7 @@ public sealed partial class SipralStack
                     $"to {destination} not tried: streamFallback is off");
                 continue;
             }
-            new Thread(() => OpenSipStream(transport, destination, over))
+            new Thread(() => OpenSipStream(transport, destination, over, bound))
             {
                 IsBackground = true,
                 Name = "sipral-stream",
@@ -140,16 +145,19 @@ public sealed partial class SipralStack
         Account? pinned;
         lock (_accounts)
         {
-            pinned = _accounts.FirstOrDefault(account => account.StreamProtocol == SipralTransport.Tls
+            pinned = _accounts.FirstOrDefault(account
+                => account.StreamProtocol is SipralTransport.Tls or SipralTransport.Wss
                 && account.RegistrarAddress == destination && account.TlsPin is not null);
         }
         return pinned?.TlsPin is { } pin ? SipralTlsTrust.Pinned(pin) : _tlsTrust;
     }
 
     // Connects (to streamServer instead, for TCP, when given), binds it as
-    // the stream to destination and reads it. A failure is reported on the
-    // same transport id, which ends whatever was waiting.
-    private void OpenSipStream(uint transport, string destination, SipralTransport over = SipralTransport.Tcp)
+    // the stream to destination, as `bound` (WS/WSS for a WebSocket), and
+    // reads it. A failure is reported on the same transport id, which ends
+    // whatever was waiting.
+    private void OpenSipStream(
+        uint transport, string destination, SipralTransport over = SipralTransport.Tcp, SipralTransport? bound = null)
     {
         SipStream stream;
         var server = over == SipralTransport.Tcp ? _streamServer ?? destination : destination;
@@ -231,7 +239,7 @@ public sealed partial class SipralStack
         {
             SipralErrors.Call(
                 () => NativeMethods.sipral_stack_transport_bind(
-                    Handle, transport, (uint)over, local, (nuint)local.Length,
+                    Handle, transport, (uint)(bound ?? over), local, (nuint)local.Length,
                     remote, (nuint)remote.Length, NowMs, out _),
                 "sipral_stack_transport_bind");
         }

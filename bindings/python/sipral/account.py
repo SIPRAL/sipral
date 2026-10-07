@@ -50,11 +50,13 @@ def _default_contact(aor: str, bind_address: str, parameters: str = "") -> str:
 
 def _contact_parameters(stack: "Stack", stream_protocol: int) -> str:
     """The account's own transport parameter, else the stack's."""
-    if stream_protocol == lib.SIPRAL_TRANSPORT_TLS:
-        return ";transport=tls"
-    if stream_protocol == lib.SIPRAL_TRANSPORT_TCP:
-        return ";transport=tcp"
-    return stack.contact_parameters
+    named = {
+        lib.SIPRAL_TRANSPORT_TCP: "tcp",
+        lib.SIPRAL_TRANSPORT_TLS: "tls",
+        lib.SIPRAL_TRANSPORT_WS: "ws",
+        lib.SIPRAL_TRANSPORT_WSS: "wss",
+    }.get(stream_protocol)
+    return f";transport={named}" if named else stack.contact_parameters
 
 
 class Account:
@@ -78,8 +80,8 @@ class Account:
         tls_pin: str | None = None,
     ) -> None:
         self.stack = stack
-        #: ``Transport.TCP``/``TLS`` for the account's own connection, ``0``
-        #: for the stack's transport.
+        #: ``Transport.TCP``/``TLS``/``WS``/``WSS`` for the account's own
+        #: connection, ``0`` for the stack's transport.
         self.stream_protocol = stream_protocol
         #: Certificate pin for its own TLS connection.
         self.tls_pin = tls_pin
@@ -118,6 +120,8 @@ class Account:
         keepalive_ms: int = 0,
         tls_pin: str | None = None,
         stream_protocol: int = 0,
+        websocket_host: str | None = None,
+        websocket_resource: str | None = None,
         advertised: str | None = None,
         display_name: str | None,
         auth_user: str | None,
@@ -242,6 +246,18 @@ class Account:
         if realms_buf is not None:
             config.realms = realms_buf
             config.realms_len = len(realms_bytes)
+        websocket_host_bytes = _optional(websocket_host)
+        websocket_host_buf = ffi.new("char[]", websocket_host_bytes) if websocket_host_bytes is not None else None
+        if websocket_host_buf is not None:
+            config.websocket_host = websocket_host_buf
+            config.websocket_host_len = len(websocket_host_bytes)
+        websocket_resource_bytes = _optional(websocket_resource)
+        websocket_resource_buf = (
+            ffi.new("char[]", websocket_resource_bytes) if websocket_resource_bytes is not None else None
+        )
+        if websocket_resource_buf is not None:
+            config.websocket_resource = websocket_resource_buf
+            config.websocket_resource_len = len(websocket_resource_bytes)
 
         out_account = ffi.new("sipral_handle_t *")
         _call(

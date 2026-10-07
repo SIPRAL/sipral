@@ -15,7 +15,8 @@ public sealed record SipralPinnedCertificateInfo(ulong NotBefore, ulong NotAfter
 
 internal sealed record AccountLocation(
     string? ServerUri, bool ServerNaptr, ulong KeepaliveMs, string? TlsPin, string? Advertised,
-    SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null);
+    SipralTransport StreamProtocol = 0, IEnumerable<string>? Realms = null,
+    string? WebsocketHost = null, string? WebsocketResource = null);
 
 /// <summary>
 /// One <c>sipral_account_add</c> handle. Built through
@@ -49,6 +50,8 @@ public sealed class Account
     {
         SipralTransport.Tcp => ";transport=tcp",
         SipralTransport.Tls => ";transport=tls",
+        SipralTransport.Ws => ";transport=ws",
+        SipralTransport.Wss => ";transport=wss",
         _ => stack.ContactParameters,
     };
 
@@ -150,6 +153,10 @@ public sealed class Account
         var serverUriBytes = location.ServerUri is null ? null : Encoding.UTF8.GetBytes(location.ServerUri);
         var pinBytes = location.TlsPin is null ? null : Encoding.UTF8.GetBytes(location.TlsPin);
         var realmsBytes = location.Realms is null ? null : Encoding.UTF8.GetBytes(string.Join("\n", location.Realms));
+        var websocketHostBytes = location.WebsocketHost is null ? null : Encoding.UTF8.GetBytes(location.WebsocketHost);
+        var websocketResourceBytes = location.WebsocketResource is null
+            ? null
+            : Encoding.UTF8.GetBytes(location.WebsocketResource);
         var displayNameBytes = displayName is null ? null : Encoding.UTF8.GetBytes(displayName);
         var authUserBytes = authUser is null ? null : Encoding.UTF8.GetBytes(authUser);
         var authPasswordBytes = authPassword is null ? null : Encoding.UTF8.GetBytes(authPassword);
@@ -171,6 +178,8 @@ public sealed class Account
         using (var serverUriPin = Pin(serverUriBytes))
         using (var pinPin = Pin(pinBytes))
         using (var realmsPin = Pin(realmsBytes))
+        using (var websocketHostPin = Pin(websocketHostBytes))
+        using (var websocketResourcePin = Pin(websocketResourceBytes))
         {
             var config = SipralAccountConfig.Sized();
             config.Aor = aorPin.Pointer;
@@ -193,6 +202,16 @@ public sealed class Account
             {
                 config.Realms = realmsPin.Pointer;
                 config.RealmsLen = (nuint)realmsBytes.Length;
+            }
+            if (websocketHostBytes is not null)
+            {
+                config.WebsocketHost = websocketHostPin.Pointer;
+                config.WebsocketHostLen = (nuint)websocketHostBytes.Length;
+            }
+            if (websocketResourceBytes is not null)
+            {
+                config.WebsocketResource = websocketResourcePin.Pointer;
+                config.WebsocketResourceLen = (nuint)websocketResourceBytes.Length;
             }
             config.Contact = contactPin.Pointer;
             config.ContactLen = (nuint)contactBytes.Length;

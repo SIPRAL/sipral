@@ -59,12 +59,16 @@ export type NativeAccountOptions = {
   authUser?: string;
   authPassword?: string;
   expiresSeconds?: CodegenTypes.Double;
-  /** "tcp" or "tls": a connection of the account's own to its server. */
+  /** "tcp", "tls", "ws" or "wss": a connection of the account's own to its server. */
   streamProtocol?: string;
   /** The SHA-256 fingerprint, as bare hexadecimal, of the one certificate the account's own TLS connection trusts. */
   tlsPin?: string;
   /** The realms the password answers, one per line. */
   realms?: string;
+  /** The `Host` of a WebSocket account's handshake. */
+  websocketHost?: string;
+  /** The resource a WebSocket account's handshake asks for. */
+  websocketResource?: string;
 };
 
 /** One call's own controls in one direction, read back. */

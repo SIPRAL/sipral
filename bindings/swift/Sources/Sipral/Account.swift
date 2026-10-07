@@ -33,8 +33,8 @@ public final class Account: @unchecked Sendable {
     private var _registrarAddress: String
     /// The server named by a URI RFC 3263 locates, or `nil`.
     public let serverUri: String?
-    /// `.tcp` or `.tls` for an account with its own connection, `nil` for
-    /// the stack's transport.
+    /// `.tcp`, `.tls`, `.ws` or `.wss` for an account with its own
+    /// connection, `nil` for the stack's transport.
     public let streamProtocol: SipralTransport?
     /// The certificate pin its own TLS connection is held to.
     let tlsPin: String?
@@ -74,6 +74,8 @@ public final class Account: @unchecked Sendable {
         switch streamProtocol {
         case .tcp: return ";transport=tcp"
         case .tls: return ";transport=tls"
+        case .ws: return ";transport=ws"
+        case .wss: return ";transport=wss"
         default: return stack.contactParameters
         }
     }
@@ -171,6 +173,8 @@ public final class Account: @unchecked Sendable {
         keepaliveMs: UInt64,
         tlsPin: String?,
         streamProtocol: SipralTransport?,
+        websocketHost: String? = nil,
+        websocketResource: String? = nil,
         advertised: String?,
         registrar: String?,
         contact: String?,
@@ -196,7 +200,7 @@ public final class Account: @unchecked Sendable {
         let handle: SipralHandle = try CStrings.with(
             [aor, registrar, contact, registrarAddress, displayName, authUser, authPassword, peers,
              suites, security.stirCertificateUrl, security.stirOrig, security.stirOrigid, serverUri, tlsPin,
-             named]
+             named, websocketHost, websocketResource]
         ) { parts in
             var config = sipral_account_config_t.sized()
             config.aor = parts[0].pointer
@@ -225,6 +229,14 @@ public final class Account: @unchecked Sendable {
             if let realmsPointer = parts[14].pointer {
                 config.realms = realmsPointer
                 config.realms_len = parts[14].count
+            }
+            if let hostPointer = parts[15].pointer {
+                config.websocket_host = hostPointer
+                config.websocket_host_len = parts[15].count
+            }
+            if let resourcePointer = parts[16].pointer {
+                config.websocket_resource = resourcePointer
+                config.websocket_resource_len = parts[16].count
             }
             if let displayNamePointer = parts[4].pointer {
                 config.display_name = displayNamePointer

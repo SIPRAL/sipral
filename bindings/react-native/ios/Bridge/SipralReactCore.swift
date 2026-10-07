@@ -94,13 +94,17 @@ public struct SipralAccountOptions {
     public var authUser: String?
     public var authPassword: String?
     public var expiresSeconds: UInt64 = 0
-    /// "tcp" or "tls": a connection of the account's own to its server.
+    /// "tcp", "tls", "ws" or "wss": a connection of the account's own to its server.
     public var streamProtocol: String?
     /// The fingerprint, as bare hexadecimal, of the one certificate that
     /// connection trusts.
     public var tlsPin: String?
     /// The realms the password answers, one per line.
     public var realms: String?
+    /// The `Host` of a WebSocket account's handshake.
+    public var websocketHost: String?
+    /// The resource a WebSocket account's handshake asks for.
+    public var websocketResource: String?
 
     public init(aor: String, registrarAddress: String? = nil, serverUri: String? = nil) {
         self.aor = aor
@@ -123,6 +127,8 @@ public struct SipralAccountOptions {
         streamProtocol = options["streamProtocol"] as? String
         tlsPin = options["tlsPin"] as? String
         realms = options["realms"] as? String
+        websocketHost = options["websocketHost"] as? String
+        websocketResource = options["websocketResource"] as? String
     }
 }
 
@@ -242,7 +248,9 @@ public final class SipralReactCore: @unchecked Sendable {
             case nil: stream = nil
             case "tcp": stream = .tcp
             case "tls": stream = .tls
-            case let other?: throw SipralRefusal("invalidArgument", "streamProtocol is tcp or tls, not \(other)")
+            case "ws": stream = .ws
+            case "wss": stream = .wss
+            case let other?: throw SipralRefusal("invalidArgument", "streamProtocol is tcp, tls, ws or wss, not \(other)")
             }
             let account = try open().addAccount(
                 aor: options.aor,
@@ -252,6 +260,8 @@ public final class SipralReactCore: @unchecked Sendable {
                 keepaliveMs: options.keepaliveMs,
                 tlsPin: options.tlsPin,
                 streamProtocol: stream,
+                websocketHost: options.websocketHost,
+                websocketResource: options.websocketResource,
                 registrar: options.registrar,
                 contact: options.contact,
                 displayName: options.displayName,

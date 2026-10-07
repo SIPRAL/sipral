@@ -40,6 +40,11 @@
 #                               registered at Asterisk's /ws as labuser-ws,
 #                               the echo called and heard, the binding given
 #                               back (part of the Asterisk run too)
+#   scripts/lab.sh wss          only the same over TLS: Asterisk restarted
+#                               with a TLS listener on 8089 (interop/wss/),
+#                               the connection secured by a socat that checks
+#                               the lab authority, registered as labuser-wss
+#                               with the Host and /ws the account names
 #   scripts/lab.sh icelite     only the call that requires ICE placed at a
 #                               C ABI stack answering as ICE-lite (part of
 #                               the ice run too)
@@ -4011,6 +4016,60 @@ if [ "$WANT" = all ] || [ "$WANT" = tls ]; then
             fi
             tls_pin_flow || true
             tls_two_lines_flow || true
+        fi
+        ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
+        wait_for asterisk "Asterisk Ready" >/dev/null || true
+        rm -rf "$SIPRAL_TLS_CERTS"
+        unset SIPRAL_TLS_CERTS
+    fi
+fi
+
+# SIP over a secure WebSocket the stack opens itself (RFC 7118 over RFC
+# 6455), cap to tail: Asterisk restarted with a TLS listener on 8089
+# (interop/wss/), its certificate made by tls_certificates for
+# asterisk.lab.sipral.test. The TLS is the application's, as the stack has
+# it: a socat beside the harness checks Asterisk's certificate against the
+# lab authority and that name, and gives the harness a plain connection on
+# 127.0.0.1:9443, which the harness binds as WSS to Asterisk's own address;
+# the account names the Host and /ws (interop/harness/src/websocket.rs). The
+# capture is of that loopback leg, so the frames are readable in it.
+wss_flow() {
+    lab_run "the secure WebSocket flow's call" $((LAB_START_APT_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS=wss \
+        -e SIPRAL_WSS_CONNECT=127.0.0.1:9443 \
+        -e SIPRAL_WSS_HOST="$TLS_NAME:8089" \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        -v "$SIPRAL_TLS_CERTS:/lab-tls:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump socat >/dev/null 2>&1
+            tcpdump -i lo -s 0 -U -w /pcap/wss-asterisk.pcap tcp port 9443 2>/dev/null &
+            socat TCP-LISTEN:9443,bind=127.0.0.1,reuseaddr \
+                OPENSSL:asterisk:8089,cafile=/lab-tls/ca.pem,commonname=$TLS_NAME 2>/tmp/socat.log &
+            sleep 2
+            /harness asterisk 5060 9000
+            status=\$?
+            [ \$status -eq 0 ] || sed 's/^/  socat: /' /tmp/socat.log
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = wss ]; then
+    step "SIP over a secure WebSocket the stack opened -- straight at Asterisk's 8089"
+    if ! tls_certificates; then
+        fail "SIP over a secure WebSocket: the certificates"
+    else
+        ( cd interop && docker compose -f compose.yaml -f wss/compose.override.yaml up -d asterisk ) \
+            >/dev/null 2>&1 || fail "could not restart Asterisk with the WebSocket TLS listener"
+        if wait_for asterisk "Asterisk Ready"; then
+            wss_flow && pass "registered, called and heard the echo over a secure WebSocket" \
+                || fail "SIP over a secure WebSocket the stack opened"
         fi
         ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
         wait_for asterisk "Asterisk Ready" >/dev/null || true

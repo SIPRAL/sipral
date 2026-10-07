@@ -705,15 +705,54 @@ fn extra_flows(
             .ok()
             .and_then(|text| text.parse().ok())
             .unwrap_or(8088);
-        match websocket::run(
+        let websocket = SocketAddr::new(remote.ip(), port);
+        let lab = websocket::Lab {
             server,
-            SocketAddr::new(remote.ip(), port),
-            &ws_user,
-            &ws_pass,
-        ) {
+            websocket,
+            connect: websocket,
+            protocol: TransportProtocol::Ws,
+            host: None,
+            user: &ws_user,
+            pass: &ws_pass,
+        };
+        match websocket::run(&lab) {
             Ok(said) => println!("  pass  SIP over a WebSocket the stack opened{said}"),
             Err(why) => {
                 println!("  FAIL  SIP over a WebSocket the stack opened — {why}");
+                failures += 1;
+            }
+        }
+    }
+    // the same over TLS, on Asterisk's 8089 (interop/wss/), as `labuser-wss`:
+    // the connection is made to SIPRAL_WSS_CONNECT, where scripts/lab.sh's
+    // socat secures it, and bound as WSS to Asterisk's own address with the
+    // account naming the Host (SIPRAL_WSS_HOST) and /ws
+    if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "wss") {
+        let wss_user = env::var("SIPRAL_USER_WSS").unwrap_or_else(|_| "labuser-wss".to_owned());
+        let wss_pass = env::var("SIPRAL_PASS_WSS").unwrap_or_else(|_| pass.to_owned());
+        let port = env::var("SIPRAL_WSS_PORT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(8089);
+        let websocket = SocketAddr::new(remote.ip(), port);
+        let connect = env::var("SIPRAL_WSS_CONNECT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(websocket);
+        let host = env::var("SIPRAL_WSS_HOST").unwrap_or_else(|_| format!("{server}:{port}"));
+        let lab = websocket::Lab {
+            server,
+            websocket,
+            connect,
+            protocol: TransportProtocol::Wss,
+            host: Some(&host),
+            user: &wss_user,
+            pass: &wss_pass,
+        };
+        match websocket::run(&lab) {
+            Ok(said) => println!("  pass  SIP over a secure WebSocket the stack opened{said}"),
+            Err(why) => {
+                println!("  FAIL  SIP over a secure WebSocket the stack opened — {why}");
                 failures += 1;
             }
         }

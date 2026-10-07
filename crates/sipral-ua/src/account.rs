@@ -198,6 +198,9 @@ pub struct Account {
     pub(crate) located: bool,
     pub(crate) tls_pin: Option<CertificatePin>,
     pub(crate) own_stream: Option<TransportProtocol>,
+    /// The `Host` and resource of its own WebSocket, where set.
+    pub(crate) websocket_host: Option<Box<str>>,
+    pub(crate) websocket_resource: Option<Box<str>>,
 }
 
 impl Account {
@@ -271,6 +274,8 @@ impl Account {
             located: true,
             tls_pin: None,
             own_stream: None,
+            websocket_host: None,
+            websocket_resource: None,
         }
     }
 
@@ -613,6 +618,32 @@ impl Account {
         }
         self.protocol = Some(protocol);
         self
+    }
+
+    /// The `Host` and resource of the WebSocket this account's requests go
+    /// on: its transport bound as `Ws`/`Wss` with its far end named, or its
+    /// own [`Account::on_stream`] connection (RFC 6455 §4.1). Read at bind
+    /// time. `None` keeps the
+    /// default: the server's address, and
+    /// [`DEFAULT_RESOURCE`](crate::websocket::DEFAULT_RESOURCE). A target set
+    /// for the address with [`UserAgent::set_websocket_target`](crate::UserAgent::set_websocket_target)
+    /// wins over this.
+    ///
+    /// # Errors
+    /// [`TargetError`](crate::websocket::TargetError) for a host or resource
+    /// that cannot go in the request.
+    pub fn websocket_target(
+        mut self,
+        host: Option<&str>,
+        resource: Option<&str>,
+    ) -> Result<Self, crate::websocket::TargetError> {
+        crate::websocket::WebSocketTarget::new(
+            host.unwrap_or("server"),
+            resource.unwrap_or(crate::websocket::DEFAULT_RESOURCE),
+        )?;
+        self.websocket_host = host.map(Box::from);
+        self.websocket_resource = resource.map(Box::from);
+        Ok(self)
     }
 
     /// The address of record, read back.

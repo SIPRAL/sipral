@@ -2712,7 +2712,7 @@ public enum Sipral {
         ("sipral_poll_result_t", MemoryLayout<sipral_poll_result_t>.size, 48, 28, 32),
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
-        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 464, 256, 264),
+        ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 496, 272, 280),
         ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 160, 92, 92),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),

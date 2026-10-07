@@ -63,7 +63,8 @@
 //! WebSocket failure retires the transport with `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`; close
 //! the connection. Bound *without* `remote`, the application runs the WebSocket and hands
 //! each frame in as a datagram (one message per frame, RFC 7118 §4.2). The handshake asks
-//! for `/ws` with the far end as `Host`; the ABI cannot change either yet.
+//! for `/ws` with the far end as `Host`, unless an account on the connection names others
+//! (`sipral_account_config_t::websocket_resource` and `websocket_host`).
 //!
 //! # When a transport dies
 //!
@@ -1209,6 +1210,10 @@ pub(crate) mod tests {
             reserved_35: 0,
             realms: ptr::null(),
             realms_len: 0,
+            websocket_host: std::ptr::null(),
+            websocket_host_len: 0,
+            websocket_resource: std::ptr::null(),
+            websocket_resource_len: 0,
         }
     }
 
@@ -2016,6 +2021,92 @@ pub(crate) mod tests {
         assert_eq!(status, SipralStatus::InvalidArgument);
         assert!(
             last_error_text().contains("stream_protocol"),
+            "{}",
+            last_error_text()
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// An account on its own WSS connection names the handshake's resource and `Host`; the
+    /// fields are refused for an account that is not on a WebSocket, and for a resource a request
+    /// cannot carry.
+    #[test]
+    fn an_account_on_a_websocket_of_its_own_names_the_resource_and_host() {
+        let mut observed = Observed::default();
+        let mut wanted = Wanted::default();
+        let mut settings = config(keep_wanted, &mut observed);
+        settings.event_user_data = ptr::from_mut(&mut wanted).cast::<std::ffi::c_void>();
+        let (status, handle) = create(&settings);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+
+        let host = "sip.example.com";
+        let resource = "/sip?tenant=7";
+        let on_wss = SipralAccountConfig {
+            stream_protocol: SipralTransport::Wss as u32,
+            websocket_host: host.as_ptr().cast::<c_char>(),
+            websocket_host_len: host.len(),
+            websocket_resource: resource.as_ptr().cast::<c_char>(),
+            websocket_resource_len: resource.len(),
+            ..account_config()
+        };
+        let mut account = SIPRAL_HANDLE_NONE;
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_wss), &raw mut account) };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        assert_eq!(
+            unsafe { sipral_account_register(handle, account, 1_000) },
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        poll(handle, 1_000);
+        assert_eq!(
+            wanted.seen,
+            [(SipralTransport::Wss as u32, REGISTRAR.to_owned(), 0, 0)]
+        );
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                9,
+                SipralTransport::Wss as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_100,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let out = drain(handle);
+        let handshake = String::from_utf8(out[0].clone()).unwrap();
+        assert!(
+            handshake.starts_with("GET /sip?tenant=7 HTTP/1.1\r\nHost: sip.example.com\r\n"),
+            "{handshake}"
+        );
+
+        let on_tcp = SipralAccountConfig {
+            stream_protocol: SipralTransport::Tcp as u32,
+            ..on_wss
+        };
+        let status =
+            unsafe { sipral_account_add(handle, ptr::from_ref(&on_tcp), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("SIPRAL_TRANSPORT_WS"),
+            "{}",
+            last_error_text()
+        );
+        let fragment = "/ws#here";
+        let bad = SipralAccountConfig {
+            websocket_resource: fragment.as_ptr().cast::<c_char>(),
+            websocket_resource_len: fragment.len(),
+            ..on_wss
+        };
+        let status = unsafe { sipral_account_add(handle, ptr::from_ref(&bad), &raw mut account) };
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(
+            last_error_text().contains("websocket_resource"),
             "{}",
             last_error_text()
         );

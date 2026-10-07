@@ -71,6 +71,8 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
                 streamProtocol = options.text("streamProtocol"),
                 tlsPin = options.text("tlsPin"),
                 realms = options.text("realms"),
+                websocketHost = options.text("websocketHost"),
+                websocketResource = options.text("websocketResource"),
             ),
         )
     }

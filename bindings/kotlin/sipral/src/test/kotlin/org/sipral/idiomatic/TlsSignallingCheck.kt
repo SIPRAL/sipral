@@ -36,7 +36,9 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.sipral.Sipral
 import org.sipral.SipralEventKind
+import org.sipral.SipralException
 import org.sipral.SipralRegistrationState
+import org.sipral.SipralStatus
 import org.sipral.SipralTlsFailure
 import org.sipral.SipralTransport
 import org.sipral.SipralTransportError
@@ -554,6 +556,40 @@ private suspend fun anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(): String 
     return "an account over TCP opened again when its server dropped it"
 }
 
+/** ABI 1.2: an account on a WebSocket of its own opens a TCP connection
+ * and the stack's handshake on it asks for the resource and `Host` the
+ * account named; either one with another protocol is refused. */
+private suspend fun anAccountOverAWebSocketAsksForItsResourceAndHost(): String {
+    Registrar().use { server ->
+        SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
+            val account = client.addAccount(
+                aor = "sip:alice@$SERVER_NAME", registrarAddress = server.address, registrar = "sip:$SERVER_NAME",
+                streamProtocol = SipralTransport.WS, websocketHost = "pbx.sipral.test",
+                websocketResource = "/sip?tenant=7",
+            )
+            assertEquals(SipralTransport.WS, account.streamProtocol)
+            assertTrue(account.contact.endsWith(";transport=ws"), account.contact)
+            account.register()
+            assertTrue(
+                eventually { server.all().any { it.second.startsWith("GET ") } },
+                "no WebSocket handshake reached the server",
+            )
+            val handshake = server.all().first { it.second.startsWith("GET ") }.second
+            assertTrue(handshake.startsWith("GET /sip?tenant=7 HTTP/1.1\r\n"), handshake)
+            assertEquals("pbx.sipral.test", header("Host", handshake))
+            assertEquals("sip", header("Sec-WebSocket-Protocol", handshake))
+            val refused = assertFailsWith<SipralException> {
+                client.addAccount(
+                    aor = "sip:bob@example.com", registrarAddress = server.address,
+                    streamProtocol = SipralTransport.TCP, websocketResource = "/ws",
+                )
+            }
+            assertEquals(SipralStatus.INVALID_ARGUMENT, refused.status)
+        }
+    }
+    return "an account over a WebSocket asked for its resource and Host"
+}
+
 /** The settings read back, every default filled in, and what was given. */
 private fun theSettingsAreReadBack(): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { plain ->
@@ -608,6 +644,7 @@ internal suspend fun tlsSignallingChecks(): String {
             theVoiceAgentPresetTakesARushTheDefaultAnswers480(),
             anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good),
             anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(),
+            anAccountOverAWebSocketAsksForItsResourceAndHost(),
             theSettingsAreReadBack(),
         ).joinToString(", ")
     } finally {

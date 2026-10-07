@@ -4366,6 +4366,28 @@ public struct SipralAccountConfig
     /// How many bytes of it.
     /// </summary>
     public nuint RealmsLen;
+    /// <summary>
+    /// The `Host` of the WebSocket handshake (RFC 6455 §4.1) when
+    /// `stream_protocol` is `SIPRAL_TRANSPORT_WS` or `_WSS`, as
+    /// `host[:port]`, or null for the server's address. ABI 1.2.
+    /// </summary>
+    public IntPtr WebsocketHost;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint WebsocketHostLen;
+    /// <summary>
+    /// The resource the handshake asks for, a path from `/` with any
+    /// query (`/ws`, `/sip?tenant=7`), no space or fragment, or null for
+    /// `/ws`. Refused with `SIPRAL_STATUS_INVALID_ARGUMENT` like a host
+    /// that cannot go in the request, and when `stream_protocol` is not a
+    /// WebSocket. ABI 1.2.
+    /// </summary>
+    public IntPtr WebsocketResource;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint WebsocketResourceLen;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -9231,7 +9253,7 @@ public static partial class Sipral
         ("sipral_poll_result_t", Marshal.SizeOf<SipralPollResult>(), 48, 28, 32),
         ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
-        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 464, 256, 264),
+        ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 496, 272, 280),
         ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 160, 92, 92),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),

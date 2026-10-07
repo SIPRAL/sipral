@@ -143,6 +143,37 @@ class AnAccountOnAConnectionOfItsOwn(_Case):
             "the account did not register again over a new connection",
         )
 
+    async def test_one_over_a_websocket_asks_for_its_resource_and_host(self) -> None:
+        server = _StreamRegistrar()
+        self.addCleanup(server.close)
+        stack = self.stack()
+        account = stack.add_account(
+            f"sip:alice@{_SERVER_NAME}",
+            registrar=f"sip:{_SERVER_NAME}",
+            registrar_address=server.address,
+            stream_protocol=Transport.WS,
+            websocket_host="pbx.sipral.test",
+            websocket_resource="/sip?tenant=7",
+        )
+        self.assertEqual(account.stream_protocol, Transport.WS)
+        account.register()
+        self.assertTrue(
+            await self.until(lambda: any(m.startswith("GET ") for _, m in server.requests)),
+            "no WebSocket handshake reached the server",
+        )
+        handshake = next(m for _, m in server.requests if m.startswith("GET "))
+        self.assertTrue(handshake.startswith("GET /sip?tenant=7 HTTP/1.1\r\n"), handshake)
+        self.assertEqual(_header("Host", handshake), "pbx.sipral.test")
+        self.assertEqual(_header("Sec-WebSocket-Protocol", handshake), "sip")
+        with self.assertRaises(SipralError) as refused:
+            stack.add_account(
+                "sip:bob@example.com",
+                registrar_address=server.address,
+                stream_protocol=Transport.TCP,
+                websocket_resource="/ws",
+            )
+        self.assertEqual(refused.exception.status, lib.SIPRAL_STATUS_INVALID_ARGUMENT)
+
     async def test_only_a_stream_on_a_stack_that_signals_over_udp_is_taken(self) -> None:
         stack = self.stack()
         with self.assertRaises(ValueError):

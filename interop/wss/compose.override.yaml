@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+# Copyright (c) 2026 Sytek
+#
+# Gives the lab's Asterisk a TLS listener for SIP WebSockets on 8089, for
+# scripts/lab.sh's `wss` step alone: applied with `-f`, on top of
+# ../compose.yaml, and taken off again as soon as that step is over, so every
+# other flow meets Asterisk exactly as compose.yaml describes it. The
+# certificates are made for each run by lab.sh's tls_certificates, into the
+# directory SIPRAL_TLS_CERTS names.
+services:
+  asterisk:
+    volumes:
+      - ./wss/http.conf:/etc/asterisk/http.conf:ro
+      - ./wss/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro
+      - ${SIPRAL_TLS_CERTS:?the wss step makes the certificates}:/etc/asterisk/lab-tls:ro

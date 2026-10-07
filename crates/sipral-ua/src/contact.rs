@@ -80,6 +80,27 @@ pub(crate) fn contact_on_name(
     Uri::parse_str(&rewritten).ok()
 }
 
+/// Whether `contact`'s host is an IP literal, whatever its port.
+pub(crate) fn contact_names_an_address(contact: &Uri) -> bool {
+    if contact.sip().is_none() {
+        return false;
+    }
+    let Some((start, end)) = hostport_span(contact.as_str()) else {
+        return false;
+    };
+    let Some(hostport) = contact.as_str().get(start..end) else {
+        return false;
+    };
+    let host = match hostport.rfind(':') {
+        Some(colon) if !hostport.ends_with(']') => hostport.get(..colon).unwrap_or(hostport),
+        _ => hostport,
+    };
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok()
+}
+
 /// Whether `contact` names `address`: the same IP literal, and the same port
 /// or no port where `address` has the one RFC 3261 §19.1.2 makes the default
 /// for the scheme.

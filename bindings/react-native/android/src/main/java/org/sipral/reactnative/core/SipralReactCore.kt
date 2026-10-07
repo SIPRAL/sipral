@@ -92,13 +92,17 @@ data class SipralAccountOptions(
     val authUser: String? = null,
     val authPassword: String? = null,
     val expiresSeconds: Long = 0,
-    /** "tcp" or "tls": a connection of the account's own to its server. */
+    /** "tcp", "tls", "ws" or "wss": a connection of the account's own to its server. */
     val streamProtocol: String? = null,
     /** The fingerprint, as bare hexadecimal, of the one certificate that
      * connection trusts. */
     val tlsPin: String? = null,
     /** The realms the password answers, one per line. */
     val realms: String? = null,
+    /** The `Host` of a WebSocket account's handshake. */
+    val websocketHost: String? = null,
+    /** The resource a WebSocket account's handshake asks for. */
+    val websocketResource: String? = null,
 )
 
 /**
@@ -193,7 +197,12 @@ class SipralReactCore(
             null -> null
             "tcp" -> SipralTransport.TCP
             "tls" -> SipralTransport.TLS
-            else -> throw SipralRefusal("invalidArgument", "streamProtocol is tcp or tls, not ${options.streamProtocol}")
+            "ws" -> SipralTransport.WS
+            "wss" -> SipralTransport.WSS
+            else -> throw SipralRefusal(
+                "invalidArgument",
+                "streamProtocol is tcp, tls, ws or wss, not ${options.streamProtocol}",
+            )
         }
         val account = open().addAccount(
             aor = options.aor,
@@ -210,6 +219,8 @@ class SipralReactCore(
             tlsPin = options.tlsPin,
             streamProtocol = stream,
             realms = options.realms?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
+            websocketHost = options.websocketHost,
+            websocketResource = options.websocketResource,
         )
         val id = account.handle.toString()
         accounts[id] = account

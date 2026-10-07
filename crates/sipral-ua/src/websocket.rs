@@ -16,9 +16,11 @@
 //! The answer must be a 101 with a matching `Sec-WebSocket-Accept`, the
 //! `sip` subprotocol and no extension; anything else fails the connection.
 //! SIP written before the answer waits, in order. `Host` and resource come
-//! from [`UserAgent::set_websocket_target`]; unset, they are the far end's
-//! address and `/ws`, which Asterisk serves and Kamailio, OpenSIPS and
-//! FreeSWITCH accept, so the C ABI (no field for either yet) still works.
+//! from [`UserAgent::set_websocket_target`] for the address, else from the
+//! [`Account::websocket_target`](crate::Account::websocket_target) of an
+//! account on the connection (its transport, or its own connection there); unset, they are the far end's address
+//! and `/ws`, which Asterisk serves and Kamailio, OpenSIPS and FreeSWITCH
+//! accept.
 //!
 //! # Frames (RFC 6455 §5)
 //!
@@ -903,7 +905,7 @@ impl UserAgent {
             .targets
             .get(&remote)
             .cloned()
-            .unwrap_or_else(|| WebSocketTarget::default_for(remote));
+            .unwrap_or_else(|| self.account_target(transport, protocol, remote));
         let key = draw.key();
         let handshake = request(&target, &key);
         self.websockets.failures.remove(&transport);
@@ -930,6 +932,30 @@ impl UserAgent {
         self.name_contacts(transport, protocol, local, remote, &name);
     }
 
+    /// What an account on this connection asked for, else the default.
+    fn account_target(
+        &self,
+        transport: TransportId,
+        protocol: TransportProtocol,
+        remote: SocketAddr,
+    ) -> WebSocketTarget {
+        let mut target = WebSocketTarget::default_for(remote);
+        let asked = self.accounts.values().find(|config| {
+            (config.websocket_host.is_some() || config.websocket_resource.is_some())
+                && (config.transport == transport
+                    || (config.own_stream == Some(protocol) && config.remote == remote))
+        });
+        if let Some(config) = asked {
+            if let Some(host) = &config.websocket_host {
+                target.host = host.to_string();
+            }
+            if let Some(resource) = &config.websocket_resource {
+                target.resource = resource.to_string();
+            }
+        }
+        target
+    }
+
     /// Rewrite to the `.invalid` name each `Contact` on this connection that
     /// names the bound address (RFC 7118 Appendix B.1). A `Contact` with the
     /// application's own name stays.
@@ -942,9 +968,13 @@ impl UserAgent {
         name: &str,
     ) {
         for config in self.accounts.values_mut() {
-            let on_it = config.transport == transport
-                || (config.own_stream == Some(protocol) && config.remote == remote);
-            if !on_it || !crate::contact::contact_names(&config.contact, local) {
+            let own = config.own_stream == Some(protocol) && config.remote == remote;
+            let on_it = config.transport == transport || own;
+            // an account's own WebSocket is reached at no address it names
+            // (RFC 7118 §5), bound or not; a name stays
+            let unreachable = crate::contact::contact_names(&config.contact, local)
+                || (own && crate::contact::contact_names_an_address(&config.contact));
+            if !on_it || !unreachable {
                 continue;
             }
             if let Some(contact) = crate::contact::contact_on_name(&config.contact, name, protocol)

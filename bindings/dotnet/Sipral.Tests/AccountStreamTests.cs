@@ -116,6 +116,27 @@ public sealed class AccountStreamTests
     }
 
     [Fact]
+    public async Task AnAccountOverAWebSocketAsksForItsResourceAndHost()
+    {
+        using var server = new SignallingTests.Registrar();
+        using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1");
+        var account = stack.AddAccount($"sip:alice@{ServerName}", server.Address, registrar: $"sip:{ServerName}",
+            streamProtocol: SipralTransport.Ws, websocketHost: "pbx.sipral.test", websocketResource: "/sip?tenant=7");
+        Assert.Equal(SipralTransport.Ws, account.StreamProtocol);
+        account.Register();
+        Assert.True(await Until(() => server.Requests().Any(r => r.Message.StartsWith("GET ", StringComparison.Ordinal))),
+            "no WebSocket handshake reached the server");
+        var handshake = server.Requests().First(r => r.Message.StartsWith("GET ", StringComparison.Ordinal)).Message;
+        Assert.StartsWith("GET /sip?tenant=7 HTTP/1.1\r\n", handshake);
+        Assert.Equal("pbx.sipral.test", SignallingTests.Header("Host", handshake));
+        Assert.Equal("sip", SignallingTests.Header("Sec-WebSocket-Protocol", handshake));
+
+        var refused = Assert.Throws<SipralException>(() => stack.AddAccount("sip:bob@example.com", server.Address,
+            streamProtocol: SipralTransport.Tcp, websocketResource: "/ws"));
+        Assert.Equal(SipralStatus.InvalidArgument, refused.Status);
+    }
+
+    [Fact]
     public void OnlyAStreamOnAStackThatSignalsOverUdpIsTaken()
     {
         using var stack = new SipralStack(audio: SipralAudio.Application, bindHost: "127.0.0.1");

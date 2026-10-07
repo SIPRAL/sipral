@@ -279,6 +279,20 @@ record! {
         pub realms: *const c_char,
         /// How many bytes of it.
         pub realms_len: usize,
+        /// The `Host` of the WebSocket handshake (RFC 6455 §4.1) when
+        /// `stream_protocol` is `SIPRAL_TRANSPORT_WS` or `_WSS`, as
+        /// `host[:port]`, or null for the server's address. ABI 1.2.
+        pub websocket_host: *const c_char,
+        /// How many bytes of it.
+        pub websocket_host_len: usize,
+        /// The resource the handshake asks for, a path from `/` with any
+        /// query (`/ws`, `/sip?tenant=7`), no space or fragment, or null for
+        /// `/ws`. Refused with `SIPRAL_STATUS_INVALID_ARGUMENT` like a host
+        /// that cannot go in the request, and when `stream_protocol` is not a
+        /// WebSocket. ABI 1.2.
+        pub websocket_resource: *const c_char,
+        /// How many bytes of it.
+        pub websocket_resource_len: usize,
     }
 }
 
@@ -329,6 +343,52 @@ unsafe impl Versioned for SipralAccountConfig {
     fn set_declared_size(&mut self, bytes: usize) {
         self.size = bytes;
     }
+}
+
+/// The `Host` and resource of the account's own WebSocket, if it named them.
+///
+/// # Safety
+///
+/// `websocket_host` and `websocket_resource` must be readable for the
+/// lengths beside them.
+unsafe fn with_websocket(account: Account, config: &SipralAccountConfig) -> Result<Account, Fail> {
+    let host = unsafe {
+        text(
+            config.websocket_host,
+            config.websocket_host_len,
+            "websocket_host",
+        )
+    }?;
+    let resource = unsafe {
+        text(
+            config.websocket_resource,
+            config.websocket_resource_len,
+            "websocket_resource",
+        )
+    }?;
+    if host.is_none() && resource.is_none() {
+        return Ok(account);
+    }
+    let websocket = [SipralTransport::Ws as u32, SipralTransport::Wss as u32];
+    if !websocket.contains(&config.stream_protocol) {
+        return Err(fail(
+            SipralStatus::InvalidArgument,
+            "websocket_host and websocket_resource are for an account whose stream_protocol is \
+             SIPRAL_TRANSPORT_WS or SIPRAL_TRANSPORT_WSS",
+        ));
+    }
+    account
+        .websocket_target(host, resource)
+        .map_err(|error| match error {
+            sipral_ua::websocket::TargetError::Host => fail(
+                SipralStatus::InvalidArgument,
+                format!("websocket_host is {host:?}, {error}"),
+            ),
+            _ => fail(
+                SipralStatus::InvalidArgument,
+                format!("websocket_resource is {resource:?}, {error}"),
+            ),
+        })
 }
 
 /// Parse a caller's URI, naming the field when it fails.
@@ -657,6 +717,7 @@ unsafe fn account_from(state: &StackState, config: &SipralAccountConfig) -> Resu
             .protocol();
         account = account.on_stream(protocol);
     }
+    account = unsafe { with_websocket(account, config) }?;
     account = unsafe { with_reach(account, config, server) }?;
     if let Some(named) = unsafe { realms_of(config) }? {
         account = account.realms(&named);
@@ -989,6 +1050,10 @@ pub(crate) mod tests {
             reserved_35: 0,
             realms: std::ptr::null(),
             realms_len: 0,
+            websocket_host: std::ptr::null(),
+            websocket_host_len: 0,
+            websocket_resource: std::ptr::null(),
+            websocket_resource_len: 0,
         }
     }
 

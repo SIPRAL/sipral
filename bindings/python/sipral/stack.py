@@ -87,6 +87,13 @@ _ADDRESS_BYTES = 128
 _TURN_WRITE_PATIENCE = 5.0
 #: Bound on one signalling connect (TLS handshake included) and on a write.
 _SIGNALLING_PATIENCE = 5.0
+#: An account's own connection: TCP, TLS, or a WebSocket on either.
+_OWN_STREAMS = (
+    lib.SIPRAL_TRANSPORT_TCP,
+    lib.SIPRAL_TRANSPORT_TLS,
+    lib.SIPRAL_TRANSPORT_WS,
+    lib.SIPRAL_TRANSPORT_WSS,
+)
 #: Reconnect backoff, doubled per failure: quick for a restarting server,
 #: not every second for one that refuses the certificate.
 _RECONNECT_FIRST = 1.0
@@ -768,6 +775,8 @@ class Stack:
         stir_attestation: int = 0,
         recording_in_clear: bool = False,
         realms: Sequence[str] | None = None,
+        websocket_host: str | None = None,
+        websocket_resource: str | None = None,
     ) -> Account:
         """`sipral_account_add`. See :class:`sipral.account.Account`.
 
@@ -820,20 +829,22 @@ class Stack:
         account's TLS itself; :meth:`sipral.account.Account.check_certificate`
         judges a presented certificate.
 
-        ``stream_protocol`` (``Transport.TCP``/``TLS``, UDP stacks only) gives
-        the account its own connection to its server, beside UDP accounts on
-        the same stack. This class opens it on
+        ``stream_protocol`` (``Transport.TCP``/``TLS``/``WS``/``WSS``, UDP
+        stacks only) gives the account its own connection to its server,
+        beside UDP accounts on the same stack. This class opens it on
         `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` regardless of ``stream_fallback``
         and reopens it when it closes; TLS is checked against ``tls_pin`` or
         the stack's ``tls_trust``. Until open, a call raises
-        ``SIPRAL_STATUS_TRANSPORT_DOWN``.
+        ``SIPRAL_STATUS_TRANSPORT_DOWN``. ``WS``/``WSS`` run a WebSocket (RFC
+        7118) asking for ``websocket_resource`` (``/ws``) with
+        ``websocket_host`` as ``Host`` (the server's address).
         """
         if (registrar_address is None) == (server_uri is None):
             raise ValueError("an account names its server by registrar_address or by server_uri, one of the two")
         if stream_protocol and (
-            stream_protocol not in (lib.SIPRAL_TRANSPORT_TCP, lib.SIPRAL_TRANSPORT_TLS) or self._streamed
+            stream_protocol not in _OWN_STREAMS or self._streamed
         ):
-            raise ValueError("stream_protocol is Transport.TCP or Transport.TLS, on a stack that signals over UDP")
+            raise ValueError("stream_protocol is Transport.TCP, TLS, WS or WSS, on a stack that signals over UDP")
         advertised = None
         if self._routes and contact is None and registrar_address is not None and not self._streamed:
             advertised = self._advertise_toward(registrar_address)
@@ -846,6 +857,8 @@ class Stack:
             keepalive_ms=keepalive_ms,
             tls_pin=tls_pin,
             stream_protocol=stream_protocol,
+            websocket_host=websocket_host,
+            websocket_resource=websocket_resource,
             advertised=advertised,
             registrar=registrar,
             contact=contact,
@@ -2185,9 +2198,12 @@ class Stack:
             seen.add(destination)
             # An account's own connection (nothing outgrown) always opens.
             opens = self._stream_fallback or (wanted["request_bytes"] == 0 and wanted["limit_bytes"] == 0)
+            # a WebSocket is a TCP or TLS connection bound as WS or WSS, whose
+            # handshake and frames are the stack's
+            bound = wanted["protocol"] if wanted["protocol"] in _OWN_STREAMS else lib.SIPRAL_TRANSPORT_TCP
             over = (
                 lib.SIPRAL_TRANSPORT_TLS
-                if wanted["protocol"] == lib.SIPRAL_TRANSPORT_TLS
+                if bound in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
                 else lib.SIPRAL_TRANSPORT_TCP
             )
             with self._stream_lock:
@@ -2208,7 +2224,7 @@ class Stack:
                 continue
             threading.Thread(
                 target=self._open_sip_stream,
-                args=(transport, destination, over),
+                args=(transport, destination, over, bound),
                 name="sipral-stream",
                 daemon=True,
             ).start()
@@ -2219,17 +2235,19 @@ class Stack:
             accounts = list(self._accounts)
         for account in accounts:
             if (
-                account.stream_protocol == lib.SIPRAL_TRANSPORT_TLS
+                account.stream_protocol in (lib.SIPRAL_TRANSPORT_TLS, lib.SIPRAL_TRANSPORT_WSS)
                 and account.registrar_address == destination
                 and account.tls_pin is not None
             ):
                 return TlsTrust.pinned(account.tls_pin)
         return self._tls_trust
 
-    def _open_sip_stream(self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP) -> None:
+    def _open_sip_stream(
+        self, transport: int, destination: str, over: int = lib.SIPRAL_TRANSPORT_TCP, bound: int | None = None
+    ) -> None:
         """Connect to ``destination`` (or ``stream_server`` for TCP) and bind
-        it at ``transport``; a failure is reported on that number, ending
-        what waited for it."""
+        it at ``transport`` as ``bound`` (WS/WSS for a WebSocket); a failure
+        is reported on that number, ending what waited for it."""
         tls = over == lib.SIPRAL_TRANSPORT_TLS
         try:
             host, port = parse_address(destination) if tls else self._stream_server or parse_address(destination)
@@ -2277,7 +2295,7 @@ class Stack:
                 lambda: lib.sipral_stack_transport_bind(
                     self.handle,
                     transport,
-                    over,
+                    over if bound is None else bound,
                     local_bytes,
                     len(local_bytes),
                     far,

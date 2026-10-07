@@ -147,7 +147,10 @@ the socket.
   — the handshake asking for the `sip` subprotocol, every message in a
   masked frame, fragments put back together, pings answered and sent, a
   close answered — and a `Via` and `Contact` naming a random host under
-  `.invalid` (RFC 7118 Appendix B.1). One that binds it without a far end
+  `.invalid` (RFC 7118 Appendix B.1). The handshake asks for `/ws` with the
+  far end's address as `Host`, or for what the account on the connection
+  names (`Account::websocket_target`; `websocket_host` and
+  `websocket_resource` in the C ABI). One that binds it without a far end
   does the handshake itself and feeds each message in as a datagram.
 - **Write it compact first.** A request bound for a datagram that is over the
   line below is written in RFC 3261 §7.3.3's compact form before anything

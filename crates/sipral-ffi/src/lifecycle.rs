@@ -666,6 +666,10 @@ mod tests {
             reserved_35: 0,
             realms: std::ptr::null(),
             realms_len: 0,
+            websocket_host: std::ptr::null(),
+            websocket_host_len: 0,
+            websocket_resource: std::ptr::null(),
+            websocket_resource_len: 0,
         }
     }
 

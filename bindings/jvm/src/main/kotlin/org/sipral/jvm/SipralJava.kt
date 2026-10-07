@@ -101,9 +101,10 @@ object SipralJava {
     /**
      * [SipralClient.addAccount]: [registrarAddress] is where requests go,
      * `host:port`; with [registrar] the account can register there, as
-     * [authUser] with [authPassword]. [streamProtocol] (`SipralTransport.TCP`
-     * or `TLS`) puts the account on its own connection, held to [tlsPin] if
-     * given. [realms] are the realms the password answers, for a server that
+     * [authUser] with [authPassword]. [streamProtocol] (`SipralTransport.TCP`,
+     * `TLS`, `WS` or `WSS`) puts the account on its own connection, held to
+     * [tlsPin] if given; a WebSocket asks for [websocketResource] with
+     * [websocketHost] as `Host`. [realms] are the realms the password answers, for a server that
      * challenges calls under a realm REGISTER never sees; other challenges go
      * unanswered and raise `CHALLENGE_DECLINED` ([declinedChallengeOf]).
      */
@@ -119,6 +120,8 @@ object SipralJava {
         streamProtocol: SipralTransport? = null,
         tlsPin: String? = null,
         realms: List<String> = emptyList(),
+        websocketHost: String? = null,
+        websocketResource: String? = null,
     ): SipralAccount = client.addAccount(
         aor = aor,
         registrarAddress = registrarAddress,
@@ -128,6 +131,8 @@ object SipralJava {
         streamProtocol = streamProtocol,
         tlsPin = tlsPin,
         realms = realms,
+        websocketHost = websocketHost,
+        websocketResource = websocketResource,
     )
 
     /** The challenge a `CHALLENGE_DECLINED` [event] reports, or null for

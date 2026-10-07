@@ -360,3 +360,130 @@ fn an_account_on_a_websocket_of_its_own_asks_for_the_connection_again() {
     agent.handle_timeout(t0 + Duration::from_secs(1));
     assert!(wanted(&events(&mut agent)), "asked again");
 }
+
+/// The handshake an account of its own on a WebSocket opens with.
+fn handshake_of(account: Account, target: Option<WebSocketTarget>) -> String {
+    let t0 = Instant::now();
+    let mut agent = UserAgent::new(EndpointConfig::default(), [23; 32]).unwrap();
+    if let Some(target) = target {
+        agent.set_websocket_target(server(), target);
+    }
+    agent.add_account(account.on_stream(TransportProtocol::Wss));
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: WS,
+                protocol: TransportProtocol::Wss,
+                local: local(),
+                remote: Some(server()),
+            },
+            t0,
+        )
+        .unwrap();
+    let transmit = agent.poll_transmit().unwrap();
+    String::from_utf8(transmit.payload.to_vec()).unwrap()
+}
+
+fn plain_account() -> Account {
+    Account::new(
+        uri("sip:alice@example.com"),
+        uri("sip:example.com"),
+        uri("sip:alice@192.0.2.1:40000"),
+        TransportId(1),
+        server(),
+    )
+}
+
+#[test]
+fn an_account_names_the_resource_and_host_of_its_own_websocket() {
+    let account = plain_account()
+        .websocket_target(Some("sip.example.com"), Some("/sip?tenant=7"))
+        .unwrap();
+    let handshake = handshake_of(account, None);
+    assert!(
+        handshake.starts_with("GET /sip?tenant=7 HTTP/1.1\r\nHost: sip.example.com\r\n"),
+        "{handshake}"
+    );
+}
+
+#[test]
+fn an_account_naming_only_the_resource_keeps_the_address_as_host() {
+    let account = plain_account().websocket_target(None, Some("/")).unwrap();
+    let handshake = handshake_of(account, None);
+    assert!(
+        handshake.starts_with("GET / HTTP/1.1\r\nHost: 192.0.2.9:8088\r\n"),
+        "{handshake}"
+    );
+    let handshake = handshake_of(plain_account(), None);
+    assert!(
+        handshake.starts_with("GET /ws HTTP/1.1\r\nHost: 192.0.2.9:8088\r\n"),
+        "{handshake}"
+    );
+}
+
+#[test]
+fn a_target_set_for_the_address_wins_over_the_account() {
+    let account = plain_account()
+        .websocket_target(None, Some("/account"))
+        .unwrap();
+    let target = WebSocketTarget::new("edge.example.com", "/edge").unwrap();
+    let handshake = handshake_of(account, Some(target));
+    assert!(handshake.starts_with("GET /edge HTTP/1.1\r\nHost: edge.example.com\r\n"));
+}
+
+#[test]
+fn an_account_refuses_a_target_a_request_cannot_carry() {
+    use crate::websocket::TargetError;
+    assert_eq!(
+        plain_account().websocket_target(None, Some("ws")).err(),
+        Some(TargetError::Resource)
+    );
+    assert_eq!(
+        plain_account().websocket_target(None, Some("/a#b")).err(),
+        Some(TargetError::Resource)
+    );
+    assert_eq!(
+        plain_account().websocket_target(Some("a/b"), None).err(),
+        Some(TargetError::Host)
+    );
+    assert_eq!(
+        plain_account().websocket_target(Some(""), None).err(),
+        Some(TargetError::Host)
+    );
+}
+
+#[test]
+fn an_account_of_its_own_on_a_websocket_names_the_invalid_host_whatever_address_it_gave() {
+    let t0 = Instant::now();
+    let mut agent = UserAgent::new(EndpointConfig::default(), [24; 32]).unwrap();
+    // the address of another socket, as a layer's default Contact names it
+    let account = agent.add_account(
+        Account::new(
+            uri("sip:alice@example.com"),
+            uri("sip:example.com"),
+            uri("sip:alice@192.0.2.1:5060;transport=ws"),
+            TransportId(1),
+            server(),
+        )
+        .on_stream(TransportProtocol::Ws),
+    );
+    agent
+        .receive(
+            Input::TransportBound {
+                transport: WS,
+                protocol: TransportProtocol::Ws,
+                local: local(),
+                remote: Some(server()),
+            },
+            t0,
+        )
+        .unwrap();
+    agent.register(account, t0).unwrap();
+    let out = written(&mut agent);
+    feed(&mut agent, &accepted(&out[0]), t0);
+    let out = written(&mut agent);
+    let (_, register) = unmasked(&out[0]);
+    let contact = String::from_utf8(header(&register, HeaderName::Contact)).unwrap();
+    assert!(contact.contains(".invalid"), "{contact}");
+    assert!(!contact.contains("192.0.2.1"), "{contact}");
+}

@@ -498,7 +498,8 @@ by the server, a ping unanswered — is `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`
 with the reason in `detail`. An account reaches one with `stream_protocol`
 set to `SIPRAL_TRANSPORT_WS`, asked for and reconnected the way a TCP or TLS
 connection of its own is. The handshake asks for `/ws` with the far end's
-address as its `Host`; no field sets either yet. Bound without `remote`, the
+address as its `Host`, or for `sipral_account_config_t::websocket_resource`
+and `websocket_host` (ABI 1.2). Bound without `remote`, the
 application runs the WebSocket and a frame goes in as a datagram, because RFC
 7118 §4.2 puts one message in each. §18.1.1 — a request that outgrew a
 datagram going out on a stream instead — arrives as
@@ -3735,6 +3736,32 @@ of the event's fields and `Account.set_access_token`, Dart
 `SipralAccount.setAccessToken`, React Native the `tokenRequired` event on the
 client and the account and `account.setAccessToken(token)` (TypeScript,
 Android and iOS halves).
+
+**The resource and `Host` of a WebSocket.** Two members appended to
+`sipral_account_config_t` behind its `size`, `websocket_host` and
+`websocket_resource` with their lengths: the `Host` (`host[:port]`) and the
+resource (a path from `/` with any query) the handshake of the account's own
+WebSocket asks for, when `stream_protocol` is `SIPRAL_TRANSPORT_WS` or
+`_WSS`. Null keeps the far end's address and `/ws`, as before, so a caller
+compiled against the shorter struct is unchanged. Given with any other
+`stream_protocol`, a resource that does not start with `/` or holds a space,
+a control character or a `#`, or a host that is empty, holds a `/` or such a
+character, is `SIPRAL_STATUS_INVALID_ARGUMENT` with the member named. The
+facade carries it as `Account::websocket_target`
+(`docs/04-ua.md`).
+
+**In the layers.** Each idiomatic layer takes `ws` and `wss` as an account's
+own connection beside `tcp` and `tls`, opens it as TCP or TLS and binds it as
+WS or WSS so the stack runs the WebSocket, and takes the two values beside
+it: Swift `addAccount(streamProtocol: .ws, websocketHost:,
+websocketResource:)`, .NET `AddAccount(streamProtocol: SipralTransport.Ws,
+websocketHost:, websocketResource:)`, Kotlin and the JVM jar
+`addAccount(streamProtocol = SipralTransport.WS, websocketHost =,
+websocketResource =)`, Python `add_account(stream_protocol=Transport.WS,
+websocket_host=, websocket_resource=)`, Dart `addAccount(streamProtocol:
+SipralTransport.ws, websocketHost:, websocketResource:)`, and React Native
+`addAccount({streamProtocol: 'ws', websocketHost, websocketResource})`
+(TypeScript, Android and iOS halves).
 
 **A network test before a call.** `docs/25-network-test.md` is the whole
 of it; what the header carries:

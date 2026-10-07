@@ -36,8 +36,8 @@ class SipralAccount internal constructor(
     private val givenContact: String?,
     /** The server named by a URI RFC 3263 locates, or null. */
     val serverUri: String? = null,
-    /** [SipralTransport.TCP] or [SipralTransport.TLS] for an account on its own
-     * connection, or null for the client's transport. */
+    /** TCP, TLS, WS or WSS for an account on its own connection, or null for
+     * the client's transport. */
     val streamProtocol: SipralTransport? = null,
     /** The certificate pin a TLS connection of its own is held to. */
     internal val tlsPin: String? = null,
@@ -93,6 +93,8 @@ class SipralAccount internal constructor(
         val advertised: String?,
         val streamProtocol: SipralTransport? = null,
         val realms: List<String> = emptyList(),
+        val websocketHost: String? = null,
+        val websocketResource: String? = null,
     )
     /** The account's current `Contact` address; after
      * [SipralClient.networkChanged], the new one. */
@@ -156,6 +158,8 @@ class SipralAccount internal constructor(
                 serverNaptr = if (location.serverNaptr) SipralToggle.ON.value.toLong() else 0,
                 streamProtocol = (location.streamProtocol?.value ?: 0).toLong(),
                 realms = location.realms.takeIf { it.isNotEmpty() }?.joinToString("\n"),
+                websocketHost = location.websocketHost,
+                websocketResource = location.websocketResource,
             )
             val accountHandle = retryBusy { Sipral.accountAdd(client.handle, config) }
             return SipralAccount(

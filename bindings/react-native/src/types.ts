@@ -221,11 +221,12 @@ export interface AccountOptions {
   /** Zero, or left out, for the library's own default. */
   expiresSeconds?: number;
   /**
-   * "tcp" or "tls": the account gets its own connection to its server, so
-   * one client can mix UDP and stream accounts. The REGISTER and every call
-   * go over it. Only on a client signalling over "udp".
+   * "tcp", "tls", "ws" or "wss": the account gets its own connection to its
+   * server, so one client can mix UDP and stream accounts. The REGISTER and
+   * every call go over it; "ws"/"wss" run a WebSocket on it (RFC 7118). Only
+   * on a client signalling over "udp".
    */
-  streamProtocol?: 'tcp' | 'tls';
+  streamProtocol?: 'tcp' | 'tls' | 'ws' | 'wss';
   /**
    * The SHA-256 fingerprint of the one certificate the account's own TLS
    * connection trusts, in any form `pinDigest` reads; it needs
@@ -239,6 +240,16 @@ export interface AccountOptions {
    * are not answered and raise `challengeDeclined`.
    */
   realms?: string[];
+  /**
+   * The `Host` the WebSocket handshake of a "ws" or "wss" account names
+   * (RFC 6455 §4.1), `host[:port]`; left out, the server's address.
+   */
+  websocketHost?: string;
+  /**
+   * The resource that handshake asks for, a path from "/" with any query;
+   * left out, "/ws".
+   */
+  websocketResource?: string;
 }
 
 export interface PlaceCallOptions {

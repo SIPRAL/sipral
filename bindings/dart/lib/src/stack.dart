@@ -263,13 +263,15 @@ final class SipralStack {
   /// [tlsPin] is the SHA-256 fingerprint of the one certificate the account
   /// trusts, in any form [sipralPinDigest] reads (else [ArgumentError]).
   ///
-  /// [streamProtocol] (`SipralTransport.tcp` or `tls`) puts the account on
-  /// its own connection to its server; the stack asks for it with
+  /// [streamProtocol] (`SipralTransport.tcp`, `tls`, `ws` or `wss`) puts the
+  /// account on its own connection to its server; the stack asks for it with
   /// `SipralEventKind.transportWanted` and this layer opens it, reopening it
   /// when it closes. With a [tlsPin] only the pinned certificate is trusted;
   /// otherwise the platform's authorities under `tlsServerName` or the
   /// server's host. Until it is open, placing a call throws
   /// `SipralStatus.transportDown`. Any other value is an [ArgumentError].
+  /// `ws`/`wss` run a WebSocket (RFC 7118) asking for [websocketResource]
+  /// (`/ws`) with [websocketHost] as `Host` (the server's address).
   ///
   /// [realms] are the realms the password answers (RFC 3261 §22.1). Empty
   /// means the realm of the first challenge plus every realm REGISTER is
@@ -290,6 +292,8 @@ final class SipralStack {
     String? tlsPin,
     int? streamProtocol,
     List<String> realms = const [],
+    String? websocketHost,
+    String? websocketResource,
   }) {
     _ensureOpen();
     if ((registrarAddress == null) == (serverUri == null)) {
@@ -298,13 +302,11 @@ final class SipralStack {
         'one of the two',
       );
     }
-    if (streamProtocol != null &&
-        streamProtocol != SipralTransport.tcp &&
-        streamProtocol != SipralTransport.tls) {
+    if (streamProtocol != null && !_ownStreams.contains(streamProtocol)) {
       throw ArgumentError.value(
         streamProtocol,
         'streamProtocol',
-        'is SipralTransport.tcp or SipralTransport.tls',
+        'is SipralTransport.tcp, .tls, .ws or .wss',
       );
     }
     final advertised =
@@ -343,6 +345,8 @@ final class SipralStack {
         arena,
         realms.isEmpty ? null : realms.join('\n'),
       );
+      final websocketHostText = _text(arena, websocketHost);
+      final websocketResourceText = _text(arena, websocketResource);
       config.ref
         ..size = ffi.sizeOf<SipralAccountConfig>()
         ..aor = aorText.$1
@@ -367,7 +371,11 @@ final class SipralStack {
         ..tlsPinSha256Len = pinText.$2
         ..streamProtocol = streamProtocol ?? 0
         ..realms = realmsText.$1
-        ..realmsLen = realmsText.$2;
+        ..realmsLen = realmsText.$2
+        ..websocketHost = websocketHostText.$1
+        ..websocketHostLen = websocketHostText.$2
+        ..websocketResource = websocketResourceText.$1
+        ..websocketResourceLen = websocketResourceText.$2;
       final out = arena<SipralHandle>();
       _check(
         _sipral,
@@ -643,11 +651,23 @@ final class SipralStack {
       switch (streamProtocol) {
         SipralTransport.tcp => ';transport=tcp',
         SipralTransport.tls => ';transport=tls',
+        SipralTransport.ws => ';transport=ws',
+        SipralTransport.wss => ';transport=wss',
         _ => '',
       };
 
-  /// Answers `SipralEventKind.transportWanted`. A failed connection is
-  /// reported; the stack asks again with the account's next REGISTER.
+  /// What an account's own connection may be: TCP, TLS, or a WebSocket on
+  /// either.
+  static const _ownStreams = {
+    SipralTransport.tcp,
+    SipralTransport.tls,
+    SipralTransport.ws,
+    SipralTransport.wss,
+  };
+
+  /// Answers `SipralEventKind.transportWanted`; WS/WSS go over TCP/TLS. A
+  /// failed connection is reported; the stack asks again with the account's
+  /// next REGISTER.
   Future<void> _openStream(String destination, int protocol) async {
     if (_closed ||
         _streamsOpening.contains(destination) ||
@@ -660,7 +680,8 @@ final class SipralStack {
     }
     _streamsOpening.add(destination);
     final id = _nextStream++;
-    final tls = protocol == SipralTransport.tls;
+    final tls =
+        protocol == SipralTransport.tls || protocol == SipralTransport.wss;
     Socket socket;
     try {
       final plain = await Socket.connect(
@@ -674,7 +695,7 @@ final class SipralStack {
             _accounts.values
                 .where(
                   (one) =>
-                      one.streamProtocol == SipralTransport.tls &&
+                      one.streamProtocol == protocol &&
                       one.registrarAddress == destination,
                 )
                 .firstOrNull;

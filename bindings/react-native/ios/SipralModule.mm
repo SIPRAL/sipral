@@ -130,6 +130,8 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   put(given, @"streamProtocol", options.streamProtocol());
   put(given, @"tlsPin", options.tlsPin());
   put(given, @"realms", options.realms());
+  put(given, @"websocketHost", options.websocketHost());
+  put(given, @"websocketResource", options.websocketResource());
   [_bridge addAccount:given resolve:resolve reject:reject];
 }
 

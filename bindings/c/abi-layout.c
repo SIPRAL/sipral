@@ -194,7 +194,7 @@ _Static_assert(offsetof(sipral_header_t, name_len) == SIPRAL_LAYOUT(8, 4, 4), "s
 _Static_assert(offsetof(sipral_header_t, value) == SIPRAL_LAYOUT(16, 8, 8), "sipral_header_t::value");
 _Static_assert(offsetof(sipral_header_t, value_len) == SIPRAL_LAYOUT(24, 12, 12), "sipral_header_t::value_len");
 
-_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(464, 256, 264), "sipral_account_config_t");
+_Static_assert(sizeof(sipral_account_config_t) == SIPRAL_LAYOUT(496, 272, 280), "sipral_account_config_t");
 _Static_assert(offsetof(sipral_account_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_account_config_t::size");
 _Static_assert(offsetof(sipral_account_config_t, aor) == SIPRAL_LAYOUT(8, 4, 4), "sipral_account_config_t::aor");
 _Static_assert(offsetof(sipral_account_config_t, aor_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_account_config_t::aor_len");
@@ -255,6 +255,10 @@ _Static_assert(offsetof(sipral_account_config_t, stream_protocol) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_account_config_t, reserved_35) == SIPRAL_LAYOUT(444, 244, 252), "sipral_account_config_t::reserved_35");
 _Static_assert(offsetof(sipral_account_config_t, realms) == SIPRAL_LAYOUT(448, 248, 256), "sipral_account_config_t::realms");
 _Static_assert(offsetof(sipral_account_config_t, realms_len) == SIPRAL_LAYOUT(456, 252, 260), "sipral_account_config_t::realms_len");
+_Static_assert(offsetof(sipral_account_config_t, websocket_host) == SIPRAL_LAYOUT(464, 256, 264), "sipral_account_config_t::websocket_host");
+_Static_assert(offsetof(sipral_account_config_t, websocket_host_len) == SIPRAL_LAYOUT(472, 260, 268), "sipral_account_config_t::websocket_host_len");
+_Static_assert(offsetof(sipral_account_config_t, websocket_resource) == SIPRAL_LAYOUT(480, 264, 272), "sipral_account_config_t::websocket_resource");
+_Static_assert(offsetof(sipral_account_config_t, websocket_resource_len) == SIPRAL_LAYOUT(488, 268, 276), "sipral_account_config_t::websocket_resource_len");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
 _Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(160, 92, 92), "sipral_call_config_t");
