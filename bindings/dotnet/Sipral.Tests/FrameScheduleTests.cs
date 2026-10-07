@@ -91,6 +91,10 @@ public sealed class FrameScheduleTests
                 never.Wait(wait);
             }
         }
+        // the wake that ended the loop is held to the schedule as the
+        // thread's next frame would hold it: on a busy machine it can end a
+        // tenth of a second past its due time, which is the machine's too
+        schedule.Next();
         // a machine busy enough to hold the thread up past a whole frame makes
         // the schedule start over, on purpose; what that gave up is the
         // machine's, and every frame of the rest must be there
