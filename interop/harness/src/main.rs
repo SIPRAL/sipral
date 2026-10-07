@@ -3262,6 +3262,7 @@ mod tests {
                 reason: CallEndReason::RemoteHangup,
                 status: None,
                 response: None,
+                request: None,
                 causes: Box::default(),
             },
             now,

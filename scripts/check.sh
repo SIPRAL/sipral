@@ -2756,7 +2756,9 @@ step_react_native() {
             rn_run "swift test, bindings/react-native/ios" \
                 xcrun --toolchain default swift test --package-path "$RN/ios"
         fi
-        swift_header=$(find "$RN/ios/.build" -path '*SipralReactBridge.build/include/SipralReactBridge-Swift.h' 2>/dev/null | head -1)
+        # Xcode 27's SwiftPM writes the header under .build/out, and an older
+        # one can still sit at the former path: the newest is this build's
+        swift_header=$(find "$RN/ios/.build" -name 'SipralReactBridge-Swift.h' -exec ls -t {} + 2>/dev/null | head -1)
         rn_native="$RN_MODULES/react-native"
         inc="$PKG_WORK/rn-include"
         if [ -z "$swift_header" ]; then
