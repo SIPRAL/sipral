@@ -31,10 +31,9 @@ pub enum Activation {
     /// desktop softphone wants.
     #[default]
     Automatic,
-    /// Only when [`Engine::activate`] says so, whatever the calls do, until
-    /// [`Engine::deactivate`]. What a phone wants: CallKit and the telecom
-    /// framework say when the audio session is this application's, and a
-    /// device opened before they do is a device that does not work.
+    /// Only between [`Engine::activate`] and [`Engine::deactivate`]. For
+    /// phones, where CallKit or telecom grants the audio session and a device
+    /// opened earlier does not work.
     Manual,
 }
 
@@ -49,15 +48,11 @@ pub struct Config {
     /// between its own rate and this one; a platform that answers with
     /// another rate is taken at its word.
     pub device_rate_hz: u32,
-    /// Whether the platform's own echo cancellation runs behind the
-    /// microphone, where the platform lets it be turned off: on by default.
-    /// Off, the devices open without it — the voice-processing unit
-    /// bypassed on macOS and iOS, a raw stream rather than a communications
-    /// one on Windows, the plain recognition preset rather than the
-    /// voice-communication one on Android — for a headset, which has no
-    /// echo to cancel and whose speech the processing only colours, or for
-    /// an application that runs a canceller of its own on each call.
-    /// [`Info::system_echo_cancellation`] says what the platform did.
+    /// Whether the platform's echo cancellation runs behind the microphone;
+    /// on by default. Off means the VPIO unit bypassed (macOS, iOS), a raw
+    /// stream (Windows), the recognition preset (Android): for headsets or
+    /// an application's own canceller. [`Info::system_echo_cancellation`]
+    /// says what the platform did.
     pub system_echo_cancellation: bool,
 }
 
@@ -87,14 +82,10 @@ struct Running {
 pub struct Info {
     /// Whether the devices are open and the pump is running.
     pub active: bool,
-    /// Whether the platform's own processing sits behind the microphone:
-    /// the voice-processing unit on macOS and iOS, which cancels the
-    /// loudspeaker's echo itself; on Windows, a stream the engine accepted
-    /// as a communications stream, which puts the endpoint's own processing
-    /// — where the endpoint has any; a virtual cable has none — behind it.
-    /// An application that wants the echo gone regardless attaches a
-    /// processor to each call, and the engine tells the call the
-    /// loudspeaker-to-microphone delay for it ([`CallAudio::set_render_delay`]).
+    /// Whether platform processing sits behind the microphone: VPIO on
+    /// macOS and iOS, a communications stream on Windows (if the endpoint
+    /// has processing at all). Otherwise attach a processor per call; it gets
+    /// the delay via [`CallAudio::set_render_delay`].
     pub system_echo_cancellation: bool,
     /// The loudspeaker-to-microphone delay the devices report, which is the
     /// reference an attached canceller needs.
@@ -133,13 +124,8 @@ struct PumpHandle {
 }
 
 impl PumpHandle {
-    /// Wait for the pump to have acted on every command sent before this one
-    /// — a stream dropped, in particular — or give up after a bounded wait
-    /// on a pump that is not turning.
-    ///
-    /// The pump answers in the order it takes commands, so the answer is
-    /// proof rather than a guess from a tick count: a tick already under way
-    /// when a command was sent counts itself without having seen it.
+    /// Wait, bounded, until the pump has acted on every earlier command.
+    /// Commands are answered in order, which a tick count cannot prove.
     fn settle(&self) {
         let (done, answer) = mpsc::channel();
         if self.sender.send(Command::Settled(done)).is_ok() {
@@ -184,10 +170,8 @@ pub struct Engine {
     events: VecDeque<AudioEvent>,
     /// How the pump's thread asks for the scheduling class audio runs in.
     promote: Option<Promote>,
-    /// Devices being let go of on a thread of their own — a finished
-    /// pump's, or ones an open in the background brought back for a pump
-    /// that had already stopped — which every open waits for, a bounded
-    /// time, before it asks the platform for the next.
+    /// Devices being released on their own thread; every open waits for
+    /// this, bounded, before asking the platform again.
     closing: Vec<Arc<Done>>,
     /// Which pump is running, counted, so that devices opened in the
     /// background for one that has since stopped are not handed to the next.
@@ -343,9 +327,7 @@ impl Engine {
     /// [`BackendError::TimedOut`] when the platform did not answer in
     /// [`Config::probe_wait`], and the list is left as it was.
     pub fn refresh(&mut self) -> Result<&[DeviceInfo], BackendError> {
-        // an open still running in the background has the platform: what it
-        // brings back is put to work first, rather than this listing being
-        // refused as a stuck driver
+        // a background open holds the platform; land it first
         self.finish_opening();
         self.refresh_now(false)
     }
@@ -373,12 +355,7 @@ impl Engine {
 
     /// The list, asked of the platform first if it never has been.
     ///
-    /// A new engine knows no device until something asks the platform: a
-    /// refresh, a change the platform announced, or an activation that opened
-    /// a device the list had not met. Without one of those its list is empty,
-    /// or holds what an earlier failed listing left. Every read the
-    /// application makes goes through here, so the first is complete without
-    /// a [`Engine::refresh`].
+    /// So the first read is complete without an [`Engine::refresh`].
     ///
     /// # Errors
     /// [`BackendError::TimedOut`] when the platform did not answer in
@@ -566,12 +543,9 @@ impl Engine {
     /// or for the devices without it, from now on: what
     /// [`Config::system_echo_cancellation`] said at creation.
     ///
-    /// While the engine is active the microphone and the loudspeaker are
-    /// reopened at once on the devices they were on, with the gain and the
-    /// mute of each direction, and each says so with a `Reopened` event; a
-    /// call carried meanwhile keeps its media and hears a gap of as long as
-    /// the platform takes to open them. Asking for what is already asked
-    /// for opens nothing. [`Info::system_echo_cancellation`] says what the
+    /// While active, both directions reopen on the same devices with their
+    /// gain and mute, each with a `Reopened` event; calls hear a short gap.
+    /// No change, no reopen. [`Info::system_echo_cancellation`] says what the
     /// platform did.
     pub fn set_system_echo_cancellation(&mut self, on: bool) {
         if self.config.system_echo_cancellation == on {
@@ -613,18 +587,13 @@ impl Engine {
     /// opens the devices; under [`Activation::Manual`] a call attached
     /// before [`Engine::activate`] is carried from the activation on.
     ///
-    /// Nothing here waits on a device. The stack attaches a call from the
-    /// poll that saw its media start, and opening a headset has been seen to
-    /// take a second and a half: a poll held that long stalls every other
-    /// call's signalling, and the far end's packets pile up behind it and
-    /// reach the call in one burst. So the pump starts at once and carries
-    /// the call on no device — silence to the far end, and the far end's
-    /// audio pulled at its own pace and let go of, each frame counted
-    /// ([`Engine::frames_without_device`]) — while the devices are opened on
-    /// a thread of their own, and put under the call by the next
-    /// [`Engine::service`] after they answer, with a `Reopened` event for
-    /// each role, or `Unavailable` for one the platform refused or did not
-    /// answer for within [`Config::probe_wait`].
+    /// Never waits on a device: opening a headset can take 1.5 s, which
+    /// would stall signalling. The pump starts at once without devices
+    /// (silence out, incoming audio discarded and counted in
+    /// [`Engine::frames_without_device`]) while devices open on another
+    /// thread. The next [`Engine::service`] after they answer installs them
+    /// with `Reopened` per role, or `Unavailable` if refused or slower than
+    /// [`Config::probe_wait`].
     ///
     /// # Errors
     /// [`BackendError::Refused`] when the pump's thread could not start; the
@@ -658,17 +627,14 @@ impl Engine {
             .clone()
     }
 
-    /// Forget a call's own controls, once its media has ended for good. A
-    /// detach keeps them, so that a call moved out of the mix and back —
-    /// into a conference, say — keeps its gain and its mute.
+    /// Forget a call's controls once its media has ended. A detach keeps
+    /// them, so a call moved into a conference and back keeps gain and mute.
     pub fn forget_call(&mut self, id: CallId) {
         self.call_channels.remove(&id);
     }
 
-    /// A call's own gain, mute and meter, for whatever carries the call in
-    /// the engine's place: a local conference it joins puts them in its path
-    /// there. `None` for a call this engine has never carried, or has
-    /// forgotten.
+    /// A call's controls, for whatever carries it instead (a local
+    /// conference). `None` for an unknown or forgotten call.
     #[must_use]
     pub fn call_controls(&self, id: CallId) -> Option<CallControls> {
         self.call_channels
@@ -685,10 +651,8 @@ impl Engine {
         })
     }
 
-    /// Set one call's own gain in one direction, on top of the stack's, from
-    /// the next frame on: what the microphone sends that call alone, or how
-    /// loud that call is in the loudspeaker beside the others. `false` for a
-    /// call this engine has never carried, or has forgotten.
+    /// Set one call's gain in one direction, on top of the engine's, from
+    /// the next frame. `false` for an unknown or forgotten call.
     #[must_use]
     pub fn set_call_gain(&self, id: CallId, direction: Direction, gain: Gain) -> bool {
         self.call_channel(id, direction)
@@ -702,10 +666,8 @@ impl Engine {
         self.call_channel(id, direction).map(Channel::gain)
     }
 
-    /// Mute or unmute one call in one direction: the far end of that call
-    /// alone hears silence, or that call alone is silent in the
-    /// loudspeaker, while every other call goes on. The muted direction
-    /// still runs, so the far end hears a stream rather than a gap.
+    /// Mute one call in one direction; other calls are unaffected. The
+    /// stream keeps running, so the far end hears silence, not a gap.
     #[must_use]
     pub fn set_call_muted(&self, id: CallId, direction: Direction, muted: bool) -> bool {
         self.call_channel(id, direction)
@@ -719,9 +681,7 @@ impl Engine {
         self.call_channel(id, direction).map(Channel::is_muted)
     }
 
-    /// One call's meter in one direction: the loudest sample of the last
-    /// tenth of a second of what went to it, or of what it played, after its
-    /// own gain and mute.
+    /// One call's meter in one direction (~100 ms peak, after its gain and mute).
     #[must_use]
     pub fn call_level(&self, id: CallId, direction: Direction) -> Option<Level> {
         self.call_channel(id, direction).map(Channel::level)
@@ -749,9 +709,7 @@ impl Engine {
             && self.attached.is_empty()
             && !self.ringing
         {
-            // reached from the stack's own poll, through a call's media
-            // ending: the devices go on the pump's thread and nothing here
-            // waits for them
+            // called from the stack's poll: do not wait for the devices
             self.stop(None);
         }
     }
@@ -817,13 +775,10 @@ impl Engine {
     /// Close the devices and stop the pump. Calls stay attached and get
     /// their audio back on the next activation.
     ///
-    /// The devices are let go of on the pump's thread, and this waits for
-    /// that at most [`Config::probe_wait`]: a teardown that waits on the
-    /// thread this was called from — the voice unit's, on macOS, has been
-    /// seen to wait for the main thread — finishes after this returns
-    /// rather than never. Devices that were already being let go of — the
-    /// last call's media ended, and the engine stopped them itself without
-    /// waiting — are waited for the same way.
+    /// Devices are released on the pump's thread and waited for at most
+    /// [`Config::probe_wait`], so a teardown that needs this thread (macOS
+    /// VPIO can wait on the main thread) completes later instead of
+    /// deadlocking. Releases already under way are waited for the same way.
     pub fn deactivate(&mut self) {
         if self.is_active() {
             self.stop(Some(self.config.probe_wait));
@@ -838,9 +793,7 @@ impl Engine {
         self.pump.is_some()
     }
 
-    /// Whether devices are still being let go of, on a thread of their own,
-    /// after the pump that ran them stopped or an open nobody wanted any
-    /// more answered.
+    /// Whether devices are still being released in the background.
     #[must_use]
     pub fn is_closing(&mut self) -> bool {
         self.closing.retain(|closed| !closed.is_set());
@@ -971,13 +924,8 @@ impl Engine {
         self.running = PerRole::default();
         self.closing.retain(|closed| !closed.is_set());
         self.closing.push(pump.closed);
-        // an open still under way was for this pump: what it brings back
-        // is let go of on its own thread, which the next open waits for as
-        // it waits for the pump's, and what was still to be opened is not.
-        // An answer it has already handed over and nobody has landed goes
-        // with the way to it, on a thread of its own too: dropped here it
-        // would be torn down on this caller's thread, which the stack
-        // reaches under its own lock
+        // a pending open was for this pump: release its result on its own
+        // thread, never here, where the stack may hold its lock
         if let Some(opening) = self.opening.take() {
             self.closing.push(opening.done);
             self.let_go(opening.answer);
@@ -1117,9 +1065,7 @@ impl Engine {
             duplex || (wants_role(&wants, Role::Microphone) && wants_role(&wants, Role::Speaker));
         let mut settled = None;
         if duplex {
-            // the one unit is reopened whole, and the old one closed first:
-            // the pump drops its halves, and it is the open's own thread,
-            // not this caller, that waits for the pump to have done so
+            // close the old unit first; the open's thread waits for the pump
             let origin = wants.first().map_or(Origin::Engine, |want| want.origin);
             for role in [Role::Microphone, Role::Speaker] {
                 if !wants_role(&wants, role) {
@@ -1272,11 +1218,8 @@ impl Engine {
     /// opened in the background, and put them under the calls; `true` once
     /// nothing is left being opened.
     ///
-    /// The stack never calls this: its poll lands an open in
-    /// [`Engine::service`] once it has answered. It is for a caller on its
-    /// own thread that wants the devices before it goes on, and the engine
-    /// calls it itself before anything that asks the platform while it
-    /// waits.
+    /// For a caller that wants the devices before going on; the stack's
+    /// poll uses [`Engine::service`] instead.
     pub fn finish_opening(&mut self) -> bool {
         while let Some(opening) = self.opening.take() {
             match opening.answer.recv_timeout(self.config.probe_wait) {
@@ -1297,10 +1240,8 @@ impl Engine {
         true
     }
 
-    /// Whether devices are being opened in the background, which the next
-    /// [`Engine::service`] after they answer puts to work: a caller that
-    /// services the engine from a loop of its own comes back soon while
-    /// this holds.
+    /// Whether devices are opening in the background; service again soon
+    /// while this holds.
     #[must_use]
     pub fn is_opening(&self) -> bool {
         self.opening.is_some() || !self.wanted.is_empty()
@@ -1403,9 +1344,7 @@ impl Engine {
             return;
         }
         if self.duplex_only && matches!(role, Role::Microphone | Role::Speaker) {
-            // the one unit has to be closed before another is opened: two
-            // voice-processing units alive at once is what blocks inside
-            // the framework, so the pump drops the old halves first
+            // two live voice-processing units block inside the framework
             if let Some(pump) = self.pump.as_ref() {
                 let _ = pump.sender.send(Command::Replace(Role::Microphone, None));
                 let _ = pump.sender.send(Command::Replace(Role::Speaker, None));
@@ -1507,25 +1446,16 @@ impl Engine {
 
     // -- servicing ----------------------------------------------------------
 
-    /// Take in what the platform and the pump reported since last time, and
-    /// act on it: devices opened in the background are put to work, a
-    /// device gone is reopened on the fallback, a default that moved is
-    /// followed by a role that follows it, a list that changed is
-    /// refreshed. Called from the application's own loop, a few times a
-    /// second; every consequence comes out of [`Engine::poll_event`].
-    ///
-    /// Nothing here waits for a device to open or to close: what has to be
-    /// reopened is opened in the background, and put to work by a later
-    /// call once it has answered ([`Engine::is_opening`]).
+    /// Act on what the platform and pump reported: install background
+    /// opens, reopen lost devices on the fallback, follow default moves,
+    /// refresh the list. Call a few times a second; results come out of
+    /// [`Engine::poll_event`]. Never waits on a device ([`Engine::is_opening`]).
     pub fn service(&mut self) {
         self.poll_opening();
         let notices = match self.backend.try_lock() {
             Ok(mut backend) => drain_notices(&mut **backend),
             Err(TryLockError::Poisoned(poisoned)) => drain_notices(&mut **poisoned.into_inner()),
-            // a probe the engine walked away from, or an open in the
-            // background, is still inside the platform: what it announced
-            // waits for a later service, and the application's loop does
-            // not wait on the driver
+            // the platform is busy with a probe or open; try next service
             Err(TryLockError::WouldBlock) => Vec::new(),
         };
         for notice in notices {
@@ -1545,10 +1475,7 @@ impl Engine {
                         origin: Origin::System,
                         device: None,
                     });
-                    // only a role that follows the system moves with it: one
-                    // the application put somewhere stays there, which is
-                    // what keeps the application's own choice from being
-                    // re-applied in a loop
+                    // a role the application placed stays put
                     for role in Role::ALL {
                         if role.direction() == direction
                             && self.selection(role) == Selection::System
@@ -1614,11 +1541,8 @@ impl Engine {
         self.pump.as_ref().map_or(0, |pump| pump.report.ticks())
     }
 
-    /// Frames the running pump has carried with no device under them while
-    /// calls were up — a microphone or a loudspeaker still being opened, or
-    /// one the platform refused: for `Input`, the silence sent to the far
-    /// end in place of the microphone; for `Output`, the far end's audio
-    /// pulled at its own pace and let go of. Zero while no pump runs.
+    /// Frames carried with no device while calls were up (`Input`: silence
+    /// sent; `Output`: audio discarded). Zero while no pump runs.
     #[must_use]
     pub fn frames_without_device(&self, direction: Direction) -> u64 {
         self.pump.as_ref().map_or(0, |pump| {
@@ -1626,9 +1550,8 @@ impl Engine {
         })
     }
 
-    /// Samples the loudspeaker running now has played silence for, for want
-    /// of anything queued, since it opened: underruns, where the platform
-    /// counts them, and zero where it does not or while no pump runs.
+    /// Underrun samples of the current loudspeaker; zero where uncounted or
+    /// while no pump runs.
     #[must_use]
     pub fn speaker_starved(&self) -> u64 {
         self.pump.as_ref().map_or(0, |pump| pump.report.starved())
@@ -1652,13 +1575,9 @@ fn drain_notices(backend: &mut dyn Backend) -> Vec<Notice> {
     notices
 }
 
-/// Open `asked`, on the calling thread, which is an open's own: a probe the
-/// engine walked away from that is still inside the platform is waited for
-/// here, where nobody else is waiting. The microphone and the loudspeaker
-/// together as one `pair` where they are opened as one unit, or both are
-/// wanted; each on its own otherwise. The list is taken afterwards, so that
-/// whoever puts the streams to work knows the devices they landed on
-/// without asking the platform itself.
+/// Open `asked` on the open's own thread, which may wait out an abandoned
+/// probe. Both directions open as one `pair` when duplex or both wanted.
+/// The list is taken afterwards so the landing needs no platform call.
 fn open_in_background(
     backend: &Mutex<Box<dyn Backend>>,
     asked: &[(Role, Option<String>)],
@@ -1709,9 +1628,7 @@ fn gone_without_answer() -> BackendError {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // the stack is going: what is being opened is let go of where it
-        // lands, and the devices in use go on the pump's thread, both
-        // waited for a bounded time rather than for ever
+        // bounded waits, never for ever
         self.stop(Some(self.config.probe_wait));
     }
 }

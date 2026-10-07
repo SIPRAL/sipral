@@ -3,14 +3,9 @@
 
 //! The seam between the engine and a platform.
 //!
-//! Everything the engine knows about devices it learns through [`Backend`],
-//! and everything it does to one it does through a [`CaptureStream`] or a
-//! [`PlaybackStream`]. The platform crates — `sipral-io-coreaudio`,
-//! `sipral-io-wasapi`, `sipral-io-aaudio` — sit behind these three traits and nothing else, so
-//! that every rule the engine keeps (a handle that survives a refresh, a
-//! device with no channels refused, a loss reopened on the fallback, a
-//! setting carried across a change) is written once and tested against a
-//! backend made of fakes, with no device in the room.
+//! Platform crates sit behind [`Backend`], [`CaptureStream`] and
+//! [`PlaybackStream`] only, so the engine's rules are written once and
+//! tested against fakes.
 
 use core::fmt;
 use core::time::Duration;
@@ -132,10 +127,8 @@ pub trait Backend: Send {
     /// Open the ringer on the device with `identity`, or wherever the
     /// platform plays a ring for `None`.
     ///
-    /// The loudspeaker by default. A platform that tells a ring from a call
-    /// — Android, whose ring is a ringtone stream that the platform plays
-    /// where a ring goes, while a call's output is a voice stream it puts
-    /// on the call's route — opens it as one.
+    /// The loudspeaker by default. Android opens a ringtone stream, which
+    /// the platform routes differently from a voice stream.
     ///
     /// # Errors
     /// As [`Backend::open_capture`].
@@ -151,9 +144,8 @@ pub trait Backend: Send {
     /// device (`None` for the system's), as close to `wanted` as the platform
     /// allows.
     ///
-    /// Two separate opens by default. A platform that runs the two as one
-    /// unit ([`Backend::duplex_only`]) opens that unit here, once, with both
-    /// devices named up front, and answers with its two halves.
+    /// Two separate opens by default; a [`Backend::duplex_only`] platform
+    /// opens its single unit here.
     fn open_duplex(
         &mut self,
         microphone: Option<&str>,
@@ -175,10 +167,8 @@ pub trait Backend: Send {
 
     /// Whether a role can be put on a device of the application's choosing.
     ///
-    /// Every role by default, and the loudspeaker everywhere. A duplex
-    /// platform that cannot name the microphone's device apart from the
-    /// loudspeaker's, or open a ringer beside the call's unit, says no for
-    /// those two — iOS, whose route is the audio session's.
+    /// Every role by default. iOS, whose route belongs to the audio
+    /// session, allows only the loudspeaker.
     fn chooses(&self, role: Role) -> bool {
         role == Role::Speaker || !self.duplex_only()
     }
@@ -193,10 +183,8 @@ pub trait Backend: Send {
     /// How the pump's thread asks the platform's scheduler for the class
     /// audio runs in, or nothing where this backend has none to ask for.
     ///
-    /// The engine calls what this returns once, on the pump's own thread,
-    /// before the first tick, and keeps what it answers for as long as that
-    /// thread runs: a registration that is given back when it is dropped —
-    /// Windows' — is given back when the pump finishes.
+    /// Called once on the pump thread before the first tick; the result is
+    /// held until the pump finishes (Windows releases it on drop).
     fn pump_scheduling(&self) -> Option<Promote> {
         None
     }
@@ -258,17 +246,13 @@ pub trait PlaybackStream: StreamCommon {
     fn write(&mut self, frame: &[i16]) -> bool;
     /// Samples queued and not yet played.
     fn queued(&self) -> usize;
-    /// The most samples the device has taken in one go so far, or nothing
-    /// for a device fed a frame at a time. The pump keeps this much queued
-    /// on top of its own couple of frames, so that a device which takes a
-    /// long slice at once — a narrowband headset under the voice unit asks
-    /// for half a second — finds all of it.
+    /// The largest pull so far, or nothing for a frame-at-a-time device.
+    /// The pump keeps this much extra queued; a narrowband headset under the
+    /// voice unit can pull half a second.
     fn burst(&self) -> usize {
         0
     }
-    /// Samples the device asked for and found nothing queued for, and so
-    /// played silence in place of, since the stream opened: an underrun,
-    /// counted where the platform counts them, and zero where it does not.
+    /// Underrun samples since open, zero where the platform does not count.
     fn starved(&self) -> u64 {
         0
     }

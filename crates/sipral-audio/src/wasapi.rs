@@ -3,15 +3,10 @@
 
 //! Windows, over `sipral-io-wasapi`.
 //!
-//! An endpoint is one direction, so a microphone and a loudspeaker are two
-//! streams on two endpoints with two clocks, and a ringer on a third is a
-//! third stream: everything the engine can ask for, this platform can open.
-//! Every stream is opened as a communications stream, and whether Windows
-//! took it as one — which is what puts the endpoint's own echo cancellation
-//! behind the microphone — is what the capture stream reports as its
-//! system echo cancellation. Where it did not, the engine's info says so
-//! and the application attaches a canceller of its own to each call, with
-//! the delay the two streams report as its reference.
+//! Each endpoint is one direction, so microphone, loudspeaker and ringer
+//! are independent streams with their own clocks. Streams open as
+//! communications streams; whether Windows accepted that (and so added the
+//! endpoint's echo cancellation) is reported as system echo cancellation.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,11 +43,8 @@ impl WasapiBackend {
     pub(crate) fn new() -> Self {
         let notices = Arc::new(Mutex::new(VecDeque::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        // the monitor is a COM object registered in the apartment of the
-        // thread that made it, and stays on that thread: a thread of its
-        // own, which polls it and leaves what it saw where any thread can
-        // read it. The engine's own thread affinity is nobody's business
-        // that way, and the backend is Send because it holds no COM object.
+        // the COM monitor stays on its own thread, so the backend holds no
+        // COM object and is Send
         let watcher = {
             let notices = Arc::clone(&notices);
             let stop = Arc::clone(&stop);

@@ -8,13 +8,9 @@ use core::num::NonZeroU32;
 
 /// The engine's own name for one device.
 ///
-/// Handed out when a device is first seen and kept for as long as the engine
-/// lives, whatever the platform does to its own identifiers in between: a
-/// refresh finds the same identity and keeps the same handle, and a device
-/// that is unplugged keeps its handle too, marked absent, so that a stream
-/// running on it and a selection saved against it still name something. The
-/// number is never reused. Zero is not a handle, and is what "the system's own
-/// choice" is written as across the C boundary.
+/// Stable for the engine's life: a refresh keeps it, an unplugged device
+/// keeps it (marked absent), and numbers are never reused. Zero means "the
+/// system's choice" across the C boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceHandle(NonZeroU32);
 
@@ -59,9 +55,8 @@ impl fmt::Display for Direction {
     }
 }
 
-/// What a device is used for. A softphone has three jobs for its devices,
-/// and the third is the one every SDK forgets: the ring goes to the room,
-/// the call to the headset.
+/// What a device is used for. The ring may go to the room while the call
+/// is on the headset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     /// The call's microphone.
@@ -174,10 +169,8 @@ impl fmt::Display for SelectError {
 
 impl std::error::Error for SelectError {}
 
-/// Who made a change: the point of telling the two apart is that the
-/// application acts on one and merely notes the other, and an application
-/// that re-applies its own selection on hearing the engine announce it is a
-/// loop.
+/// Who made a change. Re-applying a selection on an [`Origin::Engine`]
+/// event would loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     /// The operating system, or a person at a socket: a headset arrived or

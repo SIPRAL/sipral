@@ -3,23 +3,15 @@
 
 //! Android, over `sipral-io-aaudio`.
 //!
-//! Every stream is AAudio's and runs on a thread AAudio owns; the list, the
-//! defaults and the route are `AudioManager`'s, reached through the Kotlin
-//! binding's shim once the application has handed it a `Context`
-//! (`sipral_io_aaudio::route`). Three things set this platform apart from
-//! the desktop ones, and each is carried here:
+//! Streams are AAudio's; devices and routing are `AudioManager`'s, via the
+//! Kotlin shim once it has a `Context` (`sipral_io_aaudio::route`).
 //!
-//! - **A call's output is routed, not opened on a device.** The platform
-//!   puts every voice-communication stream on the communication device, so
-//!   putting the loudspeaker role on a device is setting that route, and
-//!   the stream is opened on the route rather than on the device; handing
-//!   the role back to the system gives the route back. The microphone is
-//!   opened on the device named, and follows the route when none is.
-//! - **The ring is not a call.** It is opened as a ringtone stream, which
-//!   the platform plays where a ring goes, on the device named if one is.
-//! - **Changes are looked for.** The platform announces them to Java, so a
-//!   watcher thread reads the list and the route a few times a second and
-//!   reports what moved, leaving out what the engine moved itself.
+//! - **Call output is routed.** Choosing a loudspeaker sets the
+//!   communication device; the stream opens on the route. The microphone
+//!   opens on the named device, or follows the route.
+//! - **The ring is a ringtone stream**, played where rings go.
+//! - **Changes are polled**, since the platform announces them only to
+//!   Java; the engine's own moves are left out.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

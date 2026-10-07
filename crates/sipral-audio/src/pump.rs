@@ -3,19 +3,13 @@
 
 //! The thread that carries audio between the devices and the calls.
 //!
-//! One thread, one tick every frame: whatever the microphone has captured is
-//! resampled to each call's own rate and encoded, and the packet goes out
-//! through the application's transmit function; each call's playback is
-//! pulled at its own rate, resampled to the loudspeaker's and summed into
-//! the frame the loudspeaker is written. A ring tone goes to the ringer's
-//! stream, or into the loudspeaker's sum when the two are the same device.
+//! One tick per frame: the microphone is resampled and encoded per call;
+//! each call's playback is resampled and summed into the loudspeaker. The
+//! ring goes to its own stream or into that sum.
 //!
-//! The pump owns the streams. The engine, on whichever thread the
-//! application calls it from, opens a stream and hands it over as a command;
-//! what the pump has to report — a device gone, a call whose media ended —
-//! goes back through flags and a list the engine reads when it is next
-//! serviced. Nothing here takes a lock the engine holds while it waits on a
-//! platform, and nothing the engine does waits for a tick.
+//! The pump owns the streams; the engine sends commands and reads flags.
+//! No lock is shared with a platform wait, and the engine never waits for a
+//! tick.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -41,15 +35,10 @@ const TARGET_QUEUED_FRAMES: usize = 2;
 /// Whether a loudspeaker takes another frame this tick, `written` being how
 /// many it has already been given in it.
 ///
-/// The first frame of a tick goes in while less than the target plus what
-/// the device takes at once is queued; a second only while less than the
-/// target itself. A device fed a frame at a time takes nothing at once, so
-/// for it the two are the one rule. A device that takes a long slice in one
-/// callback empties a slice's worth at a stroke: refilling to the top there
-/// and then would pull the calls in bursts of that slice, faster than the
-/// far end sends, so the queue is rebuilt a frame a tick instead — the pace
-/// the device drains it at — and the second frame only catches up a tick
-/// the pump missed.
+/// The first frame goes in below target plus the device's pull size, a
+/// second only below target. Refilling a long-slice device at once would
+/// pull calls in bursts faster than the far end sends, so the queue
+/// rebuilds one frame per tick; the second frame only covers a missed tick.
 fn takes_frame(stream: &dyn PlaybackStream, frame_samples: usize, written: usize) -> bool {
     let target = TARGET_QUEUED_FRAMES.saturating_mul(frame_samples);
     let limit = if written == 0 {
@@ -81,12 +70,8 @@ pub(crate) type Carried = Vec<(CallId, Box<dyn CallAudio>)>;
 /// still carrying.
 pub(crate) type Finished = (Transmit, Carried);
 
-/// One call's own gain, mute and meter, per direction, applied in the
-/// mixer: `up` to what the microphone sends the call, `down` to what the
-/// call plays into the loudspeaker's sum. Shared between the engine, where
-/// the application sets and reads them, and the pump, where the frames go
-/// past; they outlive a detach, so a call moved into a conference and back
-/// keeps them.
+/// One call's controls: `up` for what the microphone sends it, `down` for
+/// what it plays. Shared with the engine; they outlive a detach.
 #[derive(Clone, Debug)]
 pub(crate) struct CallChannels {
     pub(crate) up: Arc<Channel>,
@@ -102,18 +87,13 @@ impl CallChannels {
     }
 }
 
-/// One call's own gain, mute and meter, handed to whatever carries the call
-/// while the engine does not: a local conference, which puts them in the
-/// member's path ([`sipral::LocalConference::filter`]) so that a call's own
-/// controls act inside it as they do outside, from
+/// One call's controls for a local conference to apply
+/// ([`sipral::LocalConference::filter`]), from
 /// [`Engine::call_controls`](crate::Engine::call_controls).
 ///
-/// The input direction — what the microphone sends that call alone — acts
-/// on what the conference sends the call, which is what its far end hears;
-/// the output direction on what the call says into the conference, which
-/// is what this end and every other member hear of it. The meters read
-/// each after its own gain and mute, and read silence again once the
-/// conference lets go.
+/// Input acts on what the conference sends the call (its far end hears
+/// it); output on what the call says into the conference. Meters read after
+/// gain and mute, and go silent once the conference lets go.
 #[derive(Debug)]
 pub struct CallControls {
     channels: CallChannels,
@@ -186,10 +166,7 @@ pub(crate) struct Report {
     ticks: AtomicU64,
     /// Whether the ring finished by itself.
     ring_done: AtomicBool,
-    /// Frames carried with no device under them while calls were up: the
-    /// silence sent for a microphone that is not open yet, and the far
-    /// end's audio pulled and let go of for a loudspeaker that is not, in
-    /// [`Direction`](crate::Direction)'s order, input first.
+    /// Frames carried with no device while calls were up, input first.
     stand_in: [AtomicU64; 2],
     /// What the pump's thread got from the scheduler: nothing reported yet,
     /// then one of [`Scheduling`]'s answers.
@@ -553,17 +530,11 @@ impl Pump {
         }
     }
 
-    /// Run until told to quit, one tick a frame; then hand back the transmit
-    /// function and every call still carried, for the next pump to take up,
-    /// through `finished`; and only after that let go of the devices, and
-    /// say so through `closed`.
+    /// Run until told to quit; hand back the transmit function and calls via
+    /// `finished`, and only then release the devices and signal `closed`.
     ///
-    /// The order is the point. Taking a device down can take as long as
-    /// opening one, and on macOS the voice unit's teardown has been seen to
-    /// wait for the process's main thread: whoever stopped this pump has
-    /// what it needs the moment the last tick is over, and is not kept
-    /// waiting on a platform — or on a thread that is itself waiting for the
-    /// call this pump carried to be over.
+    /// The order matters: teardown can be slow (macOS VPIO may wait on the
+    /// main thread), and whoever stopped the pump must not wait for it.
     pub(crate) fn run(mut self, finished: &Sender<Finished>, closed: &Done) {
         // asked from this thread, which is the one it applies to, and held
         // for as long as the thread runs
@@ -798,9 +769,8 @@ impl Pump {
         }
     }
 
-    /// Every call's playback, summed, into the loudspeaker — or pulled and
-    /// dropped at the tick rate when there is none, so that a call keeps
-    /// draining what arrives and keeps its echo reference moving.
+    /// Every call's playback summed into the loudspeaker; without one,
+    /// pulled and dropped so calls keep draining and their echo reference moves.
     fn play(&mut self) {
         let format = match self.speaker.as_ref() {
             Some(stream) => stream.format(),
@@ -832,8 +802,6 @@ impl Pump {
                     }
                 }
                 if call.down.take(&mut self.out) {
-                    // this call's own volume and mute, before it joins the
-                    // others in the sum
                     call.channels
                         .down
                         .apply(&mut self.out, format.frame_samples);

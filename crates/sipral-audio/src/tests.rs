@@ -432,10 +432,8 @@ fn manual_activation_is_decoupled_from_the_calls() {
     assert!(!engine.is_active());
 }
 
-/// B7, the other half: a call whose media started before the platform said
-/// the audio was ours — CallKit answering, then activating the session — is
-/// carried from the moment the devices open, and again after a deactivation
-/// and a second activation.
+/// B7: a call attached before activation (CallKit answers first) is carried
+/// once active, and again after a deactivate/activate cycle.
 #[test]
 fn a_call_attached_before_a_manual_activation_is_carried_once_active() {
     let fake = a_desk();
@@ -480,10 +478,8 @@ fn a_call_attached_before_a_manual_activation_is_carried_once_active() {
     assert_eq!(call.pulls(), pulls, "a detached call stays detached");
 }
 
-/// A direction with no device from the start is still carried at the
-/// call's own pace: one frame a tick each way, not a device frame's worth of
-/// call frames, which would send packets several times faster than real
-/// time and drain the far end's audio as fast.
+/// Without a device, a call is still carried one frame per tick, not
+/// faster than real time.
 #[test]
 fn a_direction_with_no_device_is_carried_at_the_calls_own_pace() {
     let fake = FakeControl::new(RATE);
@@ -726,10 +722,7 @@ fn the_microphone_reaches_every_call_at_its_own_rate_and_the_packets_go_out() {
     );
 }
 
-/// Several streams carried as one entry — a local conference — each
-/// name their packets after a call of their own, and every packet reaches
-/// the transmit function under the name it was given rather than the
-/// entry's.
+/// A conference entry's packets keep their own call names.
 #[test]
 fn an_entry_that_carries_several_calls_names_each_packet_after_its_own() {
     struct Bridge;
@@ -1049,10 +1042,7 @@ fn the_echo_cancellation_switch_opens_nothing_on_an_idle_engine() {
     assert_eq!(fake.opens(), opens, "asked for what it already is");
 }
 
-/// One call's own mute and gain, in each direction, leave the other call
-/// alone: the far end of the muted call hears silence while the other's
-/// hears the microphone, and the call turned down is quieter in the
-/// loudspeaker's sum; each call's meter reads its own audio.
+/// Per-call mute and gain leave other calls alone; each meter reads its own call.
 #[test]
 fn one_calls_mute_gain_and_meter_are_its_own() {
     let fake = a_desk();
@@ -1139,10 +1129,7 @@ fn one_calls_mute_gain_and_meter_are_its_own() {
     assert_eq!(engine.call_muted(1, Direction::Input), None);
 }
 
-/// A call's own controls, handed to a conference, act on the frames it
-/// passes them: the input direction on what the call is sent, the output
-/// direction on what it says, each with its meter; a call never carried has
-/// none to hand, and once the conference lets go the meters read silence.
+/// A call's controls act inside a conference; meters go silent after.
 #[test]
 fn a_calls_own_controls_act_where_a_conference_carries_it() {
     use sipral::MemberFilter;
@@ -1414,10 +1401,8 @@ impl crate::backend::PlaybackStream for SliceSpeaker {
     }
 }
 
-/// A device that takes a slice longer than the pump's own target is kept a
-/// slice ahead, so every callback after the first few finds a whole slice;
-/// and the call is pulled a frame a tick, as the far end sends, rather than
-/// in bursts of what the slice took.
+/// A long-slice device is kept a slice ahead, while the call is still
+/// pulled one frame per tick.
 #[test]
 fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
     use crate::pump::{Command, Pump, Report, Stream};
@@ -1498,12 +1483,8 @@ fn a_loudspeaker_that_takes_a_long_slice_at_once_is_kept_a_slice_ahead() {
 /// How long a USB headset under the voice unit was seen to take to open.
 const SLOW_OPEN: Duration = Duration::from_millis(1_500);
 
-/// The stack attaches a call from the poll that saw its media start. A
-/// device that takes a second and a half to open does not hold that poll:
-/// the attach returns at once, the pump carries the call on no device in
-/// the meantime — silence out, the far end's audio pulled at its own pace
-/// and let go of, each frame counted — and the next service after the
-/// device answers puts it under the call.
+/// A slow-opening device does not hold the attach: the call runs without
+/// a device until a later service installs it.
 #[test]
 fn an_attach_returns_at_once_and_the_call_is_carried_while_the_devices_open() {
     let fake = a_desk();
@@ -1617,10 +1598,8 @@ fn a_device_lost_is_reopened_without_holding_the_service() {
     );
 }
 
-/// Stopping the pump — the last call's media ending, from the stack's own
-/// poll — does not wait for the devices to be let go of: a platform whose
-/// teardown waits on another thread, as the voice unit's on macOS has been
-/// seen to wait on the main one, finishes on the pump's thread, after.
+/// Stopping the pump does not wait for device teardown, which on macOS may
+/// wait on the main thread.
 #[test]
 fn a_detach_does_not_wait_for_the_devices_to_be_let_go_of() {
     let fake = a_desk();
@@ -1660,11 +1639,8 @@ fn a_detach_does_not_wait_for_the_devices_to_be_let_go_of() {
     assert_eq!(fake.teardowns(), before + 2);
 }
 
-/// A deactivate that finds the devices already stopping by themselves —
-/// the last call's media ended a moment before — waits for them within the
-/// probe wait all the same, as one that stops the pump itself does: an
-/// application that deactivates its audio session right after (CallKit's
-/// `didDeactivate`) finds no voice unit still running.
+/// A deactivate waits (bounded) for devices already stopping, so CallKit's
+/// `didDeactivate` finds no voice unit running.
 #[test]
 fn a_deactivate_after_the_devices_stopped_by_themselves_waits_for_them_to_go() {
     let fake = a_duplex_desk();
@@ -1757,10 +1733,8 @@ impl Drop for Release {
     }
 }
 
-/// A call that ends before its devices have answered leaves the open to
-/// let go of them on its own thread, and the next call's open waits for
-/// that too: the platform's one voice unit is not opened beside one an
-/// abandoned open is still letting go of.
+/// An abandoned open releases its devices on its own thread, and the next
+/// open waits for that.
 #[test]
 fn the_next_call_waits_for_an_open_the_last_one_abandoned() {
     let fake = a_duplex_desk();
@@ -1789,10 +1763,8 @@ fn the_next_call_waits_for_an_open_the_last_one_abandoned() {
     assert_eq!(fake.units_at_most(), 1);
 }
 
-/// A call that ends after its devices have answered but before a service
-/// has put them to work leaves them to be let go of off the caller's
-/// thread too: the answer waiting for that service is not torn down by
-/// the detach, which the stack reaches under its own lock.
+/// An answered but uninstalled open is released off the caller's thread,
+/// since the detach runs under the stack's lock.
 #[test]
 fn a_call_ending_between_the_open_answering_and_the_service_tears_nothing_down_itself() {
     let fake = a_duplex_desk();

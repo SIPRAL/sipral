@@ -3,23 +3,17 @@
 
 //! macOS and iOS, over `sipral-io-coreaudio`'s units.
 //!
-//! A call's microphone and loudspeaker are the two halves of one
-//! voice-processing unit, the one a process may have: the engine asks for
-//! both at once ([`Backend::open_duplex`]) and the unit opens with each half
-//! on its own device — on macOS the microphone is named apart from the
-//! loudspeaker, without moving the system's default input. Which device each
-//! half actually landed on is read back from the unit and reported.
+//! Microphone and loudspeaker are the two halves of the process's single
+//! voice-processing unit, opened together ([`Backend::open_duplex`]); on
+//! macOS each half can sit on its own device. The landed devices are read
+//! back from the unit.
 //!
-//! A ringer on a device of its own is not a second voice-processing unit.
-//! It only plays, needs no echo canceller and no microphone, and a second
-//! voice unit beside the call's is what the framework does not support; so
-//! it is a plain output unit ([`StreamKind::Playback`]), which opens on any
-//! output device beside the call's. A ringer on the loudspeaker's device is
-//! mixed into the call's unit by the engine and opens nothing.
+//! A ringer on another device is a plain output unit
+//! ([`StreamKind::Playback`]), since a second voice unit is unsupported. A
+//! ringer on the loudspeaker's device is mixed by the engine.
 //!
-//! On iOS there is no device list at all — the route is the audio session's
-//! and the application's — so the list is empty, the unit follows the
-//! session, and only the loudspeaker role is offered for choosing.
+//! On iOS the route belongs to the audio session: the list is empty and
+//! only the loudspeaker role can be chosen.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -34,18 +28,13 @@ use crate::backend::{
 };
 use crate::device::Role;
 
-/// What the pump's thread declares to the scheduler: woken once a frame,
-/// needing a few milliseconds of it — a frame encoded and decoded for every
-/// call, and the mix — done well inside the frame. A tick that runs over
-/// is let go back to the ordinary class by the kernel rather than allowed
-/// to starve the machine.
+/// The pump's time-constraint request: a few ms of work per frame. An
+/// overrunning tick is demoted by the kernel rather than starving the machine.
 const PUMP_COMPUTATION: Duration = Duration::from_millis(6);
 const PUMP_CONSTRAINT: Duration = Duration::from_millis(16);
 
-/// How long an open waits for the process's voice unit to be given back by
-/// the halves the engine has just let go of, which the pump drops on its
-/// own thread. Within the engine's probe wait, so that a unit held for good
-/// — by another stack in the same process — is a refusal and not a hang.
+/// How long an open waits for released halves to free the voice unit.
+/// Shorter than the probe wait, so a unit held elsewhere is a refusal, not a hang.
 const ROOM_WAIT: Duration = Duration::from_secs(2);
 
 /// The platform's backend.
@@ -155,10 +144,8 @@ impl CoreAudioBackend {
     }
 }
 
-/// Wait, a bounded time, for the process's voice unit to be free: the
-/// engine reopens a call's pair by letting go of the old halves first, and
-/// the pump drops them on its own thread. Past the wait the open goes ahead
-/// and is refused by the unit itself if the room is still taken.
+/// Wait, bounded, for the voice unit to be free; past that the open goes
+/// ahead and the unit itself refuses if still taken.
 fn wait_for_room() {
     let started = Instant::now();
     while sipral_io_coreaudio::voice_units_open() > 0 && started.elapsed() < ROOM_WAIT {
