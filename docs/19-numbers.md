@@ -1372,7 +1372,7 @@ Descriptors stayed between 7 and 8 and threads at 3; processor time averaged 2.2
 core, never above 2.8 %. Resident memory went from 4.7 MB idle to 5.8 MB within the first
 six hours and ended at 5.9 MB: 72 KB more over the last fifteen hours, in steps of 4 KB a
 few hours apart. That is small, and it is not flat either; whether it levels off is what
-the week-long run, started on 7 October at 21:58 UTC on the same machine, is for.
+the week-long run is for: it started on 7 October at 23:34 UTC on the same machine, with the fix below.
 
 Over the day resident memory went from 4.7 MB idle to 5.8 MB in the first six hours and
 5.9 MB at 24 hours: 72 KB in the last fifteen hours, in 4 KB pages, over about 230 calls and
