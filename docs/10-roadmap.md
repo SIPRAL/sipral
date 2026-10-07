@@ -84,11 +84,11 @@ November 2026, planned.
 Q1 2027, planned.
 
 - Node.js and TypeScript package *(done)*
-- .NET MAUI package for iOS and Android
+- .NET MAUI package for iOS and Android *(in progress)*
 - A network test before the call *(done)*
 - Answering-machine detection on calls the agent places *(done)*
 - SIP over WebSocket with the connection made by the stack (RFC 7118) *(done)*
-- LiveCommunicationKit on iOS
+- LiveCommunicationKit on iOS *(in progress)*
 
 ### 2.0 — Beyond audio
 
@@ -102,7 +102,7 @@ Mid 2027, planned.
 Every release.
 
 - Every published figure measured again by the gate on each change *(in progress)*
-- An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations
+- An adversarial review of the DTLS-SRTP code, with interop and failure tests against other implementations *(in progress)*
 - More PBXs proven in the lab, and caller identity, diversion, redirection and failover between servers shown working *(in progress)*
 - Interop with carriers and a commercial SBC
 <!-- releases: end -->
