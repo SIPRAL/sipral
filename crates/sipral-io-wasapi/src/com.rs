@@ -3,15 +3,10 @@
 
 //! Owning the things Windows hands over.
 //!
-//! Four kinds of resource cross into this crate and every one of them has to
-//! go back: an interface pointer carries a reference count, an event carries a
-//! handle, the multimedia scheduler hands back a registration, and
-//! `CoInitializeEx` has to be balanced on the thread that called it. Each gets
-//! a type here whose destructor is the return path, so that the error paths in
-//! the rest of the crate are `?` and not a ladder of cleanup.
-//!
-//! The one place this deliberately does not apply is teardown of a running
-//! stream, where a destructor is exactly the wrong tool: see `gate.rs`.
+//! Interface references, event handles, MMCSS registrations and
+//! `CoInitializeEx` each get a type whose destructor releases them, so error
+//! paths are just `?`. Teardown of a running stream is the exception: see
+//! `gate.rs`.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
@@ -86,11 +81,8 @@ impl Apartment {
     /// Join the multi-threaded apartment, or note that this thread is already
     /// somewhere else and leave it there.
     ///
-    /// A thread that a host application has already put in a single-threaded
-    /// apartment answers `RPC_E_CHANGED_MODE`. That is not a failure: every
-    /// object this crate makes is created and released on the thread that made
-    /// it, so an apartment either way works — what would not work is
-    /// uninitialising an apartment that was not ours.
+    /// `RPC_E_CHANGED_MODE` (the host already chose STA) is fine, since all
+    /// objects stay on their thread; we just must not uninitialise it.
     ///
     /// # Errors
     /// [`Error::Call`] when COM itself will not start.
@@ -179,9 +171,7 @@ unsafe impl Sync for Event {}
 
 /// The audio thread's registration with the multimedia class scheduler.
 ///
-/// Without one, the thread is scheduled like any other and Windows will take
-/// the processor away in the middle of a buffer. With one, it runs in the Pro
-/// Audio class and does not.
+/// Without it the thread can be preempted mid-buffer.
 pub(crate) struct Priority(Handle);
 
 impl Priority {
@@ -256,9 +246,7 @@ pub(crate) fn wide(text: &str) -> Vec<u16> {
 
 /// A wide string Windows handed over, as a Rust one.
 ///
-/// Lone surrogates become the replacement character rather than an error: this
-/// is a device name on its way to a log line, and a name that cannot be
-/// spelled is still better than no device.
+/// Lone surrogates become U+FFFD rather than an error.
 ///
 /// # Safety
 /// `pointer` is null, or a terminated wide string that stays valid for the

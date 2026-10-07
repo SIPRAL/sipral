@@ -3,67 +3,45 @@
 
 //! What a stream was opened as, and what that does and does not buy.
 //!
-//! Windows applies the endpoint's own voice processing — echo cancellation,
-//! noise suppression, automatic gain — to a stream that has said it is a call,
-//! and to no other kind. Saying so is one call, `SetClientProperties` on
-//! `IAudioClient2`, made after the client is activated and before it is
-//! initialised; there is no second chance, because a client that has been
-//! initialised refuses it.
+//! The endpoint's voice processing (AEC, NS, AGC) runs only on streams
+//! declared as calls via `IAudioClient2::SetClientProperties`, between
+//! activation and initialisation.
 //!
-//! What Windows does not offer is a way to ask afterwards whether anything is
-//! actually cancelling. The processing belongs to the endpoint and its driver,
-//! a person can switch it off in the sound settings, and an endpoint whose
-//! driver ships none reports nothing missing. So [`Category`] says what was
-//! asked and what Windows said to the asking, and stops there — a type that
-//! claimed more would be believed.
+//! Windows cannot be asked whether anything is actually cancelling: the
+//! processing is the driver's and can be switched off by the user. So
+//! [`Category`] only reports what was asked and what Windows answered.
 
 use core::fmt;
 
 use crate::status::HResult;
 
-/// What Windows was asked to treat a stream as, and what it made of the
-/// asking.
+/// What a stream was declared as, and whether Windows accepted.
 ///
-/// [`Category::Communications`] is the answer to want. It does not promise
-/// that echo is being cancelled — see the module documentation for why nothing
-/// can — but it is the condition Windows attaches its own processing to, and
-/// without it there is certainly none.
+/// [`Category::Communications`] does not prove echo is cancelled, but without
+/// it there is certainly no system processing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Category {
     /// The stream was declared `AudioCategory_Communications` before it was
     /// initialised, and Windows accepted the declaration.
     ///
-    /// Three things follow from it, all of them Windows's rather than this
-    /// crate's: the stream follows the endpoint the user chose for calls,
-    /// other applications duck under it, and the endpoint's voice processing
-    /// runs on it where the driver has any.
+    /// The stream follows the user's call device, ducks other applications,
+    /// and gets the endpoint's voice processing where the driver has any.
     Communications,
-    /// The client would not answer to `IAudioClient2`, so there was nothing to
-    /// declare the category to and the stream is whatever Windows opens by
-    /// default. `IAudioClient2` arrived in Windows 8; a machine without it is
-    /// older than any supported Windows.
+    /// No `IAudioClient2` (pre-Windows 8): an ordinary stream.
     Unavailable,
-    /// The stream was declared `AudioCategory_Communications` with
-    /// `AUDCLNT_STREAMOPTIONS_RAW`, and Windows accepted: a call for routing
-    /// and ducking, with the endpoint's processing — its echo canceller
-    /// among it — out of the path, as the application asked.
+    /// Communications with `AUDCLNT_STREAMOPTIONS_RAW`, accepted: call
+    /// routing and ducking, no endpoint processing, as asked.
     Raw,
-    /// `SetClientProperties` refused, carrying this.
-    ///
-    /// The stream still opened — the category is asked for before the client
-    /// is initialised and a refusal is not fatal to it — and it is an ordinary
-    /// stream, with the same consequence as [`Category::Unavailable`].
+    /// `SetClientProperties` refused with this. The stream still opened, as
+    /// an ordinary one, like [`Category::Unavailable`].
     Refused(HResult),
 }
 
 impl Category {
     /// What a `SetClientProperties` that returned `status` amounts to.
     ///
-    /// Here rather than beside the call so that the one decision in the
-    /// sequence can be shown to be right on a machine with no Windows on it.
-    /// What is left up there is the plumbing: an identifier, a vtable slot and
-    /// a structure, none of which has an opinion.
+    /// Separate from the call so it can be tested off Windows.
     #[cfg(any(target_os = "windows", test))]
     pub(crate) const fn from_status(status: HResult, processing: bool) -> Self {
         match (status.is_ok(), processing) {
@@ -76,10 +54,8 @@ impl Category {
     /// Whether the stream is a communications stream with the endpoint's
     /// processing behind it; [`Category::Raw`] is a call too, but has none.
     ///
-    /// `false` is the case worth acting on: the application's own processor is
-    /// what stands between the far end and its own echo then, attached at the
-    /// seam `docs/05-media.md` describes and given a render delay taken from
-    /// the two streams' own `latency`.
+    /// On `false`, attach the application's own processor
+    /// (`docs/05-media.md`) with the two streams' `latency` as render delay.
     #[must_use]
     pub const fn is_communications(self) -> bool {
         matches!(self, Self::Communications)

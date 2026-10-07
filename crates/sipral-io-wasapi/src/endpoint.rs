@@ -4,17 +4,11 @@
 //! Asking the machine what audio endpoints it has, and being told when that
 //! changes.
 //!
-//! Windows counts an endpoint per direction: a headset with a microphone is
-//! two of them, with two identifiers and two names, and a stream opens one.
-//! That is the shape this file reports, rather than a device with a channel
-//! count on each side, because it is the shape the operating system has and
-//! flattening it would lose the case where the two halves are separately
-//! chosen — which is exactly what a virtual cable is for.
+//! Reported per endpoint, as Windows counts them (a headset is two), so the
+//! halves can be chosen separately.
 //!
-//! Everything here belongs to the thread that called it. COM says so: an
-//! apartment is per thread, so an object created on one has to be released on
-//! the same one. [`DeviceMonitor`] is therefore not `Send`, which is a
-//! constraint rather than an omission.
+//! COM objects must be released on the thread that made them, so
+//! [`DeviceMonitor`] is deliberately not `Send`.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
@@ -46,8 +40,7 @@ pub(crate) const fn data_flow(direction: Direction) -> u32 {
 
 /// The one object in this crate that is created rather than handed over.
 pub(crate) fn enumerator() -> Result<Com<DeviceEnumeratorVtable>, Error> {
-    // bound to locals so that what is pointed at outlives the call, which a
-    // constant used in place would not
+    // locals, so the pointers outlive the call
     let class = CLSID_DEVICE_ENUMERATOR;
     let interface = DeviceEnumeratorVtable::IID;
     let mut raw: *mut c_void = ptr::null_mut();
@@ -73,9 +66,7 @@ pub(crate) fn enumerator() -> Result<Com<DeviceEnumeratorVtable>, Error> {
 
 /// The endpoint a choice names, opened.
 ///
-/// A preference the machine does not have is not an error, and neither is one
-/// it has and cannot play through. That is the whole point of one: the headset
-/// is in a bag, the call still has to happen.
+/// A preferred endpoint that is missing or unusable falls back to the system.
 pub(crate) fn open_choice(
     enumerator: &Com<DeviceEnumeratorVtable>,
     choice: &DeviceChoice,
@@ -85,12 +76,8 @@ pub(crate) fn open_choice(
         DeviceChoice::System => open(enumerator, None, direction),
         DeviceChoice::Device(ref id) => open(enumerator, Some(id), direction),
         DeviceChoice::Preferred(ref id) => match open(enumerator, Some(id), direction) {
-            // Windows keeps an unplugged, disabled or absent endpoint in its
-            // registry, and `GetDevice` finds one of those as readily as a
-            // live one; it is `Activate` that refuses, after this has already
-            // answered. Without asking, a preference would fall back only for
-            // an endpoint the machine has never seen — which is not the one a
-            // saved selection names.
+            // `GetDevice` also finds unplugged or disabled endpoints, so the
+            // state must be checked for the fallback to work
             Ok(saved) => {
                 if carries_audio(&saved)? {
                     Ok(saved)
@@ -100,8 +87,7 @@ pub(crate) fn open_choice(
                 }
             }
             Err(Error::NoDevice) => open(enumerator, None, direction),
-            // A GetDevice that failed for any other reason is not a missing
-            // endpoint, it is a broken one, and falling back would hide it.
+            // other failures are a broken endpoint; do not hide them
             other => other,
         },
     }
@@ -109,13 +95,11 @@ pub(crate) fn open_choice(
 
 /// Whether an endpoint can carry audio now: plugged in, enabled and present.
 ///
-/// The same test `EnumAudioEndpoints` applies with the mask [`devices`] asks
-/// for, so an endpoint this accepts is one the list would have offered.
+/// The same test as the mask [`devices`] passes to `EnumAudioEndpoints`.
 ///
 /// # Errors
-/// [`Error::Call`] when the endpoint will not say. That is a broken endpoint
-/// rather than a missing one, and a preference does not fall back past it for
-/// the same reason it does not fall back past a `GetDevice` that failed.
+/// [`Error::Call`] when the endpoint will not say: broken, not missing, so
+/// no fallback.
 fn carries_audio(device: &Com<MmDeviceVtable>) -> Result<bool, Error> {
     let mut state: u32 = 0;
     // SAFETY: a live endpoint and a live out-parameter.
@@ -163,9 +147,7 @@ pub(crate) fn open(
 
 /// Everything worth saying about an endpoint that is already open.
 ///
-/// Infallible, because a stream that has an endpoint open has an endpoint
-/// whatever its property store thinks: a name that cannot be read is an empty
-/// name, and a default that cannot be established is `false`.
+/// Infallible: an unreadable name is empty, an unknown default is `false`.
 pub(crate) fn describe(
     enumerator: &Com<DeviceEnumeratorVtable>,
     device: &Com<MmDeviceVtable>,
@@ -186,13 +168,8 @@ pub(crate) fn describe(
 
 /// Every endpoint the machine has, at this instant.
 ///
-/// Only the ones that are plugged in and enabled — `DEVICE_STATE_ACTIVE`. The
-/// other three states describe endpoints that exist in the registry and cannot
-/// carry audio, and listing them would offer the caller a choice that fails
-/// when it is taken.
-///
-/// The answer is a snapshot and it goes stale, which is what [`DeviceMonitor`]
-/// is for.
+/// Only `DEVICE_STATE_ACTIVE` ones; the others cannot carry audio. A
+/// snapshot; [`DeviceMonitor`] reports changes.
 ///
 /// # Errors
 /// [`Error::Call`] when COM or the enumerator refuses.
@@ -269,8 +246,7 @@ fn list(
         // the out-parameter is live.
         let status =
             unsafe { (collection.vtable().item)(collection.as_ptr(), index, &raw mut item) };
-        // An endpoint that goes away between the count and the fetch is an
-        // ordinary Tuesday, not a reason to fail the whole enumeration.
+        // an endpoint may vanish between count and fetch; skip it
         if !HResult::new(status).is_ok() {
             continue;
         }
@@ -300,8 +276,7 @@ fn identify(device: &Com<MmDeviceVtable>) -> Result<DeviceId, Error> {
 
 /// What a person would call it, or nothing when the endpoint will not say.
 ///
-/// A name is a label on a list. An endpoint that has none is still an
-/// endpoint, so this answers with an empty string rather than a failure.
+/// Empty rather than a failure.
 fn name_of(device: &Com<MmDeviceVtable>) -> String {
     let mut raw = ptr::null_mut();
     // SAFETY: a documented access mode and a live out-parameter.
@@ -419,9 +394,8 @@ unsafe extern "system" fn notify_release(this: *mut Unknown) -> u32 {
 /// Note a change on the monitor's pending set, if the monitor is still there
 /// to have one.
 ///
-/// The gate is what says it is. A panic is caught because an unwind across the
-/// boundary Windows called through would be undefined, and there is nothing
-/// here that could raise one — which is why nothing counts them.
+/// The gate says whether it is. Panics are caught: unwinding into Windows is
+/// undefined.
 ///
 /// # Safety
 /// `this` is null, or the notification client Windows was handed.
@@ -443,8 +417,7 @@ unsafe extern "system" fn notify_state_changed(
     _id: *const u16,
     _state: u32,
 ) -> i32 {
-    // enabled, disabled, unplugged: all of them mean the list is not what it
-    // was, and the caller answers all of them by asking again
+    // any state change means: list again
     // SAFETY: the pointer Windows was given.
     unsafe { noted(this, DeviceEvent::ListChanged) }
 }
@@ -465,9 +438,7 @@ unsafe extern "system" fn notify_default_changed(
     role: u32,
     _id: *const u16,
 ) -> i32 {
-    // Windows reports each role separately and this crate only ever asks for
-    // the communications one, so reporting the others would be telling the
-    // caller about a change that cannot affect anything it opens.
+    // only the communications role affects what this crate opens
     if role != ROLE_COMMUNICATIONS {
         return 0;
     }
@@ -485,20 +456,14 @@ unsafe extern "system" fn notify_property_changed(
     _id: *const u16,
     _key: PropertyKey,
 ) -> i32 {
-    // A property changed on some endpoint: its name, its icon, its format.
-    // None of it changes what a caller would do, and answering S_OK is what
-    // an implementation that does not care is supposed to do.
+    // property changes do not affect callers
     0
 }
 
 /// Watches the machine's audio endpoints and remembers what changed.
 ///
-/// A headset arriving or leaving is not an error and does not interrupt a
-/// stream running on another endpoint; it is a fact the caller may want to act
-/// on, so it waits here until asked for. Dropping the monitor stops the
-/// watching.
-///
-/// Belongs to the thread that made it, because its COM apartment does.
+/// Changes wait here until polled. Dropping it stops watching. Bound to the
+/// thread (and COM apartment) that made it.
 pub struct DeviceMonitor {
     /// Dropped last, after the enumerator and the notification client, because
     /// it is what makes both of them legal.
@@ -580,14 +545,8 @@ impl DeviceMonitor {
         self.shut_down(TEARDOWN_WAIT, TEARDOWN_WAIT_MILLIS)
     }
 
-    /// The same with the wait spelled out, so a test can ask for a deadline it
-    /// is willing to sit through.
-    ///
-    /// The order is the argument: shut the gate first, so a notification that
-    /// has not started reading turns itself around; unregister next, which is
-    /// what stops further ones arriving; then wait for anything already inside
-    /// to come out, which is the only thing that says so about one that was
-    /// already running.
+    /// With an explicit deadline, for tests. Close the gate, unregister, then
+    /// drain notifications already inside.
     fn shut_down(&mut self, within: Duration, millis: u64) -> Result<(), Error> {
         if self.notify.is_null() {
             return Ok(());
@@ -613,10 +572,7 @@ impl DeviceMonitor {
         self.registered = false;
 
         if !watch.gate.drained(within) {
-            // The reference is dropped without being given back, so the object
-            // outlives us. A notification thread reading a freed one is a
-            // crash on somebody's machine during a call; an object that is
-            // never freed is a number in a memory graph.
+            // leak the object rather than free it under a notification
             self.notify = ptr::null_mut();
             return Err(Error::Draining {
                 waited_millis: millis,
@@ -636,8 +592,6 @@ impl DeviceMonitor {
 
 impl Drop for DeviceMonitor {
     fn drop(&mut self) {
-        // nothing to report a status to from here; the record a teardown that
-        // could not finish leaves behind is the object it did not free
         let _ = self.teardown();
         // the enumerator goes back before the apartment it was made in, which
         // is the one ordering COM cares about here
@@ -971,9 +925,7 @@ mod tests {
         let outcome = monitor.shut_down(Duration::from_millis(20), 20);
 
         assert_eq!(outcome, Err(Error::Draining { waited_millis: 20 }));
-        // the pointer is gone without the reference having been given back,
-        // which is the deliberate leak: a notification thread reading a freed
-        // object is a crash in the middle of somebody's call
+        // the deliberate leak
         assert!(monitor.notify.is_null());
         // the unregistration still happened, which is what stops another
         // notification arriving

@@ -4,28 +4,16 @@
 //! One endpoint, in one direction: samples in from a microphone, or samples
 //! out to a speaker, and nothing else.
 //!
-//! One direction, because that is what Windows has. A WASAPI client is one
-//! `IAudioClient` on one endpoint, and a headset is two endpoints with two
-//! identifiers and two clocks. A duplex type here would be two of these in a
-//! coat, and it would hide the case a softphone most needs to get right —
-//! microphone on one device, speaker on another — so there are two types and
-//! the caller holds both.
+//! One `IAudioClient` per endpoint; a headset is two endpoints with two
+//! clocks, so the caller holds two streams.
 //!
-//! Shared mode and event-driven. Shared, because exclusive mode takes the
-//! endpoint away from everything else on the machine and buys latency that a
-//! jitter buffer will not notice. Event-driven, because the alternative is a
-//! thread that wakes on a timer and asks whether the buffer needs anything,
-//! which is either late or busy and usually both.
+//! Shared mode, because exclusive mode locks out the rest of the machine for
+//! latency a jitter buffer will not notice. Event-driven, because polling on
+//! a timer is late or busy.
 //!
-//! Two threads meet here. The audio thread is ours: it is created by
-//! [`CaptureStream::open`] or [`PlaybackStream::open`], it joins the
-//! multi-threaded apartment, it registers itself as Pro Audio with the
-//! multimedia class scheduler, and it owns every COM object for its whole life
-//! — which is what makes teardown a local question rather than a promise read
-//! out of a document. Everything else runs on whatever thread the caller is
-//! on. The two share one ring, the counters and three event handles, and
-//! neither waits for the other except at teardown, where the waiting has a
-//! deadline.
+//! Our own audio thread (MTA, MMCSS Pro Audio) owns every COM object for its
+//! life, so teardown is local. It shares one ring, the counters and three
+//! events with the caller; only teardown waits, with a deadline.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use core::time::Duration;
@@ -58,24 +46,19 @@ use crate::ring::Ring;
 use crate::status::{AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_UNSUPPORTED_FORMAT, Error, HResult};
 use crate::sys;
 
-/// Frames the ring holds unless the caller says otherwise: enough to ride out a
-/// scheduling hiccup, short enough that a stalled reader is heard as a gap
-/// rather than as a delay that never recovers.
+/// Enough for a scheduling hiccup; short enough that a stalled reader is a
+/// gap, not a permanent delay.
 const DEFAULT_DEPTH_FRAMES: usize = 16;
 
 /// How long the audio thread waits for the engine before deciding the endpoint
 /// has stopped signalling.
 ///
-/// Long enough that a stopped stream is not woken for nothing, short enough
-/// that an endpoint which has gone quiet is noticed rather than waited on for
-/// ever. A wake here costs one atomic load.
+/// A wake costs one atomic load; a silent endpoint is noticed, not waited on.
 const STALL_AFTER_MILLIS: u32 = 200;
 
 /// How long a caller waits for the audio thread to answer `start` or `stop`.
 ///
-/// The same budget teardown gets, for the same reason: past a couple of seconds
-/// the thread is not slow, it is inside a driver call that is not coming back,
-/// and a caller hung on that is worse than a caller told so.
+/// As for teardown: past that the thread is stuck in a driver call.
 const ANSWER_WAIT: Duration = TEARDOWN_WAIT;
 
 /// Nothing to do.
@@ -90,17 +73,13 @@ const COMMAND_QUIT: u32 = 3;
 /// Two thirty-two-bit halves in one word: a ticket on top, and a command or a
 /// status underneath.
 ///
-/// One word, so that whichever thread loads it takes both halves from the same
-/// store. A command and its ticket in two cells could be read as one command
-/// under the next one's ticket.
+/// One word, so both halves are read from the same store.
 fn ticketed(ticket: u32, low: u32) -> u64 {
     (u64::from(ticket) << 32) | u64::from(low)
 }
 
 /// The two halves of a word [`ticketed`] made: the ticket, then the rest.
 fn unticket(word: u64) -> (u32, u32) {
-    // each half is thirty-two bits by construction, so neither conversion can
-    // fail and the fallback is never taken
     (
         u32::try_from(word >> 32).unwrap_or(u32::MAX),
         u32::try_from(word & u64::from(u32::MAX)).unwrap_or(u32::MAX),
@@ -113,22 +92,15 @@ pub struct StreamConfig {
     /// Rate and frame length wanted. What is actually delivered is
     /// [`CaptureStream::format`], which carries the endpoint's rate.
     pub format: StreamFormat,
-    /// Which endpoint, and what to do when it is not there. The default is
-    /// whatever Windows is routing calls to, which is what a softphone
-    /// usually wants.
+    /// Which endpoint; by default Windows' route for calls.
     pub device: DeviceChoice,
     /// Frames of buffering between the endpoint and the caller.
     ///
-    /// This sizes the ring in this crate and nothing else. The engine's own
-    /// buffer is the engine's to size: shared mode with an event handle gets
-    /// the audio engine's period, and asking for a longer one would add
-    /// latency the caller cannot spend.
+    /// Sizes this crate's ring only; the engine buffer stays at its period.
     pub depth_frames: usize,
-    /// Whether the stream asks for the endpoint's own voice processing — the
-    /// echo canceller, noise suppression and gain control a communications
-    /// stream gets — or is a communications stream past it
-    /// (`AUDCLNT_STREAMOPTIONS_RAW`): on by default. Raw keeps what the
-    /// category does for routing and ducking, and takes the processing out.
+    /// Whether to keep the endpoint's voice processing (AEC, NS, AGC); on by
+    /// default. Off opens with `AUDCLNT_STREAMOPTIONS_RAW`, which keeps the
+    /// communications routing and ducking.
     pub processing: bool,
 }
 
@@ -154,14 +126,8 @@ impl StreamConfig {
         }
     }
 
-    /// A saved selection, at the given format: that endpoint when the machine
-    /// has it and it can carry audio, and the system's route for calls when
-    /// the machine does not have it or has it unplugged, disabled or absent.
-    ///
-    /// This is the one to build from a [`DeviceId`] read out of a
-    /// configuration file. A docking station or a headset that reboots itself
-    /// takes its endpoint away and brings it back, and in between a call still
-    /// has to have somewhere to go.
+    /// That endpoint when usable, else the system route for calls. Use this
+    /// for a [`DeviceId`] from a configuration file.
     #[must_use]
     pub fn preferring(device: DeviceId, format: StreamFormat) -> Self {
         Self {
@@ -177,12 +143,7 @@ impl Default for StreamConfig {
     }
 }
 
-/// What the audio thread has to say, in numbers because it cannot speak.
-///
-/// Every one of these is relaxed: nothing else depends on having seen them, a
-/// reader that is one increment behind is reading a number that was true a
-/// moment ago, and making them ordered would put a fence in the audio thread
-/// for the sake of a statistic.
+/// Audio-thread statistics, relaxed: nothing depends on them.
 #[derive(Default)]
 struct Meters {
     captured: AtomicU64,
@@ -216,22 +177,14 @@ impl Meters {
 
 /// Everything both threads touch.
 ///
-/// The audio thread holds a reference to this for its whole life, so the memory
-/// is alive as long as either side wants it — which is why teardown here has no
-/// buffers to leak, unlike the CoreAudio sibling where the framework holds a
-/// bare pointer to them. What teardown here can still get wrong is closing a
-/// handle the audio thread is waiting on, or blocking for ever in `join` on a
-/// thread that is not coming back. That is what the gate is for, and why
-/// failing to drain costs a detached thread rather than a hung caller.
+/// The audio thread holds an `Arc`, so no buffer can be freed under it. The
+/// gate guards against closing a handle it waits on or joining a stuck
+/// thread: a failed drain detaches the thread rather than hanging the caller.
 struct Shared {
     gate: Gate,
-    /// The gain, the mute and the meter. Behind an `Arc` of its own rather
-    /// than inline, so that a [`Controls`] handed to the thread drawing the
-    /// window survives the stream being reopened on another endpoint.
+    /// In its own `Arc` so a [`Controls`] survives a reopen.
     channel: Arc<Channel>,
-    /// Made once the endpoint's rate is known, which is after the client is
-    /// open. A caller cannot reach it before then: `open` does not return until
-    /// the audio thread has put it here.
+    /// Set by the audio thread once the rate is known, before `open` returns.
     ring: OnceLock<Ring>,
     meters: Meters,
     /// Signalled by the audio engine when a buffer wants attention.
@@ -243,9 +196,8 @@ struct Shared {
     /// The command the owner wants carried out, under the ticket it was sent
     /// with. See [`ticketed`].
     command: AtomicU64,
-    /// What the last command carried out returned, under the ticket it was
-    /// sent with — which is how an owner tells the answer to its own question
-    /// from the answer to one whose asker stopped waiting.
+    /// The last command's result under its ticket, so a late answer to an
+    /// abandoned command is not mistaken for the current one.
     outcome: AtomicU64,
     /// What the final stop returned, on the way out of the loop.
     parting: AtomicI32,
@@ -327,20 +279,14 @@ struct Session {
     delivered: StreamFormat,
     latency: Duration,
     buffer_frames: u32,
-    /// What Windows made of being told this is a call. Asked once, before the
-    /// client was initialised, because that is the only moment it can be.
+    /// Set once, before initialisation, the only moment it can be.
     category: Category,
-    /// Kept so that a reopen can ask for the same thing again and have the
-    /// choice resolved against the machine as it is then.
+    /// Re-resolved on a reopen.
     config: StreamConfig,
-    /// The controls, held here as well as in `shared` so that a reopen carries
-    /// the volume and the mute across rather than resetting them under a
-    /// caller who is mid-call.
+    /// Also held here so a reopen keeps volume and mute.
     channel: Arc<Channel>,
-    /// Whether the owner has asked for it to be running. Not the same as
-    /// `shared.running`, which goes false on its own when the endpoint is
-    /// taken away — and a stream that was carrying a call when that happened
-    /// is one that should be carrying a call after it is recovered.
+    /// What the owner asked for, unlike `shared.running`, which drops on a
+    /// loss; a recover restarts what was wanted.
     started: bool,
     /// Whether the loss has been handed over, so that it is reported once
     /// rather than on every poll.
@@ -387,10 +333,7 @@ impl Session {
         let opened = match report {
             Ok(opened) => opened,
             Err(error) => {
-                // The thread is already on its way out, having sent that. Wait
-                // for it rather than leave one behind for every endpoint that
-                // refuses, but wait with the same deadline as anything else
-                // here: it is a thread inside COM, not a thread we control.
+                // the thread is exiting: wait, with the usual deadline
                 shared.gate.close();
                 shared
                     .command
@@ -426,16 +369,11 @@ impl Session {
         self.ask_within(command, call, ANSWER_WAIT)
     }
 
-    /// The same with the wait spelled out, so a test can ask for a deadline it
-    /// is willing to sit through.
+    /// With an explicit deadline, for tests.
     ///
-    /// The command goes under a ticket of its own and only the answer under
-    /// that ticket is taken. A command that timed out is still carried out
-    /// once the driver call it was stuck behind returns, and its answer then
-    /// arrives with nobody waiting for it: already signalled when the next
-    /// command is sent, or signalled while the next one waits. Either way it
-    /// is the answer to another question, and taken for this one it would
-    /// have a stop report the success of a start from two seconds ago.
+    /// Only the answer under this command's ticket is taken: a timed-out
+    /// command still completes later, and its answer must not be read as
+    /// this one's.
     fn ask_within(
         &mut self,
         command: u32,
@@ -443,15 +381,11 @@ impl Session {
         within: Duration,
     ) -> Result<(), Error> {
         if self.shared.ended.load(Ordering::SeqCst) || self.shared.lost.load(Ordering::SeqCst) {
-            // the endpoint went away, or the thread already ended: nobody is
-            // left to answer, and waiting would only cost the deadline. The
-            // loss is the earlier of the two to say so: it is written down
-            // before the loop that found it is left, and the end only once the
-            // client and the apartment have been given back.
+            // nobody left to answer; the loss is checked first because it is
+            // recorded before the thread ends
             return Err(Error::NoDevice);
         }
-        // never zero, which is the ticket a quit goes under and the one the
-        // outcome starts with
+        // never zero: reserved for quit and the initial outcome
         self.tickets = self.tickets.checked_add(1).unwrap_or(1);
         let ticket = self.tickets;
         self.shared
@@ -479,10 +413,7 @@ impl Session {
             return Ok(());
         }
         let outcome = self.ask(COMMAND_START, "IAudioClient::Start");
-        // A start refused because the endpoint had gone is still the owner
-        // asking for a running stream. The loss is what `recover` answers, and
-        // it starts again only what was started — so without this, the
-        // documented answer to the event would bring back a silent stream.
+        // record the wish even if the endpoint is gone, so `recover` starts it
         if outcome.is_ok() || self.shared.lost.load(Ordering::SeqCst) {
             self.started = true;
         }
@@ -511,9 +442,7 @@ impl Session {
         let config = self.config.clone();
         let channel = Arc::clone(&self.channel);
         let started = self.started;
-        // What Windows says about taking down a client whose endpoint has gone
-        // is not a reason to stop: that is the situation being recovered from.
-        // A thread that would not finish is another matter entirely.
+        // teardown errors on a lost endpoint are expected; a stuck thread is not
         if let Err(error @ Error::Draining { .. }) = self.teardown() {
             return Err(error);
         }
@@ -536,24 +465,15 @@ impl Session {
 
     /// The shutdown sequence, safe to call twice.
     ///
-    /// The order is the argument, and each step is here for one reason:
+    /// 1. close the gate, so a new pass turns back;
+    /// 2. ask the thread to quit and wake it;
+    /// 3. wait, with a deadline, for the gate to drain and the thread to end
+    ///    (its interfaces released, its handles untouched);
+    /// 4. join, which then returns at once.
     ///
-    /// 1. shut the gate, so a pass that has not started touching the shared
-    ///    state turns itself around;
-    /// 2. ask the thread to quit and wake it, which is what gets it out of the
-    ///    wait it is almost certainly sitting in;
-    /// 3. wait, with a deadline, for it to be out of the shared state and then
-    ///    for it to have ended — the second is what says its interfaces are
-    ///    back and its last touch of a handle is over;
-    /// 4. only then join it, which by that point returns at once.
-    ///
-    /// Step 3 failing is not recoverable and not survivable by carrying on. The
-    /// thread is inside a call that has not returned, so it is left detached
-    /// rather than joined, and the reference it holds to the shared state keeps
-    /// its handles open for as long as it lives. A thread that outlives its
-    /// owner is a bug report; a handle closed under a thread still waiting on
-    /// it is a crash somewhere else entirely, because handle values come round
-    /// again.
+    /// If step 3 fails the thread is detached, and its `Arc` keeps the
+    /// handles open: closing a handle it still waits on could hit a reused
+    /// handle value elsewhere.
     fn shut_down(&mut self, within: Duration, millis: u64) -> Result<(), Error> {
         if self.closed {
             return Ok(());
@@ -575,9 +495,7 @@ impl Session {
         }
 
         if let Some(worker) = self.worker.take() {
-            // it has already ended, so this returns at once; a thread that
-            // panicked its way out is not a status to report, it is the panic
-            // counter above zero
+            // already ended; a panic shows in the panic counter
             let _ = worker.join();
         }
         sys::check(
@@ -601,24 +519,20 @@ pub struct CaptureStream {
 
 /// The render end: what goes to the speaker, as mono frames.
 ///
-/// "Render" is Windows's word for playback and it is the one every interface
-/// and every error code uses, so it is the one the audio thread uses too.
+/// "Render" is Windows' word for playback.
 pub struct PlaybackStream {
     session: Session,
 }
 
 /// The methods that are the same in both directions.
 ///
-/// A macro rather than a trait, because a trait would put these in the caller's
-/// namespace only after an import, and rather than two copies because two
-/// copies drift.
+/// A macro, so callers need no trait import and the copies cannot drift.
 macro_rules! session_methods {
     () => {
         /// What the caller will actually be handed.
         ///
-        /// The rate is the endpoint's, because this crate does not resample.
-        /// The frame length is the one that was asked for, rescaled to the same
-        /// duration at that rate.
+        /// The endpoint's rate (no resampling), with the requested frame
+        /// duration.
         #[must_use]
         pub const fn format(&self) -> StreamFormat {
             self.session.delivered
@@ -626,9 +540,7 @@ macro_rules! session_methods {
 
         /// What the endpoint runs, in its own terms.
         ///
-        /// Worth reading whenever [`Self::format`] is not the rate that was
-        /// asked for: this says what it is instead, and what the samples looked
-        /// like on the way through.
+        /// Explains a [`Self::format`] rate other than the one requested.
         #[must_use]
         pub const fn device_format(&self) -> DeviceFormat {
             self.session.format
@@ -643,12 +555,8 @@ macro_rules! session_methods {
         /// What `IAudioClient::GetStreamLatency` says the engine adds, which is
         /// the part of the mouth-to-ear budget that belongs to Windows.
         ///
-        /// One endpoint's worth, because a WASAPI client is one direction. An
-        /// echo canceller attached above wants the whole loop, which is this
-        /// number from the speaker's stream added to this number from the
-        /// microphone's — the pair of them being what
-        /// `sipral_io_coreaudio::Stream::latency` reports in one go, since the
-        /// unit there is duplex.
+        /// One direction only: an echo canceller wants the speaker's plus the
+        /// microphone's (CoreAudio's duplex `Stream::latency` gives both).
         #[must_use]
         pub const fn latency(&self) -> Duration {
             self.session.latency
@@ -656,18 +564,10 @@ macro_rules! session_methods {
 
         /// Whether Windows took the stream as a call.
         ///
-        /// [`Category::Communications`] is what the endpoint's own echo
-        /// cancellation, noise suppression and gain control apply to, and this
-        /// crate asks for it on every stream in both directions — the
-        /// loudspeaker's as much as the microphone's, because a canceller
-        /// whose reference is a stream Windows is treating as media is
-        /// cancelling against the wrong thing.
-        ///
-        /// It says what was asked and accepted, not that anything is
-        /// cancelling: Windows has no per-stream way to report that, and
-        /// [`Category`] says why. When it is not
-        /// [`Category::Communications`], there is no system processing at all
-        /// and the application's own is the only kind there will be.
+        /// Asked for in both directions, since the canceller's reference must
+        /// be a communications stream too. It reports acceptance, not that
+        /// anything is cancelling (see [`Category`]); anything other than
+        /// [`Category::Communications`] means no system processing.
         #[must_use]
         pub const fn category(&self) -> Category {
             self.session.category
@@ -683,8 +583,7 @@ macro_rules! session_methods {
         /// Whether the multimedia class scheduler took the audio thread into
         /// the Pro Audio class.
         ///
-        /// `false` means the stream still runs and will be interrupted, which
-        /// is worth saying out loud rather than discovering as glitches.
+        /// `false`: it still runs, but expect glitches.
         #[must_use]
         pub fn priority_raised(&self) -> bool {
             self.session.shared.pro_audio.load(Ordering::Relaxed)
@@ -702,9 +601,7 @@ macro_rules! session_methods {
 
         /// The volume, the mute and the meter for this direction.
         ///
-        /// A handle, not a borrow: the slider and the bar are on the thread
-        /// that draws the window and the frames are on the thread that carries
-        /// the call. It survives a recover with its settings intact.
+        /// A handle for the UI thread; it survives a recover.
         #[must_use]
         pub fn controls(&self) -> Controls {
             Controls::new(&self.session.channel)
@@ -747,11 +644,10 @@ macro_rules! session_methods {
         /// the endpoint has already gone away, or [`Error::Draining`] when the
         /// audio thread does not answer.
         ///
-        /// A `Start` refused with `AUDCLNT_E_DEVICE_INVALIDATED` — the endpoint
-        /// went while the stream was stopped — is that [`Error::Call`], and
-        /// [`Self::poll`] then says [`StreamEvent::DeviceLost`]. The stream
-        /// counts as started for [`Self::recover`], which is the answer to
-        /// the event and starts what it puts back.
+        /// If the endpoint went while stopped, this is an [`Error::Call`]
+        /// with `AUDCLNT_E_DEVICE_INVALIDATED`, [`Self::poll`] then reports
+        /// [`StreamEvent::DeviceLost`], and [`Self::recover`] treats the
+        /// stream as started.
         pub fn start(&mut self) -> Result<(), Error> {
             self.session.start()
         }
@@ -767,13 +663,12 @@ macro_rules! session_methods {
 
         /// Shut the endpoint down and say what Windows made of it.
         ///
-        /// Dropping the stream does exactly this and has nowhere to report to.
+        /// Same as dropping, but the status is returned.
         ///
         /// # Errors
-        /// [`Error::Draining`] when the audio thread could not be shown to have
-        /// finished within two seconds — in which case it is left detached and
-        /// its handles are left open, deliberately. Otherwise [`Error::Call`]
-        /// carrying what the last stop said.
+        /// [`Error::Draining`] when the audio thread did not finish within two
+        /// seconds; it is then detached with its handles left open on
+        /// purpose. Otherwise [`Error::Call`] from the last stop.
         pub fn close(mut self) -> Result<(), Error> {
             self.session.teardown()
         }
@@ -798,27 +693,17 @@ impl CaptureStream {
 
     /// Open again, on whatever this stream's [`StreamConfig`] names now.
     ///
-    /// This is the answer to [`StreamEvent::DeviceLost`], and the reason a
-    /// saved selection is worth storing as
-    /// [`StreamConfig::preferring`]: that choice resolves to the saved
-    /// endpoint when it is back and to the system's route when it is not, so
-    /// recovering from an unplugged headset lands on the machine's own
-    /// microphone rather than failing. [`StreamConfig::on`] names one endpoint
-    /// and nothing else, so recovering onto one that has gone fails, and says
-    /// so.
+    /// The answer to [`StreamEvent::DeviceLost`].
+    /// [`StreamConfig::preferring`] falls back to the system route;
+    /// [`StreamConfig::on`] fails if its endpoint is gone.
     ///
-    /// The controls carry over: the gain and the mute a person set are still
-    /// set, and a [`Controls`] handed out earlier keeps working. Whatever was
-    /// in the ring does not — those samples came from an endpoint that is not
-    /// there. A stream that was started is started again.
-    ///
-    /// The format can come back different, because the new endpoint chooses
-    /// its own rate: [`Self::format`] is worth reading again afterwards.
+    /// Gain, mute and existing [`Controls`] carry over; ring contents do not.
+    /// A started stream is restarted. The rate may change, so re-read
+    /// [`Self::format`].
     ///
     /// # Errors
-    /// [`Error::Draining`] when the old audio thread could not be shown to
-    /// have finished, in which case nothing is reopened. Otherwise whatever
-    /// [`Self::open`] would have said about the endpoint it landed on.
+    /// [`Error::Draining`] when the old audio thread did not finish; nothing
+    /// is reopened then. Otherwise what [`Self::open`] would say.
     pub fn recover(self) -> Result<Self, Error> {
         Ok(Self {
             session: self.session.recovered(Direction::Input)?,
@@ -833,8 +718,7 @@ impl CaptureStream {
             .is_some_and(|ring| ring.read_frame(frame))
     }
 
-    /// Samples waiting to be read. A number that keeps growing is a reader
-    /// falling behind, and the drop counter is about to start moving.
+    /// Samples waiting. A growing number means the reader is falling behind.
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.session.ring().map_or(0, Ring::filled)
@@ -880,10 +764,8 @@ impl PlaybackStream {
         self.session.ring().map_or(0, Ring::free)
     }
 
-    /// Samples queued and not yet taken by the endpoint: the ring's own
-    /// count. Not the depth asked for less [`room`](Self::room) — the ring
-    /// rounds that depth up to a power of two, and the difference would be
-    /// read as audio that is not there.
+    /// Samples queued, from the ring's own count (depth minus
+    /// [`room`](Self::room) would include power-of-two rounding).
     #[must_use]
     pub fn queued(&self) -> usize {
         self.session.ring().map_or(0, Ring::filled)
@@ -899,18 +781,14 @@ struct Engine {
     capture: Option<Com<AudioCaptureClientVtable>>,
     format: DeviceFormat,
     buffer_frames: u32,
-    /// Mono samples on their way between the ring and the endpoint's buffer.
-    /// Sized once, here, because the audio thread must not allocate.
+    /// Sized once: the audio thread must not allocate.
     scratch: Box<[i16]>,
 }
 
 /// The audio thread.
 ///
-/// Every COM object is created and released here and nowhere else: the
-/// apartment, the enumerator, the client, the one service interface. That is
-/// not caution about marshalling, it is what makes teardown answerable — when
-/// this function returns, every reference it took is back, and nothing the
-/// caller does afterwards can be too early.
+/// Every COM object lives and dies on this thread, so once it returns every
+/// reference is released and nothing the caller does can be too early.
 fn run(
     shared: &Shared,
     choice: &DeviceChoice,
@@ -940,8 +818,7 @@ fn run(
     }
 
     drop(apartment);
-    // last, and after every interface is back: the owner watches this to know
-    // that joining will not block and that a handle can be closed
+    // last: tells the owner joining will not block and handles may close
     shared.ended.store(true, Ordering::SeqCst);
 }
 
@@ -977,19 +854,13 @@ fn build(
     let client = unsafe { Com::<AudioClientVtable>::from_raw(raw.cast::<AudioClient>()) }
         .ok_or(Error::NoDevice)?;
 
-    // Before anything else is asked of the client, because the category is
-    // what the rest of the answers depend on: what Windows offers a
-    // communications stream and what it offers a media one are not obliged to
-    // be the same format, the same period, or the same processing.
+    // first: format, period and processing may depend on the category
     let category = ask_for_communications(&client, processing);
 
     let settled = negotiate(&client, wanted.sample_rate_hz())?;
     let format = mixformat::describe(&settled)?;
 
-    // Zero for both durations, which in shared mode with an event handle means
-    // the engine's own period. Asking for a longer buffer here would add
-    // latency the caller cannot spend, and asking for a shorter one is what
-    // exclusive mode is for.
+    // zero durations: the engine's own period in event-driven shared mode
     // SAFETY: a live format that outlives the call, and no session identifier.
     let status = unsafe {
         (client.vtable().initialize)(
@@ -1015,8 +886,7 @@ fn build(
     let status = unsafe { (client.vtable().get_stream_latency)(client.as_ptr(), &raw mut latency) };
     sys::check("IAudioClient::GetStreamLatency", status)?;
 
-    // After Initialize and before Start, which is the only window the client
-    // accepts it in.
+    // only accepted between Initialize and Start
     // SAFETY: a live event handle. It outlives the client, because the client
     // is released on this thread before the reference to the shared state that
     // owns the handle is dropped.
@@ -1032,14 +902,11 @@ fn build(
             bits: 16,
             floating: false,
         })?;
-    // the endpoint chose the rate, so the meter's window is only now worth
-    // anything: at 48 kHz a tenth of a second is six times what it is at 8
     shared
         .channel
         .set_window(window_samples(delivered.sample_rate_hz()));
     let period = usize::try_from(buffer_frames).unwrap_or(0).max(1);
-    // never smaller than two of the engine's buffers: a ring that cannot hold
-    // what one period delivers would lose samples every single period
+    // at least two engine periods, or every period loses samples
     let samples = delivered
         .frame_samples()
         .saturating_mul(depth)
@@ -1068,18 +935,11 @@ fn build(
 
 /// Tell the client this stream is a call, before it is too late to say so.
 ///
-/// Windows runs the endpoint's voice processing — the echo canceller among it
-/// — on streams that have declared themselves `AudioCategory_Communications`,
-/// and the declaration is only accepted between activating the client and
-/// initialising it. There is no way to add it afterwards and no way to ask
-/// later what it was, so it is done here and the answer is carried out with
-/// the stream.
+/// `AudioCategory_Communications` enables the endpoint's voice processing and
+/// is accepted only between activation and initialisation, and cannot be
+/// queried later, so the answer is kept with the stream.
 ///
-/// A refusal is not a reason to fail the open. A stream without the category
-/// is an ordinary stream that carries a call perfectly well, minus whatever
-/// the endpoint would have done to it; what would be wrong is opening one and
-/// letting the application believe otherwise, which is what [`Category`] is
-/// for.
+/// A refusal does not fail the open; [`Category`] tells the application.
 fn ask_for_communications(client: &Com<AudioClientVtable>, processing: bool) -> Category {
     // bound to a local so that what is pointed at outlives the call
     let interface = AudioClient2Vtable::IID;
@@ -1119,10 +979,7 @@ fn ask_for_communications(client: &Com<AudioClientVtable>, processing: bool) -> 
 
 /// A `REFERENCE_TIME` as a duration.
 ///
-/// It counts hundreds of nanoseconds, a unit that exists nowhere else and is
-/// therefore worth converting exactly once. Negative values do not arise from
-/// the calls this crate makes; the magnitude is taken rather than the sign
-/// being argued about.
+/// Units of 100 ns. Negative values do not occur; the magnitude is taken.
 fn reference_time(ticks: i64) -> Duration {
     let ticks = ticks.unsigned_abs();
     let per_second = REFERENCE_TIMES_PER_SECOND.unsigned_abs();
@@ -1132,21 +989,12 @@ fn reference_time(ticks: i64) -> Duration {
 
 /// Ask for mono sixteen-bit, and decide what to do with the answer.
 ///
-/// Three answers are possible and all three happen. `S_OK` means the endpoint
-/// will run exactly what was asked for, which a virtual cable configured that
-/// way does and a sound card almost never does. `S_FALSE` comes with the
-/// closest match the engine is willing to run — in shared mode that is the
-/// audio engine's mix format — and it is taken, because the alternative is to
-/// refuse the machine's only sound card. Anything else means the question was
-/// not understood, and the mix format is asked for directly.
+/// `S_OK`: exactly as asked (rare outside virtual cables). `S_FALSE`: the
+/// offered closest match (the mix format) is taken. Anything else: the mix
+/// format is asked for directly.
 ///
-/// What is deliberately not done is to set `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`
-/// and let the engine resample. It would make the rate come out right, and it
-/// would put a resampler inside a crate whose boundary says it has none:
-/// `sipral-media` owns resampling because it owns the clock drift correction
-/// that has to go with it, and a second one down here that nobody knew about is
-/// how a stack ends up correcting drift against itself. The rate that comes
-/// back is reported instead.
+/// `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` is deliberately not used: a hidden
+/// resampler here would fight `sipral-media`'s drift correction.
 fn negotiate(
     client: &Com<AudioClientVtable>,
     sample_rate_hz: u32,
@@ -1194,10 +1042,8 @@ fn negotiate(
 /// Copy a `WAVEFORMATEX` out of memory Windows owns, taking the extension only
 /// when its own `cbSize` says it is there.
 ///
-/// The structure is variable length and byte-packed, which is two reasons not
-/// to read it as a `WAVEFORMATEXTENSIBLE` and hope: an endpoint with `cbSize`
-/// of zero has eighteen octets and nothing after them, and reading forty would
-/// be reading somebody else's allocation.
+/// Variable length and byte-packed: with `cbSize` zero there are only 18
+/// octets, so reading 40 would overrun.
 ///
 /// # Safety
 /// `pointer` is null, or a live `WAVEFORMATEX` followed by as many octets as
@@ -1213,10 +1059,7 @@ unsafe fn read_wave(pointer: *const WaveFormat) -> Option<WaveFormatExtensible> 
         // SAFETY: the header says at least twenty-two octets follow it, which
         // is exactly the extension being read here.
         let mut whole = unsafe { ptr::read_unaligned(pointer.cast::<WaveFormatExtensible>()) };
-        // What was copied is the header and twenty-two octets, so the copy
-        // says twenty-two. An endpoint's longer extension left in place would
-        // tell `IAudioClient::Initialize` that octets follow this value which
-        // are not there, and it would read them off the audio thread's stack.
+        // A larger original cbSize would make Initialize read past this copy.
         whole.format.cb_size = WaveFormatExtensible::EXTENSION_BYTES;
         return Some(whole);
     }
@@ -1225,13 +1068,10 @@ unsafe fn read_wave(pointer: *const WaveFormat) -> Option<WaveFormatExtensible> 
     Some(whole)
 }
 
-/// How many channels an endpoint's shared-mode engine runs, which is what
-/// a list of devices a person picks from shows beside each one.
+/// Channels in an endpoint's shared-mode mix format, for device lists.
 ///
-/// Read from the endpoint's mix format without initialising a client on it,
-/// so asking costs an activation and a property read and leaves nothing
-/// open. Every endpoint is one direction, so the count is for `direction`
-/// and the other direction of the same endpoint is zero.
+/// Reads the mix format without initialising a client, leaving nothing
+/// open. The count is for `direction`; endpoints are one-directional.
 ///
 /// # Errors
 /// [`Error::NoDevice`] for an identifier the machine does not have, and
@@ -1349,11 +1189,9 @@ fn serve(shared: &Shared, mut engine: Engine, direction: Direction) {
     } else {
         0
     };
-    // The loop is over whatever this says, and it is not always the owner
-    // that ended it: a wait that failed leaves a stream behind to be polled.
+    // record a loss: the loop may have ended without the owner asking
     carry_on(shared, parting);
     shared.running.store(false, Ordering::SeqCst);
-    // a meter left where the last pass put it reads as a live signal
     shared.channel.quiet();
     shared.parting.store(parting, Ordering::SeqCst);
     drop(priority);
@@ -1361,11 +1199,9 @@ fn serve(shared: &Shared, mut engine: Engine, direction: Direction) {
 
 /// Carry out whatever the owner asked for. `false` means leave the loop.
 ///
-/// An endpoint found gone by `Start`, `Stop` or `Reset` ends the loop exactly
-/// as one found gone by a buffer pass does, and is written down before the
-/// answer goes, so an owner told the call failed can poll for why at once. A
-/// thread left waiting on an invalidated client would be one nothing ever
-/// reports on again.
+/// An invalidated endpoint found by `Start`, `Stop` or `Reset` ends the loop
+/// like one found by a buffer pass, and is recorded before replying so the
+/// owner can poll the reason at once.
 fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
     let (ticket, wanted) = unticket(
         shared
@@ -1383,9 +1219,7 @@ fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
             // SAFETY: a live client.
             let stopped = unsafe { (engine.client.vtable().stop)(engine.client.as_ptr()) };
             shared.running.store(false, Ordering::SeqCst);
-            // Reset after Stop, so a restart does not replay whatever the
-            // engine was still holding. It is only legal while stopped, which
-            // is exactly where this is.
+            // reset (legal only while stopped) so a restart replays nothing
             // SAFETY: a live, stopped client.
             let cleared = unsafe { (engine.client.vtable().reset)(engine.client.as_ptr()) };
             shared.channel.quiet();
@@ -1394,8 +1228,7 @@ fn command(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
             } else {
                 stopped
             };
-            // both, not only the one reported: a stop that went through and a
-            // reset that found the endpoint gone is still an endpoint gone
+            // either may have found the endpoint gone
             let survived = carry_on(shared, stopped) && carry_on(shared, cleared);
             reply(shared, ticket, first);
             survived
@@ -1417,9 +1250,8 @@ fn reply(shared: &Shared, ticket: u32, status: i32) {
 
 /// Fill the engine's buffer and start it.
 ///
-/// The prefill is not optional in event-driven mode: the first event arrives
-/// one period after `Start`, so a buffer that was empty at the start is a
-/// period of silence, and on some drivers a glitch.
+/// Prefill is required: the first event comes a period after `Start`, so an
+/// empty buffer is a gap and on some drivers a glitch.
 fn start(shared: &Shared, engine: &mut Engine, direction: Direction) -> i32 {
     if direction == Direction::Output {
         let room = engine.buffer_frames;
@@ -1458,20 +1290,15 @@ fn pass(shared: &Shared, engine: &mut Engine, direction: Direction) -> bool {
 
 /// Whether a failed call is worth carrying on after.
 ///
-/// Everything but an invalidated endpoint is: a buffer that could not be got
-/// this period may be there the next one. An invalidated endpoint never comes
-/// back — the device was unplugged, or its format was changed underneath — so
-/// the loop ends and `is_running` goes false, which is how the caller finds
-/// out.
+/// Everything but an invalidated endpoint (unplugged, or format changed),
+/// which never comes back: the loop ends and `is_running` goes false.
 fn survivable(status: i32) -> bool {
     status != AUDCLNT_E_DEVICE_INVALIDATED
 }
 
 /// The same, and it writes down what it found.
 ///
-/// The flag is the difference between a stream that stopped and one that was
-/// taken away, and it is the only place that difference is known: by the time
-/// the owner looks, the loop has ended either way.
+/// The flag is the only record of "taken away" versus "stopped".
 fn carry_on(shared: &Shared, status: i32) -> bool {
     let survived = survivable(status);
     if !survived {
@@ -1534,14 +1361,10 @@ fn capture_pass(shared: &Shared, engine: &mut Engine) -> bool {
                 let source = unsafe { core::slice::from_raw_parts(data, bytes) };
                 fold(source, engine.format, mono);
             } else {
-                // the engine says the contents are undefined, which is its way
-                // of saying nothing was recorded
+                // contents undefined: nothing was recorded
                 mono.fill(0);
             }
-            // A muted microphone still fills the ring, with silence. Stopping
-            // the frames instead would mean unmuting replayed however much
-            // audio had piled up behind the mute, and would starve whatever
-            // above is pacing itself on frames arriving.
+            // a muted microphone still delivers silence, so nothing piles up
             shared.channel.apply(mono, wanted);
             if let Some(ring) = shared.ring.get() {
                 let stored = ring.write(mono);
@@ -1601,10 +1424,8 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
         (Some(ring), Some(mono)) => ring.read(mono),
         _ => 0,
     };
-    // The volume goes on here rather than where the caller wrote the frame,
-    // so that a mute is silent on this period instead of on the one after the
-    // ring has drained. `wanted` rather than `taken`, because the silence a
-    // starved pass leaves behind is time the meter's window has to count.
+    // applied here so a mute is heard at once; `wanted` so starved silence
+    // still advances the meter window
     if let Some(played) = engine.scratch.get_mut(..taken) {
         shared.channel.apply(played, wanted);
     }
@@ -1613,8 +1434,7 @@ fn fill(shared: &Shared, engine: &mut Engine, room: u32) -> bool {
 
     let mut released = 0;
     if taken == 0 || data.is_null() {
-        // Nothing to play and nothing to write. The engine has a flag for
-        // exactly this, and it is cheaper than a memset the engine will ignore.
+        // the silent flag is cheaper than zeroing
         released = BUFFERFLAGS_SILENT;
     } else {
         let block = engine.format.block_align();
@@ -1689,11 +1509,7 @@ mod tests {
 
     /// A session with no audio thread behind it.
     ///
-    /// `ended` is set because that is what a thread says on its way out, and
-    /// without it the destructor would sit out the whole teardown deadline
-    /// waiting for a thread that was never started. What is left is the owner
-    /// side, which is the half that can be shown to be right without an
-    /// endpoint.
+    /// `ended` is preset so the destructor does not wait out the deadline.
     fn detached(channel: &Arc<Channel>) -> Session {
         let shared = Arc::new(Shared::new(Arc::clone(channel)).expect("three event handles"));
         shared.ended.store(true, Ordering::SeqCst);
@@ -1762,9 +1578,8 @@ mod tests {
         start: Answer,
         stop: Answer,
         reset: Answer,
-        /// How long the audio thread takes to be gone once its loop is over,
-        /// which on a machine is giving the client back and leaving the
-        /// apartment. Only the delay is read.
+        /// Delay between the loop ending and the thread being gone; only the
+        /// delay is read.
         leaving: Answer,
     }
 
@@ -1940,9 +1755,7 @@ mod tests {
                 status: HResult::new(AUDCLNT_E_DEVICE_INVALIDATED),
             })
         );
-        // A caller told the start failed tries again, before the thread that
-        // found the endpoint gone has finished leaving. Nothing is left in
-        // the loop to answer.
+        // a retry while the thread is still leaving: nobody answers
         let asked = Instant::now();
         assert_eq!(
             session.start(),
@@ -2036,9 +1849,7 @@ mod tests {
         let mut session = scripted(&script, &channel);
         assert_eq!(session.start(), Ok(()));
 
-        // what an audio thread leaves behind when it comes back from a
-        // command whose asker gave up: a success, signalled, and nobody
-        // waiting for it
+        // a stale, signalled success from an abandoned command
         session
             .shared
             .outcome
@@ -2059,10 +1870,7 @@ mod tests {
     fn an_answer_still_on_its_way_is_not_taken_for_the_command_sent_after_it() {
         let script = Arc::new(Script::default());
         script.start.set(0, 300);
-        // The stop takes a while too. An audio thread at Pro Audio priority
-        // can otherwise carry it out and overwrite the start's outcome before
-        // the owner that woke for the start has read anything, and an owner
-        // that takes the first answer it sees would pass by luck.
+        // slow stop, so a first-answer owner could not pass by luck
         script.stop.set(NOT_INITIALIZED, 200);
         let channel = channel();
         let mut session = scripted(&script, &channel);
@@ -2111,9 +1919,6 @@ mod tests {
         session.started = true;
         assert_eq!(session.poll(), None, "nothing has happened yet");
 
-        // what the audio thread does on its way out of an invalidated
-        // endpoint: the loop ends, the client is not running, and this is the
-        // only record of why
         session.shared.lost.store(true, Ordering::SeqCst);
         session.shared.running.store(false, Ordering::SeqCst);
 
@@ -2136,9 +1941,7 @@ mod tests {
         assert!(!session.started);
     }
 
-    /// The ring rounds the depth it was asked for up to a power of two, so
-    /// that depth less the room is short of what is queued by the
-    /// rounding; what is queued is what the ring holds.
+    /// Queued must ignore the ring's power-of-two rounding.
     #[test]
     fn what_is_queued_is_what_the_ring_holds_not_the_depth_less_the_room() {
         let channel = channel();
@@ -2316,9 +2119,7 @@ mod tests {
 
     #[test]
     fn an_endpoint_that_does_not_exist_is_refused_rather_than_waited_on() {
-        // No endpoint carries this identifier, so the audio thread fails at
-        // GetDevice and reports it. What this checks is that opening unwinds a
-        // thread it had already started, promptly, and says why.
+        // the thread fails at GetDevice; open must unwind it promptly
         let started = Instant::now();
         let outcome = CaptureStream::open(&StreamConfig::on(
             DeviceId::new("{0.0.1.00000000}.{no such endpoint}"),
@@ -2482,16 +2283,12 @@ mod tests {
         peak
     }
 
-    /// The reason the virtual cable is installed: what goes into it comes back
-    /// out of it, so a tone rendered on one endpoint and captured on the other
-    /// proves the whole path — negotiation, the event, the conversion, both
-    /// rings — rather than proving that two calls returned zero.
+    /// A tone through a virtual cable proves the whole path: negotiation,
+    /// events, conversion and both rings.
     #[test]
     #[ignore = "renders a tone into the VB-Audio cable and captures it back"]
     fn a_tone_rendered_into_the_cable_comes_back_out_of_it() {
-        /// A kilohertz, which a twenty-millisecond frame holds twenty whole
-        /// cycles of at any rate — so one frame repeats without a step in the
-        /// waveform, and nothing has to remember a phase.
+        /// 20 whole cycles per 20 ms frame, so frames repeat seamlessly.
         const CYCLES_PER_FRAME: f32 = 20.0;
         /// Loud enough to be unmistakable, quiet enough not to clip anywhere.
         const LEVEL: f32 = 0.37;
@@ -2516,9 +2313,6 @@ mod tests {
         let mut microphone = CaptureStream::open(&StreamConfig::on(source.id.clone(), wanted))
             .expect("open the cable's capture endpoint");
 
-        // The category is not printed here: the test above says what the
-        // machine's own endpoints made of it, which is the same claim, and
-        // this one is about the tone getting through the cable.
         println!(
             "render  \"{}\"\n        endpoint {}, delivering {}, {} frames a period, {:?}, pro audio {}",
             sink.name,
@@ -2556,9 +2350,7 @@ mod tests {
         }
         let sent_peak = tone.iter().map(|sample| sample.saturating_abs()).max();
 
-        // Half volume out. What comes back through the cable is then a
-        // measurement of the gain rather than of the tone: the cable does not
-        // change what it carries, so anything but half is this crate.
+        // half volume out, so what comes back measures the gain
         let out_volume = speaker.controls();
         let in_volume = microphone.controls();
         out_volume.set_gain(Gain::from_db(-6.02));
@@ -2595,10 +2387,7 @@ mod tests {
 
         let peak = the_tone_came_back(&captured, in_rate, sent_peak.unwrap_or(0));
 
-        // Half of what went in, within the tenth that the meter's window and
-        // the cable's own conversion are worth. This is the whole gain claim:
-        // the cable does not change what it carries, so anything but half
-        // would be this crate.
+        // half, within 10% for the meter window and the cable's conversion
         let half = i32::from(sent_peak.unwrap_or(0)) / 2;
         let margin = half / 10;
         assert!(

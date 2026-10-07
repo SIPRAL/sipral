@@ -7,12 +7,8 @@ use core::fmt;
 
 /// The `HRESULT` a call returned.
 ///
-/// The number is thirty-two bits with the top one meaning failure, so it is
-/// held as `i32` — the type the calls actually return — and printed as
-/// hexadecimal, because `0x88890008` is searchable and `-2004287480` is not.
-/// The handful of codes this crate can provoke are named as well: an audio
-/// engine that says `AUDCLNT_E_DEVICE_IN_USE` has told the user what to do,
-/// and a bare number has not.
+/// Held as `i32`, printed in hex (searchable), with the codes this crate can
+/// meet named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HResult(i32);
 
@@ -45,9 +41,7 @@ impl HResult {
 
     /// The name Windows gives this code, when it is one this crate can meet.
     ///
-    /// Not a lookup table of every `HRESULT` in the system: a name that is
-    /// wrong is worse than no name, and the ones below are the ones whose
-    /// meaning was checked against the header they came from.
+    /// Only codes checked against their header; a wrong name is worse than none.
     #[must_use]
     pub const fn name(self) -> Option<&'static str> {
         Some(match self.0 {
@@ -169,25 +163,19 @@ const AUDCLNT_E_RESOURCES_INVALIDATED: i32 = audclnt(0x026);
 
 /// Why device I/O could not be set up or kept running.
 ///
-/// A headset arriving or leaving is not in here. That is not a failure, it is
-/// what a laptop does all day, and it arrives as
+/// Device arrivals and removals are not errors; see
 /// [`DeviceEvent`](crate::DeviceEvent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
     /// A Windows call refused.
     Call {
-        /// The entry point that refused, under the name Microsoft documents
-        /// it by, because that is the name the code has to be looked up
-        /// beside.
+        /// The entry point, as Microsoft documents it.
         call: &'static str,
         /// What it returned.
         status: HResult,
     },
-    /// The endpoint runs a sample format this crate cannot read or write.
-    /// Shared mode means the audio engine's mix format, which is float or
-    /// integer PCM in practice; anything else is a device doing something
-    /// this crate would rather refuse than guess at.
+    /// The endpoint's mix format is neither float nor integer PCM.
     SampleFormat {
         /// Bits in one sample of one channel, as the endpoint declares them.
         bits: u16,
@@ -197,14 +185,10 @@ pub enum Error {
     /// No endpoint answered: the machine has none in that direction, or the
     /// one the caller named is not there any more.
     NoDevice,
-    /// The worker thread could not be started. The process is out of threads
-    /// or out of memory, and there is nothing this crate can do about either.
+    /// The worker thread could not be started (out of threads or memory).
     NoThread,
-    /// The audio thread did not answer within the deadline. Windows is inside
-    /// a driver call that has not returned, so nothing was joined and nothing
-    /// was closed: a thread that outlives its owner is a bug report, a handle
-    /// closed under a thread that is still waiting on it is a crash in the
-    /// middle of somebody's call.
+    /// The audio thread did not answer in time (stuck in a driver call).
+    /// Nothing was joined or closed: closing a handle it waits on could crash.
     Draining {
         /// Milliseconds spent waiting before giving up.
         waited_millis: u64,
