@@ -100,7 +100,7 @@ check keeps older applications working: a binding built against ABI 1.k
 loads against any library at 1.m with m ≥ k, and one built against a later
 minor than the library's is refused at load with both versions named.
 The Rust crates are not part of the release and their API promises nothing;
-the `sipral` name on crates.io stays the 0.0.1 reservation it is. Security
+the `sipral` name on crates.io stays the 0.0.2 reservation it is. Security
 fixes reach the current minor release and the one before it
 ([`SECURITY.md`](SECURITY.md)). The artefacts in the table above, the
 Swift package over the XCFramework, the Dart package and the React Native
@@ -108,15 +108,27 @@ package are built by `scripts/package/`, and
 [`docs/11-testing.md`, "Releasing"](docs/11-testing.md#releasing) is the
 order they are published in.
 
+## What it does not do
+
+- **No server side.** Sipral is an endpoint: no proxy, registrar, B2BUA or
+  SBC, and no PBX features of its own.
+- **No media server.** Calls are joined in the process (a local conference,
+  or two calls bridged), not through a mixer you have to run.
+- **No agent logic in the core.** The connectors to speech services live in
+  their own packages ([`integrations/`](integrations/)); the library carries
+  audio and never decides what to say.
+- **No WebRTC, and no video yet.** SDP for SIP only; video is planned for
+  2.0, SIP over WebSocket for 1.3.
+
 ## Roadmap
 
-After 1.0, and **planned, not done**; [`docs/10-roadmap.md`](docs/10-roadmap.md)
-has the exit criteria.
+[`docs/10-roadmap.md`](docs/10-roadmap.md) has every release and its exit
+criteria, the same list as [sipral.org/roadmap](https://sipral.org/roadmap/).
 
-- **Carriers:** interoperability on two paid carrier accounts and a commercial SBC; a paid carrier account is the one phase-1 exit criterion not yet met.
-- **Security:** an adversarial cryptography review of DTLS-SRTP before it ships under the commercial licence.
-- **Mobile on real phones:** store acceptance, a push waking the app from the background, Bluetooth hand-off during a call.
-- **Video, phase 6:** VP8, VP9 and AV1, RTCP feedback for pictures, per-stream hold.
+- **1.2, voice agents:** the SIP bridge, the Pipecat transport, connectors to five speech services, a bridge run from a configuration file, OAuth2 sign-in to the PBX and the agent's own latency, all done on `main`; a day and a week of calls with no growth is being measured.
+- **1.3, more platforms:** Node.js and TypeScript, .NET MAUI, a network test before the call, answering-machine detection, SIP over WebSocket, LiveCommunicationKit.
+- **2.0:** video (VP8, VP9, AV1) and ZRTP.
+- **Ongoing:** carrier interop on paid accounts and a commercial SBC, more PBXs in the lab.
 
 ## Documentation
 

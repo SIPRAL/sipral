@@ -338,8 +338,8 @@ crosses `sipral-ua` as a `SocketAddr`; `sipral-ua` still names no NAT crate.
   server side is a different product with different constraints, and pretending
   otherwise is how stacks become unmaintainable.
 - **No WebRTC.** SDP for SIP only. No data channels, no SFU, no simulcast.
-- **No video.** The audio path is deep enough to be worth doing properly. Video
-  would make it shallow.
+- **No video yet.** The audio path came first and is deep; video is planned for
+  2.0 ([`10-roadmap.md`](10-roadmap.md)), on top of it rather than instead of it.
 - **No global state, no singletons, no ambient logger.** Multiple independent
   stacks in one process must not interfere. The one exception is at the C
   boundary, where a handle has to be checked against something before it can

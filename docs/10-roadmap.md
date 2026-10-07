@@ -76,7 +76,7 @@ Q2 2027, planned.
 - OAuth2 sign-in to the PBX (RFC 8898) *(done)*
 - A call as a participant in a LiveKit room, as an example *(done)*
 - A phone voice agent that runs in five minutes, speech to speech, from one command *(done)*
-- Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published
+- Time from the INVITE to the first audio the agent hears, and from its reply to the first packet, measured and published *(done)*
 - Calls held for a day and for a week with no growth in memory or processor time, measured and published
 
 ### 1.3 — More platforms
