@@ -427,7 +427,7 @@ export class Account extends EventEmitter<AccountEvents> {
 
   /** @internal Whether its connection of its own speaks TLS. */
   get overTls(): boolean {
-    return this.streamProtocol === SipralTransport.Tls;
+    return this.streamProtocol === SipralTransport.Tls || this.streamProtocol === SipralTransport.Wss;
   }
 
   /** @internal What the stack hands each event about this account to. */

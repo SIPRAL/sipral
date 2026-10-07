@@ -3760,7 +3760,7 @@ websocketHost:, websocketResource:)`, Kotlin and the JVM jar
 websocketResource =)`, Python `add_account(stream_protocol=Transport.WS,
 websocket_host=, websocket_resource=)`, Dart `addAccount(streamProtocol:
 SipralTransport.ws, websocketHost:, websocketResource:)`, and React Native
-`addAccount({streamProtocol: 'ws', websocketHost, websocketResource})`
+`addAccount({streamProtocol: 'ws', websocketHost, websocketResource})`, and Node `stack.addAccount(aor, {streamProtocol: SipralTransport.Ws, websocketHost, websocketResource})`
 (TypeScript, Android and iOS halves).
 
 **A network test before a call.** `docs/25-network-test.md` is the whole

@@ -16,8 +16,10 @@ import { after, describe, test } from 'node:test';
 import {
   type Call,
   SipralCallEndReason,
+  SipralError,
   SipralEventKind,
   SipralRegistrationState,
+  SipralStatus,
   SipralTlsFailure,
   SipralTransport,
   SipralTransportError,
@@ -201,6 +203,36 @@ describe('an account on a connection of its own, beside a stack on UDP', () => {
     assert.match(header('Contact', register) ?? '', /transport=tcp/);
     assert.throws(() =>
       alice.addAccount('sip:carol@sipral.test', { registrarAddress: registrar.address, streamProtocol: SipralTransport.Udp }),
+    );
+  });
+});
+
+describe('an account on a WebSocket of its own, beside a stack on UDP', () => {
+  test('asks for its resource and Host, and the two are refused on another protocol', async () => {
+    const pbx = await server();
+    const alice = await stack({ bindHost: '127.0.0.1' });
+    const account = alice.addAccount('sip:alice@sipral.test', {
+      registrarAddress: pbx.address,
+      registrar: 'sip:sipral.test',
+      streamProtocol: SipralTransport.Ws,
+      websocketHost: 'pbx.sipral.test',
+      websocketResource: '/sip?tenant=7',
+    });
+    assert.equal(account.streamProtocol, SipralTransport.Ws);
+    account.register();
+    await until(() => pbx.messages.some(([, message]) => message.startsWith('GET ')));
+    const handshake = pbx.messages.find(([, message]) => message.startsWith('GET '))?.[1] ?? '';
+    assert.ok(handshake.startsWith('GET /sip?tenant=7 HTTP/1.1\r\n'), handshake);
+    assert.equal(header('Host', handshake), 'pbx.sipral.test');
+    assert.equal(header('Sec-WebSocket-Protocol', handshake), 'sip');
+    assert.throws(
+      () =>
+        alice.addAccount('sip:bob@sipral.test', {
+          registrarAddress: pbx.address,
+          streamProtocol: SipralTransport.Tcp,
+          websocketResource: '/ws',
+        }),
+      (error: unknown) => error instanceof SipralError && error.status === SipralStatus.InvalidArgument,
     );
   });
 });

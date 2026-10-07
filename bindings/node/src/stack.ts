@@ -304,8 +304,12 @@ export interface AccountOptions {
   keepaliveMs?: number;
   /** The SHA-256 fingerprint of the one TLS certificate it trusts, in the forms {@link TlsTrust.pinned} takes. */
   tlsPin?: string;
-  /** `SipralTransport.Tcp` or `Tls`: a connection of its own to its server, on a stack signalling over UDP. */
+  /** `SipralTransport.Tcp`, `Tls`, `Ws` or `Wss`: a connection of its own to its server, on a stack signalling over UDP; WS/WSS run a WebSocket on TCP/TLS (RFC 7118). */
   streamProtocol?: number;
+  /** The `Host` of a WS/WSS account's handshake; the server's address when left out. */
+  websocketHost?: string;
+  /** The resource that handshake asks for; `/ws` when left out. */
+  websocketResource?: string;
   instanceId?: string;
   expiresSeconds?: number;
   /** Header fields on every REGISTER. */
@@ -438,6 +442,14 @@ function split(address: string): { host: string; port: number } {
   const colon = address.lastIndexOf(':');
   return { host: address.slice(0, colon).replace(/^\[|\]$/g, ''), port: Number(address.slice(colon + 1)) };
 }
+
+/** An account's own connection: each protocol and its `transport=` name. */
+const OWN_STREAMS: ReadonlyMap<number, string> = new Map([
+  [SipralTransport.Tcp, 'tcp'],
+  [SipralTransport.Tls, 'tls'],
+  [SipralTransport.Ws, 'ws'],
+  [SipralTransport.Wss, 'wss'],
+]);
 
 /** A connection this class opened for `TransportWanted`, bound at its own transport number. */
 interface SipStream {
@@ -713,14 +725,11 @@ export class Stack extends EventEmitter<StackEvents> {
       throw new TypeError('sipral: an account names its server by registrarAddress or by serverUri, one of the two');
     }
     const streamProtocol = options.streamProtocol ?? 0;
-    if (
-      streamProtocol !== 0 &&
-      ((streamProtocol !== SipralTransport.Tcp && streamProtocol !== SipralTransport.Tls) || this.signalling !== SipralTransport.Udp)
-    ) {
-      throw new TypeError('sipral: streamProtocol is SipralTransport.Tcp or Tls, on a stack that signals over UDP');
+    const named = OWN_STREAMS.get(streamProtocol);
+    if (streamProtocol !== 0 && (named === undefined || this.signalling !== SipralTransport.Udp)) {
+      throw new TypeError('sipral: streamProtocol is SipralTransport.Tcp, Tls, Ws or Wss, on a stack that signals over UDP');
     }
-    const parameters =
-      streamProtocol === SipralTransport.Tls ? ';transport=tls' : streamProtocol === SipralTransport.Tcp ? ';transport=tcp' : this.contactParameters;
+    const parameters = named === undefined ? this.contactParameters : `;transport=${named}`;
     const advertised =
       options.contact === undefined && this.routes && options.registrarAddress !== undefined && this.signalling === SipralTransport.Udp
         ? this.advertiseToward(options.registrarAddress)
@@ -2401,7 +2410,9 @@ export class Stack extends EventEmitter<StackEvents> {
     // an account on a connection of its own asks with nothing outgrown;
     // that one is opened whatever streamFallback says
     const opens = this.streamFallback || (fields.requestBytes === 0 && fields.limitBytes === 0);
-    const over = fields.protocol === SipralTransport.Tls ? SipralTransport.Tls : SipralTransport.Tcp;
+    // a WebSocket goes over TCP or TLS, bound as WS or WSS so the stack runs it
+    const bound = OWN_STREAMS.has(fields.protocol as number) ? (fields.protocol as number) : SipralTransport.Tcp;
+    const over = bound === SipralTransport.Tls || bound === SipralTransport.Wss ? SipralTransport.Tls : SipralTransport.Tcp;
     if (this.streamsOpening.has(destination) || [...this.sipStreams.values()].some((stream) => stream.destination === destination)) {
       return;
     }
@@ -2411,7 +2422,7 @@ export class Stack extends EventEmitter<StackEvents> {
       return;
     }
     this.streamsOpening.add(destination);
-    void this.openSipStream(transport, destination, over);
+    void this.openSipStream(transport, destination, over, bound);
   }
 
   /** What a TLS connection to `destination` trusts: the pin of an account on it, else the stack's trust. */
@@ -2424,7 +2435,7 @@ export class Stack extends EventEmitter<StackEvents> {
     return this.tlsTrust;
   }
 
-  private async openSipStream(transport: number, destination: string, over: number): Promise<void> {
+  private async openSipStream(transport: number, destination: string, over: number, bound: number = over): Promise<void> {
     const tls = over === SipralTransport.Tls;
     const target = tls || this.streamServer === null ? split(destination) : this.streamServer;
     let socket: StreamSocket;
@@ -2463,7 +2474,7 @@ export class Stack extends EventEmitter<StackEvents> {
     const [far, farLength] = text(destination);
     try {
       checkNow(this.sipral, 'sipral_stack_transport_bind', () =>
-        this.sipral.sipral_stack_transport_bind(this.stackHandle, transport, over, near, nearLength, far, farLength, this.nowMs(), null),
+        this.sipral.sipral_stack_transport_bind(this.stackHandle, transport, bound, near, nearLength, far, farLength, this.nowMs(), null),
       );
     } catch (error) {
       this.loseSipStream(transport, false);
