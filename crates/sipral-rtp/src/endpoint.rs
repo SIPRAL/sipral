@@ -735,7 +735,10 @@ impl RtpSession {
                 // the one sending from here: the stream starts again under
                 // this one (`Inbound::source_where_left`)
                 if self.inbound.source_where_left
-                    && self.inbound.source.is_some_and(|known| known != header.ssrc)
+                    && self
+                        .inbound
+                        .source
+                        .is_some_and(|known| known != header.ssrc)
                 {
                     self.resync();
                 }

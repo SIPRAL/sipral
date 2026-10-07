@@ -58,7 +58,7 @@
 //!
 //! A connection that fails or closes is told the way a TCP or TLS one is:
 //! the transport is retired, the transactions on it fail, an account on a
-//! connection of its own asks for a new one ([`crate::flow`]), and
+//! connection of its own asks for a new one (the `flow` module), and
 //! [`Event::FlowFailed`] tells the application to close its socket.
 //! [`UserAgent::websocket_failure`] says why.
 //!
