@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// What the stack, the account, the call and the media share: the library
-// opened once, the status check, text in and out of the library's memory,
-// and `host:port` read and written.
+// Helpers shared by the stack, accounts, calls and media.
 
 import { isIP } from 'node:net';
 
@@ -19,10 +17,7 @@ export const ADDRESS_BYTES = 128;
 
 let shared: Sipral | undefined;
 
-/**
- * The library a stack uses when it is given none: opened, and its ABI
- * checked, the first time a stack needs it.
- */
+/** The library a stack uses when given none, opened on first use. */
 export function library(): Sipral {
   shared ??= Sipral.open();
   return shared;
@@ -70,10 +65,9 @@ export function check(sipral: Sipral, operation: string, status: number): void {
 const pause = new Int32Array(new SharedArrayBuffer(4));
 
 /**
- * The status `entryPoint` returns, called again while that is
- * `SipralStatus.ClockBehind` -- for up to half a second. Every entry point
- * here reads the stack's clock afresh right before the call, so a reading
- * the stack's last one beat can only be followed by a later one.
+ * Calls `entryPoint` again while it returns `SipralStatus.ClockBehind`, for
+ * up to half a second. Each entry point reads the clock afresh, so a retry
+ * always carries a later time.
  */
 export function retryingClockBehind(entryPoint: () => number): number {
   const started = Date.now();
@@ -85,7 +79,6 @@ export function retryingClockBehind(entryPoint: () => number): number {
   return status;
 }
 
-/** {@link check} over what {@link retryingClockBehind} makes of `entryPoint`. */
 export function checkNow(sipral: Sipral, operation: string, entryPoint: () => number): void {
   check(sipral, operation, retryingClockBehind(entryPoint));
 }
@@ -130,9 +123,8 @@ export function handle(value: Wide): bigint {
 }
 
 /**
- * A record of `type`, laid out in a buffer of its own, `size` filled in and
- * every member not named zero. Each buffer named in `values` must outlive
- * the call it is handed to, which the caller's own reference sees to.
+ * A zeroed record of `type` in its own buffer, with `size` filled in. Each
+ * buffer in `values` must outlive the call it is passed to.
  */
 export function record(type: string, values: Record<string, unknown> = {}): Buffer {
   const size = koffi.sizeof(type);
@@ -151,11 +143,7 @@ export function formatAddress(host: string, port: number): string {
   return isIP(host) === 6 ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
-/**
- * The host and the port of a `host:port` the library wrote, or null for one
- * whose host is not an address literal: a name is the application's to
- * resolve.
- */
+/** Null when the host is a name, which the application resolves. */
 export function parseAddress(value: string): { host: string; port: number } | null {
   const colon = value.lastIndexOf(':');
   if (colon <= 0) {

@@ -100,9 +100,8 @@ export interface CallOptions {
   /** What this call offers or takes, in place of the stack's: `'PCMA,PCMU'`. */
   codecs?: string;
   /**
-   * Placing a call, send it on to the targets a 3xx names (RFC 3261
-   * §8.1.3.4). Off by default: a 3xx then ends the call with its status, and
-   * the `Contact` it named is the application's to act on.
+   * Follow a 3xx's targets when placing a call (RFC 3261 §8.1.3.4). Off by
+   * default: a 3xx ends the call with its status.
    */
   followRedirects?: boolean;
 }
@@ -158,13 +157,9 @@ export function routeHost(peer: string | null | undefined, sipral: Sipral = libr
 /**
  * A SIP stack on one UDP socket: the class an application opens first.
  *
- * {@link Stack.open} binds the socket and creates the stack in application
- * mode, where this package carries each call's PCM; {@link close} hangs up
- * what is still up, destroys the stack exactly once and closes every socket
- * this package opened. Everything runs on the thread that opened it: the
- * library calls the event callback from inside `sipral_stack_poll`, the
- * callback only copies the event out, and the copies are delivered once the
- * poll has returned.
+ * Everything runs on the opening thread. The event callback, called from
+ * inside `sipral_stack_poll`, only copies the event out; copies are
+ * delivered after the poll returns.
  */
 export class Stack extends EventEmitter<StackEvents> {
   /** The library. */
@@ -419,14 +414,11 @@ export class Stack extends EventEmitter<StackEvents> {
   }
 
   /**
-   * Take the REFER of a `TransferRequested` (inside a call) or a `Referral`
-   * (outside any) and place the call it asks for (`sipral_call_accept_transfer`):
-   * the stack answers 202, reports on the new call to whoever asked, and
-   * places it from the account the event names -- to `destination` when
-   * given, else to the account's registrar address. A media socket is opened
-   * for it here, and the {@link Call} returned is that placed call. Taking
-   * one is a decision with a bill attached -- whoever sent it can make this
-   * line dial anything -- so it is never made on the application's behalf.
+   * Accept the REFER of a `TransferRequested` or `Referral` and place the
+   * call it asks for (`sipral_call_accept_transfer`): the stack answers 202,
+   * reports progress to the referrer, and places the call from the event's
+   * account, to `destination` or else the registrar address. Returns that
+   * call. Never done automatically: a REFER can make this line dial anything.
    */
   async acceptTransfer(event: StackEvent, options: Pick<CallOptions, 'mediaHost' | 'destination'> = {}): Promise<Call> {
     this.ensureOpen();
@@ -469,8 +461,8 @@ export class Stack extends EventEmitter<StackEvents> {
   }
 
   /**
-   * Hang up every call still up, give the goodbyes a moment to go out, then
-   * destroy the stack and close every socket. Calling it again does nothing.
+   * Hang up live calls, wait briefly for the BYEs to go out, then destroy the
+   * stack and close every socket. Idempotent.
    */
   async close(): Promise<void> {
     if (this.closed) {
@@ -702,10 +694,8 @@ export class Stack extends EventEmitter<StackEvents> {
   }
 
   /**
-   * The `host:port` an account whose server is `peer` is reached at, on a
-   * stack that picks its own address: the route toward the server, on this
-   * stack's port. The first server named also becomes the address the
-   * stack's `Via` carries.
+   * The route toward `peer` on this stack's port. The first one chosen also
+   * becomes the stack's `Via` address.
    */
   private advertiseToward(peer: string): string {
     const port = this.address.slice(this.address.lastIndexOf(':') + 1);
