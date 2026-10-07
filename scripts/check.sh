@@ -2650,7 +2650,7 @@ step_node() {
         >"$PKG_WORK/node-test" 2>&1; then
         passed=$(grep -Eo '^. pass [0-9]+' "$PKG_WORK/node-test" | grep -Eo '[0-9]+$' | tail -1)
         if [ -n "$passed" ] && [ "$passed" -gt 0 ]; then
-            pass "node --test, bindings/node ($passed tests: record layouts, the loopback call, transfer, registration)"
+            pass "node --test, bindings/node ($passed tests: record layouts, calls, TCP and TLS, presence, OAuth, network test, conferences, device mode)"
         else
             fail "node --test, bindings/node, exited zero and reported no test"
         fi

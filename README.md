@@ -80,7 +80,7 @@ Application mode — PCM in the application's hands — is available on every
 platform and in every language but one: the React Native package runs device
 mode over the Swift and Kotlin layers. The Dart layer runs application mode,
 signalling over UDP with an account's own TCP or TLS connection beside it; the
-Node.js layer runs application mode over UDP.
+Node.js layer runs device or application mode, signalling over UDP, TCP or TLS.
 
 ## Status
 

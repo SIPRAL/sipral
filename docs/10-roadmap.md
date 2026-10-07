@@ -83,7 +83,7 @@ November 2026, planned.
 
 Q1 2027, planned.
 
-- Node.js and TypeScript package *(in progress)*
+- Node.js and TypeScript package *(done)*
 - .NET MAUI package for iOS and Android
 - A network test before the call *(done)*
 - Answering-machine detection on calls the agent places *(done)*

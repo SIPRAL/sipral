@@ -52,7 +52,7 @@ than write themselves is generated.
 | .NET | [`dotnet/README.md`](dotnet/README.md) | Windows, macOS, Linux | device or application mode |
 | Python | [`python/README.md`](python/README.md) | macOS, Windows, Linux | device or application mode |
 | Dart and Flutter | [`dart/README.md`](dart/README.md) | wherever `dart:ffi` loads the library | application mode, signalling over UDP with an account's own TCP or TLS connection beside it |
-| Node.js and TypeScript | [`node/README.md`](node/README.md) | wherever Node.js 20 or later and koffi load the library | application mode, signalling over UDP |
+| Node.js and TypeScript | [`node/README.md`](node/README.md) | wherever Node.js 20 or later and koffi load the library | device or application mode, signalling over UDP, TCP or TLS |
 | React Native | [`react-native/README.md`](react-native/README.md) | iOS, Android | device mode, over the Swift and Kotlin layers |
 
 Device mode is wherever the library has an audio backend: CoreAudio on macOS

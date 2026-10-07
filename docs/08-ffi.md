@@ -2873,21 +2873,37 @@ of its members as koffi decodes them, a 64-bit integer `number | bigint`.
 `bindings/node/src/test/abi.test.ts` holds `koffi.sizeof` of each to the
 64-bit one.
 
-`Stack`, `Account`, `Call` and `Media`, in `bindings/node/src/`, are written
-by hand against it, with handles as `bigint`. Everything runs on the thread
-that opened the stack: the sockets are `dgram` sockets, the poll and each
+`Stack`, `Account`, `Call`, `Media`, `Subscription`, `LocalConference` and
+`Audio`, in `bindings/node/src/`, are written by hand against it, with
+handles as `bigint`; between them they reach every entry point but
+`sipral_call_answer` and `sipral_call_consult`, whose media is the
+application's own SDP, and `sipral_stack_transport_failed`, which
+`sipral_stack_transport_failed_with` supersedes. Everything runs on the thread
+that opened the stack: the sockets are `dgram` and `net` sockets, TLS is
+Node's own `tls` checked against the platform's authorities, a private one
+beside them, only one, or a pinned certificate (`TlsTrust`), the poll and each
 call's frame clock are timers, and the event callback is a `koffi.register`
 function the library calls from inside `sipral_stack_poll`; it only copies the
-event out, and the copy is delivered once the poll has returned, as an
-`event` on the `EventEmitter` and through `events()`, an async iterator. The
-application carries each call's audio: `Media` emits `frame` with the far
-end's PCM and takes this end's with `sendAudio`. Signalling is UDP only: this
-layer opens no TCP or TLS connection and answers no
-`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`. `bindings/node/src/test/` places a call
-between two stacks on loopback with a tone heard each way and digits, a
-transfer refused and one taken, and a registration through a simulated
-registrar's digest challenge; `scripts/check.sh --only node` runs them against
-the library it built.
+event out -- every member of the payload arm its kind writes, as `fields` --
+and the copy is delivered once the poll has returned, as an `event` on the
+`EventEmitter` and through `events()`, an async iterator. What the stack asks
+of the layer it answers itself, as the Python layer does: a connection for a
+request too large for a datagram or for an account's own TCP or TLS
+(`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`), the signalling connection made again
+with back-off, a lookup through the application's resolver or the
+platform's, a media socket mapped through STUN, a TURN server reached over
+TCP or TLS. In application mode `Media` emits `frame` with the far end's PCM
+and takes this end's with `sendAudio`. Device mode needs one thing no other
+layer does: koffi runs a JavaScript callback on the thread that registered
+it and holds the calling thread until it returns, so an
+`audio_transmit_callback` registered on the application's thread would hold
+the engine while that thread waits on the engine -- a stack destroyed, the
+devices closed -- for ever. It is registered on a worker thread that never
+calls the library, copies each packet out, posts it to the stack's thread and
+returns. `bindings/node/src/test/` runs every part against two stacks on
+loopback or this test's own registrar, compositor, notifier, STUN server and
+TLS server (certificates made with `openssl`); `scripts/check.sh --only node`
+runs them against the library it built.
 
 ## React Native
 
