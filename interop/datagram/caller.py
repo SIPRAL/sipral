@@ -29,10 +29,10 @@ sends a request up to that many bytes over UDP when no stream is coming
 
 ``SIPRAL_SERVER_URI`` names the server by a URI for RFC 3263 to locate
 instead (``SIPRAL_SERVER`` then only says which way this host's route
-goes), and the call is placed once it is located; ``SIPRAL_SRV`` is one SRV
-record, ``"<ttl> <priority> <weight> <port> <target>"``, a resolver of this
-script's own answers every SRV query with, the platform's lookup answering
-the rest. ``SIPRAL_REGISTER=1`` registers first, at ``SIPRAL_REGISTRAR``
+goes), and the call is placed once it is located; ``SIPRAL_SRV`` is the SRV
+records, ``"<ttl> <priority> <weight> <port> <target>"`` each, separated by
+``;``, a resolver of this script's own answers every SRV query with, the
+platform's lookup answering the rest. ``SIPRAL_REGISTER=1`` registers first, at ``SIPRAL_REGISTRAR``
 or else the URI the server was named by, places the call once registered,
 and takes the binding back at the end; ``SIPRAL_KEEPALIVE_MS`` is the account's own keep-alive
 interval. ``SIPRAL_SIGNALLING=tls`` signals over TLS to ``SIPRAL_SERVER``,
@@ -184,14 +184,16 @@ async def say_transport(stack: Stack) -> None:
         return
 
 
-def resolver_answering_srv(record: str):
-    """A resolver that answers every SRV query with ``record`` and leaves
-    every other query to the platform's lookup: an application's own, the
-    way one that reads SRV is given to the stack."""
+def resolver_answering_srv(records: str):
+    """A resolver that answers every SRV query with ``records`` -- one
+    record, or several separated by ``;`` -- and leaves every other query
+    to the platform's lookup: an application's own, the way one that reads
+    SRV is given to the stack."""
+    answer = [record.strip() for record in records.split(";") if record.strip()]
 
     def resolve(name: str, kind: int) -> tuple[int, list[str]]:
         if kind == lib.SIPRAL_DNS_RECORD_TYPE_SRV:
-            return lib.SIPRAL_DNS_ANSWER_RECORDS, [record]
+            return lib.SIPRAL_DNS_ANSWER_RECORDS, answer
         return lookup(name, kind)
 
     return resolve

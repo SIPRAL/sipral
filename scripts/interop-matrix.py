@@ -100,6 +100,7 @@ FLOW_SECTIONS = {
         "kamailio_members",
         "rust",
     ),
+    "FusionPBX -- its own configuration on FreeSWITCH, straight at it": ("fusionpbx", "rust"),
 }
 # The FLOW_SECTIONS headers whose harness prints no "lab: ..." line before
 # its flows: the STIR/SHAKEN step runs two stacks of the C harness against
@@ -180,6 +181,15 @@ LAYER_SECTIONS = {
         (
             "a registrar named by its host name, located by its A record through the lab's DNS",
             "a server named by a domain, located by an SRV record from the application's resolver",
+            "failover between two servers",
+        ),
+    ),
+    "who is calling, and where the call was sent -- the Python layer, straight at Asterisk": (
+        "asterisk",
+        (
+            "P-Asserted-Identity",
+            "Diversion",
+            "a 302 followed by the stack",
         ),
     ),
 }
@@ -207,6 +217,7 @@ VERDICT_SECTIONS = {
         "full_ice",
         "STUN failover, the first server dead, C calling and Rust answering",
     ),
+    "FusionPBX's own echo, *9196": ("fusionpbx", "a call to FusionPBX's own echo"),
 }
 # The steps lab.sh prints before any flow runs: builds and container
 # readiness. Their `ok` lines are notes, not results, and are the only ones
@@ -239,6 +250,7 @@ PEER_LABELS = {
     "robust_listener": "a listener that never answers, over a link that drops fragments",
     "stir_pair": "sipral, C ABI to C ABI (STIR/SHAKEN)",
     "kamailio_members": "Kamailio, routing to three sipral stacks registered at it",
+    "fusionpbx": "FusionPBX → FreeSWITCH",
 }
 
 # Every peer worth an eventual row that this lab cannot reach yet, because
@@ -725,6 +737,10 @@ def read_versions(root: Path) -> dict[str, str]:
     m = re.search(r"baresip/baresip/archive/refs/tags/v([0-9]+(?:\.[0-9]+){1,3})", baresip)
     versions["baresip"] = m.group(1) if m else ""
 
+    fusionpbx = (root / "interop/fusionpbx/Dockerfile").read_text(encoding="utf-8")
+    m = re.search(r"FUSIONPBX_VERSION=([0-9]+(?:\.[0-9]+){1,3})", fusionpbx)
+    versions["fusionpbx"] = m.group(1) if m else ""
+
     return versions
 
 
@@ -738,6 +754,8 @@ def peer_version_label(peer_key: str, versions: dict[str, str]) -> str:
         return f"{v('opensips')} (proxy) / {v('freeswitch')} (FreeSWITCH)"
     if peer_key == "asterisk":
         return v("asterisk")
+    if peer_key == "fusionpbx":
+        return f"{v('fusionpbx')} (FusionPBX) / {v('freeswitch')} (FreeSWITCH)"
     if peer_key == "baresip":
         return f"{v('baresip')} (baresip) / {v('kamailio')} (proxy)"
     if peer_key == "nat_stun":

@@ -603,6 +603,7 @@ Run before each release, and recorded with the version of each peer.
 | OpenSIPS | lab, its own step only | a second opinion on the same: Kamailio and OpenSIPS share an ancestor but have diverged for fifteen years, so a rule both of them route the same way is not one implementation's private reading of it |
 | FreeSWITCH | lab, as deployed | full call features, transfer, hold |
 | Asterisk | `chan_pjsip`, container, defaults | the configuration most integrators actually have; transfer against a second implementation |
+| FusionPBX | 5.6.5, its own database, configuration and Lua scripts on the lab's FreeSWITCH (`interop/fusionpbx`), its own step only | a PBX product built on FreeSWITCH, configured the way its users configure it: every user, SIP profile and dialplan read out of its database |
 | baresip | built from source (`interop/baresip/Dockerfile`), registered at Kamailio as a second lab user | phone to phone: a call whose dialog and media run end to end against a second client stack, not a server, since Kamailio is a proxy and never joins either |
 | Carrier A | Romanian, paid account | real trunking, real codecs |
 | Carrier B | international, paid account | a second opinion on everything carrier A does |
@@ -998,6 +999,67 @@ Known peer behaviours worth writing down rather than rediscovering:
 - FreeSWITCH, at the start of a DTLS-SRTP call, sends two packets, pauses, and
   resumes with a timestamp that has not moved, against RFC 3550 §5.1.
 - `MinivmMWI()` publishes a mailbox count rather than adding to one.
+- FreeSWITCH running FusionPBX's configuration logs `Failed to set
+  SCHED_FIFO scheduler` and `Could not set nice level` in a container without
+  `CAP_SYS_NICE`; both are harmless to a lab call.
+
+### FusionPBX, and the PBX that is not here
+
+`scripts/lab.sh fusionpbx` brings up FusionPBX (`interop/fusionpbx`) beside
+the lab and removes it after. Nobody publishes an image of it, and its own
+installer takes over a Debian machine under systemd and compiles FreeSWITCH,
+so the lab builds it in two halves: a Debian container with PostgreSQL, PHP
+and FusionPBX's release, whose `setup.sh` follows the installer's own steps
+-- the schema, a domain named `fusionpbx`, the application defaults, which
+also copy FusionPBX's Lua scripts out -- and adds what is the lab's own, the
+extension `labuser` and the lab's numbers as one row of FusionPBX's dialplan
+table (`lab_dialplan.xml`: 9000, 9001, 9002, 9003 and 9005, as on the plain
+FreeSWITCH); and the lab's pinned FreeSWITCH image, started on FusionPBX's
+configuration tree, which reads every directory entry, SIP profile and
+dialplan from that database through those scripts. Against it the harness
+runs straight, with no proxy in front: register, call, hold and resume, both
+transfers, DTMF RFC 4733, DTLS-SRTP held and resumed, and the compact form;
+then one call to FusionPBX's own echo, `*9196`, with the audio required back.
+On 7 October 2026 every one of them passed.
+
+VitalPBX is not in the lab. It is closed source, and nobody publishes an
+image of it; its installer (`pbx_installer.sh` for Debian 12, read on 7
+October 2026) adds its own package repository, turns a whole minimal machine
+into the PBX under systemd -- enabling firewalld and fail2ban and disabling
+iptables -- and reboots it. In a container that needs a privileged systemd
+whose firewall acts on the lab machine's own packet filter, which is shared
+with every other run on it; and an extension is then made through its web
+interface, or an API key created there. A machine of its own is what it
+would take.
+
+### Who is calling, where the call was sent, and the second server
+
+Three scenarios the plain flows do not cover, each through the Python layer
+straight at Asterisk:
+
+- `scripts/lab.sh identity` (`interop/identity/scenarios.py`): one stack, two
+  accounts that trust Asterisk's address (`labuser-caller` and
+  `labuser-callee`, `interop/asterisk/pjsip.conf`). A call to 9040 carries a
+  `P-Asserted-Identity` the caller wrote, `"Lab Asserted"
+  <sip:5550100@asterisk>`, a number no account has; Asterisk takes it as the
+  caller's (`trust_id_inbound`) and asserts it again to the callee
+  (`send_pai`), which reads it because it came from a peer it trusts. A call
+  to 9041 is marked diverted from 9041 for no answer before Asterisk dials the
+  callee, which reads the `Diversion` Asterisk writes. A call to 9042 is
+  answered 302 by `Transfer()` on an unanswered channel, naming the tone of
+  9002: the call comes up there, audio both ways, only because the stack
+  followed the redirect (`docs/04-ua.md`). Until this scenario ran, it did
+  not: a call answered 3xx ended with the 3xx. The first two calls also count
+  audio at both ends: Asterisk hands their media to the two ends once
+  answered (`direct_media`, on by default), so each end's far end moves by
+  re-INVITE from Asterisk to a different sender. Until this scenario ran, a
+  last packet from Asterisk read after that re-INVITE left the stream on
+  Asterisk's SSRC and nothing was heard either way (`docs/05-media.md`,
+  symmetric RTP).
+- `scripts/lab.sh locate`, its third call: the domain's SRV records name a
+  port of Asterisk's where nothing listens first and its 5060 second. The
+  REGISTER sent to the first goes unanswered, the stack moves to the second by
+  itself (RFC 3263 §4.3), registers there and places the call through it.
 
 ## Interoperability procedure
 

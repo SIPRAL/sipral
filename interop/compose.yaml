@@ -169,6 +169,54 @@ services:
       net.ipv4.ip_forward: "1"
     networks: [lab, inside2]
 
+  # FusionPBX, a PBX built on FreeSWITCH, in two halves: its database and
+  # application (interop/fusionpbx), which writes the schema, a domain named
+  # `fusionpbx`, an extension and the lab's numbers, and the switch -- the
+  # same pinned FreeSWITCH image as above, started on the configuration tree
+  # and the Lua scripts FusionPBX ships, which read every user, profile and
+  # dialplan out of that database the way they do on a FusionPBX machine.
+  # The two share the `fusionpbx` volume; the switch waits for setup.sh's
+  # /shared/ready before it starts. A profile of its own: scripts/lab.sh's
+  # `fusionpbx` step brings both up and removes them, and their volume,
+  # straight after.
+  fusionpbx-db:
+    build:
+      context: ./fusionpbx
+    image: sipral-lab-fusionpbx
+    profiles: [fusionpbx]
+    volumes:
+      - fusionpbx:/shared
+    healthcheck:
+      test: ["CMD", "test", "-f", "/shared/ready"]
+      interval: 2s
+      retries: 150
+    networks: [lab]
+
+  fusionpbx:
+    image: safarov/freeswitch:1.10.12
+    profiles: [fusionpbx]
+    depends_on:
+      fusionpbx-db:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        until [ -f /shared/ready ]; do sleep 1; done;
+        ln -sfn /shared/conf /etc/freeswitch;
+        rm -rf /usr/share/freeswitch/scripts;
+        ln -sfn /shared/scripts /usr/share/freeswitch/scripts;
+        ln -sfn /shared/fusionpbx /etc/fusionpbx;
+        mkdir -p /var/cache;
+        ln -sfn /shared/cache /var/cache/fusionpbx;
+        exec /docker-entrypoint.sh
+    volumes:
+      - fusionpbx:/shared
+    networks: [lab]
+
+volumes:
+  fusionpbx:
+
 networks:
   lab:
     driver: bridge

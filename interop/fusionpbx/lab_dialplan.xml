@@ -1,0 +1,52 @@
+<!--
+SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
+Copyright (c) 2026 Sytek
+
+The lab's numbers on FusionPBX, written into its own dialplan table
+(v_dialplans.dialplan_xml) by setup.sh, in the domain's context, ahead of
+every dialplan FusionPBX installs by itself. The same numbers, and for the
+same reasons, as interop/freeswitch/lab.xml: 9000 a tone bridged through a
+loopback leg so a transfer has somebody to hand over, 9001 a different tone
+for a transfer to land on, 9003 a digit read and sent straight back -- with
+two seconds before the hangup, since send_dtmf only queues the digit and a
+channel hung up at once never sends it -- 9005
+the tone again with DTLS-SRTP required. The echo is FusionPBX's own, *9196,
+which it installs in every domain.
+CONTEXT is replaced by the domain's name when the row is written.
+-->
+<extension name="sipral_lab" continue="false">
+  <condition field="destination_number" expression="^9000$">
+    <action application="bridge" data="loopback/9002/CONTEXT"/>
+  </condition>
+</extension>
+<extension name="sipral_lab_media" continue="false">
+  <condition field="destination_number" expression="^9002$">
+    <action application="answer"/>
+    <action application="playback" data="tone_stream://%(1200,600,350,440);loops=-1"/>
+    <action application="hangup"/>
+  </condition>
+</extension>
+<extension name="sipral_lab_transfer" continue="false">
+  <condition field="destination_number" expression="^9001$">
+    <action application="answer"/>
+    <action application="playback" data="tone_stream://%(60000,0,480,620)"/>
+    <action application="hangup"/>
+  </condition>
+</extension>
+<extension name="sipral_lab_dtmf" continue="false">
+  <condition field="destination_number" expression="^9003$">
+    <action application="answer"/>
+    <action application="read" data="1 1 silence_stream://1 digit 5000 #"/>
+    <action application="send_dtmf" data="${digit}"/>
+    <action application="sleep" data="2000"/>
+    <action application="hangup"/>
+  </condition>
+</extension>
+<extension name="sipral_lab_dtls" continue="false">
+  <condition field="destination_number" expression="^9005$">
+    <action application="set" data="rtp_secure_media=mandatory"/>
+    <action application="answer"/>
+    <action application="playback" data="tone_stream://%(1200,600,350,440);loops=-1"/>
+    <action application="hangup"/>
+  </condition>
+</extension>

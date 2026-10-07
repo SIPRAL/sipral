@@ -112,7 +112,21 @@
 #                               the A record the lab's DNS answers, then a
 #                               server named by a domain, found by the SRV
 #                               record a resolver of the application's own
-#                               gives (part of a run that names nothing too)
+#                               gives, then the same domain with two SRV
+#                               targets, the first dead, registered and
+#                               called through the second (part of a run
+#                               that names nothing too)
+#   scripts/lab.sh identity     only who a call says it is from and where it
+#                               was sent, through the Python layer at
+#                               Asterisk (interop/identity/scenarios.py): a
+#                               P-Asserted-Identity sent and received, a
+#                               Diversion on a diverted call, a 302 followed
+#                               (part of a run that names nothing too)
+#   scripts/lab.sh fusionpbx    only FusionPBX on FreeSWITCH
+#                               (interop/fusionpbx): the harness's flows
+#                               straight at it and a call to its own echo,
+#                               both containers and their volume removed
+#                               after (part of a run that names nothing too)
 #   scripts/lab.sh security     only the SRTP policy per account, through the
 #                               C ABI -- SDES required, DTLS-SRTP required
 #                               and off, set on the account and read back
@@ -700,8 +714,9 @@ teardown() {
     ( cd interop && docker compose logs --no-color | tail -80 )
     # a `down` with no profile named leaves profiled services running and the
     # networks only they use in place, so the `nat` step's two containers and
-    # its `inside` network go here too, in case it never got to remove them
-    ( cd interop && docker compose --profile nat down ) >/dev/null 2>&1
+    # its `inside` network go here too, in case it never got to remove them,
+    # and the `fusionpbx` step's two with the one volume the lab declares
+    ( cd interop && docker compose --profile nat --profile fusionpbx down -v ) >/dev/null 2>&1
 }
 trap teardown EXIT
 
@@ -4127,6 +4142,25 @@ locate_flow() {
         ok=1
     fi
 
+    # failover between two servers (RFC 3263 §4.3): the domain's SRV records
+    # name a port where nothing listens first and Asterisk's 5060 second, so
+    # the REGISTER sent to the first goes unanswered and the stack moves to
+    # the second by itself, registers there and places the call through it.
+    # Up to Timer F, 32 s, before it moves, hence the longer patience
+    CALLER_ACCOUNT=labuser datagram_call 5060 "" "" "" \
+        -e SIPRAL_SRTP=off -e SIPRAL_SERVER_URI=sip:lab.sipral.test -e SIPRAL_REGISTER=1 \
+        -e "SIPRAL_SRV=60 10 50 5099 asterisk;60 20 50 5060 asterisk" \
+        -e SIPRAL_PATIENCE_MS=60000
+    if datagram_said '^located [0-9.]+:5099,[0-9.]+:5060$' \
+        && datagram_said '^registration REGISTERED$' \
+        && datagram_said '^confirmed$' && datagram_said '^ended LOCAL_HANGUP ' \
+        && printf '%s\n' "$DATAGRAM_SEEN" | found 'from UDP:'; then
+        pass "failover between two servers: the first SRV target dead, the REGISTER moved to the second by itself, registered there and the call placed through it"
+    else
+        fail "failover between two servers named by SRV"
+        ok=1
+    fi
+
     ( cd interop && docker compose exec -T asterisk asterisk -rx 'pjsip set logger off' ) >/dev/null 2>&1
     ( cd interop && docker compose up -d asterisk ) >/dev/null 2>&1
     wait_for asterisk "Asterisk Ready" >/dev/null || true
@@ -4143,6 +4177,112 @@ if [ "$WANT" = all ] || [ "$WANT" = locate ]; then
     else
         printf '  note  no libsipral_ffi, so the location flows are skipped with the other C flows\n'
     fi
+fi
+
+# Who a call says it is from, and where it was sent, through the Python
+# layer straight at Asterisk (interop/identity/scenarios.py): a
+# P-Asserted-Identity the caller wrote, taken by Asterisk and asserted
+# again to the callee, who reads it from a peer it trusts; a Diversion
+# Asterisk writes on a call it marked redirected; and a 302 the caller's
+# stack follows to the tone it names.
+identity_flow() {
+    local beside log ok=0
+    beside=$(cd "$(dirname "$HARNESS_C")" && pwd)
+    log=$(lab_run "the identity flows" $((LAB_START_APT_S + 3 * LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        -e SIPRAL_LIBRARY=/lib-sipral -e PYTHONPATH=/python \
+        -e SIPRAL_DWELL_MS="$LAB_DWELL_MS" -e SIPRAL_PATIENCE_MS="$LAB_PATIENCE_MS" \
+        -v "$beside:/lib-sipral:ro" \
+        -v "$ROOT/bindings/python:/python:ro" \
+        -v "$ROOT/interop/identity:/identity:ro" \
+        debian:trixie-slim sh -c '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y python3 python3-cffi >/dev/null 2>&1
+            address=$(getent hosts asterisk | cut -d" " -f1)
+            SIPRAL_SERVER="$address:5060" exec python3 -u /identity/scenarios.py' 2>&1)
+    printf '%s\n' "$log" | sed 's/^/    /'
+    said() { printf '%s\n' "$log" | found -E "$1"; }
+    if said '^incoming 9040 trusted=1 asserted=sip:5550100@[^ ]+ display=Lab Asserted$' \
+        && said '^confirmed 9040$' \
+        && said '^media 9040 sent [0-9]+ received [1-9]' \
+        && said '^media 9040 callee sent [0-9]+ received [1-9]'; then
+        pass "P-Asserted-Identity: written by the caller, taken by Asterisk as who is calling, asserted again to the callee and read there from a trusted peer; audio both ways once Asterisk handed the media to the two ends"
+    else
+        fail "P-Asserted-Identity sent and received"
+        ok=1
+    fi
+    if said '^incoming 9041 diverted=sip:9041@[^ ]+ reason=no-answer count=1$' \
+        && said '^confirmed 9041$' \
+        && said '^media 9041 sent [0-9]+ received [1-9]' \
+        && said '^media 9041 callee sent [0-9]+ received [1-9]'; then
+        pass "Diversion: a call Asterisk marked diverted from 9041 for no answer, read by the callee; audio both ways"
+    else
+        fail "Diversion on a redirected call"
+        ok=1
+    fi
+    if said '^confirmed 9042$' && said '^media 9042 sent [1-9][0-9]* received [1-9]' \
+        && said '^ended 9042 LOCAL_HANGUP '; then
+        pass "a 302 followed by the stack: 9042 only redirects, and the call came up on the tone it named, audio both ways"
+    else
+        fail "a 302 followed by the stack"
+        ok=1
+    fi
+    return "$ok"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = identity ]; then
+    step "who is calling, and where the call was sent -- the Python layer, straight at Asterisk"
+    if [ -n "$HARNESS_C" ]; then
+        identity_flow || true
+    elif [ "$WANT" = identity ]; then
+        fail "the identity flows: there is no libsipral_ffi for the Python layer to load"
+    else
+        printf '  note  no libsipral_ffi, so the identity flows are skipped with the other C flows\n'
+    fi
+fi
+
+# FusionPBX (interop/fusionpbx, compose.yaml's `fusionpbx` profile): its
+# database and application set up a domain, an extension and the lab's
+# numbers, and the pinned FreeSWITCH image runs FusionPBX's own
+# configuration and scripts on them. The harness's flows go straight at it --
+# registration, a call, hold and resume, both transfers, the digit echoed,
+# DTLS-SRTP, the compact form -- and then one call to FusionPBX's own echo,
+# *9196, with the audio required back. Both containers and their volume are
+# removed after, so the lab's steady footprint does not change.
+fusionpbx_up() {
+    local tries=0
+    ( cd interop && docker compose --profile fusionpbx up -d --build fusionpbx ) >/dev/null 2>&1 \
+        || { fail "docker compose up fusionpbx"; return 1; }
+    wait_for fusionpbx-db "FusionPBX ready" required fusionpbx || return 1
+    until ( cd interop && docker compose --profile fusionpbx exec -T fusionpbx \
+            fs_cli -x 'sofia status' 2>/dev/null ) | found -E '^ *internal[[:space:]]+profile.*RUNNING'; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 45 ] && { fail "FusionPBX's internal profile never ran"; return 1; }
+        sleep 2
+    done
+    pass "fusionpbx: the internal profile running on FusionPBX's configuration"
+}
+
+fusionpbx_down() {
+    ( cd interop && docker compose --profile fusionpbx rm -sfv fusionpbx fusionpbx-db ) >/dev/null 2>&1
+    docker volume rm "${COMPOSE_PROJECT_NAME:-sipral-interop}_fusionpbx" >/dev/null 2>&1
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = fusionpbx ]; then
+    step "FusionPBX -- its own configuration on FreeSWITCH, straight at it"
+    if fusionpbx_up; then
+        flows fusionpbx fusionpbx && pass "fusionpbx" || fail "fusionpbx"
+        step "FusionPBX's own echo, *9196"
+        lab_run "a call to FusionPBX's own echo" $((LAB_START_S + LAB_CALL_S)) \
+            --network "$LAB_NETWORK" \
+            -e SIPRAL_REQUIRE_AUDIO=1 -e SIPRAL_FLOWS=call \
+            -v "$HARNESS:/harness:ro" \
+            debian:trixie-slim /harness fusionpbx 5060 '*9196' \
+            && pass "a call to FusionPBX's own echo, the audio sent heard back" \
+            || fail "a call to FusionPBX's own echo"
+    fi
+    fusionpbx_down
 fi
 
 if [ "$WANT" = all ] || [ "$WANT" = robust ]; then

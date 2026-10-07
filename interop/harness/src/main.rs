@@ -384,8 +384,12 @@ fn main() -> ExitCode {
     // Asterisk names back never came back through the proxy from FreeSWITCH,
     // and a flow is not run where it is known not to pass until the reason is
     // found
-    if server == "asterisk" {
+    // FusionPBX's 9003 is the lab's own too (interop/fusionpbx), with no
+    // proxy in front of it either
+    if server == "asterisk" || server == "fusionpbx" {
         flows.push(Flow::Dtmf4733);
+    }
+    if server == "asterisk" {
         flows.push(Flow::Renumbered);
         flows.push(Flow::DtmfInfo);
         flows.push(Flow::Srtp);
