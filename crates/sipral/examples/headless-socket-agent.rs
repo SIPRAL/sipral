@@ -453,6 +453,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        // an ended call's RTCP BYE: this binary binds no RTCP socket and sends no reports, so the
+        // goodbyes are let go here rather than left queued in the engine call after call
+        while endpoint.engine.poll_farewell().is_some() {}
+
         if drain_agent(&reader, &mut endpoint, &mut bridge, &mut out.control, turn).is_break() {
             println!("the agent's socket closed");
             return Ok(());

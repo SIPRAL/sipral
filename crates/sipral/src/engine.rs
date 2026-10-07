@@ -85,6 +85,13 @@ const COMFORT_NOISE: &str = "CN";
 #[cfg(feature = "ice")]
 const EARLY_CHECKS: usize = 16;
 
+/// How many ended calls' goodbyes wait for [`MediaEngine::poll_farewell`] before the oldest is
+/// dropped.
+///
+/// An application that never polls them would otherwise keep every call's RTCP BYE for the life of
+/// the process; a goodbye that old is worthless anyway, as the far end has long timed the stream out.
+const FAREWELL_CEILING: usize = 256;
+
 /// How long a kept check is still worth answering. With the RFC 8489 §6.2.1 defaults (Rc 7, Rm 16,
 /// RTO 500 ms) the far end gives up after 39.5 s.
 #[cfg(feature = "ice")]
@@ -947,8 +954,16 @@ impl MediaEngine {
         }
         #[cfg(not(feature = "ice"))]
         let _ = local;
-        self.farewells
-            .push_back((call, datagram.destination, datagram.payload.to_vec()));
+        self.keep_farewell((call, datagram.destination, datagram.payload.to_vec()));
+    }
+
+    /// Queue one goodbye for [`MediaEngine::poll_farewell`], dropping the oldest past
+    /// [`FAREWELL_CEILING`].
+    fn keep_farewell(&mut self, farewell: (CallHandle, SocketAddr, Vec<u8>)) {
+        if self.farewells.len() >= FAREWELL_CEILING {
+            self.farewells.pop_front();
+        }
+        self.farewells.push_back(farewell);
     }
 
     /// Give a relay back to its server among `call`'s farewells.
@@ -992,7 +1007,7 @@ impl MediaEngine {
                     },
                 ));
             } else {
-                self.farewells.push_back((call, destination, payload));
+                self.keep_farewell((call, destination, payload));
             }
         }
     }
@@ -2529,6 +2544,9 @@ impl MediaEngine {
     /// Loop until `None` after draining events. A call with a relay ([`CallMedia::relay`]) also
     /// queues here the Refresh with lifetime zero that deletes the allocation (RFC 8656 §8), unless
     /// another fork branch still holds it.
+    ///
+    /// At most 256 wait; past that the oldest is dropped, so an application that never asks holds
+    /// a bounded queue rather than every call's goodbye.
     #[must_use]
     pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.farewells.pop_front()
@@ -3477,11 +3495,13 @@ impl MediaEngine {
             match address {
                 Some(local) => self.farewells_of(call, local, said),
                 // with no socket the relay connection cannot be named; the datagrams still go
-                None => self.farewells.extend(
-                    said.into_iter()
-                        .filter(|(_, transport, _)| !transport.is_stream())
-                        .map(|(destination, _, payload)| (call, destination, payload)),
-                ),
+                None => {
+                    for (destination, transport, payload) in said {
+                        if !transport.is_stream() {
+                            self.keep_farewell((call, destination, payload));
+                        }
+                    }
+                }
             }
         }
         // best effort; `Ok(false)` means the account named no collector

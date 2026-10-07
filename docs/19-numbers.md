@@ -1374,6 +1374,25 @@ six hours and ended at 5.9 MB: 72 KB more over the last fifteen hours, in steps 
 few hours apart. That is small, and it is not flat either; whether it levels off is what
 the week-long run, started on 7 October at 21:58 UTC on the same machine, is for.
 
+Over the day resident memory went from 4.7 MB idle to 5.8 MB in the first six hours and
+5.9 MB at 24 hours: 72 KB in the last fifteen hours, in 4 KB pages, over about 230 calls and
+650 registrations. Resident memory cannot tell a leak from an allocator keeping pages, so
+`crates/sipral-ffi/tests/endurance_memory.rs` replays the same work compressed, with a
+counting allocator: an answering stack registered for two minutes and challenged with a new
+nonce each time, a call from the far end, a second of tone each way, the far end's "#", the
+answering stack's BYE, and three simulated minutes before the next call. Before the fix the
+library held 295 KB in 1,213 blocks after 300 calls, 414 KB in 2,419 after 900 and 912 KB in
+4,813 after 2,100: two blocks and about 400 bytes a call, every one of them an ended call's
+RTCP BYE that `MediaEngine` kept until `poll_farewell`, which the soak's application never
+called. With the queue capped at 256 and the application draining it, both stacks together
+hold 203,479 bytes in 613 blocks after 5,000 calls and 10,062 registrations, and exactly the
+same after 15,000 and 35,000 (70,428 registrations): a plateau. It forms within the first
+hundred calls — 46.5 KB for two idle stacks, 133 KB after the first call (the transaction
+and dialog tables reaching their working size, the codecs and the per-call diagnostic record
+ring) and 203 KB once that ring is full — and the rest of the resident growth is the
+allocator's. The test fails if the bytes held grow by more than 16 KB, or the blocks by more
+than 16, between the first stretch of calls and the last.
+
 ## What would make these numbers worse
 
 A codec that is not G.711: Opus and G.729 both cost two hundred and fifty
