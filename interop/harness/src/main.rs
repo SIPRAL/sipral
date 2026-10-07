@@ -63,6 +63,7 @@ mod scale;
 mod volume;
 #[cfg(all(feature = "wasapi", target_os = "windows"))]
 mod wasapi;
+mod websocket;
 
 use std::collections::HashMap;
 use std::env;
@@ -694,6 +695,29 @@ fn extra_flows(
             pass,
         };
         failures += inband::run_named(&lab, wanted);
+    }
+    // SIP over a WebSocket the stack opens, at Asterisk's HTTP server on
+    // 8088 (interop/asterisk/http.conf) as interop/asterisk's `labuser-ws`,
+    // and only when named: see `websocket`
+    if server == "asterisk" && wanted.split(',').any(|name| name.trim() == "websocket") {
+        let ws_user = env::var("SIPRAL_USER_WS").unwrap_or_else(|_| "labuser-ws".to_owned());
+        let ws_pass = env::var("SIPRAL_PASS_WS").unwrap_or_else(|_| pass.to_owned());
+        let port = env::var("SIPRAL_WS_PORT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(8088);
+        match websocket::run(
+            server,
+            SocketAddr::new(remote.ip(), port),
+            &ws_user,
+            &ws_pass,
+        ) {
+            Ok(said) => println!("  pass  SIP over a WebSocket the stack opened{said}"),
+            Err(why) => {
+                println!("  FAIL  SIP over a WebSocket the stack opened — {why}");
+                failures += 1;
+            }
+        }
     }
     // a call whose address moves under it, and only when named: see
     // `moved`'s own module doc for what `scripts/lab.sh` does to the
@@ -3414,6 +3438,8 @@ mod tests {
             latency::MEDIA_SEED => crate::latency::MEDIA_SEED,
             moved::SEED => crate::moved::SEED,
             moved::MEDIA_SEED => crate::moved::MEDIA_SEED,
+            websocket::SEED => crate::websocket::SEED,
+            websocket::MEDIA_SEED => crate::websocket::MEDIA_SEED,
             inband::INBAND_SEED => crate::inband::INBAND_SEED,
             inband::INBAND_MEDIA_SEED => crate::inband::INBAND_MEDIA_SEED,
             inband::AMD_SEED => crate::inband::AMD_SEED,

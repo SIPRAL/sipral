@@ -49,7 +49,8 @@ whether it is met; *in part* is followed by what is missing.
 | 5627 | Globally routable UA URIs (GRUU): asked for on REGISTER, learned from this instance's `Contact`, and used as the `Contact` of what opens a dialog, public or temporary as §3.3 says. Self-made GRUUs and the RFC 5628 event extension are not | sipral-ua | phase 2, built |
 | 7315 | P-Associated-URI, reported from the 200 OK to REGISTER and not acted on (obsoletes RFC 3455) | sipral-ua | phase 2, built |
 | 8599 | Push notification bindings: `pn-provider`, `pn-prid`, `pn-param`, and the 555 refusal | sipral-ua | phase 4 |
-| 7118 | SIP over WebSocket | sipral-core | phase 1, in part |
+| 7118 | SIP over WebSocket: `WS` and `WSS` in `Via` and `transport=`, one message per WebSocket message, the `sip` subprotocol asked for and required, and a client's `Via` and `Contact` naming a random host under `.invalid` (Appendix B.1) | sipral-core, sipral-ua | phase 2, built |
+| 6455 | The WebSocket protocol, client side, on a connection the application opened: the opening handshake and its `Sec-WebSocket-Accept`, masked frames, fragments reassembled, ping and pong, the closing handshake. No extensions | sipral-ua | phase 2, built |
 | 3323 / 3325 | Privacy, and asserted identity: `P-Asserted-Identity` read behind a per-account trust gate (§8), `Privacy` read and written, anonymous calls per account (§4.1.1.3) with the identity asserted only toward a trusted peer. No privacy service | sipral-ua | phase 2, built |
 | 3326 | The Reason header: read on the BYE, the CANCEL or the refusal that ends a call, written on a hangup and on the BYE to a fork branch that answered too late | sipral-ua | phase 2, built |
 | 6432 | Q.850 `Reason` values in responses: read on a refusal, written on this end's own | sipral-ua | phase 2, built |

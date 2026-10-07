@@ -403,7 +403,15 @@ impl Endpoint {
         let Ok(via) = response.top_via() else {
             return;
         };
-        if !via::is_ours(&via, advertised, flow.protocol) {
+        let named = self
+            .transports
+            .get(flow.transport)
+            .and_then(|bound| bound.sent_by.as_deref());
+        let ours = match named {
+            Some(name) => via::is_ours_named(&via, name, flow.protocol),
+            None => via::is_ours(&via, advertised, flow.protocol),
+        };
+        if !ours {
             return;
         }
         match self.transactions.client_for(response) {

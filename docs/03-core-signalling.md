@@ -140,11 +140,15 @@ the socket.
   caller supplied, or configuration. WebSocket is not a byte stream to the SIP
   layer: RFC 7118 §4.2 puts exactly one SIP message in each WebSocket
   message, so a frame is handed to the core whole, like a datagram, and never
-  goes through the `Content-Length` framer that TCP and TLS need. What is not
-  here is the rest of RFC 7118: the handshake, the `ws` URI scheme and the
-  `transport=ws` parameter on `Contact` and `Route` are phase 2, and
-  `crates/sipral-core/src/endpoint/transport.rs` says so at the declaration.
-  An application that binds a WebSocket today does the handshake itself.
+  goes through the `Content-Length` framer that TCP and TLS need. The
+  WebSocket itself can be the stack's: an application that binds its TCP
+  connection (or a TLS one it secured) as `Ws` or `Wss` *with the far end
+  named* gets the RFC 6455 client from `sipral-ua` (`sipral_ua::websocket`)
+  — the handshake asking for the `sip` subprotocol, every message in a
+  masked frame, fragments put back together, pings answered and sent, a
+  close answered — and a `Via` and `Contact` naming a random host under
+  `.invalid` (RFC 7118 Appendix B.1). One that binds it without a far end
+  does the handshake itself and feeds each message in as a datagram.
 - **Write it compact first.** A request bound for a datagram that is over the
   line below is written in RFC 3261 §7.3.3's compact form before anything
   else: the one-letter names RFC 3261 gives `Via`, `From`, `To`, `Call-ID`,

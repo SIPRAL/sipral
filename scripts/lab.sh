@@ -35,7 +35,12 @@
 #                               network and connected again elsewhere
 #                               mid-call, the echo heard after (part of the
 #                               Asterisk run too)
-#   scripts/lab.sh icelite      only the call that requires ICE placed at a
+#   scripts/lab.sh websocket    only SIP over a WebSocket the stack opens on
+#                               the harness's TCP connection (RFC 7118):
+#                               registered at Asterisk's /ws as labuser-ws,
+#                               the echo called and heard, the binding given
+#                               back (part of the Asterisk run too)
+#   scripts/lab.sh icelite     only the call that requires ICE placed at a
 #                               C ABI stack answering as ICE-lite (part of
 #                               the ice run too)
 #   scripts/lab.sh ice          only the ICE steps: a call that requires ICE,
@@ -3355,6 +3360,39 @@ if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = move ]; then
     step "a call whose address moves under it -- straight at Asterisk"
     move_flow && pass "offered again at the new address, and the echo heard after" \
         || fail "a call whose address moves under it"
+fi
+
+# SIP over a WebSocket the stack opens itself (RFC 7118): the harness opens a
+# TCP connection to Asterisk's HTTP server (interop/asterisk/http.conf) and
+# binds it as a WS transport with its far end named, and the stack does the
+# rest -- the handshake on /ws, the frames, the `.invalid` Via and Contact --
+# registering as interop/asterisk/pjsip.conf's labuser-ws, calling the echo
+# and hearing it (interop/harness/src/websocket.rs), with a capture of its own.
+websocket_flow() {
+    lab_run "the WebSocket flow's call" $((LAB_START_APT_S + LAB_CALL_S)) \
+        --network "$LAB_NETWORK" \
+        --cap-add NET_RAW --cap-add NET_ADMIN \
+        -e SIPRAL_FLOWS=websocket \
+        ${SIPRAL_HARNESS_SEED:+-e SIPRAL_HARNESS_SEED} \
+        -v "$HARNESS:/harness:ro" \
+        -v "$ROOT/interop/pcap:/pcap" \
+        debian:trixie-slim sh -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -qq update >/dev/null 2>&1
+            apt-get -qq install -y tcpdump >/dev/null 2>&1
+            tcpdump -i any -s 0 -U -w /pcap/websocket-asterisk.pcap 2>/dev/null &
+            sleep 2
+            /harness asterisk 5060 9000
+            status=\$?
+            sleep 1
+            kill %1 2>/dev/null
+            exit \$status"
+}
+
+if [ "$WANT" = all ] || [ "$WANT" = asterisk ] || [ "$WANT" = websocket ]; then
+    step "SIP over a WebSocket the stack opened -- straight at Asterisk"
+    websocket_flow && pass "registered, called and heard the echo over the WebSocket" \
+        || fail "SIP over a WebSocket the stack opened"
 fi
 
 # The one step in this file where the far end is a client stack rather than

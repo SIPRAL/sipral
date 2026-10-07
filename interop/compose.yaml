@@ -80,6 +80,8 @@ services:
       # interop/wasapi's sees the transport unchanged — see that file's
       # comment and interop/wasapi/compose.override.yaml
       - ./asterisk/pjsip_local.conf:/etc/asterisk/pjsip_local.conf:ro
+      # 8.13.5's SIP over WebSocket: the HTTP server on the lab network
+      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
     networks: [lab]
 
   # The phone-to-phone peer: a second client stack, registered at

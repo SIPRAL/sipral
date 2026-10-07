@@ -484,9 +484,10 @@ pub enum BuildError { MissingField(&'static str), IllegalValue(&'static str), Ow
 /// must be copied into an accumulation buffer, because a message can arrive
 /// split across reads. Frames on Content-Length (RFC 3261 §18.3).
 ///
-/// WebSocket (phase 2, RFC 7118) does not use this: each WebSocket message
-/// carries exactly one SIP message, so the caller feeds a frame as
-/// `Input::Datagram` on a transport bound with `TransportProtocol::Ws`/`Wss`.
+/// WebSocket (RFC 7118) does not use this: each WebSocket message carries
+/// exactly one SIP message, so it is fed as `Input::Datagram` on a transport
+/// bound with `TransportProtocol::Ws`/`Wss` — by the caller that runs the
+/// WebSocket itself, or by `sipral_ua::websocket` when the stack runs it.
 pub struct StreamFramer { /* buffer, its own scratch, cursor, limits */ }
 impl StreamFramer {
     pub fn new(max_message_bytes: u32) -> Self;
@@ -645,9 +646,10 @@ bytes without asking again. The ACK for a non-2xx is the transaction's
 ## Input and output
 
 ```rust
-/// UDP, TCP and TLS in phase 1. WS and WSS are named because RFC 7118
-/// registers them as `sent-protocol` transports and a `Via` carrying one is
-/// not malformed; the rest of RFC 7118 is phase 2.
+/// UDP, TCP, TLS, WS and WSS. A WebSocket is a message transport here, one
+/// message per frame (RFC 7118 §4.2); the handshake and the frames are
+/// `sipral_ua::websocket`'s, which names the transport's `.invalid` host
+/// with `Endpoint::advertise_name`.
 pub enum TransportProtocol { Udp, Tcp, Tls, Ws, Wss }
 impl TransportProtocol {
     pub fn as_str(self) -> &'static str;              // the Via token: UDP, TCP, TLS, WS, WSS
@@ -1015,6 +1017,13 @@ impl Endpoint {
     /// looked up in before that connection exists.
     pub fn transport_to(&self, protocol: TransportProtocol, destination: SocketAddr) -> Option<TransportId>;
     pub fn any_bound_address(&self) -> Option<SocketAddr>;
+
+    /// A name advertised as the `sent-by` of everything sent on `transport`
+    /// in place of its bound address, and recognised in a response's `Via`
+    /// (§18.1.2): a WebSocket client's `.invalid` host (RFC 7118 Appendix
+    /// B.1). Lasts until the transport is bound again; `false` for a
+    /// transport not bound or a name that is not a `hostname`.
+    pub fn advertise_name(&mut self, transport: TransportId, name: &str) -> bool;
 
     // -- UAS ------------------------------------------------------------------
     /// 100, or any final response. Rejected with `MustBeReliable` if the

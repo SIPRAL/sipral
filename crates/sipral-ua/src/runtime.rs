@@ -29,7 +29,9 @@
 //!
 //! **TLS.** No implementation is linked here and none will be.
 //! `TransportProtocol::Tls` describes a transport the caller has already
-//! secured; this loop opens plain TCP and plain UDP, and stops there.
+//! secured; this loop opens plain TCP and plain UDP, and stops there. A
+//! plain WebSocket is TCP to this loop: it opens the connection, and the
+//! agent does the rest ([`crate::websocket`]).
 //!
 //! One more thing it does not do, and this one is `std::net`'s fault: a
 //! datagram socket cannot say which of several local addresses a packet
@@ -456,10 +458,14 @@ impl Runtime {
     }
 
     /// §18.1.1's switch: a message too large for a datagram needs a stream,
-    /// and opening one is the caller's.
+    /// and opening one is the caller's. Also an account's connection of its
+    /// own, a WebSocket among them: the TCP connection is opened here and
+    /// bound with its far end named, and the agent does the handshake on it
+    /// ([`crate::websocket`]).
     fn open(&mut self, protocol: TransportProtocol, destination: SocketAddr) {
-        // TLS is a transport the caller secures; this loop does not link one
-        if protocol != TransportProtocol::Tcp {
+        // TLS, and a WebSocket on TLS, are transports the caller secures;
+        // this loop does not link one
+        if !matches!(protocol, TransportProtocol::Tcp | TransportProtocol::Ws) {
             return;
         }
         let Ok(socket) = TcpStream::connect(destination) else {

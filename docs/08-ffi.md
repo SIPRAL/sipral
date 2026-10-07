@@ -489,7 +489,17 @@ the same id is bound.
 **The stream path is carried, and the promotion onto it is now too.**
 TCP and TLS work end to end: bytes go in as fragments, the layer
 below frames them on `Content-Length` (§18.3), and a connection that closes
-retires its transport. A WebSocket frame goes in as a datagram, because RFC
+retires its transport. A WebSocket is the stack's when its TCP or TLS
+connection is bound as `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` with
+`remote` given: the handshake is the first thing `sipral_stack_poll_transmit`
+hands over, every read goes to `sipral_stack_receive_stream`, frames come out
+to be written, and a WebSocket the stack gives up on — refused, broken, closed
+by the server, a ping unanswered — is `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`
+with the reason in `detail`. An account reaches one with `stream_protocol`
+set to `SIPRAL_TRANSPORT_WS`, asked for and reconnected the way a TCP or TLS
+connection of its own is. The handshake asks for `/ws` with the far end's
+address as its `Host`; no field sets either yet. Bound without `remote`, the
+application runs the WebSocket and a frame goes in as a datagram, because RFC
 7118 §4.2 puts one message in each. §18.1.1 — a request that outgrew a
 datagram going out on a stream instead — arrives as
 `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, naming the protocol and the destination

@@ -259,6 +259,19 @@ binary to reproduce its notice. Its `LICENSE` reads:
 followed by the three BSD conditions and the disclaimer, which a binary
 containing Sipral must carry once this crate is linked into it.
 
+### SHA-1 for the WebSocket handshake
+
+`sipral-ua` names `sha1` for the one thing RFC 6455 §4.2.2 uses it for: the
+`Sec-WebSocket-Accept` a server owes for the key of a WebSocket the stack
+opens (`crates/sipral-ua/src/websocket.rs`). It is not used for anything a
+secret depends on. The WebSocket protocol itself — the handshake, the frames,
+the masking — is written in-tree; only the hash is taken. Every crate under
+it is already listed above with `sha2`.
+
+| Component | What it is | Licence |
+|---|---|---|
+| `sha1` 0.11.0 | SHA-1 | MIT OR Apache-2.0 |
+
 ### Certificates under STIR
 
 `sipral-stir` is STIR/SHAKEN caller authentication, and everything in it

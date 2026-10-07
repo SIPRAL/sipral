@@ -2637,17 +2637,25 @@ fn signalling(
     // keeps a connection the stack will never write to again, and does not
     // open another when the stack asks for one to the same place.
     if let UaEvent::Unclaimed(sipral_core::endpoint::Event::FlowFailed { transport }) = said {
+        // a WebSocket the stack runs says why it gave up, in its own words
+        let (error, detail) = match state.agent.websocket_failure(transport) {
+            Some((kind, why)) => (crate::transport::error_of(kind), String::from(why)),
+            None => (
+                crate::transport::SipralTransportError::TimedOut,
+                String::from(
+                    "no answer to a keep-alive ping within ten seconds (RFC 5626 section 4.4.1)",
+                ),
+            ),
+        };
         let lost = crate::transport::Lost {
             transport: transport.0,
             protocol: state
                 .transports
                 .protocol_of(transport.0)
                 .map_or(0, crate::stack::SipralTransport::named),
-            error: crate::transport::SipralTransportError::TimedOut,
+            error,
             tls: crate::transport::SipralTlsFailure::None,
-            detail: String::from(
-                "no answer to a keep-alive ping within ten seconds (RFC 5626 section 4.4.1)",
-            ),
+            detail,
         };
         let (event, text) = lost.raised(stack);
         raised.push(Delivery {

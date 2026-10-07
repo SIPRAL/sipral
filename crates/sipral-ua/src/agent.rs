@@ -180,6 +180,8 @@ pub struct UserAgent {
     pub(crate) recording_server: bool,
     /// The registrar flows kept open through a NAT ([`crate::keepalive`]).
     pub(crate) keepalives: crate::keepalive::Keepalives,
+    /// The WebSocket connections this agent runs ([`crate::websocket`]).
+    pub(crate) websockets: crate::websocket::WebSockets,
     /// The addresses of the accounts that find their server by name.
     pub(crate) locations: crate::locate::Locations,
     /// The accounts on a connection of their own that asked for one, and
@@ -307,6 +309,7 @@ impl UserAgent {
             info_handed_over: false,
             recording_server: false,
             keepalives: crate::keepalive::Keepalives::default(),
+            websockets: crate::websocket::WebSockets::default(),
             locations: crate::locate::Locations::default(),
             flows_wanted: HashMap::new(),
             flows_asked: std::collections::HashSet::new(),
@@ -363,15 +366,28 @@ impl UserAgent {
     /// # Errors
     /// As [`Endpoint::receive`].
     pub fn receive(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
-        // where the bytes came from is on the input and nowhere else by the
-        // time an event names them, and screening an INVITE needs it
-        self.guard.arrived(&input);
         // recorded before anything else touches it: what arrived is the only
         // thing a recording ever holds of the wire, never what this end sent
-        // (`docs/18-replay.md`)
+        // (`docs/18-replay.md`). A WebSocket's bytes are recorded as they
+        // came off the connection, and the messages in them are found again
+        // when the recording is replayed
         if let Some(recorder) = self.recorder.as_mut() {
             recorder.arrived(&input, now);
         }
+        let outcome = match self.websocket_input(input, now) {
+            Some(outcome) => outcome,
+            None => self.take(input, now),
+        };
+        self.drain(now);
+        outcome
+    }
+
+    /// One input, given to the endpoint and followed up here: everything
+    /// [`UserAgent::receive`] does but recording it and draining after it.
+    pub(crate) fn take(&mut self, input: Input<'_>, now: Instant) -> Result<(), ReceiveError> {
+        // where the bytes came from is on the input and nowhere else by the
+        // time an event names them, and screening an INVITE needs it
+        self.guard.arrived(&input);
         let bound = crate::announce::bound_transport(&input);
         let lost = match input {
             Input::TransportFailed { transport, .. } | Input::StreamClosed { transport } => {
@@ -384,9 +400,14 @@ impl UserAgent {
             self.flow_lost(transport);
         }
         if let Some(transport) = bound {
+            // a WebSocket this agent runs names itself before anything is
+            // written on it (RFC 7118 Appendix B.1)
+            if let Some(name) = self.websockets.name_of(transport) {
+                let name = name.to_owned();
+                self.endpoint.advertise_name(transport, &name);
+            }
             self.on_transport_bound(transport, now);
         }
-        self.drain(now);
         outcome
     }
 
@@ -407,6 +428,7 @@ impl UserAgent {
         self.fire_stir_timers(now);
         self.fire_publication_timers(now);
         self.fire_stream_wait(now);
+        self.fire_websockets(now);
         self.drain(now);
     }
 
@@ -494,12 +516,24 @@ impl UserAgent {
     /// Bytes to put on a transport. Drain to empty.
     ///
     /// What the endpoint wrote, and then the keep-alives this layer sends to
-    /// a registrar behind a NAT ([`crate::keepalive`]).
+    /// a registrar behind a NAT ([`crate::keepalive`]). On a WebSocket this
+    /// agent runs ([`crate::websocket`]), the bytes are the frames to write:
+    /// the handshake first, every message framed and masked, and the pings,
+    /// pongs and closes the connection needs of its own.
     #[must_use]
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
-        self.endpoint
-            .poll_transmit()
-            .or_else(|| self.poll_keepalive())
+        loop {
+            if let Some(own) = self.poll_websocket() {
+                return Some(own);
+            }
+            let transmit = self
+                .endpoint
+                .poll_transmit()
+                .or_else(|| self.poll_keepalive())?;
+            if let Some(framed) = self.websocket_frame(transmit) {
+                return Some(framed);
+            }
+        }
     }
 
     /// Something the application has to know. Drain to empty.
@@ -524,6 +558,7 @@ impl UserAgent {
             .chain(self.verification_deadline())
             .chain(self.publication_deadline())
             .chain(self.stream_deadline)
+            .chain(self.websockets.deadline())
             .min();
         match (self.endpoint.poll_timeout(), mine) {
             (Some(left), Some(right)) => Some(left.min(right)),

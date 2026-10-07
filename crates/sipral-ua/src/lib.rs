@@ -126,6 +126,9 @@ mod tests;
 mod timers;
 mod transfer;
 mod verification;
+pub mod websocket;
+#[cfg(test)]
+mod websocket_tests;
 
 pub use account::{Account, AccountId, Push};
 pub use agent::UserAgent;
@@ -174,6 +177,7 @@ pub use subscription::{
 pub use verification::{
     Attestation, CallerVerification, StirVerification, VerificationFailure, VerificationOutcome,
 };
+pub use websocket::WebSocketTarget;
 
 /// What a caller needs from the layer below to drive this one, re-exported so
 /// that an application does not have to name `sipral-core` to use a phone.

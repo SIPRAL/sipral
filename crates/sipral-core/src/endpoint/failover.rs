@@ -194,12 +194,7 @@ impl Endpoint {
             .local;
         let cseq = raw.cseq().map_err(|_| SendError::MissingField("CSeq"))?.seq;
         let branch = self.tokens.branch();
-        let via = super::via::local_via(
-            flow.protocol,
-            local,
-            &branch,
-            self.config.always_request_rport,
-        );
+        let via = self.via_on(transport, flow.protocol, local, &branch);
         let message = super::auth::rebuild(&raw, &via, cseq, &[]).map_err(SendError::Build)?;
         let moved = Flow {
             transport,

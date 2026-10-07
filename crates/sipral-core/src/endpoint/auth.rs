@@ -539,12 +539,7 @@ impl Endpoint {
         let mut local = bound.local;
         let branch = self.tokens.branch();
         let mut flow = held.flow;
-        let mut via = super::via::local_via(
-            flow.protocol,
-            local,
-            &branch,
-            self.config.always_request_rport,
-        );
+        let mut via = self.via_on(flow.transport, flow.protocol, local, &branch);
 
         let mut message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
             .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
@@ -582,12 +577,7 @@ impl Endpoint {
         if let Some((stream, stream_local)) = promoted {
             flow = stream;
             local = stream_local;
-            via = super::via::local_via(
-                flow.protocol,
-                local,
-                &branch,
-                self.config.always_request_rport,
-            );
+            via = self.via_on(flow.transport, flow.protocol, local, &branch);
             message = rebuild(&held.request.as_raw(), &via, cseq, answers.fields())
                 .map_err(|error| AuthRetryError::Unsendable(error.into()))?;
         }

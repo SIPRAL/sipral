@@ -57,6 +57,10 @@ pub(crate) struct Bound {
     pub(crate) local: SocketAddr,
     /// The far end, for a connection.
     pub(crate) remote: Option<SocketAddr>,
+    /// A name advertised as `sent-by` instead of `local`, when the layer
+    /// above set one: a WebSocket client's `.invalid` host (RFC 7118
+    /// Appendix B.1). Cleared by every bind.
+    pub(crate) sent_by: Option<Box<str>>,
     /// Reassembly, on a byte stream only.
     pub(crate) framer: Option<StreamFramer>,
     /// The keep-alive scheduled for this connection, so that losing the
@@ -116,6 +120,7 @@ impl Transports {
                 protocol,
                 local,
                 remote,
+                sent_by: None,
                 framer: protocol
                     .is_stream()
                     .then(|| StreamFramer::with_limits(limits)),

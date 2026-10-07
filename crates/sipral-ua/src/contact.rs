@@ -52,6 +52,39 @@ pub(crate) fn contact_at(contact: &Uri, address: SocketAddr) -> Option<Uri> {
     Uri::parse_str(&rewritten).ok()
 }
 
+/// `contact` with its host and port replaced by `name`, and the `transport`
+/// parameter `protocol` needs added when it has none, or `None` for a URI
+/// that is not `sip:` or `sips:`.
+///
+/// What a WebSocket client registers (RFC 7118 Appendix B.1 and §8's
+/// example): `sip:alice@df7jal23ls0d.invalid;transport=ws`. The user part,
+/// the other parameters and the headers stay as written.
+pub(crate) fn contact_on_name(
+    contact: &Uri,
+    name: &str,
+    protocol: TransportProtocol,
+) -> Option<Uri> {
+    let text = contact.as_str();
+    let (start, end) = hostport_span(text)?;
+    let tail = text.get(end..)?;
+    let parameters = tail.get(..tail.find('?').unwrap_or(tail.len()))?;
+    let has_transport = parameters.split(';').any(|parameter| {
+        parameter
+            .split('=')
+            .next()
+            .is_some_and(|key| key.trim().eq_ignore_ascii_case("transport"))
+    });
+    let mut rewritten = String::with_capacity(text.len() + name.len() + 16);
+    rewritten.push_str(text.get(..start)?);
+    rewritten.push_str(name);
+    if !has_transport {
+        rewritten.push_str(";transport=");
+        rewritten.push_str(&protocol.as_str().to_ascii_lowercase());
+    }
+    rewritten.push_str(tail);
+    Uri::parse_str(&rewritten).ok()
+}
+
 /// Whether `contact` names `address`: the same IP literal, and the same port
 /// or no port where `address` has the one RFC 3261 §19.1.2 makes the default
 /// for the scheme.
@@ -115,10 +148,35 @@ mod tests {
     use sipral_core::endpoint::TransportProtocol;
     use sipral_core::msg::Uri;
 
-    use super::{contact_at, contact_for_arrival, contact_names};
+    use super::{contact_at, contact_for_arrival, contact_names, contact_on_name};
 
     fn uri(text: &str) -> Uri {
         Uri::parse_str(text).expect("a URI")
+    }
+
+    #[test]
+    fn a_websocket_contact_names_the_invalid_host_and_says_how_it_is_reached() {
+        let named = |text: &str| {
+            contact_on_name(&uri(text), "df7jal23ls0d.invalid", TransportProtocol::Ws)
+                .expect("a sip URI")
+                .as_str()
+                .to_owned()
+        };
+        assert_eq!(
+            named("sip:alice@192.0.2.10:40000"),
+            "sip:alice@df7jal23ls0d.invalid;transport=ws"
+        );
+        assert_eq!(
+            named("sip:alice@192.0.2.10:40000;ob?X-Hint=1"),
+            "sip:alice@df7jal23ls0d.invalid;transport=ws;ob?X-Hint=1"
+        );
+        assert_eq!(
+            named("sip:alice@192.0.2.10;Transport=WS;ob"),
+            "sip:alice@df7jal23ls0d.invalid;Transport=WS;ob"
+        );
+        assert!(
+            contact_on_name(&uri("tel:+15551234567"), "x.invalid", TransportProtocol::Ws).is_none()
+        );
     }
 
     fn at(text: &str) -> SocketAddr {

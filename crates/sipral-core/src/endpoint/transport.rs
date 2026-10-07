@@ -20,9 +20,10 @@
 //! `sent-protocol` transports and the stack must not treat a `Via` that
 //! carries them as malformed. They are not stream transports: RFC 7118 §4.2
 //! puts exactly one SIP message in each WebSocket message, so a frame is fed
-//! in whole, the way a datagram is. The rest of RFC 7118 — the handshake, the
-//! `ws-URI`, the `transport=ws` parameter on `Contact` and `Route` — is phase
-//! 2 and is not implemented.
+//! in whole, the way a datagram is. The WebSocket itself — the handshake, the
+//! frames, the pings — is `sipral-ua`'s (`sipral_ua::websocket`), which feeds
+//! each message it unframes in here as a datagram and names the transport's
+//! `.invalid` host with [`super::Endpoint::advertise_name`].
 
 use core::fmt;
 use std::net::{IpAddr, SocketAddr};
@@ -122,7 +123,7 @@ impl TransportProtocol {
     ///
     /// RFC 3261 §18.1.1: "It is 5060 for UDP, TCP and SCTP, 5061 for TLS."
     /// There is no answer for WebSocket: the port is whichever one the
-    /// `ws-URI` was dialled on, and that URI never reaches this layer.
+    /// connection was made to, and that is the application's.
     #[must_use]
     pub const fn default_port(self) -> Option<u16> {
         match self {

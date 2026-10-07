@@ -3243,6 +3243,79 @@ fn dtmf_info_seeds() -> Result<Vec<Seed>, Wrong> {
     Ok(out)
 }
 
+/// A frame as a WebSocket server writes it (RFC 6455 §5.2): unmasked, with
+/// the payload length in its shortest form.
+fn server_frame(fin: bool, opcode: u8, payload: &[u8]) -> Result<Vec<u8>, Wrong> {
+    let mut out = vec![if fin { 0x80 | opcode } else { opcode }];
+    match payload.len() {
+        short @ 0..=125 => {
+            out.push(u8::try_from(short).map_err(|_| Wrong("a short frame".to_owned()))?);
+        }
+        medium => {
+            out.push(126);
+            let length = u16::try_from(medium)
+                .map_err(|_| Wrong(format!("a frame seed of {medium} bytes is too long")))?;
+            out.extend_from_slice(&length.to_be_bytes());
+        }
+    }
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+/// The WebSocket reader's input is a read size and then the stream: the
+/// frames a SIP server sends on a WebSocket (RFC 7118 §4.2), one message
+/// whole, one fragmented around a ping, and a close.
+fn websocket_seeds() -> Result<Vec<Seed>, Wrong> {
+    let response = ok_response()?;
+    let request = invite()?;
+    let mut whole = vec![255];
+    whole.extend(server_frame(true, 0x1, &response)?);
+    let (first, rest) = request.split_at(request.len() / 2);
+    let mut fragmented = vec![1];
+    fragmented.extend(server_frame(false, 0x1, first)?);
+    fragmented.extend(server_frame(true, 0x9, b"keep-alive")?);
+    fragmented.extend(server_frame(true, 0x0, rest)?);
+    let mut close = vec![3];
+    let mut body = 1001_u16.to_be_bytes().to_vec();
+    body.extend_from_slice(b"going away");
+    close.extend(server_frame(true, 0xA, b"")?);
+    close.extend(server_frame(true, 0x8, &body)?);
+    let out = vec![
+        ("ok-in-one-frame", whole),
+        ("invite-fragmented-around-a-ping", fragmented),
+        ("pong-then-close", close),
+    ];
+    for ((name, bytes), frames) in out.iter().zip([1, 2, 2]) {
+        through_websocket(name, bytes, frames)?;
+    }
+    Ok(out)
+}
+
+/// One WebSocket seed, walked the way the target walks it.
+fn through_websocket(name: &str, seed: &[u8], expected: usize) -> Result<(), Wrong> {
+    let Some((&first, rest)) = seed.split_first() else {
+        return Err(Wrong(format!("the {name} seed has no read size in front")));
+    };
+    let mut reader = sipral_ua::websocket::FrameReader::new();
+    let mut count = 0;
+    for piece in rest.chunks(usize::from(first).max(1)) {
+        reader.push(piece);
+        while reader
+            .next_frame()
+            .map_err(|why| Wrong(format!("the {name} seed does not read: {why}")))?
+            .is_some()
+        {
+            count += 1;
+        }
+    }
+    if count == expected && reader.pending() == 0 {
+        return Ok(());
+    }
+    Err(Wrong(format!(
+        "the {name} seed read as {count} frames and it is meant to be {expected}"
+    )))
+}
+
 // ---------------------------------------------------------------- writing
 
 /// Every target, and the seeds it starts from.
@@ -3282,6 +3355,7 @@ fn corpus() -> Result<Vec<(&'static str, Vec<Seed>)>, Wrong> {
         ("stun", stun_seeds()?),
         ("turn", turn_seeds()?),
         ("turn_client", turn_client_seeds()?),
+        ("websocket", websocket_seeds()?),
     ])
 }
 

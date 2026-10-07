@@ -313,6 +313,10 @@ pub use sipral_ua::Direction as CallDirection;
 /// What [`UserAgent::stop_recording`] hands back, for `redacted_recording`
 /// to be named against.
 pub use sipral_ua::Recording;
+/// SIP over a WebSocket the stack opens on the application's connection
+/// (RFC 7118): where it asks to go, set per far end with
+/// [`UserAgent::set_websocket_target`].
+pub use sipral_ua::WebSocketTarget;
 /// RFC 3263 for an account that names its registrar or its outbound proxy
 /// ([`Account::located`]): the lookups [`UaEvent::LookupWanted`] asks for, the
 /// answers [`UserAgent::looked_up`] takes, and the procedure itself.

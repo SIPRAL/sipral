@@ -45,13 +45,39 @@ pub(crate) fn local_via(
     branch: &[u8],
     request_rport: bool,
 ) -> Box<[u8]> {
+    // Display for SocketAddr is the sent-by grammar already: an IPv6 literal
+    // in brackets, the port after a colon
+    via_with(
+        protocol,
+        local.to_string().as_bytes(),
+        branch,
+        request_rport,
+    )
+}
+
+/// The `Via` value for a request on a transport that advertises a name
+/// rather than an address: a WebSocket client's `.invalid` host (RFC 7118
+/// Appendix B.1), written without a port because there is none to give.
+pub(crate) fn named_via(
+    protocol: TransportProtocol,
+    name: &str,
+    branch: &[u8],
+    request_rport: bool,
+) -> Box<[u8]> {
+    via_with(protocol, name.as_bytes(), branch, request_rport)
+}
+
+fn via_with(
+    protocol: TransportProtocol,
+    sent_by: &[u8],
+    branch: &[u8],
+    request_rport: bool,
+) -> Box<[u8]> {
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(b"SIP/2.0/");
     out.extend_from_slice(protocol.as_str().as_bytes());
     out.push(b' ');
-    // Display for SocketAddr is the sent-by grammar already: an IPv6 literal
-    // in brackets, the port after a colon
-    out.extend_from_slice(local.to_string().as_bytes());
+    out.extend_from_slice(sent_by);
     out.extend_from_slice(b";branch=");
     out.extend_from_slice(branch);
     if request_rport {
@@ -77,6 +103,19 @@ pub(crate) fn is_ours(via: &ViaRef<'_>, local: SocketAddr, protocol: TransportPr
         HostRef::Name(_) => false,
     };
     host_matches && via.port.unwrap_or_else(|| default_port(protocol)) == local.port()
+}
+
+/// Whether a response's top `Via` names this endpoint when its transport
+/// advertises `name` rather than an address: the same name, compared without
+/// case as §19.1.4 compares hosts, and no port, since none was written.
+pub(crate) fn is_ours_named(via: &ViaRef<'_>, name: &str, protocol: TransportProtocol) -> bool {
+    if !via.transport.eq_ignore_ascii_case(protocol.as_str()) {
+        return false;
+    }
+    match via.host {
+        HostRef::Name(host) => host.eq_ignore_ascii_case(name) && via.port.is_none(),
+        HostRef::Ipv4(_) | HostRef::Ipv6(_) => false,
+    }
 }
 
 /// Where the response to a request that arrived from `source` has to go.
@@ -133,7 +172,7 @@ fn default_port(protocol: TransportProtocol) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ours, local_via, response_destination};
+    use super::{is_ours, is_ours_named, local_via, named_via, response_destination};
     use crate::endpoint::TransportProtocol;
     use crate::msg::ViaRef;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -230,6 +269,32 @@ mod tests {
             addr("192.0.2.1:5061"),
             TransportProtocol::Tls
         ));
+    }
+
+    #[test]
+    fn a_named_sent_by_is_written_without_a_port_and_recognised_coming_back() {
+        let name = "df7jal23ls0d.invalid";
+        let value = named_via(TransportProtocol::Ws, name, b"z9hG4bK1", true);
+        assert_eq!(
+            &*value,
+            b"SIP/2.0/WS df7jal23ls0d.invalid;branch=z9hG4bK1;rport"
+        );
+        assert!(is_ours_named(
+            &via("SIP/2.0/WS DF7JAL23LS0D.invalid;branch=z9hG4bK1;received=192.0.2.4"),
+            name,
+            TransportProtocol::Ws
+        ));
+        for other in [
+            "SIP/2.0/WSS df7jal23ls0d.invalid;branch=z9hG4bK1",
+            "SIP/2.0/WS other.invalid;branch=z9hG4bK1",
+            "SIP/2.0/WS df7jal23ls0d.invalid:80;branch=z9hG4bK1",
+            "SIP/2.0/WS 192.0.2.1;branch=z9hG4bK1",
+        ] {
+            assert!(
+                !is_ours_named(&via(other), name, TransportProtocol::Ws),
+                "{other}"
+            );
+        }
     }
 
     #[test]

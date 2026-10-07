@@ -114,9 +114,23 @@
 //! in, and carry no addresses at all: a connection has one far end and it was
 //! named when the transport was bound.
 //!
-//! A WebSocket frame goes in as a datagram. RFC 7118 §4.2 puts exactly one SIP
-//! message in each frame, so the framing is already done by the time the bytes
-//! reach here and there is nothing for the reassembler to do.
+//! A WebSocket is one of two things, and the bind says which. Bound as
+//! `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` *with* `remote`, it is a
+//! TCP connection (or a TLS one the application secured) that the stack makes
+//! a WebSocket of (RFC 6455, RFC 7118): the first thing
+//! [`sipral_stack_poll_transmit`] hands over is the opening handshake, every
+//! read off the connection goes to [`sipral_stack_receive_stream`] as it came,
+//! and what comes out to write is frames, pings and pongs included. When the
+//! WebSocket fails — the handshake refused, a frame that breaks the protocol,
+//! a close from the server, a ping not answered — the stack retires the
+//! transport and raises `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` saying why, and
+//! the connection should be closed. Bound *without* `remote`, the application
+//! did the handshake itself, and each frame's message goes in as a datagram:
+//! RFC 7118 §4.2 puts exactly one SIP message in each frame, so the framing is
+//! already done by the time the bytes reach here.
+//!
+//! The handshake asks for `/ws`, with the far end's address as its `Host`;
+//! the ABI has no field for either yet (`sipral_ua::websocket`).
 //!
 //! # When a transport dies
 //!
@@ -587,8 +601,10 @@ entry! {
     /// this stack was created with, which is the answer for a socket bound to
     /// one address.
     ///
-    /// A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
-    /// in each, so it arrives whole the way a datagram does.
+    /// A WebSocket frame comes in here too, on one the application runs
+    /// itself (bound without `remote`): RFC 7118 §4.2 puts one SIP message in
+    /// each, so it arrives whole the way a datagram does. A WebSocket the
+    /// stack runs takes its reads through [`sipral_stack_receive_stream`].
     ///
     /// Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
     /// the parse error in the last error. That is an ordinary morning on a
@@ -643,6 +659,10 @@ entry! {
 
 entry! {
     /// Hand over bytes off a connection, in whatever sizes the reads came in.
+    ///
+    /// On a WebSocket the stack runs (bound with `remote`), the bytes are the
+    /// server's handshake answer and frames, read the same way; what is
+    /// inside them reaches the parser one message at a time.
     ///
     /// Not a message: a fragment of a framing the layer below reassembles on
     /// `Content-Length` (§18.3), and one call may hold several messages, half of
@@ -731,7 +751,10 @@ entry! {
     /// `local` is the address the far end reaches this one at, as `host:port`.
     /// `remote` is the far end of a connection, and is refused on a datagram
     /// transport, which has many; a length of zero, whatever the pointer,
-    /// leaves it out.
+    /// leaves it out. On `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` it
+    /// says the stack is to make the connection a WebSocket itself: the
+    /// handshake is the next thing [`sipral_stack_poll_transmit`] hands over,
+    /// and the reads go to [`sipral_stack_receive_stream`].
     ///
     /// This is also how a request
     /// [`SipralEventKind::TransportWanted`](crate::event::SipralEventKind::TransportWanted)
@@ -788,7 +811,9 @@ entry! {
                 }
                 (None, asked) => crate::stack::transport_of(asked)?.protocol(),
             };
-            if connected.is_some() && !resolved.is_stream() {
+            // a WebSocket's far end is named too: that is the one the stack
+            // then opens the WebSocket to, on the connection the caller made
+            if connected.is_some() && !resolved.is_reliable() {
                 return Err(fail(
                     SipralStatus::InvalidArgument,
                     format!("remote names one far end and {resolved} has many"),
@@ -1141,6 +1166,19 @@ const fn kind_of(error: SipralTransportError) -> TransportErrorKind {
         SipralTransportError::Unreachable => TransportErrorKind::Unreachable,
         SipralTransportError::TimedOut => TransportErrorKind::TimedOut,
         SipralTransportError::Closed => TransportErrorKind::Closed,
+    }
+}
+
+/// What the layer below's failure is called here; the other way from
+/// `kind_of`. A kind this library has no name for yet is `Other`.
+pub(crate) const fn error_of(kind: TransportErrorKind) -> SipralTransportError {
+    match kind {
+        TransportErrorKind::ConnectionRefused => SipralTransportError::ConnectionRefused,
+        TransportErrorKind::ConnectionReset => SipralTransportError::ConnectionReset,
+        TransportErrorKind::Unreachable => SipralTransportError::Unreachable,
+        TransportErrorKind::TimedOut => SipralTransportError::TimedOut,
+        TransportErrorKind::Closed => SipralTransportError::Closed,
+        _ => SipralTransportError::Other,
     }
 }
 
@@ -2353,6 +2391,83 @@ pub(crate) mod tests {
                 SipralStatus::InvalidArgument
             );
         }
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    // -- a WebSocket the stack runs -----------------------------------------
+
+    fn stream_in(handle: SipralHandle, transport: u32, bytes: &[u8], now_ms: u64) {
+        let status = unsafe {
+            sipral_stack_receive_stream(handle, transport, bytes.as_ptr(), bytes.len(), now_ms)
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+    }
+
+    /// Bound as WS with its far end named, the connection is the stack's to
+    /// make a WebSocket of: the handshake comes out first, the answer goes
+    /// in as stream bytes, and from then on a message in a frame is answered
+    /// in a masked frame.
+    #[test]
+    fn a_websocket_bound_with_its_far_end_is_opened_and_framed_by_the_stack() {
+        const WS: u32 = 5;
+        let mut observed = Observed::default();
+        let handle = stack(&mut observed);
+        let status = unsafe {
+            sipral_stack_transport_bind(
+                handle,
+                WS,
+                SipralTransport::Ws as u32,
+                BIND.as_ptr().cast::<c_char>(),
+                BIND.len(),
+                REGISTRAR.as_ptr().cast::<c_char>(),
+                REGISTRAR.len(),
+                1_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let out = drain(handle);
+        assert_eq!(out.len(), 1);
+        let handshake = String::from_utf8(out[0].clone()).unwrap();
+        assert!(handshake.starts_with("GET /ws HTTP/1.1\r\n"), "{handshake}");
+        assert!(handshake.contains("Sec-WebSocket-Protocol: sip\r\n"));
+        let key = handshake
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let answer = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: sip\r\n\r\n",
+            sipral_ua::websocket::accept_for(key)
+        );
+        stream_in(handle, WS, answer.as_bytes(), 1_010);
+        assert!(drain(handle).is_empty(), "nothing was waiting");
+
+        let request = options("ws-1").replace("SIP/2.0/UDP", "SIP/2.0/WS");
+        let mut frame = vec![0x81, 126];
+        frame.extend_from_slice(&u16::try_from(request.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(request.as_bytes());
+        // a read that ends half-way through the frame, and the rest
+        let (head, tail) = frame.split_at(9);
+        stream_in(handle, WS, head, 1_020);
+        stream_in(handle, WS, tail, 1_020);
+        let out = drain(handle);
+        assert_eq!(out.len(), 1);
+        let framed = &out[0];
+        assert_eq!(framed[0], 0x81, "one final text frame");
+        assert_eq!(framed[1] & 0x80, 0x80, "masked");
+        let at = if framed[1] & 0x7F == 126 { 4 } else { 2 };
+        let mask = &framed[at..at + 4];
+        let answer: Vec<u8> = framed[at + 4..]
+            .iter()
+            .zip(mask.iter().cycle())
+            .map(|(byte, key)| byte ^ key)
+            .collect();
+        assert!(
+            answer.starts_with(b"SIP/2.0 200 "),
+            "{:?}",
+            start_of(&answer)
+        );
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

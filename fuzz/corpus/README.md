@@ -22,7 +22,10 @@ traffic, and nothing came from another codebase.
   names in its place. A seed is then handed to the same reader its target
   hands it to before it is written out, so one that is not the thing it
   claims to be fails the generator instead of sitting here doing nothing:
-  the framer seeds go through the framer, the control-channel seeds through
+  the framer seeds go through the framer, the `websocket` seeds — server
+  frames written out byte by byte from RFC 6455 §5.2, around the generator's
+  own SIP messages — through `sipral_ua::websocket::FrameReader`, the
+  control-channel seeds through
   the frame decoder and the JSON, the `headless_media` runs through a
   `HeadlessSession` driven step by step as the target drives one, the
   `turn_client` programs through a `TurnClient` answered the way the target

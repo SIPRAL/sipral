@@ -511,6 +511,55 @@ impl Endpoint {
             .map(|bound| (bound.protocol, bound.local))
     }
 
+    /// Advertise `name` as the `sent-by` of every request sent on
+    /// `transport` from now on, in place of the address it was bound at.
+    ///
+    /// For a WebSocket client, which RFC 7118 Appendix B.1 has write a
+    /// random host under `.invalid` there: the address its socket has is
+    /// not one the server could reach it at, and the server answers down
+    /// the connection anyway (§5.2.3). A response is then recognised as
+    /// ours by that name (§18.1.2). The name lasts until the transport is
+    /// bound again.
+    ///
+    /// Answers `false`, and changes nothing, for a transport that is not
+    /// bound or a name that is not a `hostname` of letters, digits, dots
+    /// and hyphens (RFC 3261 §25.1).
+    pub fn advertise_name(&mut self, transport: TransportId, name: &str) -> bool {
+        let valid = !name.is_empty()
+            && name.len() <= 253
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+        match self.transports.get_mut(transport) {
+            Some(bound) if valid => {
+                bound.sent_by = Some(Box::from(name));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The `Via` a request leaving on `transport` carries: the name it
+    /// advertises when it has one ([`Endpoint::advertise_name`]), and
+    /// `local` otherwise.
+    pub(super) fn via_on(
+        &self,
+        transport: TransportId,
+        protocol: TransportProtocol,
+        local: SocketAddr,
+        branch: &[u8],
+    ) -> Box<[u8]> {
+        let rport = self.config.always_request_rport;
+        match self
+            .transports
+            .get(transport)
+            .and_then(|bound| bound.sent_by.as_deref())
+        {
+            Some(name) => via::named_via(protocol, name, branch, rport),
+            None => via::local_via(protocol, local, branch, rport),
+        }
+    }
+
     /// A bound transport of `protocol` that carries a message to
     /// `destination`: one connected to it, or an unconnected one of that
     /// protocol, the first found. For a layer above that keeps an account on
@@ -1753,12 +1802,7 @@ impl Endpoint {
         local: SocketAddr,
         minted: &Minted<'_>,
     ) -> Result<OwnedMessage, SendError> {
-        let via = via::local_via(
-            flow.protocol,
-            local,
-            minted.branch,
-            self.config.always_request_rport,
-        );
+        let via = self.via_on(flow.transport, flow.protocol, local, minted.branch);
         let method =
             Method::from_bytes(&request.method).ok_or(SendError::MissingField("method"))?;
         let mut builder = RequestBuilder::new(method, request.request_uri.as_bytes())
@@ -1848,12 +1892,7 @@ impl Endpoint {
         extra: Option<&OutgoingInDialogRequest>,
         body: Option<&[u8]>,
     ) -> Result<OwnedMessage, SendError> {
-        let via = via::local_via(
-            flow.protocol,
-            local,
-            branch,
-            self.config.always_request_rport,
-        );
+        let via = self.via_on(flow.transport, flow.protocol, local, branch);
 
         let mut builder = plan
             .builder()

@@ -807,8 +807,11 @@ impl Account {
         self
     }
 
-    /// Send this account's requests over a TCP or TLS connection of its
-    /// own, to its own server, which this crate asks the application to open
+    /// Send this account's requests over a TCP, TLS or WebSocket connection
+    /// of its own, to its own server, which this crate asks the application
+    /// to open — a WebSocket as the TCP or TLS connection under it, bound as
+    /// `Ws` or `Wss` with its far end named, the handshake then this
+    /// crate's ([`crate::websocket`])
     /// (`crate::flow`): the account's transport is whichever one of
     /// `protocol` the application binds to the server's address, under any
     /// number, adopted when it is bound. Until then a REGISTER waits, and an
@@ -826,7 +829,7 @@ impl Account {
     /// to a server that expects a stream.
     #[must_use]
     pub const fn on_stream(mut self, protocol: TransportProtocol) -> Self {
-        if protocol.is_stream() {
+        if protocol.is_reliable() {
             self.own_stream = Some(protocol);
             self.transport = NO_FLOW_YET;
         }
