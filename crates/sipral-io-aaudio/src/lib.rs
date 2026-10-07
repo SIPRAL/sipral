@@ -3,47 +3,32 @@
 
 //! Audio device I/O for Android, over AAudio.
 //!
-//! Frames of mono sixteen-bit samples come out of the microphone and go into
-//! the loudspeaker, a frame at a time, from a stream AAudio runs on a thread
-//! of its own. That is the whole of the stream half: no codec, no jitter
-//! buffer, no call. `sipral-audio` puts the call on top.
+//! Mono 16-bit frames to and from AAudio streams; no codec or call
+//! (`sipral-audio` adds those).
 //!
-//! Every call stream is a voice-communication one, which is what makes a
-//! phone treat it as a call:
+//! Call streams are voice-communication streams:
 //!
-//! - the loudspeaker half says `AAUDIO_USAGE_VOICE_COMMUNICATION` and
-//!   `AAUDIO_CONTENT_TYPE_SPEECH`, so the platform routes it to the
-//!   communication device — the earpiece, the loudspeaker, a wired or a
-//!   Bluetooth headset — and its volume is the call volume;
-//! - the microphone half says `AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION`,
-//!   which is the platform's own echo canceller, noise suppressor and gain
-//!   control where the phone has them;
-//! - both ask for `AAUDIO_PERFORMANCE_MODE_LOW_LATENCY` and share the device
-//!   (`AAUDIO_SHARING_MODE_SHARED`).
+//! - output: `AAUDIO_USAGE_VOICE_COMMUNICATION` + `CONTENT_TYPE_SPEECH`,
+//!   routed to the communication device at call volume;
+//! - input: `AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION`, the platform's AEC,
+//!   NS and AGC where present;
+//! - both low-latency and shared.
 //!
-//! A ring tone is a stream of its own, `AAUDIO_USAGE_NOTIFICATION_RINGTONE`,
-//! which the platform plays where a ring goes rather than where the call is.
+//! A ring is its own `AAUDIO_USAGE_NOTIFICATION_RINGTONE` stream.
 //!
-//! # What API level it needs
+//! # API level
 //!
-//! AAudio arrived in API level 26 and the usage and input preset in 28;
-//! without those two a stream is media, with no echo cancellation and on
-//! the media volume, which is not a call. So [`available`] says yes from API
-//! level 28 ([`MIN_API`]) and only when `libaaudio.so` loads with every
-//! function this crate calls. The library is looked up when first needed
-//! rather than linked, so the same build loads on the API level 21 floor the
-//! Android packages keep; below 28 the application runs its own audio
-//! through `AudioRecord` and `AudioTrack`, as the telecom helper in
-//! `bindings/kotlin/android` does.
+//! The usage and preset need API 28 ([`MIN_API`]); below that a stream would
+//! be media. [`available`] also requires `libaaudio.so` with every function
+//! used. It is loaded lazily, so the build still runs on API 21, where the
+//! application uses `AudioRecord`/`AudioTrack` (see `bindings/kotlin/android`).
 //!
 //! # Devices and routes
 //!
-//! AAudio lists no devices and routes nothing: both belong to
-//! `AudioManager`, a Java API. [`route`] is everything about them that is
-//! not Java, and runs anywhere. On Android it reaches `AudioManager` through
-//! the Kotlin binding's JNI shim, once the application has handed it a
-//! `Context`; without one the list is empty and every stream follows the
-//! platform's own route, which is what a phone does anyway.
+//! Devices and routing belong to the Java `AudioManager`. [`route`] holds
+//! the non-Java part and reaches `AudioManager` via the Kotlin JNI shim once
+//! given a `Context`; without one the list is empty and streams follow the
+//! platform route.
 //!
 //! Written from the NDK's published `AAudio.h` and the Android SDK's
 //! reference for `AudioManager` and `AudioDeviceInfo`; see

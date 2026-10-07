@@ -3,26 +3,16 @@
 
 //! One AAudio stream, one direction, a frame at a time.
 //!
-//! AAudio runs the stream on a thread of its own and calls back into it for
-//! every burst, a few milliseconds of audio. The callback converts the burst
-//! to or from mono sixteen-bit samples, applies the gain, the mute and the
-//! meter, and meets the rest of the process in a ring: the microphone's
-//! callback fills one that [`Stream::read`] empties a frame at a time, and
-//! the loudspeaker's empties one that [`Stream::write`] fills, sending
-//! silence when it runs dry. Nothing in either callback allocates, locks or
-//! waits.
+//! The per-burst callback converts samples, applies gain, mute and meter,
+//! and exchanges frames with [`Stream::read`]/[`Stream::write`] through a
+//! ring (silence when dry). It never allocates, locks or waits.
 //!
-//! A device that goes away under a stream — a headset unplugged, the audio
-//! server restarted — arrives as an error on the error callback, which only
-//! notes it: the header forbids stopping or closing a stream from there.
-//! [`Stream::lost`] reports it, once, and whoever holds the stream opens
-//! another.
+//! A lost device arrives on the error callback, which only notes it (the
+//! header forbids stopping there); [`Stream::lost`] reports it once.
 //!
-//! Tearing down is where a callback can outlive its memory: the header says
-//! that on the ordinary, non-MMAP path "some callbacks may still be in
-//! process" after a stream is released. So both callbacks come in through a
-//! [`Gate`], and what they point at is freed only once the gate is shut and
-//! empty — or leaked, if it never empties.
+//! On the non-MMAP path "some callbacks may still be in process" after
+//! release, so callbacks enter through a [`Gate`] and shared memory is freed
+//! only once it drains, or leaked.
 
 use core::ffi::c_void;
 use core::fmt;
@@ -37,11 +27,8 @@ use sipral_io_common::ring::Ring;
 use crate::api::{self, Api, Code, RawStream};
 use crate::samples;
 
-/// How many frames each ring holds at [`RING_RATE_HZ`]: enough for a pump
-/// that is a few ticks late. A stream at a lower rate holds more of its own
-/// frames; the engine's pump keeps the loudspeaker's ring near its own
-/// target and empties the microphone's every tick, so neither falls behind
-/// the live edge for it.
+/// Frames per ring at [`RING_RATE_HZ`]: enough for a pump a few ticks late.
+/// The pump keeps both rings near the live edge regardless of size.
 const RING_FRAMES: usize = 16;
 
 /// The rate a ring is sized for at least, so that a stream that opens at a
@@ -307,9 +294,7 @@ impl Stream {
             .store(format == api::FORMAT_FLOAT, Ordering::Release);
         state.channel.set_window(window_samples(sample_rate_hz));
         if config.usage != Usage::Microphone && burst > 0 {
-            // two bursts queued in the device: the least that does not
-            // underrun, which is what the low-latency mode is for. A path
-            // that will not go that low keeps what it has.
+            // two bursts: the least that does not underrun
             // SAFETY: the stream just opened.
             let _ = unsafe { (api.set_buffer_size)(raw, burst.saturating_mul(2)) };
         }

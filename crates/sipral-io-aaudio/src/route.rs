@@ -3,42 +3,27 @@
 
 //! Where a call's audio can go on a phone, and moving it there.
 //!
-//! AAudio opens streams and lists nothing: the devices a call can use are
-//! `AudioManager`'s, a Java API, and so is routing a call between them. This
-//! module is everything about that which is not Java — which platform
-//! entries make one device, what each is called, which one the call is on,
-//! how a choice is carried out on each API level, and what changed since the
-//! last look — written against [`Platform`], so that all of it runs on a
-//! machine with no phone attached. The one implementation that talks to a
-//! phone is the JNI shim's bridge (`crate::bridge`, Android only).
+//! Devices and call routing are the Java `AudioManager`'s. This is the
+//! non-Java logic (merging entries, naming, routing per API level, change
+//! detection) over [`Platform`], so it runs without a phone; the real
+//! implementation is the JNI bridge (`crate::bridge`, Android only).
 //!
 //! # Routing
 //!
-//! A voice-communication stream does not choose its output: the platform
-//! puts it on the *communication device*, which is the earpiece until
-//! something says otherwise. From API level 31 that something is
-//! `AudioManager.setCommunicationDevice`, given one of
-//! `getAvailableCommunicationDevices`. Before it, the same four outcomes were
-//! reached with two switches: `setSpeakerphoneOn` for the loudspeaker, and
-//! `startBluetoothSco` with `setBluetoothScoOn` for a Bluetooth headset;
-//! with both off the platform picks a wired headset when one is plugged in
-//! and the earpiece when none is. Both are carried out here, by API level
+//! Voice output goes to the *communication device* (the earpiece by
+//! default). From API 31 it is set with `setCommunicationDevice`; before
+//! that, with `setSpeakerphoneOn` and `startBluetoothSco`/`setBluetoothScoOn`,
+//! and with both off the platform picks a wired headset or the earpiece
 //! ([`COMMUNICATION_DEVICE_API`]).
 //!
-//! A microphone is chosen differently: an input stream names its device
-//! (`AAudioStreamBuilder_setDeviceId`), and one that names none follows the
-//! communication device — a Bluetooth headset's microphone comes with its
-//! earpiece.
+//! An input stream names its device (`AAudioStreamBuilder_setDeviceId`), or
+//! follows the communication device.
 //!
 //! # Changes
 //!
-//! The platform announces device changes to a Java callback, which a native
-//! library cannot register without a class of its own. So [`Routes`] looks
-//! instead: at most every [`POLL_INTERVAL`], the list and the communication
-//! device are read again and compared with the last look. A route this crate
-//! changed itself is taken in without being announced for [`SETTLE`]
-//! afterwards — the platform applies it asynchronously, and a change the
-//! engine made must not come back to it as one the system made.
+//! Change callbacks are Java-only, so [`Routes`] polls at most every
+//! [`POLL_INTERVAL`]. Changes this crate made are not announced for
+//! [`SETTLE`], since the platform applies them asynchronously.
 
 use core::fmt;
 use std::collections::VecDeque;
@@ -82,10 +67,8 @@ pub struct PlatformDevice {
 
 /// What kind of device an entry is, for the types a call can use.
 ///
-/// The discriminants are `AudioDeviceInfo`'s own `TYPE_*` values. Every
-/// other type — a telephony uplink, a remote submix, an FM tuner, an HDMI
-/// sink, the Bluetooth media (A2DP) profile, which carries no microphone and
-/// is not where the platform routes a call — is left out of the list.
+/// Discriminants are `AudioDeviceInfo` `TYPE_*` values. Other types
+/// (telephony, submix, HDMI, A2DP...) are not call devices and are omitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kind {
