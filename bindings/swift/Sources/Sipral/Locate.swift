@@ -38,17 +38,12 @@ public typealias SipralResolver = @Sendable (_ name: String, _ record: SipralDns
 
 /// The resolver a `SipralStack` uses when it is given none.
 ///
-/// On Apple platforms SRV and NAPTR are asked of the system's DNS service
-/// (`DNSServiceQueryRecord`, the resolver every app on the device shares,
-/// VPN and per-interface DNS settings included), each within five seconds;
-/// addresses are asked of `getaddrinfo`, which reads the hosts file as well,
-/// with a time-to-live of `addressTtl`, the platform's lookup not saying what
-/// the zone's was. Elsewhere only addresses are asked, and every SRV or NAPTR
-/// query is answered `.nothing`, which RFC 3263's procedure takes as a
-/// domain that publishes none.
+/// On Apple platforms SRV and NAPTR go to `DNSServiceQueryRecord` (honours
+/// VPN and per-interface DNS), five seconds each; addresses go to
+/// `getaddrinfo` with TTL `addressTtl`, since it reports none. Elsewhere SRV
+/// and NAPTR answer `.nothing`, which RFC 3263 treats as none published.
 public enum SipralDns {
-    /// The time-to-live given an address the platform's lookup found, in
-    /// seconds: how soon a moved server is looked up again.
+    /// TTL in seconds for `getaddrinfo` results.
     public static let addressTtl: UInt32 = 60
 
     /// How long a query to the DNS service may take.
@@ -114,12 +109,9 @@ public enum SipralDns {
         return text.split(separator: "%").first.map(String.init) ?? text
     }
 
-    /// One SRV or NAPTR record's data, as `DNSServiceQueryRecord` hands it
-    /// over (RFC 2782, RFC 3403: the names in it uncompressed), written as a
-    /// zone file writes it after `ttl`: priority, weight, port and target;
-    /// order, preference, flags, service and replacement, the regular
-    /// expression left out since RFC 3263 follows none. `nil` for data that
-    /// is not one.
+    /// An SRV or NAPTR record (RFC 2782, RFC 3403) in zone-file form after
+    /// `ttl`; NAPTR's regexp is dropped, as RFC 3263 uses none. `nil` if
+    /// malformed.
     public static func zoneText(of record: SipralDnsRecordType, data: [UInt8], ttl: UInt32) -> String? {
         var at = 0
         func number() -> Int? {
@@ -164,8 +156,7 @@ public enum SipralDns {
     }
 
     #if canImport(dnssd)
-    /// What one query to the DNS service collected, filled in by its reply
-    /// callback on the thread `query` runs.
+    /// Filled by the reply callback on `query`'s thread.
     private final class Collected {
         let record: SipralDnsRecordType
         var records: [String] = []
@@ -226,11 +217,10 @@ public enum SipralDns {
 }
 
 extension SipralStack {
-    /// `sipral_advertised_address`: the `host:port` to advertise for a
-    /// socket bound at `bound` whose traffic goes to `peer`. A wildcard bind
-    /// (`0.0.0.0:5060`) gives the address of the route toward `peer`; a
-    /// loopback bind toward a peer that is not throws `.unreachableAddress`,
-    /// and no route at all `.transportDown`. Both are addresses, not names.
+    /// `sipral_advertised_address`: what to advertise for a socket at
+    /// `bound` talking to `peer` (addresses, not names). A wildcard bind
+    /// gives the route toward `peer`; loopback toward a remote peer throws
+    /// `.unreachableAddress`; no route throws `.transportDown`.
     public static func advertisedAddress(bound: String, peer: String) throws -> String {
         var buffer = [CChar](repeating: 0, count: 128)
         let needed = try Sipral.advertisedAddress(bound: bound, peer: peer, buffer: &buffer)
@@ -238,12 +228,8 @@ extension SipralStack {
         return String(decoding: bytes, as: UTF8.self)
     }
 
-    /// The address of this machine's route toward `peer` (`host:port`), the
-    /// one a socket bound on every interface is reached at from there;
-    /// `127.0.0.1` when there is no peer, it is a name rather than an
-    /// address, or no route reaches it -- the address that works for a peer
-    /// on this machine and that the library refuses to advertise to any
-    /// other.
+    /// This machine's address on the route toward `peer`, or `127.0.0.1`
+    /// when there is no peer, it is a name, or nothing routes to it.
     public static func routeHost(toward peer: String?) -> String {
         guard let peer, isAddress(peer) else { return "127.0.0.1" }
         let wildcard = peer.hasPrefix("[") ? "[::]:0" : "0.0.0.0:0"

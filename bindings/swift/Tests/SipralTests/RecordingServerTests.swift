@@ -8,10 +8,8 @@ import Network
 import XCTest
 @testable import Sipral
 
-/// A recording server (SIPREC, RFC 7866) on a TCP port of this machine's
-/// loopback: it answers the recording session's INVITE with one
-/// receive-only stream per party, on the two sockets it is given, and every
-/// BYE with 200. Every request is kept.
+/// A loopback SIPREC server (RFC 7866): one receive-only stream per party,
+/// 200 to BYE, every request kept.
 final class FakeRecordingServer: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "org.sipral.test.recorder")
@@ -100,10 +98,8 @@ final class FakeRecordingServer: @unchecked Sendable {
     }
 }
 
-/// A call recorded to a recording server through `Call.record(toServer:)`:
-/// the session's INVITE carries `Require: siprec` and the metadata, both
-/// parties' audio reaches the server on a stream each, and stopping hangs
-/// the session up.
+/// `Call.record(toServer:)`: `Require: siprec` and metadata, both parties'
+/// audio delivered, and stopping hangs up.
 final class RecordingServerTests: XCTestCase {
     /// How many RTP packets reached `socket` since the last time.
     private func counted(_ socket: UDPSocket) -> Int {

@@ -3,14 +3,11 @@
 
 import Foundation
 
-/// What `PushKitBridge` reads out of a VoIP push, in place of a real
-/// `PKPushPayload` -- just enough to run `docs/15-mobile.md`'s "C2" sequence
-/// without `PushKit`, which does not exist on macOS or Linux at all.
+/// The part of a VoIP push `PushKitBridge` needs, so it runs without PushKit
+/// (absent on macOS and Linux).
 public struct VoipPush: Sendable {
-    /// The caller's URI, as `Account.announce` (`sipral_account_announce`)
-    /// requires and as the `From` URI the far end will place this call with
-    /// -- matched the way `docs/15-mobile.md`, "The matching rule"
-    /// describes: same account, same user and host, unescaped.
+    /// The caller's URI, matched against the INVITE's `From` by account,
+    /// user and host, unescaped (`docs/15-mobile.md`).
     public let callerId: String
 
     public init(callerId: String) {
@@ -23,14 +20,10 @@ public struct VoipPush: Sendable {
 /// > push -> report to CallKit before the handler returns -> announce ->
 /// > refresh the binding -> match the INVITE -> answer
 ///
-/// The first two steps happen here, in `handle(push:account:)`, in that
-/// order and before it returns -- a VoIP push gives the process one run
-/// loop to raise the call screen, and missing that deadline gets the
-/// application's future wake-ups stopped. The last two are `sipral-ua`'s
-/// own job once `Account.announce` has told it about the push
-/// (`UaEvent::CallAnnounced`/`IncomingCall`, paired); this bridge's own
-/// remaining job is handing the `Call` off to `CallKitBridge` once that
-/// resolves, through `PendingCall.resolve(with:)`.
+/// `handle(push:account:)` does the first two steps before returning: iOS
+/// stops delivering VoIP pushes to an app that misses that deadline. The
+/// stack does the matching; `PendingCall.resolve(with:)` then hands the
+/// `Call` to `CallKitBridge`.
 public final class PushKitBridge: @unchecked Sendable {
     private let callKit: CallKitBridge
     private let stateQueue = DispatchQueue(label: "org.sipral.pushkit.state")
@@ -42,14 +35,10 @@ public final class PushKitBridge: @unchecked Sendable {
 
     /// One push, matched to the account it woke.
     ///
-    /// Reports to CallKit first, then calls `Account.announce`, then
-    /// `Account.refreshBinding` -- RFC 8599 §4.1.3 makes the refresh a MUST
-    /// for a woken UA, and it is not waited for (`docs/15-mobile.md`, "The
-    /// binding is refreshed at once"). Returns a `PendingCall` the caller
-    /// keeps: `resolve(with:)` on it once `sipral-ua` reports the matching
-    /// `IncomingCall` (or `Announced::Arrived` came back from `announce`
-    /// itself, when the INVITE beat the push) hands the `Call` to
-    /// `CallKitBridge` and marks the CallKit-reported call connecting.
+    /// Reports to CallKit, then announces, then refreshes the binding
+    /// without waiting (a MUST for a woken UA, RFC 8599 §4.1.3). Keep the
+    /// returned `PendingCall` and `resolve(with:)` it when the matching
+    /// `IncomingCall` arrives (or at once, if the INVITE came first).
     @discardableResult
     public func handle(push: VoipPush, account: Account) async throws -> PendingCall {
         let uuid = try await callKit.reportIncomingCall(callerId: push.callerId)
@@ -61,18 +50,14 @@ public final class PushKitBridge: @unchecked Sendable {
         stateQueue.sync { pending[Self.userPart(of: push.callerId)] = pendingCall }
 
         if let arrivedHandle = announced.call {
-            // `Announced::Arrived`: the INVITE beat the push. There is
-            // nothing further to wait for.
+            // The INVITE beat the push.
             pendingCall.resolveLater(callHandle: arrivedHandle)
         }
         return pendingCall
     }
 
-    /// Matches an `IncomingCall`/`CallAnnounced` pair off `stack.events()` to
-    /// a still-pending push and resolves it. Call this from whatever reads
-    /// `SipralStack.events()` for the application's account -- a loop of its
-    /// own is as good as the application's main one, since every reader of
-    /// that stream sees every event.
+    /// Matches an `IncomingCall`/`CallAnnounced` pair to a pending push and
+    /// resolves it. Call from any reader of `SipralStack.events()`.
     public func matchIncomingCall(_ event: SipralEvent, on stack: SipralStack) {
         guard event.kind == .incomingCall, let fromUri = event.callData?.fromUri else { return }
         let callerId = Self.userPart(of: fromUri)
@@ -88,14 +73,9 @@ public final class PushKitBridge: @unchecked Sendable {
     }
 }
 
-/// The call a `VoipPush` announced, before `sipral-ua` has matched an
-/// INVITE to it. `resolve(with:)` hands the real `Call` over once the
-/// application has built one (through `SipralStack.takeIncomingCall`, after
-/// reading the matching `IncomingCall` off `stack.events()`, so that the
-/// answer is left to CallKit's `CXAnswerCallAction`), and binds it
-/// into `CallKitBridge` under the same `UUID` the system already knows.
-/// The application can go on reading that `Call`'s own `events()` once it
-/// is bound: the bridge takes a stream of its own.
+/// A pushed call not yet matched to its INVITE. `resolve(with:)` takes the
+/// `Call` (from `SipralStack.takeIncomingCall`, leaving the answer to
+/// CallKit) and binds it into `CallKitBridge` under the existing `UUID`.
 public final class PendingCall: @unchecked Sendable {
     public let uuid: UUID
     public let callerId: String
@@ -109,9 +89,7 @@ public final class PendingCall: @unchecked Sendable {
         self.callKit = callKit
     }
 
-    /// Records which call handle this push turned out to be, for
-    /// `resolve(with:)` to bind once the application has a `Call` object
-    /// for it.
+    /// The matched call handle, bound later by `resolve(with:)`.
     func resolveLater(callHandle: SipralHandle) {
         stateQueue.sync { resolvedHandle = callHandle }
     }

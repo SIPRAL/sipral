@@ -5,9 +5,7 @@ import CSipral
 import XCTest
 @testable import Sipral
 
-/// Every event the C ABI raises reaches Swift with its payload read: an event
-/// whose arm this layer never reads would reach the application as a kind
-/// and nothing else.
+/// Every event kind arrives with its payload decoded.
 final class EventDecodingTests: XCTestCase {
     private func raw(_ kind: SipralEventKind) -> sipral_event_t {
         var event = sipral_event_t()

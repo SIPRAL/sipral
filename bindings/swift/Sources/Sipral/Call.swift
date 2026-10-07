@@ -6,18 +6,13 @@ import Dispatch
 
 /// A `sipral_handle_t` naming one call, and the actions it takes.
 ///
-/// Built by `SipralStack.placeCall` for one this stack placed, and by
-/// `SipralStack.answerCall` for one that came in; either way it is
-/// registered with its stack before the caller ever sees it, so `deliver`
-/// always has somewhere to put an event that names this call
-/// (`bindings/python/sipral/call.py`'s `Call` is the same shape).
+/// Made by `SipralStack.placeCall` or `answerCall`, and registered with its
+/// stack before the caller sees it, so no event for it is lost.
 public final class Call: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
 
-    /// How many events, or digits, one reader of `events()` or `dtmf()` holds
-    /// unread before it starts dropping its oldest -- the same bound, and the
-    /// same choice of what to drop, as the Kotlin layer's `SipralCall.events`.
+    /// Unread events or digits one reader holds before dropping its oldest.
     public static let eventBuffer = 4096
 
     private let eventBroadcast = Broadcast<SipralEvent>(
@@ -32,54 +27,36 @@ public final class Call: @unchecked Sendable {
 
     /// A new reader of every event this call's handle names, decoded whole.
     ///
-    /// Every call returns a stream of its own, and every stream gets every
-    /// event, in the order the stack raised them: a `CallKitBridge` bound to
-    /// this call and the application's own loop over it both see all of
-    /// them. A reader sees what arrives from the moment this returns, and
-    /// nothing before -- so take the stream first and act second:
-    /// `let events = call.events()`, then `try call.hold()`, then wait on
-    /// `events`. What a late reader missed that still matters can be read
-    /// directly: `media` is set before `SipralEventKind.mediaStarted` is
-    /// delivered, `ended` before `SipralEventKind.callEnded`.
+    /// Each stream gets every event raised after it is taken, in order, so
+    /// take the stream before acting (`let events = call.events()`, then
+    /// `try call.hold()`). A late reader can still read `media` (set before
+    /// `mediaStarted` is delivered) and `ended` (set before `callEnded`).
     ///
-    /// Every stream finishes when the call ends, right after its
-    /// `SipralEventKind.callEnded`, or when `close()` runs first. A reader
-    /// that starts after the end gets that `callEnded` event alone and
-    /// finishes at once, so `for await` over a fresh stream always ends.
-    /// `SipralEventKind.mediaStatistics`, which comes after `callEnded`,
-    /// reaches the stack's `SipralStack.events()` only; the record it
-    /// carries is kept in `finalStatistics`.
+    /// Streams finish after `callEnded`, or on `close()`. A reader that
+    /// starts after the end gets `callEnded` alone, so `for await` always
+    /// ends. `mediaStatistics` comes after `callEnded` and only reaches
+    /// `SipralStack.events()`; its record is kept in `finalStatistics`.
     ///
-    /// Each reader buffers on its own, up to `Call.eventBuffer` events; one
-    /// that falls further behind drops its own oldest, and never slows the
-    /// others. A reader that stops -- its loop left, its task cancelled --
-    /// is fed nothing more.
+    /// Each reader buffers up to `Call.eventBuffer` events and drops its own
+    /// oldest past that, never slowing the others.
     public func events() -> AsyncStream<SipralEvent> {
         eventBroadcast.stream()
     }
 
-    /// A new reader of just the digits: `SipralEventKind.digitReceived`'s
-    /// and `SipralEventKind.inBandDigit`'s own `mediaData.digit`, so a voice
-    /// agent that only cares about DTMF does not have to filter `events()`
-    /// itself, nor care which way a key was sent. The same rules as
-    /// `events()`: every reader gets every digit from the moment it asks,
-    /// and every stream finishes when the call ends, with no digit replayed
-    /// to a reader that starts after that.
+    /// A new reader of just the digits, whether sent as RTP events or heard
+    /// in-band (`digitReceived`, `inBandDigit`). Same rules as `events()`;
+    /// nothing is replayed after the end.
     public func dtmf() -> AsyncStream<Character> {
         dtmfBroadcast.stream()
     }
 
-    /// A new reader of the real-time text the far end types (RFC 4103):
-    /// each `SipralEventKind.textReceived`'s `textData`, in order, for a call
-    /// placed or taken with `text: true` whose far end agreed a text stream.
-    /// The same rules as `dtmf()`: every reader gets everything from the
-    /// moment it asks, and every stream finishes when the call ends.
+    /// A new reader of the far end's real-time text (RFC 4103), for a call
+    /// with `text: true` whose far end agreed. Same rules as `dtmf()`.
     public func text() -> AsyncStream<TextEventData> {
         textBroadcast.stream()
     }
 
-    /// How many readers of `events()` are still being fed -- `internal` for
-    /// the same reason as `debugMediaSocketDescriptor`.
+    /// Readers still fed; `internal` for tests.
     var debugEventReaders: Int { eventBroadcast.readerCount }
 
     private let stateQueue = DispatchQueue(label: "org.sipral.call.state")
@@ -101,48 +78,36 @@ public final class Call: @unchecked Sendable {
 
     private var _finalStatistics: sipral_stream_stats_t?
 
-    /// What the call's media cost in the end: the record
-    /// `SipralEventKind.mediaStatistics` carries, kept here from the moment
-    /// it arrives -- right after `SipralEventKind.callEnded`, on the poll
-    /// thread -- and `nil` before that or for a call whose media never
-    /// started. `Media.statistics()` answers with it too once the stream is
-    /// gone, so a reader that asks after the end gets the last second of
-    /// measurements rather than `.wrongState`.
+    /// The final `mediaStatistics` record, which arrives just after
+    /// `callEnded`; `nil` before that or if media never started.
+    /// `Media.statistics()` also returns it after the end, rather than
+    /// `.wrongState`.
     public var finalStatistics: sipral_stream_stats_t? {
         stateQueue.sync { _finalStatistics }
     }
 
-    /// The socket the call was placed or answered on: until `media` exists it
-    /// is the call's, and from then on `Media` owns it -- and whichever
-    /// socket `moveMedia` puts in its place.
+    /// Owned by the call until `media` exists, then by `Media`.
     private let mediaSocket: UDPSocket
     private var _mediaAddress: String
-    /// The call's media socket, as `host:port`: the name
-    /// `sipral_stack_nat_map` gave it, and so of its connection to a TURN
-    /// server reached over TCP or TLS; after `moveMedia`, the new one.
+    /// The media socket's `host:port`, also the key of its TURN connection.
     var mediaAddress: String { stateQueue.sync { _mediaAddress } }
 
     /// The `.incomingCall` this call was taken from, for `identity()` and
     /// `answering()`; `nil` for a call this end placed.
     private let incoming: CallEventData?
 
-    /// The socket this call's real-time text travels on, when it was placed
-    /// or taken with `text: true`: the call's until `media` exists, and the
-    /// media's from then on.
+    /// The real-time text socket; owned like `mediaSocket`.
     private let textSocket: UDPSocket?
 
     /// The call's real-time text socket, as `host:port`, when it has one.
     public let textAddress: String?
 
-    /// The recording session copying this call to a recording server, while
-    /// one does.
+    /// The running recording session, if any.
     private var _recordingSession: RecordingSession?
     public var recordingSession: RecordingSession? { stateQueue.sync { _recordingSession } }
 
-    /// The raw descriptor `close()` releases on the no-media path -- `internal`
-    /// rather than `private` only so `SipralTests` can watch it directly, the
-    /// way a white-box concurrency test has to; nothing outside this module
-    /// reads it, so the public surface this package exposes is unchanged.
+    /// The descriptor `close()` releases when media never started; `internal`
+    /// for the concurrency tests.
     var debugMediaSocketDescriptor: Int32 { mediaSocket.fd }
 
     init(
@@ -158,10 +123,8 @@ public final class Call: @unchecked Sendable {
         self.textAddress = textSocket?.localAddress
     }
 
-    /// Writes to this call's media socket -- used by `SipralStack` for what
-    /// `sipral_stack_poll_farewell` hands back once signalling has already
-    /// ended, and for the packets the library's engine encodes in device
-    /// mode. Through `media` once it exists, which owns the socket then.
+    /// For farewells after the call ended and for engine-encoded packets;
+    /// goes through `media` once it owns the socket.
     func sendOnMediaSocket(_ payload: [UInt8], to address: String) {
         if let media {
             media.sendDatagram(payload, to: address)
@@ -172,11 +135,8 @@ public final class Call: @unchecked Sendable {
 
     /// Called by `SipralStack` on its own poll thread.
     ///
-    /// Every side effect below -- minting `media`, marking `ended` -- happens
-    /// before `event` is ever handed to a reader: a task already awaiting
-    /// `events()` that wakes and reads `call.media` must see it already set
-    /// (`bindings/python/sipral/call.py`'s `deliver` orders its own steps
-    /// for the same reason).
+    /// Side effects (minting `media`, marking `ended`) happen before readers
+    /// see `event`, so a woken reader finds them already set.
     func deliver(_ event: SipralEvent) {
         if event.kindRaw == SipralEventKind.mediaStarted.rawValue, media == nil {
             // Behind a NAT the poll thread has been reading this socket for
@@ -213,8 +173,7 @@ public final class Call: @unchecked Sendable {
 
     // MARK: - state
 
-    /// `sipral_call_state`, read fresh -- not cached from the last event,
-    /// which a status query between events would otherwise miss.
+    /// `sipral_call_state`, read fresh rather than cached from events.
     public var state: SipralCallState? {
         get throws {
             let raw = try retryingBusy { try Sipral.callState(stack: stack.handle, call: handle) }
@@ -224,18 +183,13 @@ public final class Call: @unchecked Sendable {
 
     // MARK: - actions
 
-    /// `sipral_call_answer_media`: accept, with this stack running the audio
-    /// through the media socket this call already opened.
+    /// `sipral_call_answer_media`: accept on the media socket already open.
     ///
-    /// A call taken with `text: true` takes the real-time text the offer
-    /// carries, on its own socket. `codecs` answers in that order of this
-    /// build's codecs instead of the stack's -- `L16/16000` for linear
-    /// audio -- and `focus` says this end is the focus of a conference
-    /// (`isfocus`, RFC 4579) on the answer. An offer that asked for RTCP
-    /// feedback is answered on RTP/AVPF whatever this says (RFC 4585 §4.1
-    /// leaves an answerer no other way to take the stream); `feedback` adds
-    /// what this end does with it, Generic NACKs and reduced-size RTCP. Any
-    /// of these answers through `sipral_call_answer_with`.
+    /// With `text: true` the offered real-time text is taken too. `codecs`
+    /// replaces the stack's order (`L16/16000` for linear audio); `focus`
+    /// marks this end as a conference focus (RFC 4579). An offer asking for
+    /// RTCP feedback is answered on RTP/AVPF regardless (RFC 4585 §4.1);
+    /// `feedback` adds Generic NACKs and reduced-size RTCP.
     public func answer(codecs: String? = nil, focus: Bool = false, feedback: Bool = false) throws {
         guard textSocket != nil || codecs != nil || focus || feedback else {
             try retryingBusy {
@@ -277,11 +231,9 @@ public final class Call: @unchecked Sendable {
         }
     }
 
-    /// `sipral_call_hangup_for`: end the call as `hangup()` does, and say
-    /// why with a `Reason` (RFC 3326) on the BYE, or on the CANCEL a call
-    /// still ringing turns into. A call that came in and was never answered
-    /// is refused with only the Q.850 value (RFC 6432): a SIP one would
-    /// repeat the refusal's own status.
+    /// `sipral_call_hangup_for`: `hangup()` with a `Reason` (RFC 3326) on
+    /// the BYE or CANCEL. An unanswered incoming call gets only the Q.850
+    /// value (RFC 6432), since a SIP one would repeat the refusal's status.
     public func hangup(reason: HangupReason) throws {
         try retryingBusy {
             try Sipral.callHangupFor(
@@ -291,20 +243,16 @@ public final class Call: @unchecked Sendable {
         }
     }
 
-    /// `sipral_call_redirect`: answer a call that came in, and is still
-    /// ringing, with a 3xx (RFC 3261 §21.3) naming where to try instead, in
-    /// order of preference -- 302 is call forwarding. `reason` -- `no-answer`,
-    /// `user-busy`, `unconditional`, `deflection`, `do-not-disturb` or any
-    /// other token -- adds a `Diversion` (RFC 5806) naming the address that
-    /// was called.
+    /// `sipral_call_redirect`: answer a ringing incoming call with a 3xx
+    /// (RFC 3261 §21.3) listing targets in order; 302 is call forwarding.
+    /// `reason` (`no-answer`, `user-busy`, `unconditional`, ... any token)
+    /// adds a `Diversion` (RFC 5806) naming the called address.
     public func redirect(to targets: [String], status: UInt32 = 302, reason: String? = nil) throws {
         try stack.redirect(call: handle, to: targets, status: status, reason: reason)
     }
 
-    /// Who is calling, beyond the `From`: for a call that came in, what the
-    /// network asserted behind the account's trust gate, the caller's
-    /// `Privacy` and where the call was diverted from. Empty for a call this
-    /// end placed.
+    /// Who is calling beyond the `From`: asserted identity (trusted peers
+    /// only), `Privacy`, diversion. Empty for an outgoing call.
     public func identity() throws -> CallerIdentity {
         try IdentityReader.identity(stack: stack, call: handle, data: incoming)
     }
@@ -315,19 +263,15 @@ public final class Call: @unchecked Sendable {
         try IdentityReader.answering(stack: stack, call: handle, data: incoming)
     }
 
-    /// Offer this call at a socket on the network the device is on now:
-    /// what `SipralEventKind.callAddressWanted` asks for once
-    /// `SipralStack.networkChanged(to:)` has said the old one is gone.
+    /// Move the call's media to the current network, as
+    /// `SipralEventKind.callAddressWanted` asks after a network change.
     ///
-    /// A socket is bound at `host` -- the new network's address,
-    /// `SipralStack.networkChanged(to:)`'s own by default -- asked where it
-    /// appears from when the stack has a STUN server, and the call offered
-    /// there with `sipral_call_media_readdress`: a re-INVITE with only `c=`
-    /// and the port moved (RFC 3264 §8.3.1), carrying the account's new
-    /// `Contact`. The new socket carries the call from then on, whatever the
-    /// far end answers; the answer arrives as `.sessionChanged`, a refusal as
-    /// `.sessionChangeFailed`. A call under ICE is refused with
-    /// `.wrongState`: `restartIce()` moves it.
+    /// Binds a socket at `host` (default: the new network's address), maps
+    /// it via STUN if configured, and sends a re-INVITE changing only `c=`
+    /// and the port (RFC 3264 §8.3.1) with the new `Contact`. The new socket
+    /// is used whatever the answer: `.sessionChanged` or
+    /// `.sessionChangeFailed`. Under ICE this throws `.wrongState`; use
+    /// `restartIce()`.
     public func moveMedia(host: String? = nil, port: UInt16 = 0) throws {
         try stack.moving {
             guard let media else {
@@ -366,22 +310,18 @@ public final class Call: @unchecked Sendable {
         }
     }
 
-    /// `sipral_call_transfer`: ask the far end to call `target` instead, a
-    /// blind transfer (RFC 3515). This end stays in the call until the far
-    /// end reports the new call up; `.transferProgress` and then
-    /// `.transferDone` arrive on `events()`, their `transferData` saying how
-    /// it went.
+    /// `sipral_call_transfer`: blind transfer to `target` (RFC 3515). This
+    /// end stays until the new call is up; `.transferProgress` then
+    /// `.transferDone` report it.
     public func transfer(to target: String) throws {
         try retryingBusy {
             try Sipral.callTransfer(stack: stack.handle, call: handle, target: target, nowMs: stack.nowMs())
         }
     }
 
-    /// `sipral_call_restart_ice`: offer the call again with new ICE
-    /// credentials (RFC 8445 §9) and check every pair again once the far end
-    /// answers, while the path it has carries the audio -- the remedy for a
-    /// path whose consent was lost, and for a network change. The new path
-    /// arrives as another `.mediaPathChosen`.
+    /// `sipral_call_restart_ice`: re-offer with new ICE credentials (RFC 8445
+    /// §9) and recheck pairs while the current path carries audio; for lost
+    /// consent or a network change. The new path arrives as `.mediaPathChosen`.
     public func restartIce() throws {
         try retryingBusy {
             try Sipral.callRestartIce(stack: stack.handle, call: handle, nowMs: stack.nowMs())
@@ -409,11 +349,9 @@ public final class Call: @unchecked Sendable {
         }
     }
 
-    /// `sipral_call_detect_progress`: listen for the network's tones, decide
-    /// who answered and listen for the machine's beep, as `options` say.
-    /// Call it straight after `SipralStack.placeCall`, before the far end
-    /// answers; each thing heard is a `SipralEventKind.progressDetected`
-    /// with `progressData` set.
+    /// `sipral_call_detect_progress`: detect network tones, who answered,
+    /// and a machine's beep. Call right after `placeCall`, before the
+    /// answer; each finding is a `progressDetected` event.
     public func detectProgress(_ options: ProgressOptions = ProgressOptions()) throws {
         var config = sipral_progress_config_t()
         config.size = MemoryLayout<sipral_progress_config_t>.size
@@ -444,10 +382,8 @@ public final class Call: @unchecked Sendable {
         try retryingBusy { try Sipral.callDetectProgress(stack: stack.handle, call: handle, config: config) }
     }
 
-    /// `sipral_call_consent_tone`: beep while this call is recorded, every
-    /// value left at zero the library's default (1400 Hz, 18 dB below
-    /// 0 dBm0, 200 ms every fifteen seconds); `local` has this end hear it
-    /// too.
+    /// `sipral_call_consent_tone`: beep while recording; zeros mean 1400 Hz,
+    /// -18 dBm0, 200 ms every 15 s. `local` plays it here too.
     public func setConsentTone(
         frequencyHz: UInt32 = 0, attenuationDb: UInt32 = 0, lengthMs: UInt32 = 0,
         intervalMs: UInt32 = 0, local: Bool = true
@@ -473,18 +409,14 @@ public final class Call: @unchecked Sendable {
 
     // MARK: - conferences
 
-    /// `sipral_call_set_focus`: say (`true`) or stop saying that this end is
-    /// the focus of a conference the call belongs to (RFC 4579 §4.2):
-    /// `isfocus` on the `Contact` of every message the call sends from here
-    /// on -- the answer, for a call not answered yet, and the next re-INVITE
-    /// or UPDATE for one that is up.
+    /// `sipral_call_set_focus`: add or drop `isfocus` (RFC 4579 §4.2) on the
+    /// `Contact` of the next answer, re-INVITE or UPDATE.
     public func setFocus(_ focus: Bool) throws {
         try retryingBusy { try Sipral.callSetFocus(stack: stack.handle, call: handle, focus: focus ? 1 : 0) }
     }
 
-    /// `sipral_call_conference_uri`: the conference this call belongs to,
-    /// when its far end said it is a focus (`isfocus` on its `Contact`), and
-    /// `nil` when it said nothing of the kind.
+    /// `sipral_call_conference_uri`: the conference URI if the far end is a
+    /// focus, else `nil`.
     public func conferenceUri() throws -> String? {
         do {
             return try ProtocolText.read { buffer in
@@ -495,11 +427,10 @@ public final class Call: @unchecked Sendable {
         }
     }
 
-    /// `sipral_call_subscribe_conference`: subscribe to the conference
-    /// package of this call's focus (RFC 4579 §3.4), from the call's own
-    /// account. The subscription outlives the call; each notification is a
-    /// `SipralEventKind.conferenceChanged`, and `SipralSubscription.conference()`
-    /// reads the picture. `.notAFocus` for a call whose far end is not one.
+    /// `sipral_call_subscribe_conference`: subscribe to the focus's
+    /// conference package (RFC 4579 §3.4). The subscription outlives the
+    /// call; each update is `conferenceChanged`, read with
+    /// `SipralSubscription.conference()`. `.notAFocus` if the far end is not.
     public func subscribeConference() throws -> SipralSubscription {
         let made = try retryingBusy {
             try Sipral.callSubscribeConference(stack: stack.handle, call: handle, nowMs: stack.nowMs())
@@ -509,16 +440,12 @@ public final class Call: @unchecked Sendable {
 
     // MARK: - a recording server
 
-    /// `sipral_call_record_to`: record this call to the recording server
-    /// `server` (SIPREC, RFC 7866). The recording session -- an INVITE with
-    /// `Require: siprec`, the metadata (RFC 7865) and one send-only stream
-    /// per party -- goes from the call's account: to `destination`
-    /// (`host:port`) over a TCP connection this stack opens for it, or, with
-    /// no `destination`, where the account sends -- which RFC 3261 does not
-    /// let an INVITE this large reach over UDP, so the stack must then
-    /// signal over TCP or TLS. Two sockets are bound at `host` for the
-    /// copies of the audio. `.wrongState` before
-    /// `SipralEventKind.mediaStarted`, and for a call already recorded.
+    /// `sipral_call_record_to`: record to a SIPREC server (RFC 7866, metadata
+    /// RFC 7865). The session goes to `destination` over a TCP connection
+    /// opened for it, or, with none, where the account sends, which then
+    /// must be TCP or TLS: the INVITE is too large for UDP. Two sockets at
+    /// `host` carry the audio copies. `.wrongState` before `mediaStarted` or
+    /// when already recording.
     public func record(toServer server: String, destination: String? = nil, host: String = "127.0.0.1") throws -> RecordingSession {
         guard let media else {
             throw SipralError(status: .wrongState, message: "the call's media has not started")
@@ -567,8 +494,7 @@ public final class Call: @unchecked Sendable {
         return session
     }
 
-    /// `sipral_call_stop_recording_to`: stop recording this call to its
-    /// recording server; the recording session is hung up.
+    /// `sipral_call_stop_recording_to`: hang up the recording session.
     public func stopRecordingToServer() throws {
         try retryingBusy { try Sipral.callStopRecordingTo(stack: stack.handle, call: handle, nowMs: stack.nowMs()) }
         recordingEnded()
@@ -581,17 +507,10 @@ public final class Call: @unchecked Sendable {
         media?.stopCopyingRecording()
     }
 
-    /// Hang up if this call is still up, release its media, forget it.
-    /// Idempotent, and safe to call regardless of how the call ended --
-    /// including two callers racing to close the same call, such as a
-    /// `CALL_ENDED` event handler and a user action landing at once, which
-    /// is exactly the shape `stateQueue` guards `Media.close()` and
-    /// `SipralStack.close()` against elsewhere in this layer. Without the
-    /// guard, a second, concurrent call here that finds `media` still `nil`
-    /// -- a call closed before its media ever started -- would close
-    /// `mediaSocket`'s file descriptor a second time, which POSIX does not
-    /// make safe: a fresh, unrelated socket opened by another thread in
-    /// between can already hold that same descriptor number by then.
+    /// Hang up if still up, release media, forget the call. Idempotent and
+    /// safe under concurrent callers: without the guard, two closes of a call
+    /// with no media would close the descriptor twice, and by the second
+    /// another thread may have reused that number.
     public func close() {
         let wasClosed = stateQueue.sync { () -> Bool in
             defer { _closed = true }
@@ -615,9 +534,8 @@ public final class Call: @unchecked Sendable {
     }
 }
 
-/// How `Call.detectProgress` listens: the network's tones, whether to decide
-/// who answered and whether to listen for the machine's beep, and every
-/// limit of `sipral_progress_config_t`, each zero for the library's default.
+/// Options for `Call.detectProgress`; each zero limit means the library's
+/// default (`sipral_progress_config_t`).
 public struct ProgressOptions: Sendable {
     public var region: SipralToneRegion = .europe
     public var answeringMachine = true

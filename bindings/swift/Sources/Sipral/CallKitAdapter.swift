@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// `CallKit` is importable on plain macOS too (the module exists in the SDK),
-// but every type in it is `API_UNAVAILABLE(macos)`; `canImport` alone would
-// let this file compile-fail on a Mac. `os(iOS)` is what actually has
-// `CXProvider`, and is also true under Mac Catalyst.
+// `canImport(CallKit)` is true on macOS, where every type is unavailable;
+// `os(iOS)` covers iOS and Mac Catalyst.
 #if canImport(CallKit) && os(iOS)
 @preconcurrency import AVFoundation
 import CallKit
@@ -12,16 +10,8 @@ import Foundation
 
 /// The real `CXProvider`-backed `CallKitProviding`.
 ///
-/// Only where `CallKit` actually works -- iOS and Mac Catalyst, never plain
-/// macOS or Linux, which is why `CallKitBridge` itself is written against
-/// the `CallKitProviding` protocol and not against this type
-/// (`docs/08-ffi.md`/`docs/15-mobile.md`, "Swift" -- "so the core module
-/// also builds on Linux").
-///
-/// Not unit-tested here: it has nothing left to test that `CallKitBridge`'s
-/// own tests, against a recording `CallKitProviding`, do not already cover
-/// -- what would be tested is `CXProvider` itself, which needs a device or
-/// the simulator's telephony stack.
+/// iOS and Mac Catalyst only. Not unit-tested: the logic lives in
+/// `CallKitBridge`, tested against a recorder; this is a thin wrapper.
 public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendable {
     private let provider: CXProvider
     public weak var bridge: CallKitBridge?
@@ -40,17 +30,13 @@ public final class CallKitAdapter: NSObject, CallKitProviding, @unchecked Sendab
     }
 
     public func reportCallConnecting(uuid: UUID) {
-        // CXProvider has no separate "connecting" report for an incoming
-        // call beyond having already reported it; the transition to
-        // answered is what CXAnswerCallAction.fulfill() in
-        // provider(_:perform: CXAnswerCallAction) tells the system.
+        // No separate report for an incoming call: fulfilling
+        // CXAnswerCallAction tells the system.
     }
 
     public func reportCallConnected(uuid: UUID) {
-        // Likewise implied by fulfilling CXAnswerCallAction for an incoming
-        // call; reportOutgoingCall(with:connectedAt:) is for a call this
-        // end originated through CXStartCallAction, which this bridge does
-        // not place -- SipralStack.placeCall goes straight to sipral-ua.
+        // Likewise; reportOutgoingCall is for CXStartCallAction calls,
+        // which this bridge does not place.
     }
 
     public func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason) {
@@ -69,10 +55,8 @@ extension CallKitAdapter: CXProviderDelegate {
         bridge?.providerDidReset()
     }
 
-    /// The session a call needs, set before CallKit activates it: Apple's
-    /// guidance for CallKit is to configure the audio session's category and
-    /// mode when answering or starting a call, and leave activating it to the
-    /// system, which then calls `provider(_:didActivate:)`.
+    /// Configure category and mode only; with CallKit the system activates
+    /// the session (`provider(_:didActivate:)`).
     public static func configureAudioSession(_ session: AVAudioSession = .sharedInstance()) throws {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
     }

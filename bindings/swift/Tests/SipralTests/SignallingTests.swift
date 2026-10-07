@@ -133,14 +133,9 @@ final class FakeRegistrar: @unchecked Sendable {
     }
 }
 
-/// SIP over TCP and TLS through `SipralStack`'s `signalling` -- the Swift
-/// counterpart of `bindings/python/tests/test_signalling.py`: a stack
-/// registers over the one connection it opened; a certificate refused for
-/// each reason `SipralTlsFailure` names arrives as
-/// `SipralEventKind.transportFailed` carrying that reason; a registrar that
-/// closes the connection is connected to again and the account registers
-/// again on the new one; and the INVITE rate floor's voice-agent preset lets
-/// through a burst the default answers 480.
+/// SIP over TCP and TLS: registration over the connection, each TLS refusal
+/// reason in `transportFailed`, reconnect and re-register after the server
+/// closes, and the voice-agent INVITE limit.
 final class SignallingTests: XCTestCase {
     static let serverName = "registrar.sipral.test"
 
@@ -314,11 +309,8 @@ final class SignallingTests: XCTestCase {
         XCTAssertEqual(failed.tls, SipralTlsFailure.none)
     }
 
-    /// A connection that is ready before its path names the local end --
-    /// what a loaded machine does -- still hands its local address on once
-    /// the path names it: the stack is created on that address and a
-    /// recording server's connection is bound by it, and an empty one is
-    /// refused as "not given" by whichever of the two it reaches.
+    /// A ready connection that names its local end late still yields it,
+    /// since the stack and recording connections need it.
     func testALocalAddressThatArrivesAfterTheConnectionIsReadyIsStillTaken() {
         var reads = 0
         let named = SignallingConnection.localAddress(within: 2000) {
@@ -359,9 +351,8 @@ final class SignallingTests: XCTestCase {
         XCTAssertTrue(FakeRegistrar.header("Contact", again)?.contains(";transport=tcp") == true)
     }
 
-    /// The stack retires the main connection on its own when a flow that
-    /// answered keep-alives stops answering them (RFC 5626 §4.4.1), with the
-    /// socket still open here; said here the way it says it.
+    /// The stack retires a connection whose keep-alives go unanswered
+    /// (RFC 5626 §4.4.1) while the socket is still open here.
     func testAConnectionTheStackLetGoOfIsMadeAgain() async throws {
         let registrar = try FakeRegistrar()
         defer { registrar.stop() }
@@ -412,9 +403,7 @@ final class SignallingTests: XCTestCase {
                 + "CSeq: 1 INVITE\r\n"
                 + "Contact: <sip:trunk@\(here)>\r\n"
                 + "Content-Length: 0\r\n\r\n"
-            // paced: a burst of datagrams from a non-blocking socket is
-            // one the kernel may refuse part of, and every INVITE has to
-            // arrive for the count to mean anything
+            // paced, or the kernel may drop some of the burst
             while !caller.send(Array(invite.utf8), to: target) {
                 usleep(1000)
             }

@@ -9,10 +9,8 @@ import Foundation
 import os
 
 extension SipralLogLevel {
-    /// The `OSLogType` a line at this level is logged as by
-    /// `SipralStack.logTo(subsystem:level:)`: the unified logging system has
-    /// no level between `.default` and `.error` for a warning, and none below
-    /// `.debug` for a trace line.
+    /// The `OSLogType` used by `SipralStack.logTo(subsystem:level:)`. Warnings
+    /// map to `.default` and traces to `.debug`, which have no closer match.
     public var osLogType: OSLogType {
         switch self {
         case .error: return .error

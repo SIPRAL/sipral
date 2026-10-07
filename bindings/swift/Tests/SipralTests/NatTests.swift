@@ -14,20 +14,15 @@ import Foundation
 import XCTest
 @testable import Sipral
 
-/// A STUN and TURN server in the test itself, on 127.0.0.1, that tells every
-/// socket it hears from that it appears at `203.0.113.7` (RFC 5737's
-/// documentation range) on its own port plus ten thousand -- a NAT that
-/// moves both the address and the port, so a `Contact` or an SDP naming the
-/// socket's own address cannot pass for right.
+/// An in-test STUN/TURN server on 127.0.0.1 that maps every socket to
+/// `203.0.113.7` (RFC 5737) on another port, so a local address in a
+/// `Contact` or SDP cannot pass.
 ///
-/// Binding requests get an XOR-MAPPED-ADDRESS (RFC 8489 §14.2). An Allocate
-/// (RFC 8656 §7) without a credential gets the 401 with a REALM and a NONCE
-/// that makes a client sign the next one; a signed one is checked against
-/// the long-term key -- MD5 of `username:realm:password` (RFC 8489 §9.2.2) --
-/// and answered with a relay on `198.51.100.9`, signed the same way. Nothing
-/// is answered until `open` is set, so a test takes its event stream before
-/// the first answer can raise an event: the stack retransmits what was not
-/// answered.
+/// Binding gets XOR-MAPPED-ADDRESS (RFC 8489 §14.2). An unsigned Allocate
+/// (RFC 8656 §7) gets a 401 with REALM and NONCE; a signed one is checked
+/// with the long-term key (RFC 8489 §9.2.2) and gets a relay on
+/// `198.51.100.9`. Nothing is answered until `open`, so tests can take their
+/// streams first; the stack retransmits meanwhile.
 final class FakeStunServer: @unchecked Sendable {
     struct Request {
         let method: UInt16
@@ -50,9 +45,7 @@ final class FakeStunServer: @unchecked Sendable {
     private var running = true
     private let stopped = DispatchSemaphore(value: 0)
 
-    /// The address every socket is told it appears at. A test in which
-    /// something is later sent to a mapped address names one of this
-    /// machine's own, so nothing leaves it.
+    /// The mapped address; tests that send to it use a local one.
     let publicHost: String
 
     init(
@@ -229,15 +222,11 @@ final class FakeStunServer: @unchecked Sendable {
     }
 }
 
-/// What `SipralStack(ice:stunServer:turn:)` carries, proven on the wire: the
-/// mapping a STUN server reports reaches the `Contact` and the SDP a far end
-/// reads, a TURN relay is asked for with the credential and offered as a
-/// candidate, and two stacks that require ICE carry audio both ways.
+/// STUN mappings reach `Contact` and SDP, TURN relays are allocated with the
+/// credential and offered, and two ICE-required stacks carry audio.
 final class NatTests: XCTestCase {
-    /// An address of this machine's own that ICE may use: RFC 8445 §5.1.1.1
-    /// keeps loopback out of the candidates, so the ICE tests bind every
-    /// socket to the first interface that is up and not loopback. Nothing
-    /// leaves the machine: every socket in them is this process's own.
+    /// A non-loopback local address, since RFC 8445 §5.1.1.1 excludes
+    /// loopback from candidates. Traffic stays on this machine.
     private func hostAddress() throws -> String {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { throw XCTSkip("no interfaces") }
@@ -346,10 +335,8 @@ final class NatTests: XCTestCase {
         XCTAssertTrue(invite.contains("a=rtcp-mux"), "one mapping describes one port, so the offer asks for rtcp-mux")
     }
 
-    /// `setStunServers(_:)` on a stack created with nobody to ask: the
-    /// signalling socket is mapped at once, a call placed afterwards is
-    /// offered at the address the server handed out, and an entry that is
-    /// not an address is refused.
+    /// `setStunServers(_:)` on a stack without STUN maps signalling at once,
+    /// later calls use the mapped address, and a malformed entry is refused.
     func testAListNamedLaterMapsTheSignallingAndTheCalls() async throws {
         let stun = try FakeStunServer()
         defer { stun.stop() }
@@ -382,9 +369,8 @@ final class NatTests: XCTestCase {
         }
     }
 
-    /// `stunFallbacks`: the first server named never answers, and the
-    /// signalling socket is asked of the next one once five and a half
-    /// seconds have gone by, with `SipralEventKind.stunServer` saying so.
+    /// A silent first server is abandoned for the next after 5.5 s, reported
+    /// by `stunServer`.
     func testASilentFirstServerHandsTheSocketToTheNext() async throws {
         let silent = try UDPSocket(host: "127.0.0.1", port: 0)
         defer { silent.close() }
@@ -407,9 +393,8 @@ final class NatTests: XCTestCase {
         XCTAssertEqual(nat.mapped, FakeStunServer.mapped(alice.bindAddress))
     }
 
-    /// An account the STUN answer showed behind a NAT keeps its registrar's
-    /// flow open: a double CRLF, alone in a datagram, reaches the registrar
-    /// within the interval asked for, and none does with the keep-alive off.
+    /// Behind a NAT, a double CRLF reaches the registrar within the interval;
+    /// none with the keep-alive off.
     func testAnAccountBehindTheNatKeepsItsRegistrarsFlowOpen() async throws {
         for keepalive in [true, false] {
             let stun = try FakeStunServer()
@@ -508,9 +493,7 @@ final class NatTests: XCTestCase {
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
 
-    /// `SipralIce.lite` answering a full agent that requires ICE (RFC 8445
-    /// §2.5): the lite end offers its one host candidate and answers the
-    /// checks, the full end nominates, and audio crosses the pair both ways.
+    /// ICE-lite answering a full agent (RFC 8445 §2.5): audio both ways.
     func testALiteStackAnsweringAFullOneCarriesAudioBothWays() async throws {
         let host = try hostAddress()
         let alice = try SipralStack(audio: .application, bindHost: host, ice: .required)
@@ -519,12 +502,9 @@ final class NatTests: XCTestCase {
         try await assertIceCarriesAudio(alice, bob, host: host)
     }
 
-    /// The same call with both ends behind the STUN server: every media
-    /// socket is mapped before its call is described, so the far end's first
-    /// checks arrive while the socket is still the stack's to read, and go
-    /// in through `sipral_stack_receive_stun` until the media handle exists.
-    /// The mapped address is this machine's own, on a port nothing listens
-    /// on, so the server-reflexive pair fails and the host pair carries it.
+    /// Both ends behind STUN: early checks arrive before the media handle
+    /// and go through `sipral_stack_receive_stun`. The reflexive pair fails
+    /// (nothing listens there) and the host pair carries the call.
     func testIceBehindStunCarriesAudioBothWays() async throws {
         let host = try hostAddress()
         let stun = try FakeStunServer(host: host, publicHost: host)
@@ -538,20 +518,10 @@ final class NatTests: XCTestCase {
             && $0.from != bob.bindAddress }, "no media socket asked the STUN server")
     }
 
-    /// A call that allocated a TURN relay gives it back when it ends:
-    /// `SipralStack.drainFarewells` must
-    /// send what `sipral_stack_poll_farewell` hands out to the destination
-    /// it names -- the TURN server, for the Refresh with a lifetime of zero
-    /// that gives a relay back (`crates/sipral/src/relay.rs`, "gives it
-    /// back when the call ends") -- and only fall back to the last address
-    /// media was heard from when it names none. A call whose peer never
-    /// carries any ICE still had a relay allocated for it and still gives
-    /// it back the same way (`relay.rs`: "A call whose peer does no ICE
-    /// never uses it, and gives it back the same way"), so this needs
-    /// nothing more than a call that reaches both ends and is then closed --
-    /// were the destination ignored in favour of the far end's own address,
-    /// as it once was, this fake TURN server would never see the Refresh at
-    /// all.
+    /// A relay is released at the end: the zero-lifetime Refresh must go to
+    /// the destination `sipral_stack_poll_farewell` names (the TURN server),
+    /// not the far end's media address. Even a call without ICE allocated a
+    /// relay, so a plain call suffices.
     func testTurnAllocationIsGivenBackWhenTheCallEnds() async throws {
         #if !canImport(CryptoKit)
         throw XCTSkip("the fake TURN server signs its answers with CryptoKit")
@@ -603,10 +573,7 @@ final class NatTests: XCTestCase {
         #endif
     }
 
-    /// D5's path half and a restart this end starts, through the idiomatic
-    /// layer: the call's agent says which pair carries it and what became of
-    /// every other, and `restartIce()` checks again under new credentials
-    /// until a second path is chosen.
+    /// The ICE path report, and `restartIce()` choosing a path again.
     func testAnIceCallSaysWhichPathsItTriedAndRestartsItsIce() async throws {
         let host = try hostAddress()
         let alice = try SipralStack(audio: .application, bindHost: host, ice: .required)
@@ -620,8 +587,7 @@ final class NatTests: XCTestCase {
             XCTAssertGreaterThan(chosen.first?.priority ?? 0, 0)
             XCTAssertFalse(chosen.first?.remote.isEmpty ?? true)
 
-            // taken before the restart, so it hears the restart's own
-            // selection and nothing from before it
+            // taken before the restart
             let again = alice.events()
             try aliceCall.restartIce()
             let reselected = await self.first(again, within: 10) { $0.kind == .mediaPathChosen }

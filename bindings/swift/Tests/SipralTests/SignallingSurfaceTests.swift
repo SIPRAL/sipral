@@ -9,11 +9,9 @@ import Glibc
 import XCTest
 @testable import Sipral
 
-/// ABI 0.29's signalling surface through this package, between two stacks on
-/// 127.0.0.1: why a call ended (RFC 3326) both ways, who is calling behind
-/// the trust gate (RFC 3325, 3323, 5806, 7044), how the call asked to be
-/// answered (RFC 5373, `Alert-Info`), a 3xx answer, the account's session
-/// timer, and a call moved to a new socket after the network changed.
+/// Two stacks on 127.0.0.1: `Reason` (RFC 3326), caller identity (RFC 3325,
+/// 3323, 5806, 7044), answer mode (RFC 5373), 3xx, session timer, and a
+/// call moved after a network change.
 final class SignallingSurfaceTests: XCTestCase {
     private struct Pair {
         let alice: SipralStack
@@ -264,8 +262,7 @@ final class SignallingSurfaceTests: XCTestCase {
         try taken.answer()
         try await confirmed(placed, aliceEvents)
         defer { placed.close(); taken.close() }
-        // alice's confirmation says nothing about bob's end: his Media is made
-        // when his own call hears it is confirmed, on his event thread
+        // bob's Media appears on his own confirmation, not alice's
         let minted = await eventually(within: 5) { placed.media != nil && taken.media != nil }
         XCTAssertTrue(minted, "a confirmed call has no Media at one end")
         let aliceMedia = try XCTUnwrap(placed.media)
@@ -371,10 +368,8 @@ final class SignallingSurfaceTests: XCTestCase {
         XCTAssertTrue(stack.keptSignallingPort)
     }
 
-    /// A stack bound on every interface keeps picking its own address
-    /// across a move: its socket stays where it was, on its port, and what it
-    /// advertises is the route toward each account's server again rather
-    /// than the address the platform named, taken as fixed from then on.
+    /// A wildcard-bound stack keeps its socket across a move and advertises
+    /// the route toward each server, not the platform's address.
     func testAStackOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove() throws {
         let elsewhere = try otherAddress()
         let stack = try SipralStack(audio: .application)

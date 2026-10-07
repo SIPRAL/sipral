@@ -5,25 +5,19 @@ import CSipral
 
 /// Who runs a stack's audio: `sipral_stack_config_t::audio`.
 ///
-/// `.device` has the library open the platform's own devices -- the
-/// voice-processing unit on macOS and iOS, with the system's echo
-/// cancellation behind the microphone -- and pump every call from the
-/// moment its media starts to the moment it ends, with nothing for the
-/// application to do but choose devices through `SipralStack.audio`.
-/// `.application` is the stack as it was before: `Media.frames()` carries the
-/// far end's audio and `Media.sendAudio` takes the microphone's, for an
-/// application that runs its own audio -- a voice agent, a recorder, a test.
+/// `.device`: the library opens the platform devices (the voice-processing
+/// unit on Apple platforms, with system echo cancellation) and pumps every
+/// call; the application only picks devices via `SipralStack.audio`.
+/// `.application`: `Media.frames()` and `Media.sendAudio` carry the audio,
+/// for voice agents, recorders and tests.
 public enum AudioMode: Sendable, Equatable {
     /// The library opens the devices, and `activation` says when.
     case device(activation: SipralAudioActivation = .automatic)
     /// The application pumps every call's frames itself.
     case application
 
-    /// What a stack is created with unless it says otherwise: `.device` with
-    /// automatic activation wherever this build of the library has an engine
-    /// for the platform -- macOS, iOS, Windows -- and `.application` where it
-    /// has none, Linux among them, so that the same code builds and runs
-    /// everywhere and hears nothing only where nothing could be heard.
+    /// `.device` with automatic activation where the build has an engine
+    /// (macOS, iOS, Windows), `.application` elsewhere (Linux).
     public static var platformDefault: AudioMode {
         guard let features = try? Sipral.capabilities().features,
               features & Sipral.featureAudioDevice != 0 else { return .application }
@@ -48,9 +42,8 @@ public enum AudioMode: Sendable, Equatable {
 
 /// One audio device, as `sipral_audio_device_at` lists it.
 public struct SipralAudioDevice: Sendable, Equatable, Identifiable {
-    /// The engine's name for it: stable across refreshes and unplugging,
-    /// never reused, never zero -- what `AudioDevices.select` takes, and what
-    /// an application saves as a person's choice.
+    /// Stable across refreshes and unplugging, never reused, never zero:
+    /// safe to save as a user's choice.
     public let id: UInt32
     /// What the platform calls it.
     public let name: String
@@ -63,8 +56,8 @@ public struct SipralAudioDevice: Sendable, Equatable, Identifiable {
     public let isDefaultInput: Bool
     /// Whether the system plays to it by default.
     public let isDefaultOutput: Bool
-    /// Whether the last refresh still found it. A device that went keeps its
-    /// row and its id, so a selection saved against it still names it.
+    /// Whether the last refresh found it. A missing device keeps its row and
+    /// id, so saved selections still name it.
     public let isPresent: Bool
 
     public init(
@@ -87,16 +80,14 @@ public struct SipralAudioDevice: Sendable, Equatable, Identifiable {
     }
 }
 
-/// The name `SipralAudioDevice` had until the package prefixed it: a bare
-/// `AudioDevice` is a name other audio packages an application imports
-/// beside this one use too. Kept for one minor release.
+/// The former name of `SipralAudioDevice`, which clashed with other audio
+/// packages. Kept for one minor release.
 @available(*, deprecated, renamed: "SipralAudioDevice")
 public typealias AudioDevice = SipralAudioDevice
 
-/// What a role was asked to run on, and what it runs on now: the two differ
-/// while a chosen device is unplugged, when the role runs on the system's
-/// route and the choice is kept for the device's return. `nil` is the
-/// system's route.
+/// The chosen and the current device for a role; they differ while the
+/// chosen one is unplugged and the system route stands in. `nil` is the
+/// system route.
 public struct AudioSelection: Sendable, Equatable {
     public let selected: UInt32?
     public let running: UInt32?
@@ -106,9 +97,7 @@ public struct AudioSelection: Sendable, Equatable {
 public struct AudioStatus: Sendable, Equatable {
     /// Whether the devices are open and the pump is running.
     public let isActive: Bool
-    /// Whether the platform's own processing sits behind the microphone: the
-    /// voice-processing unit on Apple's platforms, which cancels the
-    /// loudspeaker's echo.
+    /// Whether the platform's echo-cancelling voice processing is in use.
     public let systemEchoCancellation: Bool
     /// The loudspeaker-to-microphone delay the devices report.
     public let renderDelayMs: UInt64
@@ -129,10 +118,8 @@ public struct AudioEventData: Sendable, Equatable {
     public let changeRaw: UInt32
     public let change: SipralAudioChange?
     public let originRaw: UInt32
-    /// `.system` for the operating system -- a device arriving or leaving,
-    /// the default moving -- and `.engine` for the library doing what it was
-    /// asked, or what a lost device made it do. An application notes the
-    /// first and never re-applies its own choice on hearing the second.
+    /// `.system` for OS changes (devices, defaults), `.engine` for the
+    /// library's own actions. Never re-apply a choice on hearing `.engine`.
     public let origin: SipralAudioOrigin?
     /// The role a change is about, for a selection, a loss or a reopening.
     public let role: SipralAudioRole?
@@ -142,24 +129,19 @@ public struct AudioEventData: Sendable, Equatable {
     public let device: UInt32?
 }
 
-/// What `CallKitBridge` drives when the library runs the devices: the one
-/// audio session CallKit hands the calls, taken and given back as a whole.
-/// `AudioDevices` is the real one; a test records what it was told.
+/// What `CallKitBridge` activates and deactivates; a test can substitute it.
 public protocol CallAudioSessionEngine: AnyObject, Sendable {
     func activate() throws
     func deactivate() throws
     func setMuted(_ muted: Bool, for direction: SipralAudioDirection) throws
 }
 
-/// The library's own audio engine for one stack in `AudioMode.device`: the
-/// devices listed, chosen per role, their gain, mute and level, the ring, and
-/// when they are open. `SipralStack.audio`.
+/// The library's audio engine for one stack in `AudioMode.device`
+/// (`SipralStack.audio`).
 ///
-/// Every member calls the C ABI directly and may be called from any thread;
-/// none takes the stack's own lock, so a level meter read on a window's timer
-/// never waits for signalling. A platform that stops answering is
-/// `SipralError` with `.deviceTimedOut` after the stack's probe interval,
-/// never a hang.
+/// Callable from any thread; no member takes the stack's lock, so a level
+/// meter never waits for signalling. A platform that stops answering throws
+/// `.deviceTimedOut` after the probe interval rather than hanging.
 public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
     public unowned let stack: SipralStack
 
@@ -169,12 +151,10 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
 
     // MARK: - the list
 
-    /// Ask the platform again, and return the list. A device seen before
-    /// keeps its id; one that has gone stays, `isPresent` false; a new one
-    /// gets the next id. The engine refreshes by itself when the platform
-    /// announces a change, and says so with
-    /// `SipralEventKind.audioDevicesChanged`, so this is for a settings
-    /// screen opening rather than for polling.
+    /// Re-query the platform and return the list. Ids are kept; gone devices
+    /// stay with `isPresent` false. The engine refreshes itself on platform
+    /// changes (`audioDevicesChanged`), so this is for a settings screen,
+    /// not polling.
     @discardableResult
     public func refresh() throws -> [SipralAudioDevice] {
         _ = try Sipral.audioRefresh(stack: stack.handle)
@@ -187,10 +167,8 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         return try (0..<count).map(device(at:))
     }
 
-    /// One row, its name read into a buffer that grows to what the library
-    /// says it needs: `sipral_audio_device_at` writes the length needed, NUL
-    /// counted, even when the name does not fit, which the generated
-    /// wrapper, throwing on anything but success, would not hand back.
+    /// Called directly: the C call reports the needed name length even when
+    /// it does not fit, which the generated wrapper would throw away.
     private func device(at index: Int) throws -> SipralAudioDevice {
         var buffer = [CChar](repeating: 0, count: 256)
         var device = sipral_audio_device_t.sized()
@@ -227,16 +205,11 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
 
     /// Put `role` on `device`, or back on the system's route with `nil`.
     ///
-    /// The microphone, the speaker and the ringer are chosen separately.
-    /// Refused before anything is opened: `.noSuchDevice` for an id the list
-    /// never held, `.deviceUnusable` for a device with no channels for the
-    /// role or one that is not plugged in, and `.notSupported` where the
-    /// platform cannot put the role on a device of its own -- on iOS, whose
-    /// route is the audio session's, the microphone and the ringer. On macOS
-    /// the microphone is chosen apart from the speaker without moving the
-    /// system's default input, and a ringer on another device plays through
-    /// an output of its own. While the engine is active the role moves at
-    /// once, with its direction's gain and mute carried over.
+    /// Roles are chosen separately. Errors: `.noSuchDevice` for an unknown
+    /// id, `.deviceUnusable` for no suitable channels or unplugged,
+    /// `.notSupported` where the platform owns the route (microphone and
+    /// ringer on iOS). On macOS this does not move the system default. While
+    /// active, the role moves at once, keeping gain and mute.
     public func select(_ device: UInt32?, for role: SipralAudioRole) throws {
         try Sipral.audioSelect(stack: stack.handle, role: role.rawValue, device: device ?? 0)
     }
@@ -257,10 +230,8 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
 
     // MARK: - gain, mute, level
 
-    /// The gain of a direction as a factor: 1 leaves the audio as it is, 0.5
-    /// halves it, 2 doubles it. The input direction is the microphone's gain.
-    /// Kept by the engine and applied to whatever device the direction runs
-    /// on, so a headset unplugged mid-call comes back as loud as it was.
+    /// A direction's gain as a factor (1 unchanged, 0.5 half). Kept across
+    /// device changes.
     public func setGain(_ gain: Double, for direction: SipralAudioDirection) throws {
         let steps = (max(gain, 0) * Double(Self.unity)).rounded()
         try Sipral.audioSetGain(
@@ -273,8 +244,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         Double(try Sipral.audioGain(stack: stack.handle, direction: direction.rawValue)) / Double(Self.unity)
     }
 
-    /// Mute or unmute a direction: the input direction sends silence, the
-    /// output one plays none. Kept across a change of device, like the gain.
+    /// Mute a direction. Kept across device changes.
     public func setMuted(_ muted: Bool, for direction: SipralAudioDirection) throws {
         try Sipral.audioSetMuted(stack: stack.handle, direction: direction.rawValue, muted: muted ? 1 : 0)
     }
@@ -283,22 +253,17 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         try Sipral.audioMuted(stack: stack.handle, direction: direction.rawValue) != 0
     }
 
-    /// The meter: the recent peak of a direction, 0 for silence to 1 for
-    /// full scale, after the gain and the mute. Cheap enough for a window's
-    /// timer; zero while the engine is not active.
+    /// Recent peak, 0 to 1, after gain and mute; zero while inactive. Cheap.
     public func level(for direction: SipralAudioDirection) throws -> Double {
         Double(try Sipral.audioLevel(stack: stack.handle, direction: direction.rawValue)) / Double(Int16.max)
     }
 
     // MARK: - the platform's echo cancellation
 
-    /// Turn the platform's own echo cancellation on or off on the running
-    /// stack (ABI 1.1): what `systemEchoCancellation` chose when the stack
-    /// was made. While the devices are open they are reopened at once with or
-    /// without the voice-processing unit, on the devices they were on, with
-    /// the gain and the mute; a call keeps its media through a gap as long as
-    /// the reopen. `status().systemEchoCancellation` says what the platform
-    /// did, and `SipralStack.settings().systemEchoCancellation` what is asked.
+    /// Toggle the platform's echo cancellation on a running stack. Open
+    /// devices are reopened at once, keeping devices, gain and mute; calls
+    /// survive the short gap. `status().systemEchoCancellation` reports what
+    /// the platform did.
     public func setSystemEchoCancellation(_ on: Bool) throws {
         try Sipral.audioSetSystemEchoCancellation(
             stack: stack.handle, on: on ? SipralToggle.on.rawValue : SipralToggle.off.rawValue
@@ -307,12 +272,8 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
 
     // MARK: - one call's own gain, mute and level
 
-    /// Set one call's own gain in one direction, as a factor, on top of the
-    /// direction's (`setGain(_:for:)`): the input direction is what the
-    /// microphone sends that call alone, the output how loud that call is in
-    /// the loudspeaker beside the others. Kept while the call is held or in a
-    /// local conference and back; gone when it ends. Throws `.wrongState`
-    /// before the call's media starts and after it ends.
+    /// One call's gain on top of the direction's. Kept through hold and
+    /// local conferences; `.wrongState` before media starts or after the end.
     public func setGain(_ gain: Double, for direction: SipralAudioDirection, of call: Call) throws {
         let steps = (max(gain, 0) * Double(Self.unity)).rounded()
         try Sipral.audioCallSetGain(
@@ -327,10 +288,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
             / Double(Self.unity)
     }
 
-    /// Mute or unmute one call in one direction while every other call goes
-    /// on: the far end of that call alone hears silence, or that call alone
-    /// is silent in the loudspeaker. Kept and refused as
-    /// `setGain(_:for:of:)` is.
+    /// Mute one call in one direction. Same rules as `setGain(_:for:of:)`.
     public func setMuted(_ muted: Bool, for direction: SipralAudioDirection, of call: Call) throws {
         try Sipral.audioCallSetMuted(
             stack: stack.handle, call: call.handle, direction: direction.rawValue, muted: muted ? 1 : 0
@@ -341,8 +299,7 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
         try Sipral.audioCallMuted(stack: stack.handle, call: call.handle, direction: direction.rawValue) != 0
     }
 
-    /// One call's meter in one direction, 0 to 1, after its own gain and
-    /// mute: what the microphone sent that call, or what it played.
+    /// One call's meter, 0 to 1, after its gain and mute.
     public func level(for direction: SipralAudioDirection, of call: Call) throws -> Double {
         Double(try Sipral.audioCallLevel(stack: stack.handle, call: call.handle, direction: direction.rawValue))
             / Double(Int16.max)
@@ -350,22 +307,19 @@ public final class AudioDevices: CallAudioSessionEngine, @unchecked Sendable {
 
     // MARK: - activation and the ring
 
-    /// Open the devices, under `SipralAudioActivation.manual`: what
-    /// CallKit's `provider(_:didActivate:)` is for. Calls whose media started
-    /// before this are carried from here on.
+    /// Open the devices under `.manual` activation, from CallKit's
+    /// `provider(_:didActivate:)`. Earlier calls are picked up.
     public func activate() throws {
         try Sipral.audioActivate(stack: stack.handle)
     }
 
-    /// Close the devices; calls stay attached and are heard again at the
-    /// next `activate()`. What `provider(_:didDeactivate:)` is for.
+    /// Close the devices (`provider(_:didDeactivate:)`); calls stay attached.
     public func deactivate() throws {
         try Sipral.audioDeactivate(stack: stack.handle)
     }
 
-    /// Play `tone` -- 16-bit mono PCM at `sampleRate` -- on the ringer's
-    /// device until `stopRinging()`, over and over when `looped`. Under
-    /// automatic activation the ring opens the devices itself.
+    /// Play 16-bit mono `tone` on the ringer until `stopRinging()`. Under
+    /// automatic activation it opens the devices itself.
     public func ring(_ tone: [Int16], sampleRate: UInt32, looped: Bool = true) throws {
         try Sipral.audioRing(stack: stack.handle, samples: tone, sampleRateHz: sampleRate, looped: looped ? 1 : 0)
     }

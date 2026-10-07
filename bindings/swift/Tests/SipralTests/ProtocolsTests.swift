@@ -134,11 +134,8 @@ final class ProtocolsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(bobCall.media).info().codec, SipralCodec.l16Wideband.rawValue)
     }
 
-    /// Both stacks offer and take PCMU alone, so PCMA is there only when a
-    /// call names it. An answer keeps the offer's order (RFC 3264 §6.1):
-    /// placed with PCMA first, the call settles on PCMA however the answer
-    /// lists the two; answered with PCMA,PCMU, it takes the PCMA the stack
-    /// alone refuses.
+    /// Stacks default to PCMU only, so PCMA appears only when a call names
+    /// it. The answer keeps the offer's order (RFC 3264 §6.1).
     func testACallsOwnCodecsSettleOnPcmaPlacedAndAnswered() async throws {
         let placed: (SipralStack, Account, String) throws -> Call = { stack, account, target in
             try stack.placeCall(account: account, target: target, codecs: "PCMA,PCMU")

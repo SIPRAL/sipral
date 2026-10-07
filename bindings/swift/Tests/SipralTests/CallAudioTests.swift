@@ -287,10 +287,8 @@ final class CallAudioTests: XCTestCase {
         rig.audio.close()
     }
 
-    /// An engine that stops as soon as it starts, as one did on the iOS
-    /// Simulator every time voice processing reconfigured it: each quick
-    /// death waits a step longer before the next open, instead of rebuilding
-    /// the device in a tight loop.
+    /// A device that dies right after starting (seen on the iOS Simulator)
+    /// backs off further each time instead of looping.
     func testADeviceThatDiesAsSoonAsItOpensIsRetriedSlowerAndSlower() {
         let rig = Rig(frameSamples: frameSamples, retryDelays: [0, 0.05, 0.1])
         rig.device.dieAtOnce(true)

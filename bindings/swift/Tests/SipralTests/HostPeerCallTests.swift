@@ -10,16 +10,11 @@ import Foundation
 import XCTest
 @testable import Sipral
 
-/// Calls between wherever this suite runs and a peer outside the process:
-/// the iOS Simulator calling `SipralLabAgent` on the Mac that hosts it,
-/// which is what it was written for, or a registrar such as the lab's
-/// Asterisk, which it can register with and be called through.
+/// Calls to a peer outside the process, e.g. the iOS Simulator calling
+/// `SipralLabAgent` on its host Mac, or through a registrar.
 ///
-/// Opt-in: nothing here runs unless `SIPRAL_PEER` names, as `host:port`,
-/// where this end sends its requests. `xcodebuild` hands a test process
-/// every `TEST_RUNNER_<NAME>` variable of its own environment as `<NAME>`,
-/// so `TEST_RUNNER_SIPRAL_PEER=127.0.0.1:5070 xcodebuild test ...` reaches
-/// it in the simulator, which shares the Mac's network stack.
+/// Runs only when `SIPRAL_PEER` (`host:port`) is set; under `xcodebuild`
+/// pass it as `TEST_RUNNER_SIPRAL_PEER`.
 ///
 /// - `SIPRAL_LOCAL_HOST` is the address this end binds and advertises,
 ///   `127.0.0.1` unless the peer is somewhere loopback does not reach.
@@ -60,9 +55,8 @@ final class HostPeerCallTests: XCTestCase {
             authPassword = environment["SIPRAL_AUTH_PASSWORD"]
         }
 
-        /// The account, registered first when there is a registrar to
-        /// register with; `stackEvents` is the stack's own stream, read by
-        /// the caller for everything that follows too.
+        /// The account (registered first when there is a registrar) and the
+        /// stack's event stream.
         func account(on stack: SipralStack, stackEvents: Recorder<SipralEvent>) async throws -> Account {
             let account = try stack.addAccount(
                 aor: aor,
@@ -171,9 +165,8 @@ final class HostPeerCallTests: XCTestCase {
         print("host-peer call: incoming call ended by this end, \(String(describing: ended?.callData?.endReason))")
     }
 
-    /// One second of a square wave at a quarter of full scale, loud enough
-    /// that its echo is told apart from the silence and comfort noise a peer
-    /// sends when it has nothing to echo, and at least 25 loud frames back.
+    /// One second of square wave, loud enough to tell its echo from comfort
+    /// noise.
     private func exchangeAudio(on call: Call, events: Recorder<SipralEvent>) async throws {
         let started = await events.first(within: 5) { $0.kind == .mediaStarted }
         let media = try XCTUnwrap(started.flatMap { _ in call.media }, "media never started")

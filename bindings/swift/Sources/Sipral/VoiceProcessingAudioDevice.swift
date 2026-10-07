@@ -11,23 +11,16 @@
 /// processing -- echo cancellation, noise suppression, automatic gain -- on
 /// its input node.
 ///
-/// Every `open` builds a new engine: after
-/// `mediaServicesWereResetNotification` every audio object made before it is
-/// unusable and has to be made again. An engine whose I/O was reconfigured
-/// under it -- a route change, the session's sample rate -- stops and says
-/// so with `AVAudioEngineConfigurationChange`; it is started again in place,
-/// and only one that will not start is reported as the device failing, so
-/// that `CallAudio` builds the next one.
+/// Every `open` builds a new engine, since a media services reset kills the
+/// old one. After a configuration change the engine is restarted in place;
+/// only one that will not restart is reported as failed.
 public final class VoiceProcessingAudioDevice: CallAudioDevice, @unchecked Sendable {
     #if os(iOS)
     private let managesSession: Bool
 
-    /// `managesSession`: whether `open` sets the session's category to
-    /// `.playAndRecord` in `.voiceChat` mode and activates it, and `close`
-    /// deactivates it. True for an application that does not use CallKit.
-    /// With CallKit it is false: the system activates the session for the
-    /// call and says so in `CXProviderDelegate`'s `didActivate`, and
-    /// activating it before that is what Apple asks applications not to do.
+    /// `managesSession`: `open` configures (`.playAndRecord`, `.voiceChat`)
+    /// and activates the session, `close` deactivates it. Use `false` with
+    /// CallKit, which activates the session itself.
     public init(managesSession: Bool) {
         self.managesSession = managesSession
     }
@@ -166,10 +159,7 @@ private final class EngineStreams: CallAudioStreams, @unchecked Sendable {
         player.scheduleBuffer(buffer)
     }
 
-    /// The engine's I/O was reconfigured -- a route change, the session's
-    /// sample rate, voice processing settling in after the start -- which
-    /// stops it. Started again in place, as `AVAudioEngineConfigurationChange`
-    /// asks; only an engine that will not start again is the device failing.
+    /// A configuration change stopped the engine; restart it in place.
     private func configurationChanged(_ failed: @Sendable (String) -> Void) {
         lock.lock()
         defer { lock.unlock() }

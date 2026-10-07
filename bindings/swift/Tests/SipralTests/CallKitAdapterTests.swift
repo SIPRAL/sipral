@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// iOS only, for the reason `CallKitAdapter.swift` itself is: `CXProvider`
-// and its actions exist nowhere else. On macOS and Linux this file compiles
-// to nothing, and `CallKitPushKitBridgeTests.swift` covers the bridge
-// against a recording provider instead.
+// iOS only; elsewhere `CallKitPushKitBridgeTests.swift` covers the bridge.
 #if canImport(CallKit) && os(iOS)
 @preconcurrency import AVFoundation
 import CallKit
@@ -46,19 +43,11 @@ final class RecordingEnd: CXEndCallAction, @unchecked Sendable {
     override func fail() { outcome = .failed }
 }
 
-/// `CallKitAdapter`, the real `CXProviderDelegate`, handed the real
-/// `CallKit` action classes the system delivers when the person on the call
-/// screen touches Answer, Hold, the keypad or End -- each one checked for
-/// what it did to a live call between two stacks, and for whether the
-/// adapter told CallKit it was fulfilled or failed.
+/// Real CallKit actions handed to `CallKitAdapter` on a live call, checked
+/// for their effect and for fulfil or fail.
 ///
-/// The actions are handed to the delegate here rather than sent through
-/// `CXCallController`, because the iOS Simulator refuses every third-party
-/// `CXProvider`: its `callservicesd` turns the connection away ("a
-/// CXXPCCallSource couldn't be created"), from an app as much as from a
-/// test bundle, and never calls `reportNewIncomingCall`'s completion at
-/// all. What the system's own delivery adds is a device's to show
-/// (`docs/15-mobile.md`, "The Swift package on iOS").
+/// They are passed to the delegate directly: the iOS Simulator refuses
+/// third-party `CXProvider`s, so `CXCallController` cannot be used there.
 final class CallKitAdapterTests: XCTestCase {
     func testActionsFromCallKitDriveARingingCall() async throws {
         let alice = try SipralStack(audio: .application)
@@ -108,8 +97,7 @@ final class CallKitAdapterTests: XCTestCase {
         let bobConfirmed = await bobCallEvents.first(within: 5) { $0.kind == .callConfirmed }
         XCTAssertNotNil(bobConfirmed, "the application's reader lost the confirmation to the bridge's")
 
-        // The session configured on answering, and the call's audio started
-        // only once CallKit says it has activated it.
+        // audio starts only after CallKit activates the session
         let session = AVAudioSession.sharedInstance()
         XCTAssertEqual(session.category, .playAndRecord, "answering did not configure the call's session")
         XCTAssertEqual(session.mode, .voiceChat)

@@ -15,32 +15,22 @@ import Network
 import Security
 #endif
 
-/// Which authorities a TLS connection to the SIP server trusts -- the three
-/// answers `docs/22-tls.md` gives for every platform: `.platform` (the
-/// system's own store, what a public server's certificate is checked
-/// against), `.privateAuthority` (a private CA, DER-encoded, beside the
-/// system's) and `.onlyAuthority` (that authority and no other: pinning it).
-/// The name is checked by the SSL policy against the server name the stack
-/// was given; none of them turns a check off. `.pinnedCertificate` trusts one
-/// certificate by the SHA-256 digest of its DER bytes, for a PBX that signed
-/// its own: the digest is the whole verdict, and no authority, name or date
-/// is consulted (`docs/22-tls.md`); `pinned(_:)` reads it from the text an
-/// administrator copies. TLS is Network.framework's, on Apple platforms
-/// only.
+/// What a TLS connection to the SIP server trusts (`docs/22-tls.md`):
+/// `.platform` (the system store), `.privateAuthority` (a DER CA beside the
+/// system's) or `.onlyAuthority` (that CA alone). The name is always
+/// checked. `.pinnedCertificate` trusts one self-signed certificate by its
+/// SHA-256 digest alone, ignoring authority, name and dates; `pinned(_:)`
+/// parses the text an administrator copies. Apple platforms only.
 public enum TLSTrust: Sendable {
     case platform
     case privateAuthority([UInt8])
     case onlyAuthority([UInt8])
     case pinnedCertificate([UInt8])
 
-    /// The one certificate whose SHA-256 fingerprint is `fingerprint`,
-    /// written as `openssl x509 -fingerprint -sha256` (`sha256
-    /// Fingerprint=`, or `SHA256 Fingerprint=` before OpenSSL 3) or RFC 8122
-    /// prints it: 64 hexadecimal digits, either case, colons and spaces
-    /// between them ignored, optionally after `sha-256 `, `SHA256=` or
-    /// `SHA256 Fingerprint=`, in any case. Anything else throws
-    /// `.invalidArgument`; `bindings/fixtures/pin-forms.txt` lists what every
-    /// layer takes.
+    /// Pin by SHA-256 fingerprint as OpenSSL or RFC 8122 prints it: 64 hex
+    /// digits in either case, colons and spaces ignored, optionally after
+    /// `sha-256 `, `SHA256=` or `SHA256 Fingerprint=`. Anything else throws
+    /// `.invalidArgument` (forms: `bindings/fixtures/pin-forms.txt`).
     public static func pinned(_ fingerprint: String) throws -> TLSTrust {
         .pinnedCertificate(try pinDigest(fingerprint))
     }
@@ -85,12 +75,9 @@ extension String {
 }
 
 /// How fast one address may ring a stack: `burst` INVITEs at once, then one
-/// more every `everyMs` (`sipral_stack_invite_limit`). `.standard` is what
-/// every stack starts with -- ten, then one every two seconds, past which a
-/// call is answered 480 -- and `.voiceAgent` the preset for a headless
-/// service taking a trunk's calls, a hundred and twenty-eight at once and
-/// then twenty a second (`docs/08-ffi.md`, "How fast one address may ring
-/// this stack").
+/// every `everyMs`; beyond that a call is answered 480
+/// (`sipral_stack_invite_limit`). `.standard` is the default; `.voiceAgent`
+/// suits a service taking a trunk's calls.
 public struct InviteLimit: Sendable, Equatable {
     public let burst: UInt32
     public let everyMs: UInt64
@@ -109,10 +96,8 @@ public struct InviteLimit: Sendable, Equatable {
     )
 }
 
-/// A transport this stack signals on stopped carrying traffic
-/// (`sipral_transport_failed_event_t`): which one, what it spoke, what went
-/// wrong and, when TLS refused the connection, why, with the TLS library's
-/// own `detail`.
+/// A signalling transport failed (`sipral_transport_failed_event_t`); for a
+/// TLS refusal, why, with the TLS library's `detail`.
 public struct TransportFailedEventData: Sendable {
     public let transport: UInt32
     public let protocolRaw: UInt32
@@ -121,10 +106,9 @@ public struct TransportFailedEventData: Sendable {
     public let detail: String?
 }
 
-/// What `SipralEventKind.transportWanted` carries
-/// (`sipral_transport_wanted_event_t`): a request too large for a datagram
-/// (RFC 3261 §18.1.1), where it was going, and the two sizes that say why.
-/// `SipralStack(streamFallback:)` opens the stream itself.
+/// What `SipralEventKind.transportWanted` carries: a request too large for
+/// a datagram (RFC 3261 §18.1.1). `SipralStack(streamFallback:)` opens the
+/// stream itself.
 public struct TransportWantedEventData: Sendable {
     /// What to open, a `SipralTransport` raw value.
     public let protocolRaw: UInt32
@@ -154,13 +138,10 @@ struct SignallingRefusal: Error, Sendable {
 
 /// The one connection a `SipralStack` signals on over TCP or TLS.
 ///
-/// On Apple platforms a Network.framework `NWConnection`, over TLS with the
-/// certificate checked against `serverName` under `TLSTrust`; elsewhere a
-/// plain TCP socket, TLS being refused there before any connection is
-/// made, since there is no platform TLS to bring. `open` blocks until the
-/// connection is ready or refused; `bytes` gets everything read, in order,
-/// on the connection's own queue; `lost` once, for a connection that was
-/// open and went away -- `nil` for an orderly close.
+/// An `NWConnection` on Apple platforms; elsewhere a plain TCP socket, and
+/// TLS is refused up front. `open` blocks until ready or refused; `bytes`
+/// gets everything in order on the connection's queue; `lost` fires once
+/// (`nil` for an orderly close).
 final class SignallingConnection: @unchecked Sendable {
     private let lock = SignallingLock()
     private var finished = false
@@ -171,16 +152,14 @@ final class SignallingConnection: @unchecked Sendable {
     #if canImport(Network)
     private let connection: NWConnection
     private let queue: DispatchQueue
-    /// What the certificate check said when it refused, kept for the reason
-    /// the refused handshake is reported with.
+    /// The certificate check's refusal, for reporting the failed handshake.
     private let verdict = SignallingVerdict()
     #else
     private var fd: Int32 = -1
     #endif
 
-    /// Connect from `bindHost` -- from the address of the route toward
-    /// `server` when `nil` -- to `server`, over TLS when `transport` says
-    /// so; throws the refusal.
+    /// Connect from `bindHost` (default: the route toward `server`); throws
+    /// the refusal.
     init(
         server: String, bindHost: String?, transport: SipralTransport, serverName: String, trust: TLSTrust,
         patienceMs: Int
@@ -272,9 +251,7 @@ final class SignallingConnection: @unchecked Sendable {
             case .waiting(let error), .failed(let error):
                 var refusal = self.verdict.kept ?? Self.refusal(error)
                 if refusal.error == .connectionReset && refusal.tls == .none && !outcome.isSettled {
-                    // a reset answering the SYN, before the connection was
-                    // ever ready, is a port nothing listens on: refused,
-                    // which is what BSD sockets call it
+                    // a reset before ready means nothing listens: "refused"
                     refusal = SignallingRefusal(error: .connectionRefused, tls: .none, detail: refusal.detail)
                 }
                 if outcome.settle(refusal) {
@@ -378,8 +355,8 @@ final class SignallingConnection: @unchecked Sendable {
         #endif
     }
 
-    /// Write one message, whole and after everything written before it; a
-    /// connection that fails here is lost.
+    /// Write one message whole, in order; a failure here loses the
+    /// connection.
     func send(_ payload: [UInt8]) {
         #if canImport(Network)
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
@@ -468,9 +445,8 @@ final class SignallingConnection: @unchecked Sendable {
         return SignallingRefusal(error: .connectionReset, tls: tls, detail: detail)
     }
 
-    /// What Network.framework said: a TLS failure the certificate check did
-    /// not explain is a handshake refused; a POSIX error is what the socket
-    /// said.
+    /// A TLS failure the certificate check did not explain is a refused
+    /// handshake.
     private static func refusal(_ error: NWError) -> SignallingRefusal {
         let detail = sentence(error.debugDescription)
         switch error {
@@ -492,9 +468,7 @@ final class SignallingConnection: @unchecked Sendable {
 
     private static func sentence(_ text: String) -> String { SignallingRefusal.sentence(text) }
 
-    /// Whether SHA-256 over `leaf` is `pin`, every byte compared whatever
-    /// the first difference, so that how long this takes says nothing about
-    /// how close a certificate came.
+    /// Constant-time comparison of SHA-256(`leaf`) with `pin`.
     static func digestMatches(_ pin: [UInt8], of leaf: [UInt8]) -> Bool {
         let digest = Array(SHA256.hash(data: leaf))
         guard digest.count == pin.count else { return false }
@@ -505,12 +479,9 @@ final class SignallingConnection: @unchecked Sendable {
         return difference == 0
     }
 
-    /// The local end of a connection that is ready, as `host:port`, or
-    /// `nil` when `read` never named one within `patienceMs`. A connection
-    /// can be ready while its path does not name the local end yet -- on a
-    /// loaded machine the address arrives a moment later -- and that end is
-    /// what the stack is created on and a transport is bound by, so the wait
-    /// is for the address, not only for the state.
+    /// The local `host:port`, or `nil` after `patienceMs`. On a loaded
+    /// machine a ready connection may name its local end a moment later, and
+    /// the stack needs that address, so this waits for it.
     static func localAddress(within patienceMs: Int, reading read: () -> NWEndpoint?) -> String? {
         let deadline = DispatchTime.now() + .milliseconds(patienceMs)
         while true {
@@ -611,8 +582,7 @@ private final class SignallingLock: @unchecked Sendable {
 }
 
 #if !canImport(Network)
-/// The C library's own `close` and `connect`, which the methods of the same
-/// name above would otherwise shadow.
+/// The C `close` and `connect`, shadowed by the methods above.
 private enum SignallingC {
     static func close(_ descriptor: Int32) -> Int32 {
         #if canImport(Glibc)

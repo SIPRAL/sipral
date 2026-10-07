@@ -7,11 +7,8 @@
 import PushKit
 import Foundation
 
-/// The real `PKPushRegistry`-backed half of `docs/15-mobile.md`'s "C2"
-/// sequence. Only where `PushKit` actually works -- iOS, never plain macOS
-/// or Linux -- which is why the sequence itself lives in `PushKitBridge`,
-/// tested through `VoipPush` and a recording `CallKitProviding` with no
-/// device involved.
+/// The `PKPushRegistry` side, iOS only; the logic is in `PushKitBridge`,
+/// which is testable without a device.
 public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked Sendable {
     private let registry: PKPushRegistry
     private let bridge: PushKitBridge
@@ -29,11 +26,8 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
     public func pushRegistry(
         _ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType
     ) {
-        // The application's own job from here: hand `pushCredentials.token`
-        // to its server, so a proxy implementing RFC 8599's proxy half can
-        // reach this device (`docs/15-mobile.md`, "Who sends the push").
-        // The credentials never belong on the device either way, and this
-        // package has no server to hand them to.
+        // The application sends `pushCredentials.token` to its own server
+        // (RFC 8599 proxy side); this package has none.
     }
 
     public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {}
@@ -48,10 +42,8 @@ public final class PushKitAdapter: NSObject, PKPushRegistryDelegate, @unchecked 
             completion()
             return
         }
-        // `PushKitBridge.handle` reports to CallKit as its very first
-        // `await`, before `Account.announce` or anything else -- the
-        // deadline `docs/15-mobile.md` opens with is about that report,
-        // not about this completion handler.
+        // The deadline is met by `handle`'s first step, the CallKit report,
+        // not by this completion handler.
         Task {
             _ = try? await bridge.handle(push: VoipPush(callerId: callerId), account: account)
             completion()

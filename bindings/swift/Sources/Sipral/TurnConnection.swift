@@ -16,18 +16,14 @@ import Security
 /// One media socket's TCP or TLS connection to the TURN server
 /// (`SIPRAL_EVENT_KIND_TURN_STREAM`, RFC 8656 §3.1).
 ///
-/// On Apple platforms it is a Network.framework `NWConnection`, over TLS
-/// when the server was named with `SipralTransport.tls`: the handshake and
-/// the certificate check are the platform's own, the name checked is
-/// `TurnServer.serverName`, and the roots trusted are the system's or,
-/// when `TurnServer.trustedCertificates` names some, those and nothing else.
-/// Elsewhere -- the lab agent's Linux build -- it is a plain TCP socket,
-/// and TLS is refused: there is no platform TLS to bring there.
+/// An `NWConnection` on Apple platforms (TLS checked against
+/// `TurnServer.serverName` with the system roots, or only
+/// `trustedCertificates` when given); a plain TCP socket elsewhere, where
+/// TLS is refused.
 ///
-/// Every callback arrives on the connection's own queue: `ready` once, with
-/// whether it opened; `bytes` for everything read, in order; `closed` once,
-/// for a connection that was open and went away. `send` may be called from
-/// any thread and keeps the order it was called in.
+/// Callbacks run on the connection's queue: `ready` once, `bytes` in order,
+/// `closed` once after an open connection drops. `send` is thread-safe and
+/// ordered.
 final class TurnConnection: @unchecked Sendable {
     let local: String
     private let queue: DispatchQueue
@@ -66,9 +62,7 @@ final class TurnConnection: @unchecked Sendable {
                 SecCertificateCreateWithData(nil, Data($0) as CFData)
             }
             if !anchors.isEmpty {
-                // the roots given and nothing else, and the name as the
-                // application gave it: a private CA or a self-signed server
-                // is trusted exactly as far as it was asked to be
+                // only the given roots, and the given name
                 sec_protocol_options_set_verify_block(security, { _, trust, complete in
                     let evaluated = sec_trust_copy_ref(trust).takeRetainedValue()
                     SecTrustSetPolicies(evaluated, SecPolicyCreateSSL(true, name as CFString))
@@ -102,8 +96,8 @@ final class TurnConnection: @unchecked Sendable {
         #endif
     }
 
-    /// Write `payload` on the connection, whole and after everything sent
-    /// before it. A connection that fails here is closed, and `closed` said.
+    /// Write `payload` whole, in order. A failure closes the connection and
+    /// calls `closed`.
     func send(_ payload: [UInt8]) {
         #if canImport(Network)
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
@@ -130,9 +124,8 @@ final class TurnConnection: @unchecked Sendable {
         #endif
     }
 
-    /// Close it, saying nothing: for a connection the stack asked to have
-    /// closed, or found broken. What was sent before is written first --
-    /// the Refresh that gives the relay back is usually the last of it.
+    /// Close without calling `closed`. Pending writes go first; the last is
+    /// usually the relay-release Refresh.
     func close() {
         let already = lock.withLock { () -> Bool in
             defer { finished = true }
@@ -192,10 +185,8 @@ final class TurnConnection: @unchecked Sendable {
             receive()
 
         case .waiting, .failed:
-            // a refused port, a server that is not there, a handshake that
-            // failed or a certificate nobody vouches for: Network.framework
-            // would wait for a better path, and a relay that is not there
-            // now is one the call goes without
+            // Network.framework would wait for a better path; the call
+            // goes without a relay instead.
             fail()
         case .cancelled:
             fail()
@@ -269,8 +260,7 @@ private final class NSLockish: @unchecked Sendable {
 }
 
 #if !canImport(Network)
-/// The C library's own `close` and `connect`, which the methods of the same
-/// name above would otherwise shadow.
+/// The C `close` and `connect`, shadowed by the methods above.
 private enum Glibcish {
     static func close(_ descriptor: Int32) -> Int32 {
         #if canImport(Glibc)

@@ -5,11 +5,7 @@ import Foundation
 import XCTest
 @testable import Sipral
 
-/// The virtual loopback device the tests that open the devices play and
-/// record on when the machine has one: it plays nowhere and hands back what
-/// it was given, so that a run never sounds through the machine's
-/// loudspeaker. Without it they run on the system's route, as they always
-/// did.
+/// A virtual loopback device, used when present so tests stay silent.
 let quietDeviceName = "BlackHole 2ch"
 
 /// The device `role` goes on in a test that opens the devices: the quiet one
@@ -22,16 +18,10 @@ func quietDevice(in devices: [SipralAudioDevice], for role: SipralAudioRole) -> 
 /// listed, chosen, turned up and down, opened and closed, and carrying a call
 /// against a stack in `.application` mode on 127.0.0.1.
 ///
-/// The list, the choices and the settings are asked of the platform without
-/// opening anything, and run everywhere the library has an engine. What opens
-/// the devices -- activation, the ring, a call -- runs the voice-processing
-/// unit, which on macOS needs the microphone granted to the process running
-/// the tests: without the grant the unit fails inside the framework, and the
-/// test process with it. Those run only with `SIPRAL_AUDIO_DEVICES=1`, from a
-/// Terminal the system has asked about the microphone once
-/// (`bindings/swift/README.md`, "Testing"). Only one stack in device mode is
-/// alive at a time in any test: two voice-processing units in one process do
-/// not survive on macOS.
+/// Tests that open devices need microphone permission on macOS (without it
+/// the process crashes), so they run only with `SIPRAL_AUDIO_DEVICES=1`
+/// (`bindings/swift/README.md`). Only one device-mode stack lives at a time:
+/// two voice-processing units in one process do not survive on macOS.
 final class AudioDeviceModeTests: XCTestCase {
     private func deviceStack(_ activation: SipralAudioActivation = .manual) throws -> SipralStack {
         let features = try Sipral.capabilities().features
@@ -156,9 +146,8 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertEqual(try audio.level(for: .output), 0, "a closed device has a level")
     }
 
-    /// A call's own gain and mute, which the engine holds from the moment the
-    /// call's media starts -- the devices left closed under manual
-    /// activation -- to the moment it ends, beside the stack's own.
+    /// Per-call gain and mute, held from media start to end, with devices
+    /// closed under manual activation.
     func testACallsOwnGainAndMuteLastFromItsMediaToItsEnd() async throws {
         let bob = try deviceStack()
         let alice = try SipralStack(audio: .application)
@@ -214,9 +203,8 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertFalse(try audio.status().isActive)
     }
 
-    /// ABI 1.1: the platform's echo cancellation switched on a running stack.
-    /// With the devices closed nothing opens and the settings read it back; a
-    /// stack whose application pumps the frames has no engine to switch.
+    /// Echo cancellation toggled on a running stack with devices closed; an
+    /// application-mode stack has no engine to toggle.
     func testTheEchoCancellationSwitchIsReadBackAndRefusedWithoutAnEngine() throws {
         let pumped = try SipralStack(audio: .application)
         defer { pumped.close() }
@@ -235,8 +223,7 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertTrue(try stack.settings().systemEchoCancellation)
     }
 
-    /// The switch on open devices reopens them at once, where they were and
-    /// with the gain and the mute, and the status says what the platform did.
+    /// Toggling on open devices reopens them, keeping devices, gain and mute.
     func testTheEchoCancellationSwitchReopensTheOpenDevices() throws {
         let stack = try openingStack(.manual)
         defer { stack.close() }
@@ -297,9 +284,7 @@ final class AudioDeviceModeTests: XCTestCase {
         try audio.deactivate()
     }
 
-    /// The call's frames are the engine's: the far end's audio reaches the
-    /// loudspeaker's meter, and what the microphone gives reaches the far end
-    /// as packets through the transmit callback and the call's own socket.
+    /// The engine carries the call both ways.
     func testACallInDeviceModeIsPumpedByTheEngine() async throws {
         let bob = try openingStack(.automatic)
         let alice = try SipralStack(audio: .application)
@@ -333,10 +318,8 @@ final class AudioDeviceModeTests: XCTestCase {
         XCTAssertTrue(heard, "the engine's packets never reached the far end")
     }
 
-    /// Ending a call in device mode does not need the main thread: an
-    /// application that hangs up on it and then holds it -- waiting there
-    /// for the call to be over, as one shutting down does -- still gets its
-    /// BYE out while the voice unit is being taken down.
+    /// Hanging up in device mode does not need the main thread: the BYE goes
+    /// out while the main thread blocks waiting for it.
     @MainActor
     func testAHangupInDeviceModeLeavesWhileTheMainThreadIsHeld() async throws {
         let bob = try openingStack(.automatic)
@@ -355,8 +338,7 @@ final class AudioDeviceModeTests: XCTestCase {
         try taken.answer()
         let running = await eventually(within: 5) { ((try? audio.status().speakerRateHz) ?? 0) != 0 }
         XCTAssertTrue(running, "the call's media opened no device")
-        // the voice unit carrying the call for a while, as it is when a
-        // person ends one
+        // let the voice unit run for a while first
         try await Task.sleep(nanoseconds: 1_000_000_000)
 
         XCTAssertTrue(Thread.isMainThread)

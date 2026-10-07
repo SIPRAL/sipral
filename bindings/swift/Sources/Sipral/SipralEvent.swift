@@ -5,19 +5,11 @@ import CSipral
 
 /// One event, copied out of `sipral_event_t` while it was still live.
 ///
-/// `sipral_event_t`'s pointers -- `message`, an SDP, a URI -- are valid only
-/// for the length of the C callback that carries it, and never after
-/// (`docs/08-ffi.md`, "Signalling across the boundary"). So every byte a
-/// caller might want later is copied out here, once, synchronously, on the
-/// thread `sipral_stack_poll` is running on; what crosses into the
-/// `AsyncStream` afterwards is a plain, `Sendable`, ordinary value that owns
-/// what it holds.
+/// `sipral_event_t`'s pointers are valid only during the C callback, so
+/// everything is copied here, on the poll thread, into a `Sendable` value.
 public struct SipralEvent: Sendable {
-    /// The raw `sipral_event_kind_t`. Present even for a kind this build's
-    /// `SipralEventKind` does not have a case for yet, because a header
-    /// newer than the Swift package it is paired with must still be able to
-    /// report it (`kindName` is `sipral_event_kind_name`'s own answer, and
-    /// stays current the same way).
+    /// The raw `sipral_event_kind_t`, kept so a kind newer than this package
+    /// can still be reported (`kindName` comes from the library too).
     public let kindRaw: UInt32
     public let kind: SipralEventKind?
     public let kindName: String
@@ -83,9 +75,8 @@ public struct SipralEvent: Sendable {
     public internal(set) var networkTestData: NetworkTestEventData? = nil
 }
 
-/// What `SipralEventKind.networkTest` carries (`sipral_network_test_event_t`):
-/// every part of one test `SipralStack.networkTest(account:echoCall:echoMs:timeoutMs:)`
-/// started, and the verdict, the worst of the parts that were tested.
+/// What `SipralEventKind.networkTest` carries: each part's result and the
+/// verdict, the worst of the parts tested.
 public struct NetworkTestEventData: Sendable {
     /// The number the test was given.
     public let test: UInt32
@@ -123,11 +114,10 @@ public struct NetworkTestEventData: Sendable {
     public let mapped: String?
 }
 
-/// What `SipralEventKind.tokenRequired` carries (`sipral_token_event_t`): an
-/// account's server asking for an OAuth 2.0 access token (RFC 8898), where a
-/// token comes from and what it has to cover. Check `authzServer` against
-/// the authorization servers the application trusts before going near it,
-/// then hand the token to `Account.setAccessToken(_:)`.
+/// What `SipralEventKind.tokenRequired` carries: a server asking for an
+/// OAuth 2.0 access token (RFC 8898). Check `authzServer` against the
+/// servers the application trusts before contacting it, then pass the token
+/// to `Account.setAccessToken(_:)`.
 public struct TokenEventData: Sendable {
     /// What the server said was wrong; `.invalidToken` for one expired or
     /// revoked.
@@ -146,9 +136,8 @@ public struct TokenEventData: Sendable {
     public let authzServer: String?
 }
 
-/// What `SipralEventKind.challengeDeclined` carries
-/// (`sipral_challenge_event_t`): a challenge an account's password was not
-/// given to, why, who asked and for which realms.
+/// What `SipralEventKind.challengeDeclined` carries: a challenge the
+/// password was withheld from, why, who asked and for which realms.
 public struct ChallengeEventData: Sendable {
     public let refusal: SipralChallengeRefusal?
     /// Where the challenged request went, `host:port`.
@@ -158,10 +147,7 @@ public struct ChallengeEventData: Sendable {
 }
 
 /// What `SipralEventKind.subscriptionChanged` and `.notified` carry
-/// (`sipral_subscription_event_t`): which subscription, where it is now and
-/// why it ended, the SIP status behind it, whether the NOTIFY's body was a
-/// dialog-info document, its lifetime and when the stack refreshes or retries
-/// it, and the subscription a fork of it came from.
+/// (`sipral_subscription_event_t`).
 public struct SubscriptionEventData: Sendable {
     public let subscription: SipralHandle
     public let state: SipralSubscriptionState?
@@ -174,9 +160,7 @@ public struct SubscriptionEventData: Sendable {
     public let forkedFrom: SipralHandle
 }
 
-/// What `SipralEventKind.recovery` carries (`sipral_recovery_event_t`): how
-/// the recovery settled, the rung it reached, why it gave up, and how many
-/// registrations it could not prove.
+/// What `SipralEventKind.recovery` carries (`sipral_recovery_event_t`).
 public struct RecoveryEventData: Sendable {
     public let state: SipralRecoveryOutcome?
     public let rung: SipralRecoveryRung?
@@ -195,8 +179,7 @@ public struct ResolveEventData: Sendable {
 }
 
 /// What `SipralEventKind.lookupWanted`, `.located` and `.locateFailed` carry
-/// (`sipral_locate_event_t`): the DNS query an account's server is located
-/// with, every address it was located at, or why it was not.
+/// (`sipral_locate_event_t`).
 public struct LocateEventData: Sendable {
     /// A `SipralDnsRecordType` raw value: what to ask `name` for.
     public let recordRaw: UInt32
@@ -209,9 +192,7 @@ public struct LocateEventData: Sendable {
 }
 
 /// What `SipralEventKind.messageReceived`, `.messageSent` and
-/// `.messagesWaiting` carry (`sipral_message_event_t`): a MESSAGE's handle,
-/// body and type, the status its sender was answered with, and a message
-/// summary's counts.
+/// `.messagesWaiting` carry (`sipral_message_event_t`).
 public struct MessageEventData: Sendable {
     public let message: SipralHandle
     public let subscription: SipralHandle
@@ -226,11 +207,8 @@ public struct MessageEventData: Sendable {
     public let messageAccount: String?
 }
 
-/// What a `SipralEventKind.localConferenceChanged` carries
-/// (`sipral_local_conference_event_t`): which `LocalConference`, what
-/// changed -- a member joined or left and why, who is talking, a recording
-/// that stopped by itself -- and how it stands now. `member` and `loudest`
-/// are call handles, or the conference's own handle for this end.
+/// What `SipralEventKind.localConferenceChanged` carries. `member` and
+/// `loudest` are call handles, or the conference's own handle for this end.
 public struct LocalConferenceEventData: Sendable, Equatable {
     public let conference: SipralHandle
     public let change: SipralLocalConferenceChange?
@@ -241,12 +219,11 @@ public struct LocalConferenceEventData: Sendable, Equatable {
     public let loudest: SipralHandle
 }
 
-/// What a `SipralEventKind.callerVerification` carries
-/// (`sipral_verification_event_t`). At `.certificateWanted` the application
-/// fetches `certificateUrl` and hands the chain to
-/// `SipralStack.stirCertificate(call:chain:)`; at `.verified` the rest is the
-/// verdict, announced just before the call it is about, which `refused` says
-/// a strict account turned away with `responseCode`.
+/// What `SipralEventKind.callerVerification` carries. At
+/// `.certificateWanted`, fetch `certificateUrl` and pass the chain to
+/// `SipralStack.stirCertificate(call:chain:)`. At `.verified` it is the
+/// verdict, raised just before the call; `refused` means a strict account
+/// turned the call away with `responseCode`.
 public struct VerificationEventData: Sendable {
     public let stage: SipralVerificationStage?
     public let outcome: SipralVerificationOutcome?
@@ -261,9 +238,8 @@ public struct VerificationEventData: Sendable {
     public let detail: String?
 }
 
-/// What a call told to listen heard (`sipral_progress_event_t`): a tone of
-/// its network, the special information tone, who answered, or the
-/// machine's beep. `what` says which of the other members mean anything.
+/// What progress detection heard (`sipral_progress_event_t`); `what` says
+/// which members are meaningful.
 public struct ProgressEventData: Sendable {
     public let what: SipralProgressKind?
     public let tone: SipralProgressTone?
@@ -296,9 +272,8 @@ public struct StunServerEventData: Sendable {
     public let previous: String?
 }
 
-/// A media socket's connection to a TURN server reached over TCP or TLS
-/// (`sipral_turn_stream_event_t`): open it, or close it. `SipralStack` does
-/// both itself; this is what it was told.
+/// Open or close a TURN-over-TCP/TLS connection. `SipralStack` acts on it
+/// itself.
 public struct TurnStreamEventData: Sendable {
     public let stateRaw: UInt32
     public let state: SipralTurnStream?
@@ -310,11 +285,9 @@ public struct TurnStreamEventData: Sendable {
     public let server: String
 }
 
-/// A REFER outside any dialog (`sipral_referral_event_t`): take it with
-/// `SipralStack.acceptReferral`, refuse it with `SipralStack.rejectReferral`.
-/// `statusCode` is zero while it waits; set, it is the word that it lapsed
-/// unanswered, with what the stack answered it with and nothing else.
-/// `referredBy` is what the sender wrote, never proof of who it is.
+/// An out-of-dialog REFER: `SipralStack.acceptReferral` or `rejectReferral`.
+/// `statusCode` is zero while it waits; nonzero means it lapsed and the
+/// stack answered with that code. `referredBy` is unverified.
 public struct ReferralEventData: Sendable {
     public let statusCode: UInt32
     public let attended: Bool
@@ -322,12 +295,10 @@ public struct ReferralEventData: Sendable {
     public let referredBy: String?
 }
 
-/// A transfer inside a call (`sipral_transfer_event_t`). At
-/// `.transferRequested` the far end asks this end to call `target`: take it
-/// with `SipralStack.acceptReferral`, refuse it with
-/// `SipralStack.rejectReferral`, as a referral is. At `.transferProgress`
-/// and `.transferDone` it reports on a `Call.transfer(to:)` this end asked
-/// for, `statusCode` being what the far end's new call is doing.
+/// A transfer inside a call. At `.transferRequested` the far end asks this
+/// end to call `target` (accept or reject like a referral). At
+/// `.transferProgress` and `.transferDone` it reports on our
+/// `Call.transfer(to:)`, `statusCode` being the new call's status.
 public struct TransferEventData: Sendable, Equatable {
     public let statusCode: UInt32
     public let attended: Bool
@@ -401,9 +372,8 @@ public struct CallEventData: Sendable {
     public let verstat: SipralVerstat?
     /// What the caller's `Privacy` asked for.
     public let privacy: Privacy
-    /// The top-most `Diversion`, and its reason; `diversionCount` and
-    /// `historyCount` say how many entries `SipralStack.callerIdentity(of:)`
-    /// will read.
+    /// The top `Diversion` and its reason; the counts say how many entries
+    /// `SipralStack.callerIdentity(of:)` will read.
     public let divertedFrom: String?
     public let diversionReason: String?
     public let diversionCount: UInt32
@@ -421,9 +391,8 @@ public struct CallEventData: Sendable {
     public let ringSource: SipralRingSource?
     /// The first `Alert-Info` URI.
     public let alertInfo: String?
-    /// This end's own STIR/SHAKEN verdict on the call's `Identity` (RFC
-    /// 8224), when the account verifies: the outcome, the attestation a
-    /// valid SHAKEN PASSporT claimed, and why an invalid one did not hold.
+    /// This end's STIR/SHAKEN verdict on the `Identity` (RFC 8224), when the
+    /// account verifies.
     public let verification: SipralVerificationOutcome?
     public let attestation: SipralAttestation?
     public let verificationFailure: SipralVerificationFailure?
@@ -444,22 +413,17 @@ public struct MediaEventData: Sendable {
     public let suite: UInt32
     public let sourceRaw: UInt32
     public let source: SipralDigitSource?
-    /// How the call's keys were exchanged, whether it is encrypted, and
-    /// whether the exchange authenticated the far end, on media started,
-    /// changed and secured.
+    /// Key exchange, encryption and far-end authentication, on media
+    /// started, changed and secured.
     public let keyExchange: SipralKeyExchange?
     public let encrypted: Bool
     public let authenticated: Bool
-    /// What the call's media cost, on `SipralEventKind.mediaStatistics`
-    /// only: the end-of-call record `payload.media.statistics` points at,
-    /// copied out while the callback still owns it. The stream is gone by
-    /// then, so this -- or `Call.finalStatistics`, which keeps it -- is the
-    /// only place the last second of measurements can still be read.
+    /// The end-of-call record, on `mediaStatistics` only. The stream is gone
+    /// by then, so this (or `Call.finalStatistics`) is the only source.
     public var statistics: sipral_stream_stats_t? = nil
 
-    /// Which SRTP suite keys the call, on `SipralEventKind.mediaSecured`:
-    /// RFC 4568's AES-CM, RFC 6188's AES-256 and RFC 7714's AES-GCM each have
-    /// a name of their own; `nil` for a number newer than this package.
+    /// The SRTP suite (RFC 4568, 6188, 7714), on `mediaSecured`; `nil` for
+    /// one newer than this package.
     public var srtpSuite: SipralSrtpSuite? { SipralSrtpSuite(rawValue: suite) }
 }
 
@@ -479,8 +443,7 @@ public struct AnnounceEventData: Sendable {
 }
 
 enum SipralEventDecoder {
-    // Kinds whose payload lives in `payload.call` (`sipral_call_event_t`),
-    // mirroring `bindings/python/sipral/events.py`'s `_CALL_KINDS`.
+    // Kinds whose payload lives in `payload.call`.
     private static let callKinds: Set<UInt32> = [
         SipralEventKind.incomingCall.rawValue,
         SipralEventKind.callProgress.rawValue,
@@ -634,10 +597,8 @@ enum SipralEventDecoder {
         )
     }
 
-    /// A copy of the record `pointer` names, or `nil` for none. Only the
-    /// bytes its own `size` says the library wrote are read: a library
-    /// older than this package wrote a shorter record, and what it did not
-    /// write stays zero here rather than being read past its end.
+    /// Reads only the `size` bytes the library wrote: an older library
+    /// writes a shorter record, and the rest stays zero.
     static func statistics(_ pointer: UnsafePointer<sipral_stream_stats_t>?) -> sipral_stream_stats_t? {
         guard let pointer else { return nil }
         var copy = sipral_stream_stats_t.sized()
@@ -737,9 +698,7 @@ enum SipralEventDecoder {
 
     /// Copies one `sipral_event_t` out into a standalone `SipralEvent`.
     ///
-    /// Called from inside the C callback, and nowhere else: `raw` points at
-    /// memory the callback's own caller owns, and every field this reads is
-    /// read before this function returns.
+    /// Only from inside the C callback, while `raw` is valid.
     static func decode(_ raw: sipral_event_t) -> SipralEvent {
         let kindRaw = raw.kind
         let kindName = String(cString: sipral_event_kind_name(kindRaw))

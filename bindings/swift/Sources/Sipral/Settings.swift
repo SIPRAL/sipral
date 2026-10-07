@@ -3,9 +3,7 @@
 
 import CSipral
 
-/// What a stack runs with, every default filled in
-/// (`sipral_stack_settings`, `SipralStack.settings()`): what a settings
-/// screen or a support report shows, rather than what was passed.
+/// The effective settings, defaults filled in (`SipralStack.settings()`).
 public struct SipralSettings: Sendable, Equatable {
     /// The protocol the stack signals over.
     public let transport: SipralTransport?
@@ -38,19 +36,15 @@ public struct SipralSettings: Sendable, Equatable {
     public let pathMtu: UInt32
     /// `datagramWithoutStreamBytes` as given, zero for never.
     public let datagramWithoutStreamBytes: UInt32
-    /// The SRTP suites the stack's calls offer and accept unless their
-    /// account names its own, in the order they are offered: the ones
-    /// `srtpSuites` named, or this build's own (ABI 0.35).
+    /// The SRTP suites calls offer and accept unless their account names
+    /// its own, in offer order.
     public let srtpSuites: [SipralSrtpSuite]
-    /// Whether a `pseudonymSalt` was given; the salt itself is never read
-    /// back (ABI 0.35).
+    /// Whether a `pseudonymSalt` was given; the salt is never read back.
     public let pseudonymSalted: Bool
-    /// Whether the trace writes whole messages now, as `diagnosticTrace` or
-    /// `setDiagnosticTrace(_:)` last left it (ABI 0.35).
+    /// Whether the trace currently writes whole messages.
     public let diagnosticTrace: Bool
-    /// Whether the platform's echo cancellation is asked for, the default
-    /// filled in (ABI 0.35); `AudioStatus.systemEchoCancellation` says what
-    /// the platform did.
+    /// Whether platform echo cancellation is requested;
+    /// `AudioStatus.systemEchoCancellation` says what the platform did.
     public let systemEchoCancellation: Bool
 
     init(_ raw: sipral_stack_settings_t, srtpSuites: [SipralSrtpSuite]) {

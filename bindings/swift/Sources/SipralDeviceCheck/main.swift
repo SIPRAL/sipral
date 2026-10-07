@@ -1,33 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// The device-mode sequence an application runs around a call, on the
-// machine's real devices, three times over: open the engine, ring a looped
-// 8 kHz tone, stop it, put the speaker on the system's default output
-// explicitly, close. Built by `swift build` with everything else and never
-// run by the gate, because it needs a microphone and a loudspeaker; run by
-// hand on a desk, and under the system's guard allocator to catch a write
-// past the end of any buffer the audio path touches:
+// The device-mode sequence around a call, on real devices, repeated: open,
+// ring, stop, select the default speaker, close. Needs real devices, so it
+// is run by hand, ideally under the guard allocator:
 //
 //   (cd bindings && swift build --product SipralDeviceCheck)
 //   DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib MallocScribble=1 \
 //       bindings/.build/debug/SipralDeviceCheck
 //
-// SIPRAL_CHECK_ROUNDS sets how many rounds (3 by default). SIPRAL_CHECK_MIC
-// and SIPRAL_CHECK_RINGER name, by a fragment of their names, a microphone
-// and a ringer device to select before the first round, so that the same
-// sequence runs with each role on a device of its own; SIPRAL_CHECK_SPEAKER
-// names the device each round puts the speaker on, in place of the system's
-// default output (a virtual loopback device keeps a desk quiet), and
-// SIPRAL_CHECK_GAIN scales what is played (0.1 is a tenth). With
-// SIPRAL_CHECK_RESELECT set, each round also moves the microphone to the
-// system's default input and back to the one SIPRAL_CHECK_MIC names, which
-// reopens the voice-processing unit twice in the middle of the round, the
-// way a person choosing a device during a call does, without a sound on the
-// loudspeaker. SIPRAL_CHECK_PROBE_MS gives the platform longer than the
-// stack's default to open a device, which the guard allocator can need. It
-// prints one line per step and "PASS" at the end; anything
-// thrown is printed and exits 1.
+// SIPRAL_CHECK_ROUNDS: rounds (default 3). SIPRAL_CHECK_MIC,
+// SIPRAL_CHECK_RINGER, SIPRAL_CHECK_SPEAKER: device name fragments
+// (a virtual loopback speaker keeps a desk quiet). SIPRAL_CHECK_GAIN scales
+// playback. SIPRAL_CHECK_RESELECT moves the microphone away and back each
+// round, reopening the voice unit mid-round. SIPRAL_CHECK_PROBE_MS allows
+// slower opens under the guard allocator. Prints "PASS", or the error and
+// exits 1.
 
 import Foundation
 import Sipral

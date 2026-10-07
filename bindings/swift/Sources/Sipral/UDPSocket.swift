@@ -11,12 +11,8 @@ import Glibc
 
 /// The one POSIX socket every stack and every call's media opens.
 ///
-/// `sipral-ffi` carries no socket of its own (`docs/08-ffi.md`, "Six calls,
-/// and no socket among them"): the application owns the transport and hands
-/// the library bytes. This is that transport, written directly against
-/// `Darwin`/`Glibc` rather than `Network.framework`, since the same core has
-/// to build and run on Linux (`docs/08-ffi.md`, "Swift" — what is not
-/// printed is the platform work, and Network.framework is Apple-only).
+/// The library owns no sockets; this is the application side, on POSIX
+/// rather than Network.framework so it also builds on Linux.
 public final class UDPSocket: @unchecked Sendable {
     let fd: Int32
     /// `host:port`, as every address crosses `sipral.h`.
@@ -137,9 +133,7 @@ public final class UDPSocket: @unchecked Sendable {
     }
 }
 
-/// Everything below `sipral.h` a binding can fail at on its own -- opening
-/// a socket, mostly -- as opposed to a `SipralError` the library itself
-/// raised.
+/// A failure in this layer itself (mostly sockets), not a `SipralError`.
 public enum SipralBindingError: Error, CustomStringConvertible, Sendable {
     case socket(String)
 

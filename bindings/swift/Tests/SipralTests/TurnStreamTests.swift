@@ -13,13 +13,9 @@ import XCTest
 /// A TURN server on a TCP port of this machine's loopback, over TLS when it
 /// is given an identity, and on nothing else: no datagram reaches it.
 ///
-/// What arrives is framed the way RFC 8656 §12.5 and RFC 8489 §6.2.2 say --
-/// a STUN message is twenty octets and its length, a channel message four
-/// and its length padded to whole words -- and every request is recorded
-/// with the connection it came on, counting from one. An unauthenticated
-/// Allocate gets the 401 of the long-term mechanism, a signed one a relay,
-/// and every other signed request its success, all signed with the key
-/// `FakeStunServer` derives.
+/// Framing per RFC 8656 §12.5 and RFC 8489 §6.2.2. Requests are recorded
+/// with their connection number. An unsigned Allocate gets 401, signed
+/// requests succeed, signed with `FakeStunServer`'s key.
 final class FakeTurnOverStream: @unchecked Sendable {
     struct Request {
         let connection: Int
@@ -152,10 +148,8 @@ final class FakeTurnOverStream: @unchecked Sendable {
     }
 }
 
-/// `TurnServer.transport`: the relay made over a TCP or TLS connection the
-/// stack opens itself, for a network that lets no UDP through to the TURN
-/// server (RFC 8656 §3.1). The mapping of the media socket is still asked
-/// over UDP, of the fake server `NatTests` has: it is the socket's own.
+/// TURN over TCP or TLS (RFC 8656 §3.1); the STUN mapping still uses UDP,
+/// since it is about the socket itself.
 final class TurnStreamTests: XCTestCase {
     private static let serverName = "turn.sipral.test"
     private let password = "turn-secret-\(UInt32.random(in: 100_000...999_999))"
@@ -179,9 +173,7 @@ final class TurnStreamTests: XCTestCase {
         }
     }
 
-    /// An address of this machine's own that ICE may gather a host candidate
-    /// from, as `NatTests` finds one: loopback is not a candidate (RFC 8445
-    /// §5.1.1.1).
+    /// A non-loopback local address (RFC 8445 §5.1.1.1).
     private func hostAddress() throws -> String {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let first = list else { throw XCTSkip("no interfaces") }
@@ -242,8 +234,7 @@ final class TurnStreamTests: XCTestCase {
         XCTAssertEqual(server.allocations, [1], "one Allocate, on the one connection")
         XCTAssertFalse(stun.requests.contains { $0.method == 0x0003 }, "an Allocate went as a datagram")
 
-        // the call ends while the stack runs on: its relay goes back on the
-        // connection, and then nothing is left for the connection to carry
+        // the relay is released on the connection, which then closes
         aliceCall.close()
         bobCall.close()
         until { server.refreshes.contains { $0.lifetime == [0, 0, 0, 0] } }

@@ -5,20 +5,15 @@ import Foundation
 import XCTest
 @testable import Sipral
 
-/// A local conference through this layer -- the Swift counterpart of
-/// `bindings/python/tests/test_local_conference.py`: made on its own and
-/// asked about, recorded, refused at a rate it cannot mix, and, with three
-/// stacks on 127.0.0.1, two calls bridged so that what one far end says the
-/// other hears.
+/// Local conference: info, recording, refused rates, and two bridged calls
+/// across three stacks on 127.0.0.1.
 final class LocalConferenceTests: XCTestCase {
     private func square(_ samples: Int) -> [Int16] {
         (0..<samples).map { ($0 / 8) % 2 == 0 ? 8000 : -8000 }
     }
 
-    /// Above this, a frame of `square` that came through PCMU whole: it
-    /// decodes at 7900. A frame concealed in place of one that never came
-    /// fades from the last one heard and stays under it, so it is not
-    /// counted as heard.
+    /// A whole PCMU `square` frame decodes at 7900; concealed frames fade
+    /// below this and are not counted.
     private let wholeFrame = 7500
 
     private func loudness(_ frame: [Int16]) -> Int {
@@ -137,15 +132,9 @@ final class LocalConferenceTests: XCTestCase {
         var loudest = 0
         var whole = 0
         _ = await eventually(within: 10) {
-            // and in full, ninety-five of Bob's hundred frames at least: a
-            // call whose own thread still carried frames beside the
-            // conference would have every other frame taken from under it,
-            // and a frame clock slower than the conference's overflows the
-            // buffers and drops them. Counted whenever they arrive rather
-            // than as an unbroken run: on a machine with more work than
-            // cores, the threads of all three stacks are held up together
-            // for a hundred milliseconds and more, Carol's buffer runs dry,
-            // and the frames play late but all play.
+            // At least 95 of 100: a call still pumping its own frames would
+            // lose every other one. Counted whenever they arrive, since a
+            // loaded machine can stall all three stacks and play them late.
             let frames = heard.elements
             loudest = frames.map { loudness($0) }.max() ?? 0
             whole = frames.filter { loudness($0) > wholeFrame }.count

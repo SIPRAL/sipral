@@ -3,17 +3,13 @@
 
 /// Helpers for handing several C strings across the boundary at once.
 ///
-/// `SipralAbi.swift`'s printed wrappers each build one struct's pointer
-/// members inside the call that reads them (`docs/08-ffi.md`, "Swift"), but
-/// `sipral_account_config_t` and `sipral_call_config_t` carry more string
-/// members than a caller can fill from one `withCString`. `CStrings.with`
-/// nests as many as it is given, so every pointer stays valid for exactly
-/// the length of the call that reads them and not a moment longer.
+/// Config structs carry more strings than one `withCString` can fill;
+/// `CStrings.with` nests as many as needed, so each pointer lives exactly as
+/// long as the call.
 
 enum CStrings {
-    /// Turns ``strings`` into pointer/length pairs, one call at a time, and
-    /// only then runs ``body`` -- so every pointer ``body`` sees is still
-    /// backed by a live `withCString` frame further up the stack.
+    /// Runs ``body`` with pointer/length pairs for ``strings``, each backed
+    /// by a live `withCString` frame.
     static func with<R>(
         _ strings: [String?],
         _ body: ([(pointer: UnsafePointer<CChar>?, count: Int)]) throws -> R

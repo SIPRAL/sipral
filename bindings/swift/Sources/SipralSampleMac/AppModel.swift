@@ -5,22 +5,14 @@ import Foundation
 import Sipral
 import Observation
 
-/// The skeleton sample's whole state: one stack, one account, at most one
-/// call at a time. Not a product -- `docs/08-ffi.md`, "Swift" calls this out
-/// as the layer's real proof: "what is not printed is the platform work,
-/// and it is what the binding will actually earn its place for."
+/// The sample's state: one stack, one account, at most one call. Device
+/// mode runs the audio; the sample only picks devices, volume and mute.
 ///
-/// There is no audio code here: the stack is created in the library's
-/// device mode, which opens the microphone and the loudspeaker for every
-/// call itself. What the sample does about audio is what a person does --
-/// choose the devices, set the volume, mute, watch the meters.
-///
-/// Every field can be filled from the environment, for a run from a
-/// Terminal: `SIPRAL_SAMPLE_AOR`, `SIPRAL_SAMPLE_REGISTRAR_ADDRESS`,
-/// `SIPRAL_SAMPLE_REGISTRAR`, `SIPRAL_SAMPLE_AUTH_USER`,
-/// `SIPRAL_SAMPLE_AUTH_PASSWORD` and `SIPRAL_SAMPLE_TARGET`; with
-/// `SIPRAL_SAMPLE_CALL=1` it registers and places the call as it opens. The
-/// log is printed as well as shown.
+/// Fields can come from the environment: `SIPRAL_SAMPLE_AOR`,
+/// `SIPRAL_SAMPLE_REGISTRAR_ADDRESS`, `SIPRAL_SAMPLE_REGISTRAR`,
+/// `SIPRAL_SAMPLE_AUTH_USER`, `SIPRAL_SAMPLE_AUTH_PASSWORD`,
+/// `SIPRAL_SAMPLE_TARGET`; `SIPRAL_SAMPLE_CALL=1` registers and calls at
+/// launch.
 @Observable
 @MainActor
 final class AppModel {
@@ -151,8 +143,7 @@ final class AppModel {
         try? stack.audio?.stopRinging()
         var attachedCall: Call?
         do {
-            // Attached before it is answered, so that its reader is there
-            // for the first event the answer brings.
+            // attached before answering, so no event is missed
             let host = UDPSocket.parse(stack.bindAddress).host
             let call = try stack.takeIncomingCall(incoming.event, mediaHost: host)
             attach(call)
@@ -160,8 +151,7 @@ final class AppModel {
             try call.answer()
         } catch {
             append("answer failed: \(error)")
-            // A failed answer must not leave the call it just attached as
-            // the current one: nothing on it will ever succeed again.
+            // a failed answer must not stay the current call
             if let attachedCall, self.call === attachedCall {
                 callEventTask?.cancel()
                 callEventTask = nil
@@ -305,9 +295,8 @@ final class AppModel {
         }
     }
 
-    /// Show who is calling -- the network's word for it when the account
-    /// trusts the peer, the `From` otherwise -- ring, and answer by itself
-    /// when the call asked to be answered without the person.
+    /// Show the caller (asserted identity if trusted, else `From`), ring, and
+    /// auto-answer when asked to.
     private func ringFor(_ event: SipralEvent) {
         guard let stack, call == nil else {
             try? self.stack?.rejectCall(event, code: 486)

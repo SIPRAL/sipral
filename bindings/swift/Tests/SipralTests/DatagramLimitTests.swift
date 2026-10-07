@@ -8,11 +8,9 @@ import Network
 import XCTest
 @testable import Sipral
 
-/// A PBX on loopback that answers every INVITE without credentials with a 401
-/// whose nonce takes the answer past RFC 3261 §18.1.1's 1300 bytes, and --
-/// with `tcp` -- a TCP listener on the same port that answers the INVITE
-/// carrying credentials with a 486. Every request a connection carried is
-/// recorded.
+/// A loopback PBX whose 401 nonce pushes the answer past RFC 3261
+/// §18.1.1's 1300 bytes; with `tcp`, a TCP listener answers the
+/// authenticated INVITE with 486.
 final class ChallengingPbx: @unchecked Sendable {
     private let udp: UDPSocket
     private var listener: NWListener?
@@ -128,9 +126,8 @@ final class ChallengingPbx: @unchecked Sendable {
         return lines.joined(separator: "\r\n") + "\r\n" + extra + "Content-Length: 0\r\n\r\n"
     }
 
-    /// RFC 3261 §7.3.3's compact names for the fields a response repeats: a
-    /// request over the line is written compact before it is weighed against
-    /// it, and a server reads either form.
+    /// Compact header names (RFC 3261 §7.3.3): oversize requests are
+    /// compacted before being measured.
     private static let compact = ["via": "v", "from": "f", "to": "t", "call-id": "i"]
 
     /// A field's value under its full name or its compact one.
@@ -146,12 +143,9 @@ final class ChallengingPbx: @unchecked Sendable {
     }
 }
 
-/// RFC 3261 §18.1.1 through `SipralStack`: a call whose answer to a challenge
-/// is too large for a datagram -- the Swift counterpart of
-/// `bindings/python/tests/test_datagram_limit.py`. With a TCP listener at the
-/// PBX the stack opens the connection itself and the call carries on over
-/// it; with none, or with `streamFallback: false`, the call ends at once with
-/// a 513 naming the limit, never hanging.
+/// RFC 3261 §18.1.1: a challenge answer too large for UDP moves to TCP when
+/// the PBX listens, and otherwise (or with `streamFallback: false`) ends the
+/// call at once with 513.
 final class DatagramLimitTests: XCTestCase {
     private func place(_ stack: SipralStack, _ pbx: ChallengingPbx) throws {
         let account = try stack.addAccount(
@@ -299,10 +293,8 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(detail, "TCP to \(pbx.address) not tried: streamFallback is off")
     }
 
-    /// RFC 5626 §4.4.1: the stack retires a stream that stopped answering
-    /// keep-alives and says so with `transportFailed`; the socket is this
-    /// layer's, and one kept open would stand in for the new connection the
-    /// stack asks for next time.
+    /// RFC 5626 §4.4.1: a stream retired for unanswered keep-alives must be
+    /// closed here, or it would stand in for the next connection.
     func testAConnectionTheStackLetGoOfIsClosedHereToo() async throws {
         let pbx = try ChallengingPbx(tcp: true)
         defer { pbx.stop() }
@@ -321,11 +313,8 @@ final class DatagramLimitTests: XCTestCase {
         XCTAssertEqual(pbx.closedByTheStack, 1, "the connection was let go of")
     }
 
-    /// A connection to a recording server and one opened for a request too
-    /// large for a datagram never share a transport id: a stack that has
-    /// made enough recordings for the count to reach an id a stream still
-    /// holds binds the next recording past it, and what the stack sends
-    /// under the stream's id still goes to the stream.
+    /// Recording and oversize-request connections never share a transport
+    /// id, however many recordings were made.
     func testARecordingConnectionNeverTakesAnIdAStreamHolds() async throws {
         let pbx = try ChallengingPbx(tcp: true)
         defer { pbx.stop() }

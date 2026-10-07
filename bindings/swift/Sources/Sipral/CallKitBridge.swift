@@ -3,14 +3,9 @@
 
 import Foundation
 
-/// The slice of `CXProvider` `CallKitBridge` needs, small enough to fake in
-/// a test that carries no device and no `CallKit` framework at all.
-///
-/// `docs/15-mobile.md`'s whole point is that **the application must present
-/// a ringing call before the network session exists** -- so the sequence
-/// this protocol's methods are called in is the part worth testing, and
-/// testing it does not need a real `CXProvider` to report to, only
-/// something that records what it was told.
+/// The part of `CXProvider` `CallKitBridge` uses, small enough to fake in a
+/// test without CallKit. The order of calls matters: a ringing call must be
+/// shown before the network session exists (`docs/15-mobile.md`).
 public protocol CallKitProviding: AnyObject, Sendable {
     /// `CXProvider.reportNewIncomingCall`. Must be reported before the
     /// system push handler that triggered it returns.
@@ -20,16 +15,12 @@ public protocol CallKitProviding: AnyObject, Sendable {
     func reportCallEnded(uuid: UUID, reason: CallKitBridge.EndReason)
 }
 
-/// Bridges `SipralStack`/`Call` events onto whatever conforms to
-/// `CallKitProviding` -- the real `CXProvider` on iOS, behind
-/// `#if canImport(CallKit)` in `CallKitAdapter.swift`, or a recorder in a
-/// test.
+/// Mirrors `Call` events onto a `CallKitProviding` (the real `CXProvider` in
+/// `CallKitAdapter.swift`, or a test recorder).
 ///
-/// `docs/15-mobile.md`, "C2": a call is announced out of band -- the push
-/// arrives, this end reports it to the system call screen, *then* asks
-/// `sipral-ua` to match the INVITE that follows. `CallKitBridge` owns the
-/// second half, once a `Call` handle exists or the announcement is still
-/// waiting; `PushKitBridge` owns getting from a push to that point.
+/// A push is reported to the call screen first, then matched to the INVITE
+/// that follows (`docs/15-mobile.md`). `PushKitBridge` handles the push;
+/// this handles the call from there.
 public final class CallKitBridge: @unchecked Sendable {
     public enum EndReason: Sendable {
         case localHangup, remoteHangup, failed, unanswered
@@ -48,11 +39,8 @@ public final class CallKitBridge: @unchecked Sendable {
         self.provider = provider
     }
 
-    /// Reports an incoming call to the system before the INVITE that will
-    /// confirm it has necessarily arrived. Returns the `UUID` CallKit now
-    /// knows this call by, matched to a `Call` later by `bind(uuid:to:)`
-    /// once `sipral-ua` has resolved the announcement
-    /// (`docs/15-mobile.md`, "The matching rule").
+    /// Reports an incoming call, possibly before its INVITE. The returned
+    /// `UUID` is later tied to a `Call` with `bind(uuid:to:)`.
     @discardableResult
     public func reportIncomingCall(callerId: String) async throws -> UUID {
         let uuid = UUID()
@@ -68,18 +56,13 @@ public final class CallKitBridge: @unchecked Sendable {
         return uuid
     }
 
-    /// Ties a `UUID` CallKit is already showing to the `Call` handle
-    /// `sipral-ua` resolved it to, and starts mirroring that call's own
-    /// events onto `provider` -- ringing, connected, ended -- for as long
-    /// as the call lasts.
+    /// Ties a shown `UUID` to its `Call` and mirrors the call's events onto
+    /// `provider` while it lasts.
     ///
-    /// The bridge reads a `Call.events()` stream of its own, taken here,
-    /// before this returns: the application keeps reading the same call's
-    /// events alongside it, and misses none to the bridge. Events raised
-    /// before `bind` are not replayed, with one exception that matters here
-    /// -- a call that has already ended, whose stream still hands over its
-    /// `callEnded`, so a call the far end gave up on before it was bound is
-    /// still reported ended rather than left ringing on the call screen.
+    /// The bridge takes its own `Call.events()` stream, so the application
+    /// loses nothing to it. Earlier events are not replayed, except that an
+    /// already-ended call still yields `callEnded`, so it does not stay
+    /// ringing on screen.
     public func bind(uuid: UUID, to call: Call) {
         stateQueue.sync {
             callsByUuid[uuid] = call
@@ -103,23 +86,14 @@ public final class CallKitBridge: @unchecked Sendable {
                     break
                 }
             }
-            // The stream finished without ever handing over `.callEnded`:
-            // `Call.close()` forgets the call and finishes its broadcasts
-            // synchronously, ahead of the stack's own asynchronous delivery
-            // of the CALL_ENDED that a hangup it just issued will raise
-            // (`SipralStack.forgetCall` runs before that event can ever
-            // reach `Call.deliver`) -- reachable whenever an application
-            // hangs up and closes a bound call without reading its own
-            // events() first. CallKit still has to be told, and this uuid
-            // still has to be forgotten, or the call screen and this
-            // bridge's own bookkeeping would both outlive the call.
+            // Finished without `.callEnded`: `Call.close()` finishes streams
+            // before the hangup's CALL_ENDED is delivered. CallKit must
+            // still be told and the uuid forgotten.
             guard let self else { return }
             provider.reportCallEnded(uuid: uuid, reason: .localHangup)
             self.unbind(uuid: uuid)
         }
-        // A call that had already ended can be unbound by its own task
-        // before this line runs; keeping the task then would keep it for
-        // good.
+        // An ended call's task may already have unbound it; don't keep it.
         stateQueue.sync {
             if callsByUuid[uuid] != nil {
                 watchTasks[uuid] = task
@@ -168,9 +142,8 @@ public final class CallKitBridge: @unchecked Sendable {
         try call.hangup()
     }
 
-    /// Hold or resume, as CallKit asks: the call's device let go (or taken
-    /// back) at once, since the system is handing the session to another
-    /// call, and the far end told with a re-INVITE.
+    /// Releases or retakes the device at once (the session is moving), and
+    /// tells the far end with a re-INVITE.
     public func handleHold(uuid: UUID, onHold: Bool) throws {
         guard let call = call(for: uuid) else { throw CallKitBridgeError.unknownCall(uuid) }
         let audio = audio(for: uuid)
@@ -183,8 +156,7 @@ public final class CallKitBridge: @unchecked Sendable {
         }
     }
 
-    /// `CXSetMutedCallAction`: the far end is sent silence while muted --
-    /// through the call's `CallAudio`, or the engine's microphone.
+    /// `CXSetMutedCallAction`: the far end gets silence while muted.
     public func handleMute(uuid: UUID, muted: Bool) throws {
         guard call(for: uuid) != nil else { throw CallKitBridgeError.unknownCall(uuid) }
         audio(for: uuid)?.setMuted(muted)
@@ -193,15 +165,12 @@ public final class CallKitBridge: @unchecked Sendable {
 
     // MARK: - the call's audio
 
-    /// Hand `audio` the call CallKit knows as `uuid`: CallKit's hold, mute
-    /// and audio session reach it from now on. Until the system has
-    /// activated the session (`audioSessionActivated()`) the device stays let
-    /// go -- Apple's rule is that call audio starts in `didActivate`, not
-    /// before -- and it is let go again whenever the system deactivates it.
+    /// Route CallKit's hold, mute and session to `audio`. The device stays
+    /// released until `audioSessionActivated()` (Apple's rule) and whenever
+    /// the session is deactivated.
     ///
-    /// The session's state is applied under the same lock `audioSessionActivated`
-    /// and `audioSessionDeactivated` take, so an activation arriving while this
-    /// runs is never lost between reading it and applying it.
+    /// Applied under the same lock as activation, so a concurrent activation
+    /// is not lost.
     public func attach(_ audio: CallAudio, to uuid: UUID) {
         stateQueue.sync {
             audiosByUuid[uuid] = audio
@@ -217,15 +186,10 @@ public final class CallKitBridge: @unchecked Sendable {
         stateQueue.sync { audiosByUuid[uuid] }
     }
 
-    /// Hand the audio session to the library's own engine: a stack created
-    /// with `AudioMode.device(activation: .manual)` gives its
-    /// `SipralStack.audio` here, and from then on CallKit's `didActivate`
-    /// opens the devices for every call at once, `didDeactivate` and a
-    /// provider reset close them -- the calls stay attached and are heard
-    /// again at the next activation -- and `CXSetMutedCallAction` mutes the
-    /// microphone. The application attaches no `CallAudio` of its own then:
-    /// the engine is every call's audio. When the session is already active
-    /// the devices open here.
+    /// Let the library engine (`AudioMode.device(activation: .manual)`)
+    /// follow CallKit: `didActivate` opens the devices, `didDeactivate` and
+    /// a reset close them (calls stay attached), mute mutes the microphone.
+    /// No `CallAudio` is attached then. If already active, devices open now.
     public func drive(_ engine: any CallAudioSessionEngine) throws {
         let active = stateQueue.sync { () -> Bool in
             self.engine = engine
@@ -236,9 +200,7 @@ public final class CallKitBridge: @unchecked Sendable {
         }
     }
 
-    /// `CXProviderDelegate.provider(_:didActivate:)`: the session is the
-    /// calls' now, and every attached call's device is taken back -- or the
-    /// engine `drive(_:)` was given opens the devices.
+    /// `provider(_:didActivate:)`: attached devices (or the engine) open.
     public func audioSessionActivated() {
         let engine = stateQueue.sync { () -> (any CallAudioSessionEngine)? in
             sessionActive = true
@@ -250,9 +212,7 @@ public final class CallKitBridge: @unchecked Sendable {
         try? engine?.activate()
     }
 
-    /// `CXProviderDelegate.provider(_:didDeactivate:)`: the system took the
-    /// session back -- another call, the calls ending -- and every attached
-    /// call's device is let go, or the engine's devices closed.
+    /// `provider(_:didDeactivate:)`: attached devices (or the engine) close.
     public func audioSessionDeactivated() {
         let engine = stateQueue.sync { () -> (any CallAudioSessionEngine)? in
             sessionActive = false
@@ -264,10 +224,8 @@ public final class CallKitBridge: @unchecked Sendable {
         try? engine?.deactivate()
     }
 
-    /// `CXProviderDelegate.providerDidReset(_:)`: the system's call service
-    /// restarted and every call it was showing is gone from it, so each is
-    /// ended here too -- hung up, its device let go -- rather than left
-    /// running with no call screen and no audio session.
+    /// `providerDidReset(_:)`: CallKit forgot every call, so each is hung up
+    /// here too rather than left running unseen.
     public func providerDidReset() {
         let (calls, audios, engine) = stateQueue.sync { () -> ([Call], [CallAudio], (any CallAudioSessionEngine)?) in
             sessionActive = false

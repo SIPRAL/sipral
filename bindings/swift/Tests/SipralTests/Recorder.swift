@@ -15,15 +15,9 @@ func eventually(within seconds: Double, _ condition: () async -> Bool) async -> 
     }
 }
 
-/// Everything one `AsyncStream` yields, read by a single task for as long as
-/// the stream lasts and kept, so that a test can wait for what it needs with
-/// a deadline.
-///
-/// A deadline cannot be put on the `for await` loop itself: cancelling the
-/// task that iterates an `AsyncStream` finishes that stream, so what the
-/// test is waiting for would never be recorded at all. Here nothing is ever
-/// cancelled -- the reader ends when the stream does -- and a wait that
-/// runs out only stops looking.
+/// Records everything an `AsyncStream` yields, so a test can wait with a
+/// deadline. Cancelling a `for await` task would finish the stream itself,
+/// so the reader is never cancelled; a timed-out wait just stops looking.
 final class Recorder<Element: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var seen: [Element] = []
@@ -107,10 +101,8 @@ func firstOne<Element: Sendable>(
     await Recorder(stream).first(within: seconds, where: predicate)
 }
 
-/// The first element of `stream` that `predicate` accepts, read by a loop
-/// that ends there -- or, once `seconds` have passed with none, `nil`, the
-/// loop cancelled. Unlike `firstOne(of:within:where:)` the reader is gone
-/// afterwards either way, for a test that counts a call's readers.
+/// Like `firstOne(of:within:where:)`, but the reader is gone afterwards
+/// either way, for tests that count readers.
 func firstOrGiveUp<Element: Sendable>(
     _ stream: AsyncStream<Element>, within seconds: Double,
     where predicate: @escaping @Sendable (Element) -> Bool = { _ in true }

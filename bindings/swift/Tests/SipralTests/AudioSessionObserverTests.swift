@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// iOS only, as `AudioSessionObserver` is. The simulator cannot raise a real
-// interruption, route change or media services reset, so each notification
-// is posted here the way the system posts it -- the same name, the same
-// object, the same `userInfo` keys and values -- and what reaches the call's
-// audio is checked.
+// iOS only. The simulator cannot raise these notifications, so they are
+// posted here exactly as the system would.
 #if canImport(AVFoundation) && os(iOS)
 @preconcurrency import AVFoundation
 import XCTest
@@ -107,12 +104,9 @@ final class AudioSessionObserverTests: XCTestCase {
         XCTAssertEqual(device.closed, 0)
     }
 
-    /// The real device on the simulator, which shares the Mac's audio: the
-    /// system's voice-processing engine opened, frames coming from its
-    /// microphone, and after a media services reset -- which the simulator
-    /// cannot raise, so it is posted -- a new engine carrying frames again.
-    /// Opt-in (`SIPRAL_AUDIO_DEVICE=1`, as `TEST_RUNNER_SIPRAL_AUDIO_DEVICE`
-    /// through `xcodebuild`), because it records from the Mac's microphone.
+    /// The real device on the simulator, rebuilt after a posted media
+    /// services reset. Opt-in (`SIPRAL_AUDIO_DEVICE=1`): it records from the
+    /// Mac's microphone.
     func testTheVoiceProcessingDeviceIsBuiltAgainAfterAReset() async throws {
         guard ProcessInfo.processInfo.environment["SIPRAL_AUDIO_DEVICE"] == "1" else {
             throw XCTSkip("set SIPRAL_AUDIO_DEVICE=1 to open the real microphone and speaker")

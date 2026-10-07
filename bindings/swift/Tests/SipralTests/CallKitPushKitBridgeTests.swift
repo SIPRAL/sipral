@@ -4,12 +4,8 @@
 import XCTest
 @testable import Sipral
 
-/// A `CallKitProviding` that records what it was told instead of driving a
-/// real `CXProvider` -- `CallKit` does not exist on this platform at all
-/// (macOS, and the Linux the core module also builds on), so this is the
-/// only way `docs/15-mobile.md`'s sequence can be exercised without a
-/// device: "push -> report to CallKit before the handler returns ->
-/// announce -> refresh the binding -> match the INVITE -> answer".
+/// Records what it was told, standing in for `CXProvider`, which does not
+/// exist on macOS or Linux.
 final actor RecordingProvider: CallKitProviding {
     private(set) var reported: [(uuid: UUID, callerId: String)] = []
     private(set) var connecting: [UUID] = []
@@ -86,12 +82,9 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertThrowsError(try bridge.handleMute(uuid: uuid, muted: true))
     }
 
-    /// CallKit's hold, mute and audio session reach the call's audio: the
-    /// device shut until the system activates the session, let go the moment
-    /// CallKit holds the call (before the far end has answered the
-    /// re-INVITE), taken back on resume, muted, let go when the system
-    /// deactivates the session, and the call hung up when CallKit's own
-    /// service resets under it.
+    /// CallKit's hold, mute, session activation and reset all reach the
+    /// call's audio; hold releases the device before the re-INVITE is
+    /// answered.
     func testCallKitsHoldMuteAndSessionReachTheAttachedCallsAudio() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -140,11 +133,9 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertNotNil(hungUp, "a call CallKit forgot was left up")
     }
 
-    /// With the library running the devices, CallKit's audio session opens
-    /// and closes the engine as a whole: nothing before `didActivate`, the
-    /// devices at once when the session is already active, closed at
-    /// `didDeactivate` and at a provider reset, and CallKit's mute on the
-    /// engine's microphone.
+    /// In device mode the session drives the whole engine: opened at
+    /// `didActivate` (or at once if already active), closed at deactivation
+    /// and reset, muted with CallKit.
     func testCallKitsSessionAndMuteDriveTheLibrarysEngine() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -187,10 +178,7 @@ final class CallKitBridgeTests: XCTestCase {
         return (aliceCall, bobCall)
     }
 
-    /// The bridge and the application both read the same bound call, and
-    /// neither takes events from the other: the bridge reports the call
-    /// connected and ended, and the application's own reader sees the
-    /// confirmation and the end too.
+    /// The bridge and the application both see every event of a bound call.
     func testBridgeAndApplicationBothSeeEveryEventOfABoundCall() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -221,9 +209,7 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertNil(bridge.call(for: uuid), "an ended call must be unbound")
     }
 
-    /// A call the caller gave up on before it was bound is still reported
-    /// ended once it is: its stream hands the bridge the end it missed,
-    /// rather than leaving the call screen ringing.
+    /// A call that ended before binding is still reported ended.
     func testBindingACallThatAlreadyEndedReportsItEnded() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -245,14 +231,9 @@ final class CallKitBridgeTests: XCTestCase {
         XCTAssertTrue(unbound, "a call bound after it ended must be unbound again")
     }
 
-    /// `Call.close()` forgets the call and force-finishes its broadcasts
-    /// synchronously; a hangup it just issued still owes the stack an
-    /// asynchronous CALL_ENDED, which can now never reach this call's
-    /// `deliver` (the call is already forgotten by the time it would).
-    /// Bob's own application code never reads `bobCall.events()` here, the
-    /// same shape as `testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist`
-    /// -- only the bridge is watching -- so the bridge is the only thing
-    /// that can be left holding a call CallKit still thinks is live.
+    /// `Call.close()` finishes the streams before the hangup's CALL_ENDED
+    /// can arrive; with only the bridge watching, it must still report the
+    /// end and forget the call.
     func testBridgeStillReportsEndedWhenTheApplicationHangsUpAndClosesWithoutReadingEvents() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -267,9 +248,7 @@ final class CallKitBridgeTests: XCTestCase {
         try bridge.handleAnswer(uuid: uuid)
         _ = await eventually(within: 5) { await provider.connected.contains(uuid) }
 
-        // Bob hangs up and closes right away -- no draining of events()
-        // first, the same shape as
-        // testHandlesReleaseWithNoUseAfterFreeWhilePendingEventsExist.
+        // Close right away, without draining events().
         try bobCall.hangup()
         bobCall.close()
 
@@ -286,22 +265,14 @@ private extension RecordingProvider {
     func setFailNextReport(_ value: Bool) { failNextReport = value }
 }
 
-/// `PushKitBridge`'s own sequence, with no `PushKit` and no `CallKit`
-/// involved: `Account.announce` and `Account.refreshBinding` are exercised
-/// against a real loopback `SipralStack`/`Account` (the ABI calls
-/// themselves need a real stack to mean anything), while the CallKit half
-/// is the same `RecordingProvider` above.
+/// `PushKitBridge` against a real loopback stack, with `RecordingProvider`
+/// for CallKit.
 final class PushKitBridgeTests: XCTestCase {
     func testHandlePushReportsToCallKitThenAnnouncesThenRefreshesBinding() async throws {
         let stack = try SipralStack(audio: .application)
         defer { stack.close() }
-        // No registrar: `Account.announce` and `refreshBinding` both refuse
-        // outright on a no-op account with `SIPRAL_STATUS_INVALID_ARGUMENT`
-        // (`docs/08-ffi.md`, "An account with no registrar never
-        // registers") -- which is exactly the shape this test wants to
-        // observe without a real registrar to answer: the sequence still
-        // runs in the right order, and PushKitBridge does not crash or stop
-        // early when the refresh that follows announce is refused.
+        // No registrar, so announce and refresh are refused; the sequence
+        // must still run in order and not stop early.
         let account = try stack.addAccount(aor: "sip:agent@sipral.invalid", registrarAddress: "127.0.0.1:5060")
 
         let provider = RecordingProvider()
@@ -332,8 +303,7 @@ final class PushKitBridgeTests: XCTestCase {
         )
         XCTAssertNil(pending.matchedCallHandle)
 
-        // A synthetic `IncomingCall` naming "alice" in `From`, the shape
-        // `docs/15-mobile.md`'s matching rule reads: same user, unescaped.
+        // A synthetic `IncomingCall` from "alice".
         let event = SipralEvent(
             kindRaw: SipralEventKind.incomingCall.rawValue,
             kind: .incomingCall,

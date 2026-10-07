@@ -5,34 +5,25 @@ import Darwin
 import Network
 import Sipral
 
-/// Where this Mac is on the network, and a word whenever that changes: the
-/// sample's own half of `SipralStack.networkChanged(to:)`, which only the
-/// platform can tell.
-///
-/// The address is the one the system would send from toward the registrar
-/// -- asked by connecting a UDP socket there, which sends nothing -- so a
-/// server behind a VPN is reached from the tunnel's address and one on the
-/// LAN from the LAN's. `NWPathMonitor` says when to ask again.
+/// Feeds `SipralStack.networkChanged(to:)`. The address is the route toward
+/// the registrar (found by connecting a UDP socket, which sends nothing), so
+/// a VPN-only server is reached from the tunnel. `NWPathMonitor` triggers
+/// the re-check.
 final class NetworkWatcher: @unchecked Sendable {
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "org.sipral.sample.network")
 
-    /// The network the monitor's first update described, which is where the
-    /// stack already is: `start` hands it back rather than calling it a
-    /// change. Touched only on `queue`.
+    /// The first update is where the stack already is, not a change. Only
+    /// on `queue`.
     private var first = true
 
-    /// The network as it stands toward `remote`, before anything changes:
-    /// what the stack is created on, so that its first `networkChanged`
-    /// compares like with like.
+    /// The current network toward `remote`, to create the stack on.
     static func current(toward remote: String) -> SipralStack.Network {
         let address = localAddress(toward: remote)
         return SipralStack.Network(link: .wired, address: address, interface: address.flatMap(interface(holding:)))
     }
 
-    /// Calls `changed` on a queue of the watcher's own with the network it
-    /// sees toward `remote` (`host:port`), every time the path changes after
-    /// the monitor's first look.
+    /// Calls `changed` on the watcher's queue on every later path change.
     func start(toward remote: String, _ changed: @escaping @Sendable (SipralStack.Network) -> Void) {
         monitor.pathUpdateHandler = { [self] path in
             guard !first else {
@@ -92,8 +83,7 @@ final class NetworkWatcher: @unchecked Sendable {
         return String(decoding: text.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
-    /// The name of the interface `address` is on: what tells two networks
-    /// that hand out the same address apart.
+    /// The interface name, which tells apart networks giving the same address.
     private static func interface(holding address: String) -> String? {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0 else { return nil }

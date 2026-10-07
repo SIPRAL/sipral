@@ -76,11 +76,8 @@ enum FakeRegistrarHeader {
     }
 }
 
-/// Where a stack is reached and where its server is, through `SipralStack`:
-/// the address advertised when the application names none, a server named
-/// by a URI and located by RFC 3263, the account's keep-alive, a certificate
-/// trusted by its fingerprint, and the diagnostic trace -- the Swift
-/// counterpart of `bindings/python/tests/test_reachability.py`.
+/// Advertised address, RFC 3263 location, keep-alive, certificate pinning
+/// and the diagnostic trace.
 final class ReachabilityTests: XCTestCase {
     private func next(
         _ kind: SipralEventKind, on events: AsyncStream<SipralEvent>, seconds: Double = 5

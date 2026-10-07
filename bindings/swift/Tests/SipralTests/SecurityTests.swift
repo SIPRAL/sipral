@@ -10,18 +10,13 @@ import Foundation
 import XCTest
 @testable import Sipral
 
-/// STIR/SHAKEN, the SRTP policy per account and the encryption report,
-/// through this layer -- the Swift counterpart of
-/// `bindings/python/tests/test_security.py`. Two stacks on loopback with no
-/// registrar between them, one signing the call it places and the other
-/// verifying it. A valid signature is verified against the chain the C ABI's
-/// tests keep in `bindings/fixtures/stir-provider-709J`, whose signing
-/// certificate names a service provider code and no number; beside that,
-/// what this proves is the plumbing every half of it runs through.
+/// STIR/SHAKEN, per-account SRTP policy and the encryption report between
+/// two loopback stacks. Valid signatures use the chain in
+/// `bindings/fixtures/stir-provider-709J`, which names a service provider
+/// code rather than numbers.
 final class SecurityTests: XCTestCase {
-    /// Short, and the stacks offer one codec: a signed INVITE is some five
-    /// hundred octets longer than an unsigned one, and past RFC 3261
-    /// §18.1.1's 1300 it needs a stream transport this test does not open.
+    /// Kept short with one codec: a signed INVITE must stay under RFC 3261
+    /// §18.1.1's 1300 bytes, as no stream is opened here.
     private let url = "https://c.test/p"
     /// A P-256 private key as the bare scalar: any 32 octets below the group
     /// order are one, and these are nobody's.
@@ -76,10 +71,7 @@ final class SecurityTests: XCTestCase {
         XCTAssertTrue(call.ended, "the caller never heard the 436")
     }
 
-    /// One of the credentials `sipral_stir::testing` issues for the service
-    /// provider code 709J, checked against it by the C ABI's own tests: a
-    /// root, a chain whose signing certificate names that code and no
-    /// number, and its key.
+    /// The 709J test credential: root, chain and key.
     private func provider(_ name: String, here: String = #filePath) throws -> [UInt8] {
         let url = URL(fileURLWithPath: here)
             .deletingLastPathComponent()

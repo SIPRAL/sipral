@@ -5,32 +5,19 @@ import Dispatch
 
 /// Hands every element it is sent to every reader live at that moment.
 ///
-/// One `AsyncStream` has one reader's worth of elements: two loops over the
-/// same stream split them, each element going to whichever loop asked first,
-/// so a `CallKitBridge` watching a call and an application watching the same
-/// call would each see only part of it. This keeps one continuation per
-/// reader instead, and `stream()` mints a fresh one on every call -- the
-/// Swift counterpart of the Kotlin layer's `SharedFlow` with `replay = 0`
-/// (`bindings/kotlin/README.md`).
+/// Two loops over one `AsyncStream` split its elements, so each reader gets
+/// its own continuation here.
 ///
-/// - A reader sees what is sent from the moment `stream()` returns, and
-///   nothing sent before it. The one exception is `finish(after:)`'s
-///   element: a reader that arrives once this is finished gets that element
-///   and is finished at once, so a loop waiting for the end always finds it.
-/// - Every reader buffers on its own, under `policy`: a reader that falls
-///   behind drops from its own buffer and never holds the others back.
-/// - A reader that stops -- its loop left, its task cancelled, its stream
-///   dropped -- is forgotten through `onTermination`, and nothing is sent to
-///   it again.
-/// - `send` and `finish(after:)` are called by whichever thread produces the
-///   elements (a stack's poll thread, a media thread), one at a time, which
-///   is what keeps every reader's order the order they were sent in.
-///   `finish()` may come from any thread; whatever is sent after it is
-///   dropped.
+/// - A reader sees only what is sent after `stream()` returns, except that a
+///   reader arriving after `finish(after:)` still gets that last element, so
+///   a loop waiting for the end always ends.
+/// - Each reader buffers under `policy` and never holds others back.
+/// - A stopped reader is forgotten through `onTermination`.
+/// - `send` and `finish(after:)` come from the one producing thread, which
+///   keeps order; `finish()` may come from any thread.
 ///
-/// No continuation is ever touched while `queue` is held: `finish()` runs a
-/// reader's `onTermination` on the calling thread, and that handler takes
-/// `queue` itself.
+/// No continuation is touched while `queue` is held: `onTermination` runs on
+/// the finishing thread and takes `queue` itself.
 final class Broadcast<Element: Sendable>: @unchecked Sendable {
     private let policy: AsyncStream<Element>.Continuation.BufferingPolicy
     private let queue: DispatchQueue
@@ -79,9 +66,8 @@ final class Broadcast<Element: Sendable>: @unchecked Sendable {
         }
     }
 
-    /// Finishes every reader, now and to come. `last`, when given, is sent to
-    /// every live reader first and handed to every later one before it is
-    /// finished. Only the first call does anything.
+    /// Finishes every reader, present and future, after sending `last` if
+    /// given. Only the first call has effect.
     func finish(after last: Element? = nil) {
         let targets = queue.sync { () -> [AsyncStream<Element>.Continuation]? in
             guard !finished else { return nil }

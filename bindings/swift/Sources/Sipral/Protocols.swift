@@ -4,10 +4,8 @@
 import CSipral
 import Dispatch
 
-/// What a `SipralEventKind.conferenceChanged` carries
-/// (`sipral_conference_event_t`): a notification about a conference was
-/// merged, or the focus deleted it. `SipralSubscription.conference()` reads the
-/// picture it left.
+/// What `SipralEventKind.conferenceChanged` carries; read the result with
+/// `SipralSubscription.conference()`.
 public struct ConferenceEventData: Sendable {
     /// Which subscription it is about.
     public let subscription: SipralHandle
@@ -29,11 +27,9 @@ public struct TextEventData: Sendable, Equatable {
     public let missing: UInt32
 }
 
-/// What a `SipralEventKind.presenceChanged` carries
-/// (`sipral_presence_event_t`). For `.watched`, a presentity a `presence`
-/// subscription watches: `basic`, `activity`, `entity` and `note`. For
-/// `.publication`, this account's own published presence, the event's
-/// `account`: `publicationState`, `failure`, `statusCode`, `expiresMs` and
+/// What `SipralEventKind.presenceChanged` carries. `.watched` fills `basic`,
+/// `activity`, `entity` and `note`; `.publication` (our own) fills
+/// `publicationState`, `failure`, `statusCode`, `expiresMs` and
 /// `refreshInMs`.
 public struct PresenceEventData: Sendable {
     public let kind: SipralPresenceKind?
@@ -54,11 +50,8 @@ public struct PresenceEventData: Sendable {
     public let refreshInMs: UInt64
 }
 
-/// This account's presence as `Account.publishPresence(_:)` publishes it
-/// (RFC 3903, a PIDF document for the address of record): reachable or not,
-/// what the person is doing (`.none` publishes no person at all; `.other`
-/// has no name to publish under and is refused), and a note a buddy list
-/// shows beside the name, on one line.
+/// Presence for `Account.publishPresence(_:)` (RFC 3903, PIDF). Activity
+/// `.none` publishes no person; `.other` is refused. `note` is one line.
 public struct Presence: Sendable, Equatable {
     public var basic: SipralBasic
     public var activity: SipralActivity
@@ -105,18 +98,13 @@ public struct Conference: Sendable, Equatable {
     public let users: [ConferenceUser]
 }
 
-/// One subscription (RFC 6665): `Account.subscribe(to:package:)`,
-/// `Account.watchPresence(of:)` or `Call.subscribeConference()`.
+/// One subscription (RFC 6665).
 ///
-/// The stack keeps it -- refreshes it, subscribes again after a notifier's
-/// `deactivated` -- until `end()`; what it learns arrives on
-/// `SipralStack.events()`: `SipralEventKind.subscriptionChanged` and
-/// `.notified` for every package, `.presenceChanged` for `presence` and
-/// `.conferenceChanged` for `conference`, each naming this `handle`.
-///
-/// Named with the package's prefix, as `SipralStack` and `SipralEvent` are,
-/// because a bare `Subscription` is also Combine's protocol: a file that
-/// imports both would have to spell out which it means at every use.
+/// The stack refreshes it, and resubscribes after `deactivated`, until
+/// `end()`. Updates arrive on `SipralStack.events()` naming `handle`:
+/// `subscriptionChanged` and `.notified`, plus `.presenceChanged` or
+/// `.conferenceChanged` for those packages. Prefixed to avoid Combine's
+/// `Subscription`.
 public final class SipralSubscription: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
@@ -137,14 +125,13 @@ public final class SipralSubscription: @unchecked Sendable {
         }
     }
 
-    /// `sipral_subscription_end`: unsubscribe (`Expires: 0`) and let the
-    /// handle go once the notifier's last word is in.
+    /// `sipral_subscription_end`: unsubscribe (`Expires: 0`); the handle
+    /// goes after the final NOTIFY.
     public func end() throws {
         try retryingBusy { try Sipral.subscriptionEnd(stack: stack.handle, subscription: handle, nowMs: stack.nowMs()) }
     }
 
-    /// The conference this subscription holds, read whole: `nil` for one
-    /// to another package, and for one no document has reached yet.
+    /// The merged conference; `nil` for other packages or before any NOTIFY.
     public func conference() throws -> Conference? {
         let whole: sipral_conference_t
         do {
@@ -197,21 +184,16 @@ public final class SipralSubscription: @unchecked Sendable {
     }
 }
 
-/// The name `SipralSubscription` had until the package prefixed it, which
-/// Combine's `Subscription` collides with. Kept for one minor release.
+/// Former name of `SipralSubscription`. Kept for one minor release.
 @available(*, deprecated, renamed: "SipralSubscription")
 public typealias Subscription = SipralSubscription
 
 /// A recording session to a recording server (SIPREC, RFC 7866), from
 /// `Call.record(toServer:destination:host:)`.
 ///
-/// It is a call of its own on the stack -- `handle` is the one its
-/// `SipralEventKind.callConfirmed` and `.callEnded` name on
-/// `SipralStack.events()` -- kept in step with the recorded call by the
-/// stack: the metadata follows a hold or a transfer, and it ends when the
-/// recorded call does. The copies of both parties' audio leave from two
-/// sockets of their own, `thisEnd` (what this end sent, the stream labelled
-/// `1`) and `farEnd` (what it heard, labelled `2`).
+/// A call of its own (`handle` appears in `callConfirmed`/`callEnded`), kept
+/// in step with the recorded call and ended with it. Audio copies leave
+/// from `thisEnd` (label `1`) and `farEnd` (label `2`).
 public final class RecordingSession: @unchecked Sendable {
     public let handle: SipralHandle
     /// The socket this end's audio is copied from, `host:port`.
@@ -227,17 +209,14 @@ public final class RecordingSession: @unchecked Sendable {
         self.call = call
     }
 
-    /// `sipral_call_stop_recording_to`: the copies stop at once and the
-    /// recording session is hung up. `.wrongState` once nothing records the
-    /// call any more.
+    /// `sipral_call_stop_recording_to`: stop now and hang up the session.
+    /// `.wrongState` if already stopped.
     public func stop() throws {
         try call.stopRecordingToServer()
     }
 }
 
-/// Reads one piece of text the ABI copies into a caller's buffer, with a
-/// buffer large enough for any the library holds, and a second, larger one
-/// for the rare piece that is not.
+/// Reads ABI text into a buffer, retrying once with a larger one.
 enum ProtocolText {
     static func read(_ fill: (inout [CChar]) throws -> Int) throws -> String {
         for capacity in [1024, 65536] {

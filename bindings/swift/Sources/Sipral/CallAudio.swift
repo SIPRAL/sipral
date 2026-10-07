@@ -6,20 +6,15 @@ import Foundation
 
 /// Why a call's audio device is let go while the call goes on.
 public enum CallAudioPause: Hashable, Sendable {
-    /// The call is on hold: CallKit asked (`CXSetHeldCallAction`, a cellular
-    /// call answered with Hold & Accept, a car's or a headset's control), or
-    /// the application did.
+    /// On hold, by CallKit (`CXSetHeldCallAction`) or the application.
     case held
 
-    /// The system interrupted the audio session
-    /// (`AVAudioSession.interruptionNotification`, type `.began`): a call
-    /// the system took the session for without CallKit holding this one.
+    /// The system interrupted the audio session without CallKit holding the
+    /// call (`AVAudioSession.interruptionNotification`, `.began`).
     case interrupted
 
-    /// CallKit has not activated the audio session for the call, or has
-    /// deactivated it (`CXProviderDelegate`'s `didActivate` and
-    /// `didDeactivate`): Apple's rule is that call audio starts only once the
-    /// system has activated the session.
+    /// CallKit has not activated the session, or deactivated it: Apple
+    /// requires call audio to wait for `didActivate`.
     case sessionInactive
 }
 
@@ -68,28 +63,23 @@ public struct CallAudioRoute: Equatable, Sendable {
 public enum CallAudioTransition: Equatable, Sendable {
     /// The device was opened for the first time and is carrying the call.
     case started
-    /// The device was let go; the set is every reason it is still let go for,
-    /// reported each time it grows or shrinks without emptying.
+    /// The device was released; the set is every current reason, reported
+    /// each time it changes without emptying.
     case paused(Set<CallAudioPause>)
     /// The last reason was lifted and a device is open again.
     case resumed
-    /// The system's interruption ended. With `shouldResume` false the
-    /// interruption stays one of the reasons the device is let go, as Apple
-    /// asks, until the application calls `resume(.interrupted)` -- typically
-    /// once the person touches the call again.
+    /// The interruption ended. With `shouldResume` false the device stays
+    /// released, as Apple asks, until `resume(.interrupted)`.
     case interruptionEnded(shouldResume: Bool)
-    /// The platform moved the call's audio. Reported, not acted on: the
-    /// session routes the call wherever it went, and a device that stops
-    /// because of the move reports that itself.
+    /// The platform moved the audio. Reported only; a device stopped by the
+    /// move reports that itself.
     case routeChanged(CallAudioRoute)
     /// The call was muted or unmuted (`CXSetMutedCallAction`). While muted
     /// the far end is sent silence.
     case muteChanged(Bool)
-    /// The system's media services went (`mediaServicesWereLostNotification`):
-    /// every audio object in the process is dead.
+    /// Media services were lost: every audio object in the process is dead.
     case mediaServicesLost
-    /// They came back (`mediaServicesWereResetNotification`), and the device
-    /// is being built again from nothing.
+    /// Media services were reset; the device is being rebuilt.
     case mediaServicesReset
     /// The device failed or would not open, and why. Reported once per
     /// failure; it is opened again until it opens.
@@ -100,14 +90,11 @@ public enum CallAudioTransition: Equatable, Sendable {
     case stopped
 }
 
-/// A call's microphone and speaker. `open` builds and starts both, from
-/// nothing, every time it is called -- which is what recovering from a media
-/// services reset takes, since every audio object made before it is dead.
+/// A call's microphone and speaker. `open` builds both from nothing each
+/// time, as recovery from a media services reset requires.
 public protocol CallAudioDevice: AnyObject, Sendable {
-    /// Open and start. `capture` is handed the microphone's samples, 16-bit
-    /// mono at `sampleRate`, in whatever lengths the device produces, on
-    /// whatever thread it produces them. `failed` is called, once, if the
-    /// device stops on its own afterwards.
+    /// `capture` gets 16-bit mono samples at `sampleRate`, in any length, on
+    /// any thread. `failed` is called once if the device stops by itself.
     func open(
         sampleRate: Int,
         frameSamples: Int,
@@ -118,35 +105,25 @@ public protocol CallAudioDevice: AnyObject, Sendable {
 
 /// What `CallAudioDevice.open` returned.
 public protocol CallAudioStreams: AnyObject, Sendable {
-    /// Queue one decoded frame for the speaker. Called from the call's own
-    /// frame reader, and possibly once more after `close()` has begun on
-    /// another thread, when it does nothing.
+    /// Queue one frame for the speaker. May be called once after `close()`
+    /// has begun elsewhere, and must then do nothing.
     func play(_ frame: [Int16])
-    /// Stop and let go of both, for good. Called on a queue of its own,
-    /// never on the thread that paused or resumed the call.
+    /// Stop for good. Called on its own queue.
     func close()
 }
 
 /// One call's audio between a `CallAudioDevice` and the call's `Media`,
 /// kept alive through what iOS does to it in the middle of a call.
 ///
-/// The device is never assumed to stay open. `pause` lets it go -- closed,
-/// so that whoever the system gave the session to has it -- and lifting the
-/// last reason opens a new one. A device that fails, or will not open, is
-/// opened again after `retryDelays`, the last delay repeating for as long as
-/// the call lasts; so is one whose media services were reset. The far end
-/// is sent silence meanwhile: `Media` keeps its own frame clock and sends
-/// silence when nothing is queued, so a gap in the device is a gap in the
-/// sound and not in the stream. Frames that arrive while the device is let
-/// go are dropped, so that the speaker picks up at the live edge of the call.
+/// `pause` closes the device so the session's new owner has it; lifting the
+/// last reason opens a new one. A failing device is retried after
+/// `retryDelays`, the last repeating while the call lasts. Meanwhile
+/// `Media`'s own frame clock sends silence, so the stream has no gap, and
+/// frames arriving while released are dropped so playback resumes live.
 ///
-/// What feeds it: `AudioSessionObserver` on iOS (interruptions, route
-/// changes, the media services going and coming back), `CallKitBridge`
-/// (hold, mute, and the session CallKit activates and deactivates), and
-/// `follow(_:)` for the call's end.
-///
-/// Every change is a `transitions()` item and a `state` value; `history`
-/// keeps the last 64, for a reader that starts late.
+/// Fed by `AudioSessionObserver` (iOS), `CallKitBridge` (hold, mute,
+/// session activation) and `follow(_:)` (the call's end). Every change is a
+/// `transitions()` item; `history` keeps the last 64.
 public final class CallAudio: @unchecked Sendable {
     private let device: CallAudioDevice
     private let sampleRate: Int
@@ -157,8 +134,8 @@ public final class CallAudio: @unchecked Sendable {
 
     /// Guards everything below it.
     private let queue = DispatchQueue(label: "org.sipral.call-audio.state")
-    /// Where the device is opened and closed, one at a time and never on
-    /// the caller's thread: both can take as long as the audio server does.
+    /// Opens and closes off the caller's thread: both can block on the
+    /// audio server.
     private let deviceQueue = DispatchQueue(label: "org.sipral.call-audio.device")
 
     private var current: CallAudioStreams?
@@ -234,8 +211,7 @@ public final class CallAudio: @unchecked Sendable {
 
     // MARK: - driving it
 
-    /// Open the device, unless something already paused it, and start moving
-    /// frames. Once only.
+    /// Open the device unless paused, and start moving frames. Once only.
     public func start() {
         let first = queue.sync { () -> Bool in
             guard !started, !stopped else { return false }
@@ -257,8 +233,7 @@ public final class CallAudio: @unchecked Sendable {
         }
     }
 
-    /// Let the device go for `reason`; it stays let go until every reason
-    /// given is `resume`d.
+    /// Release the device until every reason is `resume`d.
     public func pause(_ reason: CallAudioPause) {
         queue.sync {
             guard !stopped, pauseSet.insert(reason).inserted else { return }
@@ -289,8 +264,7 @@ public final class CallAudio: @unchecked Sendable {
         pause(.interrupted)
     }
 
-    /// The system's interruption ended. The device is taken back when the
-    /// system says the call may resume; otherwise it waits for
+    /// Resumes if the system allows; otherwise waits for
     /// `resume(.interrupted)`.
     public func interruptionEnded(shouldResume: Bool) {
         let wasInterrupted = queue.sync { () -> Bool in
@@ -312,8 +286,7 @@ public final class CallAudio: @unchecked Sendable {
         }
     }
 
-    /// Mute or unmute: the microphone is still read while muted, and silence
-    /// sent in its place.
+    /// While muted the microphone is still read, and silence is sent.
     public func setMuted(_ muted: Bool) {
         queue.sync {
             guard !stopped, self.muted != muted else { return }
@@ -322,8 +295,7 @@ public final class CallAudio: @unchecked Sendable {
         }
     }
 
-    /// Every audio object in the process is dead: the device is let go, and
-    /// nothing is opened until the services come back.
+    /// Nothing is opened until the services come back.
     public func mediaServicesLost() {
         queue.sync {
             guard !stopped else { return }
@@ -339,8 +311,7 @@ public final class CallAudio: @unchecked Sendable {
         }
     }
 
-    /// The media services are back: a device built from nothing, at once,
-    /// unless the call is paused, in which case the next resume builds it.
+    /// Rebuild now, or at the next resume if paused.
     public func mediaServicesReset() {
         queue.sync {
             guard !stopped else { return }
@@ -461,11 +432,9 @@ public final class CallAudio: @unchecked Sendable {
         }
     }
 
-    /// Called on `queue`. A device that fails again within
-    /// `CallAudio.shortLived` of opening did not really come back: each such
-    /// failure in a row waits one step longer before the next open, so a
-    /// device that dies as soon as it starts is retried at the slowest
-    /// delay rather than in a tight loop.
+    /// Called on `queue`. A failure within `CallAudio.shortLived` of opening
+    /// counts as not recovered, so the delay keeps growing instead of
+    /// retrying in a tight loop.
     private func noteFailure(_ why: String) {
         if !failing {
             failing = true

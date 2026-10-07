@@ -13,9 +13,7 @@ import OSLog
 import XCTest
 @testable import Sipral
 
-/// The log, the state snapshot and the RTP port range, carried through
-/// `SipralStack` -- the Swift counterpart of
-/// `bindings/python/tests/test_logging.py`.
+/// The log, the state snapshot and the RTP port range.
 final class LoggingTests: XCTestCase {
     /// A call the stack refuses: a stack with no RTP range has no port to
     /// reserve.
@@ -44,9 +42,7 @@ final class LoggingTests: XCTestCase {
         }
     }
 
-    /// A null callback is how C turns the log and a screening policy off,
-    /// and the generated wrappers took neither a null callback nor a null
-    /// pointer beside it, so this did not compile.
+    /// Turning the log off passes a null callback through the wrappers.
     func testTheGeneratedWrappersTakeANullListener() throws {
         let stack = try SipralStack(audio: .application)
         defer { stack.close() }
@@ -131,10 +127,8 @@ final class LoggingTests: XCTestCase {
     }
 
     #if canImport(OSLog)
-    /// `logTo(subsystem:level:)`: a registrar's refusal -- a warning, which
-    /// the unified logging system keeps where it drops debug lines -- reaches
-    /// it under the category of its target, read back from this process's own
-    /// log store.
+    /// A registrar's refusal (a warning, which the unified log keeps) is
+    /// found under its target's category in this process's log store.
     func testALineReachesTheUnifiedLogUnderItsTarget() throws {
         let subsystem = "org.sipral.test.\(UUID().uuidString)"
         let registrar = try UDPSocket(host: "127.0.0.1", port: 0)

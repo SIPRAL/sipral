@@ -1,30 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-// iOS only: `AVAudioSession` exists nowhere else a call runs. A Mac has no
-// session to be interrupted, and its device changes reach an `AVAudioEngine`
-// as the configuration-change notification `VoiceProcessingAudioDevice`
-// already reports.
+// iOS only: on a Mac, device changes arrive as the engine's configuration
+// change, which `VoiceProcessingAudioDevice` handles.
 #if canImport(AVFoundation) && os(iOS)
 @preconcurrency import AVFoundation
 
-/// Carries what `AVAudioSession` says about the device onto a `CallAudio`,
-/// for as long as it is kept:
-///
-/// - `interruptionNotification`: `.began` lets the device go
-///   (`CallAudioPause.interrupted`); `.ended` reports whether the system
-///   says the call may resume (`.shouldResume`), and takes the device back
-///   when it does.
-/// - `routeChangeNotification`: reported with the output the session is on
-///   now and why it moved -- a headset or a car arriving
-///   (`newDeviceAvailable`), the device the call was on gone
-///   (`oldDeviceUnavailable`).
-/// - `mediaServicesWereLostNotification` and
-///   `mediaServicesWereResetNotification`: the device let go, then built
-///   again from nothing.
-///
-/// The notifications are posted by the system on a thread of its choosing;
-/// nothing here assumes the main one.
+/// Forwards `AVAudioSession` notifications to a `CallAudio` while kept:
+/// interruptions (resuming only when `.shouldResume`), route changes, and
+/// media services lost and reset. Notifications may arrive on any thread.
 public final class AudioSessionObserver: @unchecked Sendable {
     private let center: NotificationCenter
     private let session: AVAudioSession

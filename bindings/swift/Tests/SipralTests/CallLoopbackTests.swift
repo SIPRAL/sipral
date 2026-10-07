@@ -9,12 +9,8 @@ import Glibc
 import XCTest
 @testable import Sipral
 
-/// Two stacks on 127.0.0.1, talking directly, with no registrar between
-/// them -- the same shape `bindings/python/tests/test_call.py` proves the
-/// Python layer with, carried through this package's own idiomatic layer:
-/// place a call, answer it, exchange audio, hold and resume, send DTMF,
-/// hang up, and release every handle without a use-after-free while events
-/// are still pending.
+/// Two stacks on 127.0.0.1 with no registrar: call, answer, audio, hold and
+/// resume, DTMF, hang up, and release every handle while events are pending.
 final class CallLoopbackTests: XCTestCase {
     private func placeAndAnswer(_ alice: SipralStack, _ bob: SipralStack) async throws -> (Call, Call) {
         let aliceAccount = try alice.addAccount(
@@ -90,9 +86,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(heardBack?.count, bobMedia.frameSamples)
     }
 
-    /// `Media.setAppRate(_:)`: both ends at 24 kHz hand out and take
-    /// 480-sample frames whatever the codec, a rate outside the four is
-    /// refused and changes nothing, and 0 is the codec's own again.
+    /// At 24 kHz both ends use 480-sample frames; an unsupported rate is
+    /// refused without effect; 0 restores the codec's rate.
     func testFramesCrossAtTheRateTheApplicationChose() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -146,10 +141,8 @@ final class CallLoopbackTests: XCTestCase {
         return heard.elements.map { frame in frame.map { abs(Int($0)) }.max() ?? 0 }.max() ?? 0
     }
 
-    /// A party this end holds hears silence by default, in application mode
-    /// too, where the frames sent may be a microphone's; it hears what the
-    /// application sends — hold music, an announcement, a voice agent — on
-    /// a stack told `heldAudio: .application`.
+    /// A held party hears silence by default, and the application's frames
+    /// with `heldAudio: .application`.
     func testAHeldPartyHearsSilenceUnlessTheStackSaysTheApplication() async throws {
         let byDefault = try await loudestHeardOnHold(.default)
         XCTAssertLessThan(byDefault, 100, "the held party heard the application on a stack told nothing")
@@ -157,9 +150,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertGreaterThan(application, 1_000, "the held party did not hear what the application sent")
     }
 
-    /// The realms a password answers reach the stack one per line: a realm
-    /// with a comma of its own is one realm, and one with a control byte is
-    /// refused there.
+    /// Realms cross one per line: a comma stays inside one realm, a control
+    /// byte is refused.
     func testTheRealmsAPasswordAnswersReachTheStackOnePerLine() throws {
         let stack = try SipralStack(audio: .application)
         defer { stack.close() }
@@ -193,12 +185,8 @@ final class CallLoopbackTests: XCTestCase {
         let resumeEvents = aliceCall.events()
         try aliceCall.resume()
         let sawResumed = await firstOne(of: resumeEvents) { event in
-            // A resume re-offers the session the way a hold does, and its
-            // outcome arrives the same way (`docs/08-ffi.md`, "The
-            // application hears the outcome as
-            // SIPRAL_EVENT_KIND_MEDIA_CHANGED"): a SESSION_CHANGED naming
-            // `heldHere` false, `SipralEventKind.mediaResumed` is a
-            // different thing (recovery from a suspend, not an un-hold).
+            // A resume reports like a hold: SESSION_CHANGED with `heldHere`
+            // false. `mediaResumed` is recovery from suspend, not this.
             event.callData?.heldHere == false
         }
         XCTAssertNotNil(sawResumed)
@@ -224,8 +212,7 @@ final class CallLoopbackTests: XCTestCase {
         let after = try Sipral.mediaStatistics(media: media.handle, nowMs: 0).frames_underrun
         XCTAssertLessThanOrEqual(before, read)
         XCTAssertLessThanOrEqual(read, after)
-        // each member appended after the ones before it, the newest at the
-        // tail, where a caller built before it never reads
+        // new members are appended, so older callers never read them
         XCTAssertLessThan(
             try XCTUnwrap(Self.offset(of: \.frames_underrun, in: stats)),
             try XCTUnwrap(Self.offset(of: \.feedback, in: stats))
@@ -241,11 +228,8 @@ final class CallLoopbackTests: XCTestCase {
         MemoryLayout<T>.offset(of: member)
     }
 
-    /// Two readers of one call, both taken before anything happens on it,
-    /// each see every event the call raises, in the same order, and each
-    /// digit -- what a `CallKitBridge` bound to a call and the
-    /// application's own loop over that call both rely on. A single
-    /// `AsyncStream` read from two places splits its events between them.
+    /// Two readers of one call each see every event and digit in order, as
+    /// `CallKitBridge` and the application both rely on.
     func testTwoConcurrentReadersBothSeeEveryEventOfARealCall() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -323,10 +307,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(stackFirst.last, SipralEventKind.callEnded.rawValue)
     }
 
-    /// One reader leaves after its first event, and another is taken and
-    /// never read at all: the reader beside them still gets every event on
-    /// time, the one that left is forgotten, and the one never read still
-    /// holds everything when it is finally drained.
+    /// A reader that leaves is forgotten, an unread one keeps everything,
+    /// and neither delays the others.
     func testAReaderThatStopsEarlyDoesNotHoldUpTheOthers() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -381,8 +363,7 @@ final class CallLoopbackTests: XCTestCase {
         let first = Recorder(bobMedia.frames())
         let second = Recorder(bobMedia.frames())
         let slow = bobMedia.frames(bufferingNewest: 2)
-        // A square wave, not a constant: a codec is free to take a
-        // constant level out as the DC offset it is.
+        // A square wave: a codec may remove a constant as DC offset.
         let tone = (0..<(aliceMedia.frameSamples * 25)).map { index -> Int16 in
             (index / 8) % 2 == 0 ? 8192 : -8192
         }
@@ -403,9 +384,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(bobMedia.debugFrameReaders, 0)
     }
 
-    /// Every stream a call hands out finishes when the call ends, with no
-    /// `close()` needed; one taken after the end is handed that end and
-    /// finished at once, and a digit stream taken then is empty.
+    /// Streams finish when the call ends without `close()`; a later one gets
+    /// the end and finishes; a later digit stream is empty.
     func testEveryStreamFinishesWhenTheCallEnds() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -437,9 +417,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(aliceCall.debugEventReaders, 0)
     }
 
-    /// The end-of-call record travels in `.mediaStatistics` itself, is kept
-    /// on the call, and is what `Media.statistics()` answers once the stream
-    /// is gone, where the library alone says `.wrongState`.
+    /// The end-of-call record is kept on the call and returned by
+    /// `Media.statistics()` instead of `.wrongState`.
     func testTheEndOfCallRecordIsDecodedKeptAndStillReadable() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -493,25 +472,18 @@ final class CallLoopbackTests: XCTestCase {
 
         let (aliceCall, bobCall) = try await placeAndAnswer(alice, bob)
 
-        // Hang up and close immediately, without draining `events()` first --
-        // there may still be a CALL_ENDED (and its farewell) queued when
-        // `close()` runs. `docs/08-ffi.md`'s "A media handle outlives its
-        // call, and says so" is the property under test: nothing here may
-        // crash or read freed memory, whatever order the two closes and the
-        // still-pending events land in.
+        // Close without draining events: a CALL_ENDED may still be queued.
+        // Nothing may crash or read freed memory, whatever the order.
         try aliceCall.hangup()
         aliceCall.close()
         bobCall.close()
 
-        // The handle is now stale; every entry point on it must answer
-        // SIPRAL_STATUS_STALE_HANDLE (or invalid_handle), never crash.
+        // A stale handle must be refused, never crash.
         XCTAssertThrowsError(try aliceCall.hangup())
     }
 
-    /// The caller cancels (CANCEL) before the callee ever takes the call:
-    /// `takeIncomingCall` must not hand back a `Call` that can never end:
-    /// on a handle that ended before it was taken it throws and releases
-    /// the handle.
+    /// A call cancelled before it is taken: `takeIncomingCall` throws and
+    /// releases the handle rather than returning a `Call` that never ends.
     func testTakeIncomingCallOnAHandleThatEndedBeforeItWasTakenThrowsAndCleansUp() async throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -528,9 +500,7 @@ final class CallLoopbackTests: XCTestCase {
         let incoming = await bobEvents.first(within: 5) { $0.kind == .incomingCall }
         let event = try XCTUnwrap(incoming, "no incoming call arrived")
 
-        // Alice gives up before bob ever calls takeIncomingCall: bob's
-        // stack raises callEnded for this handle with no Call registered
-        // to receive it, exactly the gap the finding describes.
+        // callEnded arrives with no Call registered to receive it.
         try aliceCall.hangup()
         aliceCall.close()
         let ended = await bobEvents.first(within: 5) { $0.kind == .callEnded && $0.call == event.call }
@@ -546,12 +516,8 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertNil(bob.callFor(event.call), "a Call minted on a dead handle must not stay registered")
     }
 
-    /// `Call.close()`'s own doc comment promises "idempotent, and safe to
-    /// call regardless of how the call ended" -- two callers racing to close
-    /// the same call, such as a `CALL_ENDED` handler and a user action
-    /// landing at once. Sixteen concurrent closers on a call whose media
-    /// never started (so the only thing a non-idempotent `close()` would do
-    /// twice is close the raw `mediaSocket` descriptor) must not hang.
+    /// Sixteen concurrent `close()` calls on a call without media must not
+    /// hang.
     func testCloseFromManyConcurrentCallersDoesNotHang() throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)
@@ -576,14 +542,9 @@ final class CallLoopbackTests: XCTestCase {
         XCTAssertEqual(outcome, .success, "close() from \(closers) concurrent callers must not hang")
     }
 
-    /// The concrete harm a non-idempotent `close()` does on the no-media
-    /// path, made deterministic rather than raced: `close()` legitimately
-    /// frees `aliceCall`'s media descriptor once, a fresh, unrelated socket
-    /// is immediately handed that same descriptor number -- the ordinary
-    /// POSIX behaviour of allocating the lowest free one -- and a *second*
-    /// `close()` call, standing in for a second caller racing the first,
-    /// must not reach past its own guard to close that unrelated socket's
-    /// descriptor out from under it.
+    /// The race made deterministic: after the first `close()`, an unrelated
+    /// socket reuses the descriptor number (POSIX picks the lowest free), and
+    /// a second `close()` must not close it.
     func testSecondCloseDoesNotStealAReusedDescriptor() throws {
         let alice = try SipralStack(audio: .application)
         let bob = try SipralStack(audio: .application)

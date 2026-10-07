@@ -5,27 +5,19 @@
 /// by: `sipral_stack_config_t::turn_server`, `turn_username` and
 /// `turn_password`.
 ///
-/// Given to `SipralStack(stunServer:turn:)`, every media socket a call is
-/// placed or answered on gets a relay there, offered as the call's relayed
-/// ICE candidate -- the path of last resort, used only when no cheaper pair
-/// answers (`docs/06-nat.md`). `address` is `host:port`, an address and
-/// not a name.
+/// Each media socket gets a relay, offered as the relayed ICE candidate and
+/// used only when no cheaper pair works (`docs/06-nat.md`). `address` is
+/// `host:port`, not a name.
 ///
-/// `transport` is how every media socket reaches it (RFC 8656 §3.1):
-/// `SipralTransport.udp` by default, `.tcp` for a network that lets no UDP
-/// out, `.tls` for one that lets one port out -- 5349 is TURN's -- or for an
-/// application that wants the server checked. Over either the stack opens a
-/// connection per media socket itself, a Network.framework `NWConnection`,
-/// and carries everything for the relay on it. Over TLS the certificate is
-/// checked against `serverName` -- the host part of `address` when `nil`,
-/// which for an address is an IP-address certificate -- with the system's
-/// trust, or, when `trustedCertificates` holds any (DER), with those roots
-/// and nothing else: how a private CA or a self-signed server is trusted.
-/// Nothing here turns checking off.
+/// `transport` (RFC 8656 §3.1): `.udp` by default, `.tcp` where UDP is
+/// blocked, `.tls` (port 5349) where only one port is open or the server
+/// must be verified. The stack opens one connection per media socket. TLS
+/// checks `serverName` (default: the host of `address`) against the system
+/// roots, or only `trustedCertificates` (DER) when given. Checking cannot
+/// be turned off.
 ///
-/// The password never appears in `description`, `debugDescription`,
-/// `dump()` or string interpolation: a TURN credential that reaches a log
-/// is a relay somebody else can use.
+/// The password never appears in descriptions or logs: a leaked TURN
+/// credential is a relay anyone can use.
 public struct TurnServer: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let address: String
     public let username: String

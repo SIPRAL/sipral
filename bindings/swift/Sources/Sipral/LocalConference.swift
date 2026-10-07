@@ -9,10 +9,8 @@ import Glibc
 import CSipral
 import Dispatch
 
-/// One member of a `LocalConference`, as `sipral_local_conference_member_at`
-/// reads it: its handle -- a call's, or the conference's own for this end --
-/// whether it is talking, its two mutes and its two gains in the audio
-/// engine's steps (256 is unity).
+/// One member of a `LocalConference`. The handle is a call's, or the
+/// conference's own for this end; gains are in engine steps (256 is unity).
 public struct ConferenceMember: Sendable, Equatable {
     public let member: SipralHandle
     public let talking: Bool
@@ -22,19 +20,13 @@ public struct ConferenceMember: Sendable, Equatable {
     public let gainOutput: UInt32
 }
 
-/// A local conference: any number of this stack's calls, each on its own
-/// codec and rate, mixed here so that every member hears everybody but
-/// itself -- this end too, unless it was made without (`docs/08-ffi.md`,
-/// "A local conference").
+/// Mixes any number of calls, each on its own codec and rate, so every
+/// member (including this end, unless excluded) hears everyone but itself.
 ///
-/// A call added stops carrying its own frames -- its `Media` goes on reading
-/// the socket and sending RTCP -- and the conference carries them instead:
-/// on a stack in `AudioMode.device` the library's audio engine does, and
-/// every packet leaves from the member's own socket through the stack's
-/// transmit path; in `AudioMode.application` a thread of this class's own
-/// ticks every twenty milliseconds -- `sendAudio` is this end's microphone,
-/// `frames()` what it hears. What changes arrives on the stack's events as
-/// `SipralEventKind.localConferenceChanged`, with `localConferenceData`.
+/// A member's `Media` still handles the socket and RTCP, but the conference
+/// carries its frames: the engine in `AudioMode.device`, or a 20 ms thread
+/// here in `.application`, where `sendAudio` is this end's microphone and
+/// `frames()` what it hears. Changes arrive as `localConferenceChanged`.
 public final class LocalConference: @unchecked Sendable {
     /// The conference's handle, which is also this end's name as a member.
     public let handle: SipralHandle
@@ -58,9 +50,8 @@ public final class LocalConference: @unchecked Sendable {
     )
 
     /// `sipral_local_conference_create`. `maxMembers` counts this end;
-    /// `sampleRate` is the rate of its frames -- 8000, 16000, 32000 or
-    /// 48000 -- in application mode. A rate the conference cannot mix throws
-    /// `SipralError` with `.conferenceRefused`.
+    /// `sampleRate` (8000, 16000, 32000, 48000) applies in application mode.
+    /// Other rates throw `.conferenceRefused`.
     public init(stack: SipralStack, maxMembers: UInt32 = 16, local: Bool = true, sampleRate: UInt32 = 16000) throws {
         self.stack = stack
         var config = sipral_local_conference_config_t.sized()
@@ -83,10 +74,8 @@ public final class LocalConference: @unchecked Sendable {
     /// at its own codec's rate. A full conference, a call already in one, or
     /// a codec it cannot mix throws with `.conferenceRefused`.
     public func add(_ call: Call) throws {
-        // the call's own thread stops carrying frames before the conference
-        // starts, so that no frame is taken twice; a call refused keeps
-        // whatever it had -- a call already in this conference keeps being
-        // carried by it
+        // Stop the call's own frames first so none is taken twice; a refused
+        // call keeps what it had.
         let was = call.media?.carriedByConference ?? false
         call.media?.setCarriedByConference(true)
         do {
@@ -106,8 +95,8 @@ public final class LocalConference: @unchecked Sendable {
         call.media?.setCarriedByConference(false)
     }
 
-    /// Mute or unmute one way of a member -- `nil` for this end: `.input` is
-    /// what it says, `.output` what it hears.
+    /// Mute a member (`nil` for this end): `.input` is what it says,
+    /// `.output` what it hears.
     public func setMuted(_ member: Call?, _ direction: SipralAudioDirection, _ muted: Bool = true) throws {
         let named = member?.handle ?? handle
         try retryingBusy {
@@ -169,15 +158,13 @@ public final class LocalConference: @unchecked Sendable {
         try retryingBusy { try Sipral.localConferenceRecordStop(conference: handle) }
     }
 
-    /// What this end says, 16-bit mono PCM at `sampleRate`, in any length:
-    /// the conference's thread takes a frame of it every tick.
+    /// This end's 16-bit mono audio at `sampleRate`, any length.
     public func sendAudio(_ samples: [Int16]) {
         stateQueue.sync { toSend.append(samples) }
     }
 
-    /// A new reader of what this end hears, one frame each, in application
-    /// mode; `Media.frames(bufferingNewest:)` says how a reader that falls
-    /// behind is kept.
+    /// What this end hears, in application mode; buffering as in
+    /// `Media.frames(bufferingNewest:)`.
     public func frames(bufferingNewest limit: Int = Media.frameBuffer) -> AsyncStream<[Int16]> {
         frameBroadcast.stream(bufferingPolicy: .bufferingNewest(max(limit, 1)))
     }
@@ -246,9 +233,8 @@ public final class LocalConference: @unchecked Sendable {
         }
     }
 
-    /// `sipral_local_conference_destroy`: every call still in it carries its
-    /// own frames again, a recording running is finished, and the handle is
-    /// spent.
+    /// `sipral_local_conference_destroy`: members carry their own frames
+    /// again and a running recording is finished.
     public func close() {
         let (wasClosed, wasTicking) = stateQueue.sync { () -> (Bool, Bool) in
             let before = closed

@@ -9,10 +9,9 @@ import Glibc
 import CSipral
 import Dispatch
 
-/// What `Account.checkCertificate(_:unixSeconds:)` found in the certificate
-/// the account pins: its dates, in seconds since 1970 (zero when its DER
-/// could not be read that far), and whether the clock is past or before
-/// them. Accepted either way; an expired one is worth a warning.
+/// The pinned certificate's validity dates (Unix seconds, zero if unreadable)
+/// and whether the clock is outside them. Accepted either way; an expired
+/// one deserves a warning.
 public struct PinnedCertificate: Sendable, Equatable {
     public let notBefore: UInt64
     public let notAfter: UInt64
@@ -22,38 +21,30 @@ public struct PinnedCertificate: Sendable, Equatable {
 
 /// `sipral_account_add`, and the entry points that take its handle.
 ///
-/// Built through `SipralStack.addAccount`, never directly: a handle names
-/// something only on the stack that minted it (`docs/08-ffi.md`, "A handle
-/// names something only on the stack that minted it"), so keeping the two
-/// together is what makes every method here safe to call with nothing
-/// further to pass.
+/// Made by `SipralStack.addAccount`: a handle is only valid on the stack
+/// that minted it, so the account keeps both.
 public final class Account: @unchecked Sendable {
     public unowned let stack: SipralStack
     public let handle: SipralHandle
     public let aor: String
-    /// Where the account's requests go, `host:port`: the address it was
-    /// added with, or -- for one added with `serverUri` -- the address it was
-    /// last located at, empty until then.
+    /// Where requests go, `host:port`; with `serverUri`, the last located
+    /// address, empty until then.
     public var registrarAddress: String { stateQueue.sync { _registrarAddress } }
     private var _registrarAddress: String
     /// The server named by a URI RFC 3263 locates, or `nil`.
     public let serverUri: String?
-    /// The protocol of the connection of its own the account's requests go
-    /// over, `.tcp` or `.tls`, or `nil` for the stack's own transport
-    /// (`SipralStack.addAccount(streamProtocol:)`).
+    /// `.tcp` or `.tls` for an account with its own connection, `nil` for
+    /// the stack's transport.
     public let streamProtocol: SipralTransport?
-    /// The certificate pin it was added with, which a TLS connection of its
-    /// own is held to.
+    /// The certificate pin its own TLS connection is held to.
     let tlsPin: String?
 
     private let stateQueue = DispatchQueue(label: "org.sipral.account.state")
-    /// The `Contact` the application wrote, or `nil` when the account's is
-    /// the one this layer derives from the signalling socket.
+    /// The application's `Contact`, or `nil` when derived from the socket.
     private let givenContact: String?
     private var _contact: String
 
-    /// Where this account says it can be reached, as its `Contact` carries
-    /// it now: after `SipralStack.networkChanged(to:)`, the new address.
+    /// The current `Contact`, updated by `SipralStack.networkChanged(to:)`.
     public var contact: String { stateQueue.sync { _contact } }
 
     init(
@@ -71,13 +62,10 @@ public final class Account: @unchecked Sendable {
         self.givenContact = given
     }
 
-    /// Whether its `Contact` is the one this layer derives, rather than one
-    /// the application wrote.
+    /// Whether the `Contact` is derived rather than written by the app.
     var derivesContact: Bool { givenContact == nil }
 
-    /// What goes after the address in the `Contact` this layer derives for
-    /// it: the parameter naming its own connection's protocol (RFC 3261
-    /// §19.1.1), or the stack's.
+    /// The derived `Contact`'s transport parameter (RFC 3261 §19.1.1).
     var contactParameters: String {
         Self.contactParameters(streamProtocol, stack: stack)
     }
@@ -109,13 +97,11 @@ public final class Account: @unchecked Sendable {
         stateQueue.sync { _contact = next }
     }
 
-    /// `sipral_account_check_certificate`: the verdict of this account's
-    /// `tlsPin` on `certificate`, the DER bytes of the leaf a TLS server
-    /// presented, from inside the application's own certificate check. A
-    /// `PinnedCertificate` when it is the pinned one -- accept the handshake
-    /// whoever signed it, its dates reported, an expired one included; `nil`
-    /// when the account pins nothing and the platform's own checks decide;
-    /// `.certificateRefused` thrown when it pins another.
+    /// `sipral_account_check_certificate`: judge the server's leaf
+    /// certificate (DER) against `tlsPin`, from the application's own TLS
+    /// check. Returns `PinnedCertificate` when it matches (accept, whoever
+    /// signed it, even expired), `nil` when nothing is pinned (the platform
+    /// decides), and throws `.certificateRefused` otherwise.
     public func checkCertificate(_ certificate: [UInt8], unixSeconds: UInt64? = nil) throws -> PinnedCertificate? {
         let now = unixSeconds ?? UInt64(time(nil))
         let found = try retryingBusy {
@@ -128,10 +114,9 @@ public final class Account: @unchecked Sendable {
         )
     }
 
-    /// `sipral_account_rebind` onto the signalling socket the stack bound
-    /// after a network change: a derived `Contact` names the new socket; one
-    /// the application wrote has the old address, wherever it names it,
-    /// replaced by the new one, and is otherwise left as written.
+    /// `sipral_account_rebind` after a network change. A derived `Contact`
+    /// names the new socket; a written one has the old address replaced and
+    /// is otherwise untouched.
     func rebind(local now: String, previous: String?) throws {
         let next: String
         if givenContact == nil {
@@ -150,9 +135,7 @@ public final class Account: @unchecked Sendable {
         stateQueue.sync { _contact = next }
     }
 
-    /// `text` with every `old` in it made `new`: the standard library's own
-    /// `replacing(_:with:)` needs iOS 16 and macOS 13, and this package
-    /// builds for older ones.
+    /// The standard `replacing(_:with:)` needs iOS 16 / macOS 13.
     private static func replacing(_ old: String, with new: String, in text: String) -> String {
         var result = ""
         var index = text.startIndex
@@ -168,11 +151,8 @@ public final class Account: @unchecked Sendable {
         return result
     }
 
-    /// Where this account can actually be reached, for a caller who gave no
-    /// `Contact` of its own. The AOR itself is never a usable default: a
-    /// `sip:` address of record names who this is, not a socket anything can
-    /// write to (`bindings/python/sipral/account.py`'s `_default_contact`
-    /// explains the same choice).
+    /// The default `Contact`. Never the AOR: it names who this is, not a
+    /// socket anything can reach.
     private static func defaultContact(aor: String, bindAddress: String, parameters: String) -> String {
         guard let colon = aor.firstIndex(of: ":") else { return aor }
         let scheme = aor[aor.startIndex..<colon]
@@ -305,16 +285,13 @@ public final class Account: @unchecked Sendable {
 
     private var _wantsRegistration = false
 
-    /// Whether it was asked to register and not to unregister since: the
-    /// accounts a stack signalling over TCP or TLS registers again once its
-    /// connection is made again.
+    /// Asked to register and not since unregistered; such accounts
+    /// re-register when a TCP/TLS connection is remade.
     public var wantsRegistration: Bool { stateQueue.sync { _wantsRegistration } }
 
-    /// `sipral_account_register`. A no-op account (no registrar) refuses this.
-    /// On a stack signalling over TCP or TLS whose connection is down
-    /// (`.transportDown`, already raised as `SipralEventKind.transportFailed`)
-    /// it is kept, and the REGISTER goes the moment the connection is made
-    /// again.
+    /// `sipral_account_register`. Refused for an account with no registrar.
+    /// While a TCP/TLS connection is down the request is kept and sent once
+    /// it is back.
     public func register() throws {
         stateQueue.sync { _wantsRegistration = true }
         do {
@@ -326,25 +303,21 @@ public final class Account: @unchecked Sendable {
         }
     }
 
-    /// `sipral_account_set_access_token`: the OAuth 2.0 access token the
-    /// account's server asked for (RFC 8898), in place of any it had; `nil`
-    /// takes it away. The answer to `SipralEventKind.tokenRequired`
-    /// (`SipralEvent.tokenData`), and the way a renewed token goes in: from
-    /// the next request on, the server's `Bearer` challenge is answered with
-    /// it. A registration that failed for want of one starts again with
-    /// `register()`. Throws `.invalidArgument` for a token that is not RFC
-    /// 6750's `b64token`, with nothing changed.
+    /// `sipral_account_set_access_token`: set or replace (or with `nil`,
+    /// remove) the OAuth 2.0 token (RFC 8898), answering
+    /// `SipralEventKind.tokenRequired`. Used for the next `Bearer`
+    /// challenge; a registration that failed for lack of one restarts with
+    /// `register()`. A token that is not an RFC 6750 `b64token` throws
+    /// `.invalidArgument` and changes nothing.
     public func setAccessToken(_ token: String?) throws {
         try retryingBusy {
             try Sipral.accountSetAccessToken(stack: stack.handle, account: handle, token: token ?? "")
         }
     }
 
-    /// Gives the binding up: a REGISTER with Expires: 0. The registration state
-    /// reads unregistered as soon as this returns, before the registrar answers;
-    /// the answer is the registration-changed event that follows. Wait for that
-    /// event before closing the stack, which otherwise cannot answer a challenge
-    /// to the un-REGISTER.
+    /// A REGISTER with Expires: 0. The state reads unregistered at once; the
+    /// registrar's answer is the following registration event. Wait for it
+    /// before closing the stack, or a challenge to it goes unanswered.
     public func unregister() throws {
         stateQueue.sync { _wantsRegistration = false }
         try retryingBusy {
@@ -367,11 +340,9 @@ public final class Account: @unchecked Sendable {
         stack.forgetAccount(handle)
     }
 
-    /// `sipral_account_announce` (`docs/15-mobile.md`, "C2"): what a
-    /// `PushKitBridge` calls the instant a VoIP push arrives, before the
-    /// INVITE it is about has necessarily reached the transport. Returns
-    /// either an announcement waiting for that INVITE, or the call itself
-    /// when it arrived first.
+    /// `sipral_account_announce`: called when a VoIP push arrives, possibly
+    /// before its INVITE. Returns an announcement waiting for the INVITE, or
+    /// the call if it already came.
     public func announce(caller: String) throws -> (announcement: SipralHandle?, call: SipralHandle?) {
         let result = try retryingBusy {
             try Sipral.accountAnnounce(stack: stack.handle, account: handle, caller: caller, nowMs: stack.nowMs())
@@ -382,9 +353,8 @@ public final class Account: @unchecked Sendable {
         return (result.announcement, nil)
     }
 
-    /// `sipral_account_refresh_binding` (RFC 8599 §4.1.3): refreshed at once
-    /// on a wake-up, ahead of the scheduled refresh and any back-off an
-    /// earlier outage earned.
+    /// `sipral_account_refresh_binding` (RFC 8599 §4.1.3): refresh now on a
+    /// wake-up, skipping schedule and back-off.
     public func refreshBinding() throws {
         try retryingBusy {
             try Sipral.accountRefreshBinding(stack: stack.handle, account: handle, nowMs: stack.nowMs())
@@ -393,13 +363,10 @@ public final class Account: @unchecked Sendable {
 
     // MARK: - subscriptions and presence
 
-    /// `sipral_account_subscribe` (RFC 6665): watch `target`, a SIP URI, for
-    /// the event `package` -- `presence` (RFC 3856), `conference` (RFC 4575),
-    /// `dialog` for a busy lamp field, `message-summary` -- from this
-    /// account. `accept` is the `Accept` value when the package's default
-    /// body type is not the one wanted, `expiresSeconds` how long to ask for
-    /// (zero for an hour), and `destination` (`host:port`) where to send the
-    /// SUBSCRIBE when not where the account registers.
+    /// `sipral_account_subscribe` (RFC 6665): watch `target` for `package`
+    /// (`presence`, `conference`, `dialog`, `message-summary`, ...).
+    /// `accept` overrides the default body type, `expiresSeconds` zero means
+    /// an hour, and `destination` overrides where the SUBSCRIBE goes.
     public func subscribe(
         to target: String,
         package: String,
@@ -425,10 +392,8 @@ public final class Account: @unchecked Sendable {
         return SipralSubscription(stack: stack, handle: made, package: package)
     }
 
-    /// Watch `target`'s presence (RFC 3856): a `presence` subscription
-    /// asking for PIDF, whose every notification arrives as
-    /// `SipralEventKind.presenceChanged` with `presenceData.kind ==
-    /// .watched`: open or closed, the activity, the presentity and its note.
+    /// Watch `target`'s presence (RFC 3856, PIDF). Each notification is a
+    /// `presenceChanged` with `presenceData.kind == .watched`.
     public func watchPresence(of target: String, expiresSeconds: UInt32 = 0, destination: String? = nil) throws -> SipralSubscription {
         try subscribe(
             to: target, package: "presence", accept: "application/pidf+xml",
@@ -436,12 +401,10 @@ public final class Account: @unchecked Sendable {
         )
     }
 
-    /// `sipral_account_publish_presence` (RFC 3903): publish this account's
-    /// presence to its registrar as the presence compositor; the first call
-    /// publishes and every later one modifies the same publication, which
-    /// the stack keeps refreshed until `unpublishPresence()`. What the
-    /// compositor did with it arrives as `SipralEventKind.presenceChanged`
-    /// with `presenceData.kind == .publication`, naming this account.
+    /// `sipral_account_publish_presence` (RFC 3903): publish to the
+    /// registrar; later calls modify the same publication, kept refreshed
+    /// until `unpublishPresence()`. Results arrive as `presenceChanged` with
+    /// `presenceData.kind == .publication`.
     public func publishPresence(_ presence: Presence) throws {
         try CStrings.with([presence.note]) { parts in
             var document = sipral_presence_t.sized()
@@ -467,24 +430,19 @@ public final class Account: @unchecked Sendable {
     }
 }
 
-/// What one account holds its calls to, and signs them with, beyond what the
-/// stack does: the `srtp` and `stir_*` members of `sipral_account_config_t`,
-/// given to `SipralStack.addAccount`.
+/// An account's SRTP and STIR/SHAKEN settings (`srtp` and `stir_*` in
+/// `sipral_account_config_t`).
 ///
-/// `srtp` is the account's own SRTP policy over the stack's (`nil` keeps the
-/// stack's); a call it places may ask for more and never less. `srtpSuites`
-/// are the suites it runs, most preferred first, by their RFC 4568 and RFC
-/// 7714 names; RFC 7714's GCM ones only if named. `stirVerification` is what
-/// the account does with the `Identity` of the calls it receives, once
-/// `SipralStack.stir` gave the stack trust anchors. `stirKey` (a P-256 key:
-/// the bare 32 bytes, or SEC1 or PKCS #8 in DER or PEM) with
-/// `stirCertificateUrl` signs every call the account places (RFC 8224), as
-/// `stirOrig` or the number in the AOR, claiming `stirAttestation` (`.none`
-/// is A) and `stirOrigid` (one drawn for the account when `nil`). A PASSporT
-/// carries the time, which `SipralStack.stir` gives the stack: call it first,
-/// with no anchors on a stack that only signs. `recordingInClear` lets the
-/// account's encrypted calls be recorded to a recording server as plain RTP;
-/// otherwise their copies go as SRTP or not at all (RFC 7866 §12.2).
+/// `srtp` overrides the stack's policy (`nil` keeps it); a call may ask for
+/// more, never less. `srtpSuites` are named by RFC 4568/7714, most preferred
+/// first; GCM only if named. `stirVerification` applies once
+/// `SipralStack.stir` set anchors. `stirKey` (P-256: raw 32 bytes, or SEC1
+/// or PKCS #8 in DER or PEM) with `stirCertificateUrl` signs outgoing calls
+/// (RFC 8224) as `stirOrig` or the AOR's number, with `stirAttestation`
+/// (`.none` means A) and `stirOrigid` (generated when `nil`). Call
+/// `SipralStack.stir` first, since a PASSporT needs the clock.
+/// `recordingInClear` allows recording encrypted calls as plain RTP;
+/// otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
 public struct AccountSecurity: Sendable {
     public var srtp: SipralSrtp?
     public var srtpSuites: [String]

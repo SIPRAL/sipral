@@ -3,10 +3,7 @@
 
 // A headless voice agent: answers, listens, talks back, hangs up on "#".
 //
-// The Swift-layer equivalent of `bindings/python/examples/agent.py`, run the
-// same way by `scripts/lab.sh`'s own `swift_agent`: registered at Asterisk as
-// `labuser-agent-swift`, dialled by `[agent-call]`, and its log read back for
-// "answered", the "#" it hangs up on, and packets both ways.
+// Run by `scripts/lab.sh` (`swift_agent`), which reads its log back.
 //
 //   SIPRAL_AOR=sip:agent@example.invalid \
 //   SIPRAL_REGISTRAR=sip:example.invalid \
@@ -14,17 +11,11 @@
 //   SIPRAL_AUTH_USER=agent SIPRAL_AUTH_PASSWORD=secret \
 //   SipralLabAgent
 //
-// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
-// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
-// signals on it, and over TLS -- on Apple platforms, where Network.framework
-// is -- checks the server's certificate against SIPRAL_TLS_SERVER_NAME (the
-// address's host when unset) with SIPRAL_TLS_CA as the only authority it
-// trusts (the system's when unset). A connection that fails is printed as
-// "transport failed error=<...> tls=<...>" with Security's own words, and
-// tried again. SIPRAL_INVITE_LIMIT=voice-agent takes a trunk's rush of calls
-// the default rate floor would answer 480. SIPRAL_TEXT=echo takes the
-// real-time text a call offers, prints each piece as "text <...>" and types
-// it back.
+// SIPRAL_SIGNALLING is udp (default), tcp or tls. TLS (Apple only) checks
+// against SIPRAL_TLS_SERVER_NAME (default: the address's host) with
+// SIPRAL_TLS_CA as the only authority (default: the system's).
+// SIPRAL_INVITE_LIMIT=voice-agent lifts the default rate limit.
+// SIPRAL_TEXT=echo echoes real-time text.
 
 #if canImport(Darwin)
 import Darwin
@@ -35,20 +26,14 @@ import Dispatch
 import Foundation
 import Sipral
 
-// Unbuffered: this agent's log is read from `docker logs` while it is still
-// running, the same reason `scripts/lab.sh`'s `python_agent` runs
-// `python3 -u`. Block-buffered stdio would hold every line back until this
-// process exited, which it never does on its own.
+// Unbuffered: the log is read from `docker logs` while the agent runs.
 setbuf(stdout, nil)
 
 /// Which of this host's addresses a datagram to `address` leaves from.
 ///
-/// That address goes in the `Contact` and in every answer's SDP, so it has
-/// to be one the far end can send to: a stack bound to `0.0.0.0` advertises
-/// it, and a registrar or a phone handed `0.0.0.0` has nowhere to send
-/// anything back. Connecting a datagram socket sends nothing; it only asks
-/// the system which route it would take
-/// (`bindings/python/examples/agent.py`'s `route_to`).
+/// It goes in the `Contact` and SDP, so it must be reachable, unlike
+/// `0.0.0.0`. Connecting a datagram socket sends nothing; it only picks the
+/// route.
 func routeTo(_ address: String) -> String {
     let (host, port) = UDPSocket.parse(address)
     #if canImport(Darwin)
@@ -93,11 +78,9 @@ func environmentValue(_ name: String) -> String? {
 /// The one function a real agent replaces. Default: an echo.
 func respond(_ pcm: [Int16]) -> [Int16] { pcm }
 
-/// `call.media` may still be `nil` the instant a call is answered; this
-/// waits for it once, off `events`, the way
-/// `bindings/python/examples/agent.py`'s `run_call` does. `events` is a
-/// stream of this function's own, taken before the call was answered, so
-/// the `mediaStarted` that sets `call.media` cannot slip past it.
+/// `call.media` may still be `nil` right after answering, so this waits
+/// for `mediaStarted` on `events`, taken before the answer so it cannot be
+/// missed.
 func mediaFrames(of call: Call, watching events: AsyncStream<SipralEvent>) async -> AsyncStream<[Int16]> {
     if let media = call.media { return media.frames() }
     for await _ in events {
@@ -111,9 +94,7 @@ private enum Termination: Sendable {
     case remoteEnded
 }
 
-/// The streams one call is watched through, each taken before the answer
-/// goes out: every one of them sees every event from then on, so three
-/// readers of the same call split nothing between them.
+/// One stream per reader, all taken before the answer goes out.
 struct CallStreams: Sendable {
     let forMedia: AsyncStream<SipralEvent>
     let forEnd: AsyncStream<SipralEvent>
@@ -132,11 +113,8 @@ struct CallStreams: Sendable {
 /// 4103) is printed and typed back to it.
 let echoesText = environmentValue("SIPRAL_TEXT") == "echo"
 
-/// The last statistics read while the call was up. Once the far end's BYE
-/// is answered the stack ends the call's media on its own poll thread, and a
-/// statistics call after that answers that the media has ended rather than
-/// with numbers -- so the call is read every 200 ms while it lasts, and the
-/// numbers printed at the end are the last ones that came back.
+/// Statistics are sampled every 200 ms, since after the far end's BYE the
+/// media is gone and no longer answers.
 final class LastStatistics: @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.sipral.lab-agent.statistics")
     private var sent: UInt64 = 0
@@ -201,9 +179,7 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
     if termination == .hangupRequested {
         // The call is still up, so this last reading is the final count.
         last.read(call.media)
-        // Read fresh from the stack, not from an event: an answered call
-        // stays ringing until its ACK arrives, so "confirmed" here is this
-        // end's word that the caller acknowledged the 200 OK.
+        // Read fresh: "confirmed" means the caller's ACK arrived.
         if let state = try? call.state {
             print("state \(String(call.handle, radix: 16)): \(state)")
         }
@@ -216,14 +192,10 @@ func runCall(_ call: Call, _ streams: CallStreams) async {
     print("ended \(String(call.handle, radix: 16)): packets_sent=\(counts.sent) packets_received=\(counts.received)")
 }
 
-/// Whether `call` has ended within `milliseconds`, read off `events`, a
-/// stream of the call's own that finishes when the call ends. Both of the
-/// group's children give up when the group cancels them, so it returns as
-/// soon as either does. A child that awaited an unstructured task's `value`
-/// would not: cancelling the child does not cancel that task, and a group
-/// waits for every child before it returns -- which left the lab agent,
-/// once it had dwelt, waiting for a far end that never hangs up before it
-/// would hang up itself.
+/// Whether `call` ended within `milliseconds`. Both children honour
+/// cancellation, so it returns as soon as either finishes; awaiting an
+/// unstructured task instead would block the group until the far end hung
+/// up, which in the lab it never does first.
 func endedWithin(_ call: Call, _ events: AsyncStream<SipralEvent>, milliseconds: UInt64) async -> Bool {
     if call.ended { return true }
     return await withTaskGroup(of: Bool.self) { group -> Bool in
@@ -243,23 +215,14 @@ func endedWithin(_ call: Call, _ events: AsyncStream<SipralEvent>, milliseconds:
     }
 }
 
-/// Talk for the life of one call this end placed against a peer with
-/// nothing of its own that would ever hang up first (the lab's own
-/// two-NAT pair, `scripts/lab.sh`'s `ice_turn_flow`, where the far end is
-/// the harness's own `iceanswer` role rather than a server): `patienceMs`
-/// is how long this end waits for media at all, so a call under
-/// `SipralIce.required` with every path blocked is given up on rather than
-/// waited on forever, and `dwellMs` is how long it talks before hanging up
-/// on its own once media has started. `false` when it ended before media
-/// ever started, which `runDirectCall` needs to tell apart from an
-/// ordinary hangup.
+/// Talk on a placed call whose peer never hangs up first (the lab's
+/// `ice_turn_flow`). `patienceMs` bounds the wait for media, so a blocked
+/// ICE call gives up; `dwellMs` is the talk time. `false` when it ended
+/// before media started.
 func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> Bool {
     print("answered \(String(call.handle, radix: 16))")
-    // A stream of its own for each reader, the same rule `CallStreams` above
-    // follows and `Call.events()`'s own doc comment gives: one `AsyncStream`
-    // value fed to two separate `for await` loops is not two readers, it is
-    // one reader two loops race for, and the loser waits on a stream nothing
-    // is ever going to deliver to again.
+    // One stream per reader: two loops over one `AsyncStream` race for its
+    // items, and the loser may wait forever.
     let forMedia = call.events()
     let forEnd = call.events()
 
@@ -301,26 +264,18 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
             call.media?.sendAudio(respond(frame))
         }
     }
-    // the dwell, cut short by the far end hanging up first; then this end's
-    // own hangup, which waits on nothing the far end has to do
+    // dwell, unless the far end hangs up first
     if !(await endedWithin(call, forEnd, milliseconds: dwellMs)) {
-        // one last read while the call is still certainly up, for the
-        // freshest number this path can give
+        // last reading while certainly up
         last.read(call.media)
         try? call.hangup()
-        // the relayed call's farewell -- the TURN Refresh that gives its
-        // allocation back, not only the RTCP BYE -- is queued once the far
-        // end's 200 to this end's own BYE is read, so this waits for
-        // `call.ended` rather than closing right behind hangup(); on a
-        // stream of its own, since the one above finished when its reader
-        // was cancelled
+        // The TURN release is queued only after the 200 to our BYE, so wait
+        // for `call.ended` (on a fresh stream: the one above is finished).
         _ = await endedWithin(call, call.events(), milliseconds: 5_000)
     }
     talkTask.cancel()
     statisticsTask.cancel()
-    // the same short wait bindings/python/examples/agent.py's own
-    // hang_up_after_dwell gives, so a relayed call's farewell has had its
-    // own turn before the stack tears the socket down
+    // let the relay's farewell leave before the socket closes
     try? await Task.sleep(nanoseconds: 200_000_000)
 
     call.close()
@@ -329,26 +284,15 @@ func runCallDirect(_ call: Call, patienceMs: UInt64, dwellMs: UInt64) async -> B
     return true
 }
 
-/// Dial a peer straight at its address, no registrar between them --
-/// `scripts/lab.sh`'s own `ice_turn_flow`, where the far end is the
-/// harness's own `iceanswer` role rather than a server.
-/// SIPRAL_PEER_HOST/SIPRAL_PEER_PORT name it, and the account this end
-/// adds is one whose `registrarAddress` is just the routing destination
-/// for: `registrar` is left `nil`, so nothing is ever registered.
+/// Dial SIPRAL_PEER_HOST:SIPRAL_PEER_PORT directly, with no registrar (the
+/// lab's `ice_turn_flow`).
 ///
-/// SIPRAL_STUN_SERVER turns on STUN the same way `SipralStack`'s own
-/// initializer already offers any application; SIPRAL_TURN_SERVER/
-/// SIPRAL_TURN_USER/SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT
-/// is `udp`, `tcp` or `tls` (RFC 8656 §3.1); over TLS the server's
-/// certificate is checked against SIPRAL_TURN_NAME and trusted if it chains
-/// to a certificate in the PEM file SIPRAL_TURN_CA names, the system's
-/// roots otherwise. TLS needs Network.framework, which only Apple's
-/// platforms have: on Linux the stack opens the connection with a plain
-/// socket, over TCP, and a relay asked for over TLS fails. SIPRAL_ICE=required
-/// asks `SipralIce.required` of the stack, which is what makes a call that
-/// cannot find a path fail outright rather than fall back to the address
-/// this end bound to -- the one thing that would let a run through a
-/// blocked NAT pair pass by accident.
+/// SIPRAL_STUN_SERVER and SIPRAL_TURN_* configure NAT traversal;
+/// SIPRAL_TURN_TRANSPORT is `udp`, `tcp` or `tls` (RFC 8656 §3.1), TLS
+/// checked against SIPRAL_TURN_NAME and SIPRAL_TURN_CA (Apple only; on
+/// Linux a TLS relay fails). SIPRAL_ICE=required makes a call with no path
+/// fail instead of falling back to the bound address, which would let a
+/// blocked-NAT run pass by accident.
 func runDirectCall() async -> Bool {
     guard let peerHost = environmentValue("SIPRAL_PEER_HOST") else {
         print("SIPRAL_PEER_HOST is required")
@@ -416,9 +360,8 @@ func snake(_ name: String) -> String {
     }
 }
 
-/// The DER of every certificate in the PEM file at `path`, which is what
-/// `TurnServer.trustedCertificates` takes: how the lab's coturn, whose
-/// certificate is made for the run, is trusted over TLS.
+/// The DER of every certificate in a PEM file, for
+/// `TurnServer.trustedCertificates`.
 func certificatesIn(_ path: String) -> [[UInt8]] {
     guard let pem = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
     var found: [[UInt8]] = []
@@ -440,10 +383,7 @@ func certificatesIn(_ path: String) -> [[UInt8]] {
     return found
 }
 
-// The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead of
-// the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells the
-// two apart, since a real registrar address never doubles as one -- the
-// same tell `bindings/python/examples/agent.py`'s own `main` reads.
+// SIPRAL_PEER_HOST selects the direct-call mode.
 if environmentValue("SIPRAL_PEER_HOST") != nil {
     let ok = await runDirectCall()
     exit(ok ? 0 : 1)
@@ -476,8 +416,7 @@ let account = try stack.addAccount(
     authUser: environmentValue("SIPRAL_AUTH_USER"),
     authPassword: environmentValue("SIPRAL_AUTH_PASSWORD")
 )
-// Taken before the REGISTER goes out, so that nothing it raises -- the
-// first INVITE included, however soon it follows -- lands before a reader.
+// Taken before the REGISTER, so no event (even a quick INVITE) is missed.
 let stackEvents = stack.events()
 if environmentValue("SIPRAL_REGISTRAR") != nil {
     try account.register()
