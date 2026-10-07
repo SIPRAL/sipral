@@ -2182,6 +2182,13 @@ export const SipralEventKind = Object.freeze({
    * again at once with the new token. `account` is the account.
    */
   TokenRequired: 59,
+  /**
+   * A network test `sipral_stack_network_test` started has every
+   * answer it is going to get (ABI 1.2). `payload.network_test` holds
+   * each part and the verdict; `account` is the account whose server
+   * was probed and `call` the echo call, when the test had them.
+   */
+  NetworkTest: 60,
 } as const);
 koffi.alias('sipral_event_kind_t', 'uint32_t');
 
@@ -4174,6 +4181,103 @@ export const SipralTokenError = Object.freeze({
   Other: 5,
 } as const);
 koffi.alias('sipral_token_error_t', 'uint32_t');
+
+/**
+ * What a network test, or one part of it, comes to. Names for
+ * `sipral_network_test_event_t::verdict` and `echo_verdict`.
+ */
+export const SipralNetworkVerdict = Object.freeze({
+  /**
+   * Nothing was tested.
+   */
+  Unknown: 0,
+  /**
+   * Calls should work and sound right.
+   */
+  Good: 1,
+  /**
+   * Calls should work, and may not everywhere or may not sound their
+   * best.
+   */
+  Acceptable: 2,
+  /**
+   * Calls are likely to fail or to sound bad.
+   */
+  Poor: 3,
+} as const);
+koffi.alias('sipral_network_verdict_t', 'uint32_t');
+
+/**
+ * Whether a part of a network test was tried, and how it went. Names
+ * for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+ */
+export const SipralNetworkProbe = Object.freeze({
+  /**
+   * Not part of this test.
+   */
+  NotTested: 0,
+  /**
+   * The server answered as hoped; for the echo, audio came back and
+   * was measured.
+   */
+  Succeeded: 1,
+  /**
+   * It did not.
+   */
+  Failed: 2,
+} as const);
+koffi.alias('sipral_network_probe_t', 'uint32_t');
+
+/**
+ * What a STUN answer says about the NAT in front of this end. Names for
+ * `sipral_network_test_event_t::nat`. Approximate: one answer shows
+ * whether the address and the port were translated, and nothing about
+ * how the NAT filters what arrives (RFC 4787).
+ */
+export const SipralNatKind = Object.freeze({
+  /**
+   * No answer to read.
+   */
+  Unknown: 0,
+  /**
+   * No translation: the server saw the socket's own address.
+   */
+  Open: 1,
+  /**
+   * The address was translated and the port kept.
+   */
+  PortPreserved: 2,
+  /**
+   * The port was changed too.
+   */
+  PortChanged: 3,
+} as const);
+koffi.alias('sipral_nat_kind_t', 'uint32_t');
+
+/**
+ * What the account's server did with the test's `OPTIONS`. Names for
+ * `sipral_network_test_event_t::server`.
+ */
+export const SipralServerReach = Object.freeze({
+  /**
+   * Not part of this test.
+   */
+  NotTested: 0,
+  /**
+   * It answered: `server_status` with what, `server_round_trip_ms`
+   * after how long. Any final answer is a server that is there.
+   */
+  Answered: 1,
+  /**
+   * No answer before the request, or the test, timed out.
+   */
+  TimedOut: 2,
+  /**
+   * The transport refused the request or failed under it.
+   */
+  TransportFailed: 3,
+} as const);
+koffi.alias('sipral_server_reach_t', 'uint32_t');
 
 /**
  * What a party this end holds is sent:
@@ -8729,6 +8833,136 @@ koffi.struct('sipral_token_event_t', {
 });
 
 /**
+ * What a SIPRAL_EVENT_KIND_NETWORK_TEST
+ * carries: every part of one test, and the verdict (ABI 1.2). The
+ * event's `account` is the account probed and its `call` the echo call,
+ * when there were any. The two addresses are `host:port`, not
+ * NUL-terminated, and the library's: valid for as long as the callback
+ * runs.
+ */
+export interface SipralNetworkTestEvent {
+  /**
+   * The number sipral_stack_network_test gave the test.
+   */
+  test: number;
+  /**
+   * A sipral_network_verdict_t: the worst of the parts tested.
+   */
+  verdict: number;
+  /**
+   * A sipral_network_probe_t: whether a STUN server answered.
+   */
+  stun: number;
+  /**
+   * A sipral_nat_kind_t, from that answer.
+   */
+  nat: number;
+  /**
+   * A sipral_network_probe_t: whether the TURN server allocated a
+   * relay for the probe socket.
+   */
+  turn: number;
+  /**
+   * A `sipral_transport_t`: what the TURN server was reached over, or
+   * zero when it was not tested.
+   */
+  turn_protocol: number;
+  /**
+   * A sipral_server_reach_t.
+   */
+  server: number;
+  /**
+   * The status the server answered with, or zero.
+   */
+  server_status: number;
+  /**
+   * From sending the `OPTIONS` to its answer, in milliseconds.
+   */
+  server_round_trip_ms: number;
+  /**
+   * A sipral_network_probe_t: whether audio came back on the echo call
+   * and was measured. Failed for a call whose media never started, or
+   * that brought nothing back.
+   */
+  echo: number;
+  /**
+   * A sipral_network_verdict_t for the echo alone.
+   */
+  echo_verdict: number;
+  /**
+   * Packets lost or too late to play, as a percentage of those due.
+   */
+  loss_percent: number;
+  /**
+   * Interarrival jitter (RFC 3550 §6.4.1), in milliseconds.
+   */
+  jitter_ms: number;
+  /**
+   * Nonzero when RTCP brought a round trip back in time.
+   */
+  has_round_trip: number;
+  /**
+   * That round trip, in milliseconds.
+   */
+  round_trip_ms: number;
+  /**
+   * The one-way delay the rating assumed: half the round trip and the
+   * jitter buffer's delay, in milliseconds.
+   */
+  one_way_delay_ms: number;
+  /**
+   * G.107's transmission rating R, 0 to 100, for concealed G.711.
+   */
+  r_factor: number;
+  /**
+   * The conversational mean opinion score estimated from it, 1.0 to
+   * 4.5.
+   */
+  mos: number;
+  /**
+   * The socket the STUN answer was about: the probe socket, or the
+   * signalling socket.
+   */
+  local: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  local_len: number;
+  /**
+   * Where the STUN server saw it. Empty without an answer.
+   */
+  mapped: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  mapped_len: number;
+}
+koffi.struct('sipral_network_test_event_t', {
+  test: 'uint32_t',
+  verdict: 'sipral_network_verdict_t',
+  stun: 'sipral_network_probe_t',
+  nat: 'sipral_nat_kind_t',
+  turn: 'sipral_network_probe_t',
+  turn_protocol: 'sipral_transport_t',
+  server: 'sipral_server_reach_t',
+  server_status: 'uint32_t',
+  server_round_trip_ms: 'uint32_t',
+  echo: 'sipral_network_probe_t',
+  echo_verdict: 'sipral_network_verdict_t',
+  loss_percent: 'float',
+  jitter_ms: 'float',
+  has_round_trip: 'uint32_t',
+  round_trip_ms: 'uint32_t',
+  one_way_delay_ms: 'uint32_t',
+  r_factor: 'uint32_t',
+  mos: 'float',
+  local: 'void *',
+  local_len: 'size_t',
+  mapped: 'void *',
+  mapped_len: 'size_t',
+});
+
+/**
  * The arm of an event that its kind names.
  *
  * The whole union is zeroed before that one arm is written, so every
@@ -8850,6 +9084,10 @@ export interface SipralEventPayload {
    * For SIPRAL_EVENT_KIND_TOKEN_REQUIRED.
    */
   token: SipralTokenEvent;
+  /**
+   * For SIPRAL_EVENT_KIND_NETWORK_TEST.
+   */
+  network_test: SipralNetworkTestEvent;
 }
 koffi.union('sipral_event_payload_t', {
   registration: 'sipral_registration_event_t',
@@ -8878,6 +9116,7 @@ koffi.union('sipral_event_payload_t', {
   locate: 'sipral_locate_event_t',
   challenge: 'sipral_challenge_event_t',
   token: 'sipral_token_event_t',
+  network_test: 'sipral_network_test_event_t',
 });
 
 /**
@@ -10205,6 +10444,58 @@ koffi.struct('sipral_pinned_certificate_t', {
 });
 
 /**
+ * What sipral_stack_network_test tests. Zero in any member but
+ * `size` leaves that part out or takes its default.
+ *
+ * Set `size` to `sizeof(sipral_network_test_config_t)` before the call.
+ */
+export interface SipralNetworkTestConfig {
+  /**
+   * `sizeof` this struct, as the caller's header declares it.
+   */
+  size: number;
+  /**
+   * The account whose server to probe, on the account's own
+   * transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+   */
+  account: Wide;
+  /**
+   * A UDP socket the application bound for the test, `host:port`,
+   * asked about as `sipral_stack_nat_map` asks about a media socket;
+   * null to ask about the signalling socket only, and to test no
+   * relay. Not NUL-terminated.
+   */
+  probe_socket: Pointer;
+  /**
+   * How many bytes of it.
+   */
+  probe_socket_len: number;
+  /**
+   * A call the application placed to an echo service, measured once
+   * its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+   */
+  echo_call: Wide;
+  /**
+   * How long the echo is measured. 8000 by default.
+   */
+  echo_ms: number;
+  /**
+   * How long the whole test may take. 30000 by default; a part that
+   * has not answered by then counts as failed.
+   */
+  timeout_ms: number;
+}
+koffi.struct('sipral_network_test_config_t', {
+  size: 'size_t',
+  account: 'sipral_handle_t',
+  probe_socket: 'void *',
+  probe_socket_len: 'size_t',
+  echo_call: 'sipral_handle_t',
+  echo_ms: 'uint32_t',
+  timeout_ms: 'uint32_t',
+});
+
+/**
  * The one callback a stack has.
  *
  * It is called from inside `sipral_stack_poll`, on the thread that called
@@ -11023,6 +11314,28 @@ export class Sipral {
    * length of zero.
    */
   readonly sipral_account_set_access_token: (stack: Wide, account: Wide, token: Pointer, token_len: number) => number;
+
+  /**
+   * Test the network before a call: STUN, TURN, the account's server and,
+   * with an echo call, the audio path, as `config` says (ABI 1.2). The
+   * answer arrives from a later `sipral_stack_poll` as one
+   * `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+   * has answered or `timeout_ms` has passed. Tests may run side by side.
+   *
+   * `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+   * no STUN server, and for an account whose server has not been located
+   * yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+   * an address or is a signalling socket of the stack's own; a handle
+   * that names no account or call of this stack is refused as handles are.
+   * Nothing is started when anything is refused.
+   *
+   * Safety
+   *
+   * `config` must point at a `sipral_network_test_config_t` whose `size`
+   * member says how long it is, with `probe_socket` readable for
+   * `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+   */
+  readonly sipral_stack_network_test: (stack: Wide, config: Pointer, now_ms: Wide, out_test: Pointer) => number;
 
   /**
    * Place a call, and write its handle to `out_call`.
@@ -12331,8 +12644,10 @@ export class Sipral {
    * this stack was created with, which is the answer for a socket bound to
    * one address.
    *
-   * A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
-   * in each, so it arrives whole the way a datagram does.
+   * A WebSocket frame comes in here too, on one the application runs
+   * itself (bound without `remote`): RFC 7118 §4.2 puts one SIP message in
+   * each, so it arrives whole the way a datagram does. A WebSocket the
+   * stack runs takes its reads through sipral_stack_receive_stream.
    *
    * Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
    * the parse error in the last error. That is an ordinary morning on a
@@ -12347,6 +12662,10 @@ export class Sipral {
 
   /**
    * Hand over bytes off a connection, in whatever sizes the reads came in.
+   *
+   * On a WebSocket the stack runs (bound with `remote`), the bytes are the
+   * server's handshake answer and frames, read the same way; what is
+   * inside them reaches the parser one message at a time.
    *
    * Not a message: a fragment of a framing the layer below reassembles on
    * `Content-Length` (§18.3), and one call may hold several messages, half of
@@ -12394,7 +12713,10 @@ export class Sipral {
    * `local` is the address the far end reaches this one at, as `host:port`.
    * `remote` is the far end of a connection, and is refused on a datagram
    * transport, which has many; a length of zero, whatever the pointer,
-   * leaves it out.
+   * leaves it out. On `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` it
+   * says the stack is to make the connection a WebSocket itself: the
+   * handshake is the next thing sipral_stack_poll_transmit hands over,
+   * and the reads go to sipral_stack_receive_stream.
    *
    * This is also how a request
    * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
@@ -14345,6 +14667,7 @@ export class Sipral {
     this.sipral_account_unregister = library.func('sipral_status_t sipral_account_unregister(sipral_handle_t stack, sipral_handle_t account, uint64_t now_ms)');
     this.sipral_account_registration_state = library.func('sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_handle_t account, sipral_registration_state_t *out_state)');
     this.sipral_account_set_access_token = library.func('sipral_status_t sipral_account_set_access_token(sipral_handle_t stack, sipral_handle_t account, const char *token, size_t token_len)');
+    this.sipral_stack_network_test = library.func('sipral_status_t sipral_stack_network_test(sipral_handle_t stack, const sipral_network_test_config_t *config, uint64_t now_ms, uint32_t *out_test)');
     this.sipral_call_place = library.func('sipral_status_t sipral_call_place(sipral_handle_t stack, sipral_handle_t account, const sipral_call_config_t *config, sipral_handle_t *out_call, uint64_t now_ms)');
     this.sipral_call_ring = library.func('sipral_status_t sipral_call_ring(sipral_handle_t stack, sipral_handle_t call, const uint8_t *sdp, size_t sdp_len, uint64_t now_ms)');
     this.sipral_call_ring_media = library.func('sipral_status_t sipral_call_ring_media(sipral_handle_t stack, sipral_handle_t call, const sipral_call_config_t *config, uint64_t now_ms)');
@@ -14562,6 +14885,7 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_locate_event_t: [48, 32, 32],
   sipral_challenge_event_t: [40, 20, 20],
   sipral_token_event_t: [88, 48, 48],
+  sipral_network_test_event_t: [104, 88, 88],
   sipral_event_payload_t: [328, 208, 216],
   sipral_event_t: [384, 248, 264],
   sipral_suspending_t: [32, 16, 16],
@@ -14586,4 +14910,5 @@ export const RECORD_LAYOUTS: Readonly<Record<string, readonly [number, number, n
   sipral_local_conference_info_t: [56, 48, 48],
   sipral_local_conference_member_t: [40, 36, 40],
   sipral_pinned_certificate_t: [40, 36, 40],
+  sipral_network_test_config_t: [48, 36, 40],
 };

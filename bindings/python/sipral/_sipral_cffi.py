@@ -11676,8 +11676,10 @@ sipral_status_t sipral_stack_poll_transmit(sipral_handle_t stack, sipral_transmi
  * this stack was created with, which is the answer for a socket bound to
  * one address.
  *
- * A WebSocket frame comes in here too: RFC 7118 §4.2 puts one SIP message
- * in each, so it arrives whole the way a datagram does.
+ * A WebSocket frame comes in here too, on one the application runs
+ * itself (bound without `remote`): RFC 7118 §4.2 puts one SIP message in
+ * each, so it arrives whole the way a datagram does. A WebSocket the
+ * stack runs takes its reads through sipral_stack_receive_stream.
  *
  * Bytes that are not a message are `SIPRAL_STATUS_INVALID_ARGUMENT` with
  * the parse error in the last error. That is an ordinary morning on a
@@ -11692,6 +11694,10 @@ sipral_status_t sipral_stack_receive_datagram(sipral_handle_t stack, uint32_t tr
 
 /**
  * Hand over bytes off a connection, in whatever sizes the reads came in.
+ *
+ * On a WebSocket the stack runs (bound with `remote`), the bytes are the
+ * server's handshake answer and frames, read the same way; what is
+ * inside them reaches the parser one message at a time.
  *
  * Not a message: a fragment of a framing the layer below reassembles on
  * `Content-Length` (§18.3), and one call may hold several messages, half of
@@ -11739,7 +11745,10 @@ sipral_status_t sipral_stack_receive_stream(sipral_handle_t stack, uint32_t tran
  * `local` is the address the far end reaches this one at, as `host:port`.
  * `remote` is the far end of a connection, and is refused on a datagram
  * transport, which has many; a length of zero, whatever the pointer,
- * leaves it out.
+ * leaves it out. On `SIPRAL_TRANSPORT_WS` or `SIPRAL_TRANSPORT_WSS` it
+ * says the stack is to make the connection a WebSocket itself: the
+ * handshake is the next thing sipral_stack_poll_transmit hands over,
+ * and the reads go to sipral_stack_receive_stream.
  *
  * This is also how a request
  * SIPRAL_EVENT_KIND_TRANSPORT_WANTED
