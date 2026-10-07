@@ -42,14 +42,9 @@ impl<'a> Frame<'a> {
 
 /// Reassembles a byte stream into frames.
 ///
-/// A frame can arrive split across any number of reads — one byte at a time
-/// in the worst case — so bytes are accumulated here until a complete frame
-/// exists. The length in a frame's header is trusted only up to
-/// `max_payload`: past that, [`FrameDecoder::next_frame`] refuses the frame
-/// as soon as the three-byte header is available, without waiting for
-/// however many bytes the header claims to follow, so a hostile or corrupt
-/// header cannot make this allocate space for a payload that will never
-/// arrive.
+/// Bytes accumulate until a frame is complete. A declared length above
+/// `max_payload` is refused as soon as the header arrives, so a hostile
+/// header cannot force a large allocation.
 #[derive(Debug)]
 pub struct FrameDecoder {
     buf: Vec<u8>,

@@ -7,32 +7,21 @@
 //! echoes whatever audio it hears one frame later, and hangs up the moment
 //! it hears the digit `#`.
 //!
-//! Depends on nothing but `sipral-headless` itself and the standard library
-//! — no `sipral`, no SIP, no RTP, no audio device — which is the whole pitch
-//! of the crate this ships in: whatever answers here could as well be a
-//! speech model instead of an echo, and it would still depend on nothing
-//! more than this.
+//! Depends only on `sipral-headless` and `std`: no SIP, RTP or audio device.
+//! A speech model could replace the echo with the same dependencies.
 //!
-//! Deliberately below `Decoder` (`crate::codec`), which needs an
-//! [`AudioConfig`](crate::AudioConfig) before it can be built at all: this
-//! agent has not been told one when the connection opens — [`SessionOpen`]
-//! is the first thing that names it — so it reads frames with
-//! [`FrameDecoder`] directly and reads the kind byte itself, exactly the
-//! bootstrap `ControlMessage::decode`'s own documentation assumes a caller
-//! does before any audio has a rate to be validated against. It never needs
-//! one afterwards either: an echo forwards whatever bytes a frame carried,
-//! at whatever size they arrived in, without ever decoding them into
-//! samples.
+//! It uses [`FrameDecoder`] rather than `Decoder` (`crate::codec`), which
+//! needs an [`AudioConfig`](crate::AudioConfig) that only [`SessionOpen`]
+//! provides; the echo forwards frame bytes without decoding samples.
 //!
 //! ```text
 //! cargo run --example agent -p sipral-headless -- --addr 127.0.0.1:7001
 //! ```
 //!
-//! `--timings` prints, once a call, the wall clock in microseconds since the
-//! Unix epoch: `timing first-frame <call> <us>` when the call's first audio
-//! frame is read off the socket, and `timing reply <call> <us>` just before
-//! the first frame this agent sends back is written to it — the halves of
-//! `docs/19-numbers.md`'s voice agent figures this side of the socket sees.
+//! `--timings` prints, once per call, `timing first-frame <call> <us>` when
+//! the first audio frame is read and `timing reply <call> <us>` before the
+//! first reply is written (Unix epoch microseconds), for the voice agent
+//! figures in `docs/19-numbers.md`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 

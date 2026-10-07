@@ -37,19 +37,15 @@ use crate::latency::LatencyBudget;
 
 /// Where a session is in its lifecycle.
 ///
-/// Distinct from [`crate::control::CallStateKind`], which is what gets
-/// written to the wire when the call moves: that enum has no `Held` because
-/// the document only names three wire states, while a session held locally
-/// is a real state this crate has to track even though nobody on the socket
-/// has been told about it yet.
+/// Unlike the wire's [`crate::control::CallStateKind`], this has `Held`,
+/// which the document does not put on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
     /// Placed or arrived, not yet answered.
     Ringing,
     /// Up: audio is expected to be flowing.
     Active,
-    /// Answered, then parked. Nothing here plays music on hold — that is a
-    /// local media decision, not one this crate makes for anyone.
+    /// Answered, then parked. No music on hold is played here.
     Held,
     /// Over. A session in this state accepts no more transitions and no
     /// more audio.
@@ -73,21 +69,15 @@ impl QueueKind {
     }
 }
 
-/// `code` as [`ErrorCode::Other`], falling back to [`ErrorCode::Internal`]
-/// on the unreachable case that it collides with one of the six reserved
-/// strings — every caller here builds `code` from a literal, never from
-/// anything a peer sent, so the fallback is defensive rather than expected
-/// to fire.
+/// `code` as [`ErrorCode::Other`], or [`ErrorCode::Internal`] if it collides
+/// with a reserved string (callers pass literals, so it should not).
 fn other_error_code(code: impl Into<String>) -> ErrorCode {
     OtherErrorCode::new(code.into()).map_or(ErrorCode::Internal, ErrorCode::Other)
 }
 
 /// A bounded run of PCM frames, oldest first.
 ///
-/// Bounded rather than growable on purpose: the document rules out queuing
-/// forever for a stalled agent, so a frame that arrives once the queue is
-/// already full displaces the oldest one held instead of the queue growing
-/// to hold both — see the module's own "Drop policy" section.
+/// Bounded: when full, a new frame evicts the oldest (see "Drop policy").
 #[derive(Debug)]
 struct FrameQueue {
     frames: VecDeque<Vec<u8>>,
@@ -136,10 +126,8 @@ impl FrameQueue {
 
     /// Empty the queue immediately and say how many frames that discarded.
     ///
-    /// Deliberate discarding — barge-in — rather than the queue falling
-    /// behind, so this does not move [`FrameQueue::dropped`]: the two count
-    /// different things, and an application asking "is my agent keeping up"
-    /// does not want a barge-in it asked for to read as the agent stalling.
+    /// Does not count in [`FrameQueue::dropped`], so a requested barge-in
+    /// does not look like the agent falling behind.
     fn clear(&mut self) -> usize {
         let discarded = self.frames.len();
         self.frames.clear();
@@ -301,17 +289,13 @@ impl Session {
 
     /// Queue one frame of the caller's audio for the agent to read.
     ///
-    /// Never blocks and never grows the queue past what the session was
-    /// opened with: a queue already at capacity drops its oldest frame to
-    /// make room, counted in [`Session::capture_dropped`] — the module's own
-    /// "Drop policy" section says why the oldest rather than this one.
+    /// Never blocks; when full the oldest frame is dropped and counted in
+    /// [`Session::capture_dropped`] (see "Drop policy").
     ///
     /// # Errors
-    /// An [`ErrorMessage`] ready for the error channel, and `frame` is gone
-    /// either way rather than held for a retry: [`ErrorCode::InvalidAudioFrame`]
-    /// if it is not exactly one frame at the session's rate and duration, or
-    /// `call_ended` once the call is over and nothing more is coming from
-    /// either side of it.
+    /// An [`ErrorMessage`] for the error channel; `frame` is not kept:
+    /// [`ErrorCode::InvalidAudioFrame`] if it is not exactly one frame, or
+    /// `call_ended` once the call is over.
     pub fn push_capture(&mut self, frame: Vec<u8>) -> Result<(), ErrorMessage> {
         self.push(QueueKind::Capture, frame)
     }
@@ -376,19 +360,12 @@ impl Session {
         self.playback.pop()
     }
 
-    /// Discard everything queued for playback immediately, per the
-    /// document's barge-in message — without waiting for what is already
-    /// buffered to drain. Returns how many frames were discarded.
+    /// Discard all queued playback now (barge-in); returns how many frames.
     ///
-    /// The residual time to silence on the wire after this call is bounded
-    /// by [`LatencyBudget::playback_latency_ms`] alone, never by how many
-    /// frames happened to be queued a moment before: that is the entire
-    /// point of discarding instead of draining.
-    ///
-    /// Whatever sits between this queue and the wire — audio already taken
-    /// off it and resampled, waiting to fill the codec's next frame — is not
-    /// this crate's to reach, so [`Session::barge_ins`] moves too, and that
-    /// layer discards its own share the next time it looks.
+    /// Time to silence is then bounded by
+    /// [`LatencyBudget::playback_latency_ms`], not by queue depth. Audio
+    /// already past this queue is the next layer's to drop, signalled by
+    /// [`Session::barge_ins`].
     pub fn barge_in(&mut self) -> usize {
         self.barge_ins = self.barge_ins.saturating_add(1);
         self.playback.clear()
@@ -397,9 +374,8 @@ impl Session {
     /// How many times [`Session::barge_in`] has been asked for since the
     /// session opened, whether or not anything was queued at the time.
     ///
-    /// For a layer that holds playback audio of its own past
-    /// [`Session::pop_playback`]: a number that moved since it last looked
-    /// means everything it holds belongs to speech the agent has abandoned.
+    /// A layer past [`Session::pop_playback`] drops what it holds when this
+    /// moves.
     #[must_use]
     pub const fn barge_ins(&self) -> u64 {
         self.barge_ins
@@ -628,9 +604,7 @@ mod tests {
 
     #[test]
     fn a_stalled_agent_keeps_hearing_the_freshest_frames_not_the_first_ones() {
-        // a queue this far behind is exactly what the drop policy is for:
-        // the depth never exceeds capacity, and what survives is always the
-        // most recent run of frames rather than whatever arrived first
+        // depth stays at capacity and the newest frames survive
         let mut session = session(2, 2);
         for n in 0..5_u8 {
             session
@@ -652,9 +626,7 @@ mod tests {
 
     #[test]
     fn barge_in_does_not_count_toward_the_drop_counter() {
-        // deliberate discarding and a queue falling behind are different
-        // facts, and an application asking whether its agent is keeping up
-        // must not read a barge-in it asked for as the agent stalling
+        // a barge-in is not a drop
         let mut session = session(4, 4);
         session.answer().expect("ringing to active");
         session.push_playback(frame()).expect("within capacity");

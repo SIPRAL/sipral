@@ -18,10 +18,8 @@ use crate::frame::{self, FrameDecoder, FrameError};
 
 /// Largest control payload accepted, independent of the audio frame size.
 ///
-/// Not from the document. Every control message this crate defines fits in a
-/// few hundred bytes; this leaves room for a caller identity or an error
-/// string an order of magnitude longer than any of them, without opening the
-/// door to a JSON payload sized to exhaust memory.
+/// This crate's choice: ten times the largest message, while refusing JSON
+/// sized to exhaust memory.
 pub const MAX_CONTROL_PAYLOAD: usize = 8192;
 
 /// Turns bytes off the wire into messages: PCM checked against the session's
@@ -49,12 +47,10 @@ pub enum Decoded<'a> {
 /// frame at its rate and duration, or [`MAX_CONTROL_PAYLOAD`], whichever is
 /// larger, so that neither budget refuses the other's traffic.
 ///
-/// What [`Decoder`] bounds its frames by, and what a reader working below it
-/// — one that learns the session's audio from [`crate::SessionOpen`] only
-/// after the connection is up, like `examples/agent.rs` — raises its own
-/// [`FrameDecoder`] to with [`FrameDecoder::set_max_payload`] once it has.
-/// A bound picked without the session's audio refuses real frames: at
-/// 48 kHz anything past 85 ms is longer than [`MAX_CONTROL_PAYLOAD`].
+/// The bound [`Decoder`] uses. A raw [`FrameDecoder`] reader should raise
+/// its limit to this with [`FrameDecoder::set_max_payload`] after
+/// [`crate::SessionOpen`]: at 48 kHz frames past 85 ms exceed
+/// [`MAX_CONTROL_PAYLOAD`].
 ///
 /// # Errors
 /// [`AudioError::FrameTooLarge`] if `audio`'s frame size does not fit the
@@ -117,12 +113,8 @@ impl Decoder {
 /// Write one audio frame.
 ///
 /// # Errors
-/// [`AudioError::WrongFrameSize`] if `payload` is not exactly one frame at
-/// the session's rate and duration — half a frame is a bug on the caller's
-/// side, and sending it anyway would hide that bug behind a click on the
-/// wire. [`FrameError::PayloadTooLarge`] cannot happen for a payload that
-/// already passed the frame-size check, since [`AudioConfig::frame_bytes`]
-/// is itself bounded to sixteen bits.
+/// [`AudioError::WrongFrameSize`] if `payload` is not exactly one frame.
+/// [`FrameError::PayloadTooLarge`] cannot occur after that check.
 pub fn encode_audio(
     audio: AudioConfig,
     payload: &[u8],
@@ -135,13 +127,10 @@ pub fn encode_audio(
 
 /// Write one control message.
 ///
-/// Held to [`MAX_CONTROL_PAYLOAD`], the bound every [`Decoder`] reads control
-/// frames up to, rather than to the sixteen bits the length field could
-/// carry: a frame longer than that is one the far end's decoder refuses as
-/// final, which ends the connection over one message. Some fields come from
-/// outside — [`crate::IncomingCall::caller`] and its display name are read
-/// off a SIP request a stranger wrote — so the application shortens them
-/// when this refuses, rather than this refusal being unreachable.
+/// Held to [`MAX_CONTROL_PAYLOAD`]: anything longer the far end's decoder
+/// refuses as final, closing the connection. Peer-supplied fields such as
+/// [`crate::IncomingCall::caller`] can exceed it; the application shortens
+/// them on refusal.
 ///
 /// # Errors
 /// See [`EncodeError`]; [`FrameError::PayloadTooLarge`] for a message whose
@@ -172,14 +161,9 @@ pub enum DecodeError {
 impl DecodeError {
     /// Whether the stream can be read past this error at all.
     ///
-    /// Only a [`DecodeError::Frame`] is final: a length that exceeds the
-    /// bound leaves no way to know where the frame it announced ends, so
-    /// nothing after it can be read and the connection has to go. An audio
-    /// frame of the wrong size or a control message that did not decode was
-    /// still a whole frame, already consumed, and the next call to
-    /// [`Decoder::next_message`] reads the frame after it — the error belongs
-    /// on the error channel ([`crate::ErrorMessage`]), not in a closed
-    /// socket.
+    /// Only [`DecodeError::Frame`] is final: after an oversized length the
+    /// frame boundary is lost. The other errors consumed a whole frame;
+    /// report them on the error channel ([`crate::ErrorMessage`]) and read on.
     #[must_use]
     pub const fn is_final(&self) -> bool {
         matches!(self, Self::Frame(_))
@@ -270,9 +254,7 @@ mod tests {
 
     #[test]
     fn a_reader_bounded_before_the_session_opened_reads_its_audio_once_it_has() {
-        // the reference agent's bootstrap: frames are read before any audio is
-        // named, and one bound picked then refused 48 kHz audio past 85 ms as
-        // final, ending the connection over valid audio
+        // the agent bootstrap: a pre-session bound refused valid 48 kHz audio
         let audio = AudioConfig::with_frame_duration_ms(SampleRate::Hz48000, 100).expect("fits");
         let pcm = vec![0_u8; 9_600];
         let mut wire = Vec::new();
@@ -353,9 +335,7 @@ mod tests {
 
     #[test]
     fn audio_and_control_interleave_in_the_order_they_were_pushed() {
-        // this is the property the shared socket exists for: a barge-in
-        // decoded ahead of audio frames pushed before it would be exactly
-        // the ambiguity the document calls out
+        // order is preserved: a barge-in must not overtake earlier audio
         let config = AudioConfig::new(SampleRate::Hz8000);
         let audio_payload = vec![7_u8; usize::from(config.frame_bytes().expect("fits"))];
         let open = ControlMessage::SessionOpen(SessionOpen::new(SampleRate::Hz8000));
@@ -389,9 +369,7 @@ mod tests {
 
     #[test]
     fn a_control_message_longer_than_any_decoder_accepts_is_refused_when_written() {
-        // the caller's identity comes off a SIP INVITE, whose From a peer
-        // can make as long as a datagram allows; written anyway, the frame
-        // is one every Decoder refuses as final, and the connection ends
+        // a peer-controlled From could otherwise produce a fatal frame
         let message = ControlMessage::IncomingCall(IncomingCall {
             call_id: "call-1".to_owned(),
             caller: "sip:caller@example.com".to_owned(),

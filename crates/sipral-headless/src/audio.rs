@@ -5,10 +5,8 @@
 //! little-endian, mono, at one of four sample rates, in frames of a fixed
 //! duration agreed once when the session opens and never varied afterward.
 //!
-//! Raw PCM rather than an encoded format is the document's whole point — the
-//! codec work happens once, at the RTP edge — so what lives here is only the
-//! arithmetic of frame sizing and the one check that matters: a frame is
-//! exactly one frame, or it is refused.
+//! Coding happens once, at the RTP edge; here is only frame sizing and the
+//! check that a frame is exactly one frame.
 
 use core::fmt;
 
@@ -57,9 +55,7 @@ impl TryFrom<u32> for SampleRate {
 
 /// What one session agreed: a rate, and how much audio one frame carries.
 ///
-/// Fixed for the life of the session and the same in both directions, per the
-/// document — there is no per-frame negotiation, so this is built once and
-/// handed to whatever reads or writes audio frames.
+/// Fixed for the session and the same in both directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioConfig {
     sample_rate: SampleRate,
@@ -79,18 +75,13 @@ impl AudioConfig {
 
     /// `sample_rate` at a frame duration other than the default.
     ///
-    /// The one place a duration is checked, so that every way into a session
-    /// — this, and [`crate::SessionOpen`] off the wire — agrees on which ones
-    /// exist: from one millisecond up to the longest frame the sixteen-bit
-    /// length field can carry at that rate (682 ms at 48 kHz, 4095 ms at
-    /// 8 kHz).
+    /// The single duration check, shared with [`crate::SessionOpen`]: from
+    /// 1 ms up to what the 16-bit length field holds (682 ms at 48 kHz,
+    /// 4095 ms at 8 kHz).
     ///
     /// # Errors
-    /// [`AudioError::EmptyFrame`] for zero milliseconds, a frame with no audio
-    /// in it that no queue or resampler can make progress on, and
-    /// [`AudioError::FrameTooLarge`] if a frame of that duration at that rate
-    /// would not fit the sixteen-bit payload length every frame is written
-    /// in.
+    /// [`AudioError::EmptyFrame`] for zero, [`AudioError::FrameTooLarge`] when
+    /// the frame would not fit the 16-bit payload length.
     pub fn with_frame_duration_ms(
         sample_rate: SampleRate,
         frame_duration_ms: u32,
@@ -297,9 +288,7 @@ mod tests {
 
     #[test]
     fn a_frame_duration_of_zero_is_refused_up_front() {
-        // a frame with no samples in it: nothing downstream can make progress
-        // on one, and a session opened with it failed only later, in whatever
-        // first tried to fill a frame
+        // nothing downstream can make progress on an empty frame
         for rate in [
             SampleRate::Hz8000,
             SampleRate::Hz16000,

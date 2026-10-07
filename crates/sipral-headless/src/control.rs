@@ -4,15 +4,9 @@
 //! The control messages `docs/07-headless.md` names, and the frame kinds that
 //! distinguish them on the wire.
 //!
-//! Audio shares the frame format but carries no JSON, so [`FrameKind::Audio`]
-//! is here only to make the kind byte a closed set: every value a frame's
-//! kind can legally hold is one variant of this enum, and nothing decodes a
-//! byte outside it by guessing what was probably meant.
-//!
-//! Each message is a plain struct with public fields — there is no reason to
-//! hide `call_id` behind an accessor — plus the JSON conversion `to_json_bytes`
-//! and `decode` need, kept private because the shape of the JSON is this
-//! module's business, not the caller's.
+//! [`FrameKind::Audio`] is listed so the kind byte is a closed set; unknown
+//! values are refused. Messages are plain structs; their JSON shape stays
+//! private to this module.
 
 use core::fmt;
 
@@ -84,10 +78,7 @@ impl TryFrom<u8> for FrameKind {
 
 /// One key of a DTMF keypad.
 ///
-/// `0`-`9`, `*`, `#`, and `A`-`D`: the sixteen events RFC 4733 §7.1
-/// registers, Table 7. `A` through `D` exist on very few real keypads, but
-/// they are legal telephone-events and this crate has no basis to refuse
-/// them.
+/// `0`-`9`, `*`, `#`, `A`-`D`: the sixteen events of RFC 4733 §7.1, Table 7.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DtmfDigit(char);
 
@@ -150,10 +141,8 @@ impl SessionOpen {
         ]))
     }
 
-    /// Checked here, where the message comes off the wire, rather than by
-    /// whatever opens a session with it later: a session that cannot exist is
-    /// the sender's mistake, and the error channel is where the sender hears
-    /// about it (`docs/07-headless.md`).
+    /// Checked on decode, so the sender hears about an impossible session on
+    /// the error channel (`docs/07-headless.md`).
     fn from_value(value: &Value) -> Result<Self, ControlError> {
         let hz = u32_field(value, "sample_rate")?;
         let sample_rate =
@@ -424,10 +413,8 @@ impl Transfer {
 
 /// Discard everything queued for playback on the named call, immediately.
 ///
-/// This is the message the document's latency budget is measured against:
-/// under 100 ms from here to silence on the wire. Nothing about that budget
-/// is enforced by the type — it is a property of whatever reads this message
-/// off the socket and acts on it, not of the message itself.
+/// The document's latency budget (under 100 ms to silence on the wire) is
+/// for whatever acts on this message; the type enforces nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BargeIn {
     /// The call whose playback queue is discarded.
@@ -449,18 +436,11 @@ impl BargeIn {
     }
 }
 
-/// The caller started or stopped talking, as this call's voice-activity
-/// detector reads the audio decoded from it — not from anything the agent
-/// sent. The signal an agent watches for barge-in: on `speaking: true` it
-/// knows the caller has begun over whatever it is playing, and can answer
-/// with [`BargeIn`] itself rather than waiting to be interrupted by silence
-/// on its own microphone.
+/// The caller started or stopped talking, per the VAD on the caller's
+/// decoded audio. An agent can answer `speaking: true` with [`BargeIn`].
 ///
-/// One message per transition, not one per frame: a caller that talks for
-/// three seconds sends `speaking: true` once, at its first frame, and
-/// `speaking: false` once, when the detector's hangover runs out — never a
-/// message for every twenty milliseconds in between, which would turn one
-/// sentence into a hundred and fifty of these.
+/// Sent once per transition, not per frame; `false` comes when the
+/// detector's hangover runs out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceActivity {
     /// Which call.
@@ -488,10 +468,8 @@ impl VoiceActivity {
 
 /// A code for [`ErrorMessage`] narrower than its free-text `message`.
 ///
-/// Not from the document, which only says there is an error channel: this is
-/// this crate's own small taxonomy, covering what the codec itself can
-/// detect, plus `Other` for whatever the wiring layer reports that is none of
-/// those.
+/// This crate's own taxonomy (the document defines none): what the codec can
+/// detect, plus `Other` for the wiring layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     /// A frame or a control message did not follow the protocol.
@@ -506,18 +484,14 @@ pub enum ErrorCode {
     SessionNotOpen,
     /// Anything this taxonomy does not name.
     Internal,
-    /// A code from outside this list, kept rather than collapsed into
-    /// `Internal` so a caller that defined it still gets it back.
-    /// [`OtherErrorCode`] cannot equal one of the six strings above, so
-    /// nothing held here can be misread as one of them on the way back in.
+    /// A caller-defined code, kept as is. [`OtherErrorCode`] cannot equal a
+    /// reserved string, so it round-trips.
     Other(OtherErrorCode),
 }
 
 impl ErrorCode {
-    /// `code` as one of the six built-in variants, or `None` when it names
-    /// none of them — the single place both [`ErrorCode::parse`] and
-    /// [`OtherErrorCode::new`] check, so the two can never disagree about
-    /// which strings are reserved.
+    /// `code` as a built-in variant, or `None`. The one list both
+    /// [`ErrorCode::parse`] and [`OtherErrorCode::new`] check.
     fn reserved(code: &str) -> Option<Self> {
         Some(match code {
             "protocol_violation" => Self::ProtocolViolation,
@@ -551,11 +525,8 @@ impl ErrorCode {
 
 /// A caller-defined [`ErrorCode`] outside this crate's own six.
 ///
-/// Cannot equal one of them: on the wire a code is just its string, so a
-/// value that collided would be read back as the reserved [`ErrorCode`]
-/// instead of `Other`, changing identity with no error.
-/// Refusing the collision here, at construction, is cheaper than teaching
-/// the wire format to tell the two apart.
+/// Cannot equal a reserved code: on the wire it would read back as the
+/// reserved [`ErrorCode`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OtherErrorCode(String);
 
