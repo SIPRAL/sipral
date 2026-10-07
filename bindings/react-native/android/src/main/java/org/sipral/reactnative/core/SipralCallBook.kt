@@ -7,28 +7,24 @@
 package org.sipral.reactnative.core
 
 /**
- * The calls placed or answered through the module, kept until their
- * `CALL_ENDED`.
+ * Calls placed or answered through the module, kept until `CALL_ENDED`.
  *
- * Keeping and ending come from two threads: the module's worker keeps a
- * call once `placeCall` or `answerCall` has returned it, and the client's
- * event collector ends it. A call can end before it is kept -- a far end that
- * refuses at once, a transfer that completes immediately -- and the end then
- * finds nothing to close; kept afterwards, the call would be held, its
- * sockets open, for as long as the core lives. So an end that finds nothing
- * is remembered, and a call kept after its end is closed instead of kept.
- * Only the last [REMEMBERED] such ends are remembered: an end for a call this
- * core never keeps -- one turned away while it rang -- would otherwise be
- * remembered for ever.
+ * Keeping and ending happen on two threads: the worker keeps a call once
+ * `placeCall` or `answerCall` returns it, and the event collector ends it.
+ * A call can end before it is kept (an immediate refusal or transfer); kept
+ * afterwards it would hold its sockets for the core's lifetime. So an end
+ * that finds nothing is remembered, and a call kept after its end is
+ * closed instead. Only the last [REMEMBERED] such ends are kept, since a
+ * call the core never keeps (refused while ringing) would otherwise be
+ * remembered forever.
  */
 internal class SipralCallBook<C : AutoCloseable> {
     private val lock = Any()
     private val calls = HashMap<String, C>()
     private val endedFirst = LinkedHashSet<String>()
 
-    /** Keep [call] as [id], unless [ended] says it is over or its end has
-     * already gone by, in which case it is closed and not kept. True when
-     * it was kept. */
+    /** Keep [call] as [id], unless [ended] or its end already went by, in
+     * which case it is closed. True when kept. */
     fun keep(id: String, call: C, ended: Boolean): Boolean {
         val kept = synchronized(lock) {
             val over = endedFirst.remove(id) || ended

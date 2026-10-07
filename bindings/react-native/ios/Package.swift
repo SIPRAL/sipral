@@ -2,11 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The Swift half of the iOS module, built on its own: what scripts/check.sh
-// compiles against bindings/swift and tests on macOS, the Objective-C++
-// module beside it being the part only an application's React Native build
-// compiles. An application never reads this manifest; the podspec at the
-// package's root takes Bridge/ and the module together.
+// The Swift half of the iOS module, for scripts/check.sh to build and test
+// on macOS. Applications use the podspec instead.
 
 import Foundation
 import PackageDescription

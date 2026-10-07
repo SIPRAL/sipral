@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The Android half of the React Native package, without React Native: three
-// SipralReactCores on loopback, driven by the handles and options
-// JavaScript would hand them, with every event read back as the flattened
-// map the bridge would emit. A call placed, answered, held, resumed, sent
-// digits, transferred to a third phone that answers, a second call turned
-// away, and a client closed. Compiled with bindings/kotlin by
-// scripts/check.sh and run on a JVM under -Xcheck:jni.
+// The React Native package's Android half without React Native: three
+// SipralReactCores on loopback, driven with the handles and options
+// JavaScript would pass, every event read back as the bridge's map. A call
+// placed, answered, held, resumed, sent digits, transferred to a third
+// phone, a second call refused, and a client closed. Built with
+// bindings/kotlin by scripts/check.sh and run under -Xcheck:jni.
 
 package org.sipral.reactnative.core
 
@@ -151,11 +150,10 @@ private fun everything(): String {
 }
 
 /**
- * What ABI 0.34 brought to the module: a client opened with no address
- * advertises the route toward its server -- loopback here -- an account named
- * by a URI is located and the event flattened with where, the options reach
- * the library (an SRTP policy and a salt it refuses are refused), and the
- * diagnostic trace is turned on.
+ * A client opened with no address advertises the route toward its server
+ * (loopback here), a URI-named account is located and the event flattened,
+ * options reach the library (a bad SRTP policy or salt is refused), and
+ * the diagnostic trace turns on.
  */
 private fun reachability(): String {
     val events: MutableList<Map<String, Any>> = Collections.synchronizedList(ArrayList())
@@ -254,10 +252,9 @@ private fun aCallThatEndedBeforeItWasKeptIsClosed(): String {
     return "a call that ended before it was kept was closed, and remembered ends are bounded"
 }
 
-/** ABI 0.35: an account on a TCP connection of its own, beside the UDP
- * socket, registers over a connection the core opened; a protocol that is
- * neither is refused; and the settings come back as the spec's
- * NativeSettings, the echo switch among them. */
+/** An account on its own TCP connection beside the UDP socket registers
+ * over a connection the core opened; another protocol is refused; settings
+ * come back as NativeSettings, echo switch included. */
 private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
     ServerSocket(0, 4, InetAddress.getLoopbackAddress()).use { registrar ->
         val register = CompletableFuture.supplyAsync {
@@ -309,9 +306,9 @@ private fun anAccountOnAConnectionOfItsOwnAndTheSettingsReadBack(): String {
     return "an account on a TCP connection of its own registered over it, and the settings read back"
 }
 
-/** A call's own gain and mute through the core, on a client in device mode
- * whose devices stay closed under manual activation; a direction that is
- * neither is refused, and so is a core in application mode. */
+/** A call's own gain and mute through the core, in device mode with the
+ * devices kept closed (manual activation); an unknown direction is
+ * refused, as is a core in application mode. */
 private fun aCallsOwnAudioIsSetAndReadBack(): String {
     if (Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE == 0L) {
         return "no audio engine in this build for a call's own audio"
@@ -345,9 +342,9 @@ private fun aCallsOwnAudioIsSetAndReadBack(): String {
     return "a call's own gain and mute set and read back"
 }
 
-/** The platform's echo cancellation switched through the core on a client in
- * device mode whose devices stay closed, and read back from its settings; a
- * core in application mode has no devices to switch. */
+/** Echo cancellation switched through the core in device mode with the
+ * devices closed, and read back from settings; application mode has no
+ * devices to switch. */
 private fun theEchoCancellationIsSwitchedAndReadBack(): String {
     val bob = Phone("bob")
     try {
@@ -370,9 +367,9 @@ private fun theEchoCancellationIsSwitchedAndReadBack(): String {
     return "the echo cancellation switched and read back"
 }
 
-/** The rate a call's frames cross at, chosen through the core on a client in
- * application mode: 24 kHz is 480 samples a frame whatever the codec, a rate
- * outside the four is refused, and 0 is the codec's own again. */
+/** A call's frame rate chosen through the core in application mode: 24
+ * kHz is 480 samples per frame whatever the codec, other rates are refused,
+ * and 0 restores the codec's. */
 private fun theRateOfACallsFramesIsChosen(): String {
     val alice = Phone("alice")
     val bob = Phone("bob")
@@ -400,10 +397,10 @@ private fun theRateOfACallsFramesIsChosen(): String {
     return "the rate of a call's frames chosen and read back"
 }
 
-/** A call's own codecs through the core, read on a plain client at the other
- * end: placed with PCMA,PCMU it settles on PCMA where the client's own order
- * would take Opus, and answered with PCMA,PCMU it leaves out the G.722 the
- * offer put first -- an answer keeps the offer's order. */
+/** A call's own codecs through the core, checked at a plain client: placed
+ * with PCMA,PCMU it settles on PCMA where the client order would pick Opus;
+ * answered with PCMA,PCMU it drops the G.722 the offer put first, since an
+ * answer keeps the offer's order. */
 private fun aCallsOwnCodecsReachTheLibrary(): String {
     val pcma = SipralCodec.PCMA.value.toLong()
     val alice = Phone("alice")
@@ -442,11 +439,9 @@ private fun aCallsOwnCodecsReachTheLibrary(): String {
     return "a call's own codecs settled on PCMA, placed and answered"
 }
 
-/** An action after the worker was shut down is rejected as closed rather
- * than thrown at its caller; the close itself runs after what was queued. */
-/** The realms an account names and what a held party is sent reach the
- * library through the core, a value of neither the core knows refused before
- * it, and a declined challenge flattened with its refusal, server and realms. */
+/** Account realms and held audio reach the library through the core,
+ * unknown values are refused first, and a declined challenge is flattened
+ * with refusal, server and realms. */
 private fun theRealmsAndTheHeldAudioReachTheLibrary(): String {
     val refused = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
     refusal("invalidArgument") {
@@ -555,6 +550,8 @@ private fun theRealmsAndTheHeldAudioReachTheLibrary(): String {
     return "the realms and the held audio reached the library, and a declined challenge, a token asked for and a network test were flattened"
 }
 
+/** An action after the worker shut down is rejected as closed rather than
+ * thrown at its caller; the close itself runs after what was queued. */
 private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
     val worker = SipralWorker("sipral-react-native-check")
     val outcomes = Collections.synchronizedList(ArrayList<String>())
@@ -571,9 +568,8 @@ private fun aSettleAfterShutdownIsRejectedNotThrown(): String {
     return "a settle after the module was invalidated was rejected as closed"
 }
 
-/** maxDialogs reaches the library through the core: at a ceiling of one
- * call, a second placed while the first still rings is refused as
- * limitReached. */
+/** maxDialogs reaches the library: with a ceiling of one, a second call
+ * placed while the first rings is refused as limitReached. */
 private fun aCallPlacedPastMaxDialogsIsRefused(): String {
     val capped = SipralReactCore(emit = { }, audio = { SipralAudioMode.Application })
     val bob = Phone("bob")
@@ -591,11 +587,10 @@ private fun aCallPlacedPastMaxDialogsIsRefused(): String {
     return "a call placed past maxDialogs was refused"
 }
 
-/** The check the Kotlin layer under this module makes at load keeps the 1.x
- * rule, and a refusal of it reaches JavaScript as `unsupportedVersion`
- * naming the caller's version: within this major every minor up to the
- * library's own is served -- a binding the library is newer than -- and a
- * later minor, another major or any 0.x is refused. */
+/** The Kotlin layer's load-time check keeps the 1.x rule, and its refusal
+ * reaches JavaScript as `unsupportedVersion` naming the caller's version:
+ * any minor up to the library's is served, a later minor, another major or
+ * any 0.x is refused. */
 private fun theAbiCheckKeepsTheOneXRule(): String {
     val library = Sipral.abiVersion()
     assertEquals(Sipral.ABI_VERSION_MAJOR, library.major)

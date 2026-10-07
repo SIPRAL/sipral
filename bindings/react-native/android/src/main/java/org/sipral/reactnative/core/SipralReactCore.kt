@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Everything the React Native module does, with nothing of React Native in
-// it: one SipralClient from org.sipral.idiomatic, its accounts and calls
-// kept by the handle JavaScript names them with, and every event flattened
-// into the map the codegen spec's NativeEvent describes. SipralModule is
-// the few lines that hand this to the bridge; scripts/check.sh compiles
-// this file with the Kotlin layer and runs it on a JVM, over two real
-// stacks, without any of React Native.
+// The React Native module's logic with no React Native in it: one
+// SipralClient, its accounts and calls kept by the handle JavaScript uses,
+// and every event flattened into the spec's NativeEvent map. SipralModule
+// hands this to the bridge; scripts/check.sh runs it on a JVM over two real
+// stacks.
 
 package org.sipral.reactnative.core
 
@@ -357,10 +355,9 @@ class SipralReactCore(
         )
     }
 
-    /** `sipral_media_set_app_rate` on the call's media, and the rate and
-     * frame length it came to, as the spec's NativeAppRate. A call with no
-     * audio yet is `wrongState`, and so is one on the phone's own devices,
-     * which the library refuses. */
+    /** `sipral_media_set_app_rate` on the call's media, returning the rate
+     * and frame length as NativeAppRate. `wrongState` before the call has
+     * audio, and on the phone's own devices. */
     fun setAppRate(call: String, hz: Int): Map<String, Any> = guarded {
         val media = callOf(call).media
             ?: throw SipralRefusal("wrongState", "call $call has no audio yet")
@@ -425,11 +422,8 @@ class SipralReactCore(
         ?: throw SipralRefusal("notSupported", "the library runs no audio devices on this client")
 
     companion object {
-        /**
-         * Device mode wherever the library has an engine for the phone --
-         * Android from API level 28 -- and a refusal where it has none,
-         * since nothing in JavaScript could carry a call's audio there.
-         */
+        /** Device mode where the library has an engine (Android API 28+), else a
+         * refusal: nothing in JavaScript could carry the audio. */
         fun deviceAudio(manual: Boolean): SipralAudioMode {
             if (SipralAudioMode.platformDefault !is SipralAudioMode.Device) {
                 throw SipralRefusal("notSupported", "the library runs a phone's audio from Android 9 (API level 28)")
@@ -437,7 +431,6 @@ class SipralReactCore(
             return SipralAudioMode.Device(if (manual) SipralAudioActivation.MANUAL else SipralAudioActivation.AUTOMATIC)
         }
 
-        /** The bytes [hex] writes, two digits each. */
         /** A direction by the name JavaScript gives it. */
         fun direction(named: String): SipralAudioDirection = when (named) {
             "input" -> SipralAudioDirection.INPUT
@@ -445,6 +438,7 @@ class SipralReactCore(
             else -> throw SipralRefusal("invalidArgument", "a direction is input or output, not $named")
         }
 
+        /** The bytes [hex] writes, two digits each. */
         fun bytes(hex: String): ByteArray {
             if (hex.length % 2 != 0 || hex.any { it.digitToIntOrNull(16) == null }) {
                 throw SipralRefusal("invalidArgument", "pseudonymSalt is bytes as hexadecimal")
@@ -452,15 +446,13 @@ class SipralReactCore(
             return ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
         }
 
-        /** `SIPRAL_EVENT_KIND_CALL_ENDED` as "callEnded": a constant's name in lower camel case. */
+        /** `SIPRAL_EVENT_KIND_CALL_ENDED` as "callEnded". */
         fun camel(name: String): String = name.lowercase().split('_').mapIndexed { at, word ->
             if (at == 0) word else word.replaceFirstChar { it.uppercase() }
         }.joinToString("")
 
-        /**
-         * [block], with what it threw turned into the refusal JavaScript
-         * reads: a status by its name, anything else as the platform's.
-         */
+        /** Run [block], turning what it throws into the refusal JavaScript reads:
+         * a status by name, anything else as the platform's. */
         fun <T> guarded(block: () -> T): T = try {
             block()
         } catch (refused: SipralRefusal) {

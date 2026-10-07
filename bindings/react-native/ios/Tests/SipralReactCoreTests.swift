@@ -140,10 +140,8 @@ private func refusal(_ code: String, file: StaticString = #filePath, line: UInt 
     }
 }
 
-/// The iOS half of the React Native package without React Native: three
-/// cores on loopback, driven by the handles and options JavaScript would
-/// hand them, every event read back as the dictionary the bridge would
-/// emit. The Swift counterpart of the Android half's SipralReactCoreCheck.kt.
+/// Three cores on loopback, driven as JavaScript would, events read back as
+/// the bridge's dictionaries.
 final class SipralReactCoreTests: XCTestCase {
     func testACallThroughEveryStepJavaScriptCanAskFor() async throws {
         let alice = try Phone("alice")
@@ -275,10 +273,8 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(SipralAccountOptions(["aor": "sip:a@b", "registrarAddress": "c:1", "expiresSeconds": NSNumber(value: 300)]).expiresSeconds, 300)
     }
 
-    /// What ABI 0.34 brought to the module: a core opened with no address
-    /// advertises the route toward its server -- loopback here -- an account
-    /// named by a URI is located and the event flattened with where, the
-    /// options reach the library, and the diagnostic trace is turned on.
+    /// No address advertises the route to the server; a URI-named account is
+    /// located; options and the diagnostic trace reach the library.
     func testAnAccountNamedByAUriIsLocatedAndTheOptionsReachTheLibrary() async throws {
         let seen = NSLock()
         nonisolated(unsafe) var events: [[String: Any]] = []
@@ -311,10 +307,8 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(located?["account"] as? String, line)
     }
 
-    /// ABI 0.35: an account on a TCP connection of its own, beside the UDP
-    /// socket, registers over a connection the core opened; a protocol that
-    /// is neither is refused; and the settings come back as the spec's
-    /// NativeSettings, the echo switch among them.
+    /// An account on its own TCP connection registers; an unknown protocol
+    /// is refused; settings come back as NativeSettings.
     func testAnAccountOnAConnectionOfItsOwnAndTheSettingsReadBack() async throws {
         let registrar = try OneRegister()
         let core = SipralReactCore(emit: { _ in }, audio: { _ in .application })
@@ -346,10 +340,8 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertGreaterThan(settings["codecCount"] as? Int ?? 0, 0)
     }
 
-    /// ABI 0.36: the realms an account names and what a held party is sent
-    /// reach the library through the core, a value of neither the core
-    /// knows is refused before it, and a declined challenge is flattened
-    /// with its refusal, server and realms.
+    /// Realms and held audio reach the library, unknown values are refused,
+    /// and a declined challenge is flattened.
     func testTheRealmsAndTheHeldAudioReachTheLibrary() throws {
         let refused = SipralReactCore(emit: { _ in }, audio: { _ in .application })
         refusal("invalidArgument") {
@@ -434,9 +426,8 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(found["serverStatus"] as? Int, 200)
     }
 
-    /// A call's own gain and mute through the core, on a stack in device mode
-    /// whose devices stay closed under manual activation; a direction that is
-    /// neither is refused, and so is a core in application mode.
+    /// Per-call gain and mute in device mode with devices closed; bad
+    /// directions and application mode are refused.
     func testACallsOwnAudioIsSetAndReadBack() async throws {
         guard try Sipral.capabilities().features & Sipral.featureAudioDevice != 0 else {
             throw XCTSkip("this build has no audio engine for this platform")
@@ -463,9 +454,7 @@ final class SipralReactCoreTests: XCTestCase {
         refusal("notSupported") { try bob.core.setCallGain(taken, "output", 1) }
     }
 
-    /// The platform's echo cancellation switched through the core on a stack
-    /// in device mode whose devices stay closed, and read back from its
-    /// settings; a core in application mode has no devices to switch.
+    /// Echo cancellation toggled and read back; refused in application mode.
     func testTheEchoCancellationIsSwitchedAndReadBack() throws {
         let bob = try Phone("bob")
         refusal("notSupported") { try bob.core.setSystemEchoCancellation(false) }
@@ -481,9 +470,7 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(try alice.core.settings()["systemEchoCancellation"] as? Bool, true)
     }
 
-    /// The rate a call's frames cross at, chosen through the core on a stack
-    /// in application mode: 24 kHz is 480 samples a frame whatever the codec,
-    /// a rate outside the four is refused, and 0 is the codec's own again.
+    /// App rate: 24 kHz gives 480-sample frames, others refused, 0 resets.
     func testTheRateOfACallsFramesIsChosen() async throws {
         let alice = try Phone("alice")
         let bob = try Phone("bob")
@@ -504,9 +491,7 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual((codec["sampleRate"] as? Int).map { $0 / 50 }, codec["frameSamples"] as? Int)
     }
 
-    /// maxDialogs reaches the library through the core: at a ceiling of one
-    /// call, a second placed while the first still rings is refused as
-    /// limitReached.
+    /// With maxDialogs 1, a second call is refused as limitReached.
     func testACallPlacedPastMaxDialogsIsRefused() async throws {
         let capped = SipralReactCore(emit: { _ in }, audio: { _ in .application })
         let bob = try Phone("bob")
@@ -521,10 +506,8 @@ final class SipralReactCoreTests: XCTestCase {
         }
     }
 
-    /// A call's own codecs through the core, read on a plain stack at the
-    /// other end: placed with PCMA,PCMU it settles on PCMA where the stack's
-    /// own order would take Opus, and answered with PCMA,PCMU it leaves out
-    /// the G.722 the offer put first -- an answer keeps the offer's order.
+    /// Per-call codecs: placed or answered with PCMA,PCMU it settles on PCMA;
+    /// an answer keeps the offer's order.
     func testACallsOwnCodecsReachTheLibraryPlacedAndAnswered() async throws {
         let pcma = SipralCodec.pcma.rawValue
         do {
@@ -565,12 +548,9 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(SipralReactCore.refusal(of: SipralError(code: 999, message: "")).code, "platform")
     }
 
-    /// The check the Swift layer under this module makes at load keeps the
-    /// 1.x rule, and a refusal of it reaches JavaScript as
-    /// `unsupportedVersion` naming the caller's version: within this major
-    /// every minor up to the library's own is served -- a binding the
-    /// library is newer than -- and a later minor, another major or any 0.x
-    /// is refused.
+    /// The load-time version check: any minor up to the library's within
+    /// 1.x passes; a later minor, another major or 0.x reaches JavaScript as
+    /// `unsupportedVersion`.
     func testTheAbiCheckKeepsTheOneXRule() throws {
         let library = try Sipral.abiVersion()
         XCTAssertEqual(library.major, Sipral.abiVersionMajor)

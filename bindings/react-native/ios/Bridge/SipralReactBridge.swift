@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// SipralReactCore as Objective-C sees it: dictionaries in, and each call
-// settled through the resolve and reject blocks a React Native promise is,
-// on one serial queue -- so the calls JavaScript makes reach the stack in the
-// order it made them, and none of them waits on the JavaScript thread.
+// SipralReactCore for Objective-C: dictionaries in, promises settled on one
+// serial queue, so calls keep JavaScript's order and never block its thread.
 
 import Foundation
 

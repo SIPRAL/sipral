@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Everything the React Native module does on iOS, with nothing of React
-// Native in it: one SipralStack from bindings/swift, its accounts and calls
-// kept by the handle JavaScript names them with, and every event flattened
-// into the dictionary the codegen spec's NativeEvent describes. The
-// Objective-C++ module is the few lines that hand this to the bridge;
-// scripts/check.sh builds this with the Swift layer and tests it on macOS,
-// over real stacks, without any of React Native.
+// The iOS module's logic without React Native: one SipralStack, accounts
+// and calls keyed by JavaScript's handles, events flattened to the spec's
+// NativeEvent. Testable on macOS against real stacks.
 
 import Foundation
 import Sipral
@@ -436,10 +432,8 @@ public final class SipralReactCore: @unchecked Sendable {
         }
     }
 
-    /// `sipral_media_set_app_rate` on the call's media, and the rate and
-    /// frame length it came to, as the spec's NativeAppRate. A call with no
-    /// audio yet is `wrongState`, and so is one on the phone's own devices,
-    /// which the library refuses.
+    /// `sipral_media_set_app_rate`, returning NativeAppRate. `wrongState`
+    /// before media or in device mode.
     public func setAppRate(_ call: String, hz: Int) throws -> [String: Any] {
         try guarded {
             guard let media = try callOf(call).media else {
@@ -568,9 +562,8 @@ public final class SipralReactCore: @unchecked Sendable {
         return try body()
     }
 
-    /// Device mode wherever the library has an engine for the platform, and
-    /// a refusal where it has none: nothing in JavaScript could carry a
-    /// call's audio there.
+    /// Device mode, or a refusal where there is no engine: JavaScript cannot
+    /// carry audio itself.
     public static func deviceAudio(manual: Bool) throws -> AudioMode {
         guard AudioMode.platformDefault.isDevice else {
             throw SipralRefusal("notSupported", "this build of the library runs no audio devices here")
