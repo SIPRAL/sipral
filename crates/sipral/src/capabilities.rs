@@ -1,40 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One machine-readable answer to "what does this build support" — D8, and
-//! B2 seen from the outside.
+//! One machine-readable answer to "what does this build support" (D8, and B2 seen from outside).
 //!
-//! B2 is the promise that a setting answers `applied`, `rejected` or `not
-//! supported in this build`, and never a fourth thing that looks like
-//! success and is not. D8 is the same promise read before any setting is
-//! touched: an application that asks once, at start-up, learns which
-//! controls this build can honour at all, and can grey out the rest instead
-//! of shipping them and finding out from a support ticket which ones do
-//! nothing.
+//! B2 promises a setting answers `applied`, `rejected` or `not supported in this build`. D8 lets an
+//! application ask once at start-up which controls this build can honour, and grey out the rest.
 //!
 //! # Derived, not maintained
 //!
-//! [`Capabilities::of_this_build`] reads facts that already exist elsewhere
-//! rather than repeating them. The codec count is [`Codec::ALL`]'s own
-//! length, so a codec added to the build changes what this reports without
-//! anybody updating a second list; [`Capabilities::opus`] is that same list
-//! read for one codec rather than a second copy of the feature that fills
-//! it; the transport list names the protocols `sipral-core`'s endpoint has
-//! logic for, and not a socket this crate has never opened. A capability
-//! list that can drift from the build it describes is worse than none,
-//! because it is believed.
+//! [`Capabilities::of_this_build`] reads facts from where they already live: the codec list is
+//! [`Codec::ALL`], [`Capabilities::opus`] is that list read for one codec, and the transports are
+//! the ones `sipral-core`'s endpoint implements. A capability list that can drift from the build is
+//! worse than none, because people believe it.
 
 use sipral_ua::TransportProtocol;
 
 use crate::codec::Codec;
 
-/// Every transport [`sipral_core`]'s endpoint has protocol logic for:
-/// framing, the timers RFC 3261 §17 names, what goes in a `Via`.
+/// Every transport [`sipral_core`]'s endpoint implements: framing, RFC 3261 §17 timers, `Via`
+/// contents.
 ///
-/// Not a promise that the platform underneath can open one of these — no
-/// build of this crate opens a socket, so "does this build support TLS" and
-/// "can this process open a TLS connection" are two different questions, and
-/// this answers only the first.
+/// Not a promise the platform can open one; this crate opens no sockets.
 const TRANSPORTS: [TransportProtocol; 5] = [
     TransportProtocol::Udp,
     TransportProtocol::Tcp,
@@ -43,37 +29,24 @@ const TRANSPORTS: [TransportProtocol; 5] = [
     TransportProtocol::Wss,
 ];
 
-/// How a stream on this build can come to have keys.
-///
-/// An enumeration rather than a pair of flags, so that
-/// [`Capabilities::srtp_keying`] can only name a key exchange that has a
-/// variant, and a variant that is missing from that list is missing because
-/// nothing in this build reaches it.
+/// How a stream on this build can get keys. An enum, so a missing exchange is simply absent from
+/// [`Capabilities::srtp_keying`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SrtpKeying {
-    /// RFC 4568's `a=crypto`, keyed from the seeded token stream and offered
-    /// per call — see [`SrtpPolicy`](crate::SrtpPolicy).
+    /// RFC 4568 `a=crypto`, keyed from the seeded token stream, per call; see
+    /// [`SrtpPolicy`](crate::SrtpPolicy).
     Sdes,
-    /// RFC 5764's handshake on the media path.
+    /// RFC 5764 handshake on the media path.
     ///
-    /// Listed only where the `dtls` feature put a handshake behind it. In a
-    /// build without it, `sipral-core` still reads an `a=fingerprint` and
-    /// carries it through, and nothing can produce a key from it: a plan
-    /// keyed this way is then refused with
-    /// [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) rather than
-    /// opened in the clear, which is the behaviour that absence is derived
-    /// from.
+    /// Listed only with the `dtls` feature. Without it a DTLS-keyed plan is refused with
+    /// [`MediaError::NoDtlsSrtp`](crate::MediaError::NoDtlsSrtp) instead of opening in the clear.
     Dtls,
 }
 
-/// Whether a catalogue contains Opus, walked rather than asked of a `cfg`.
-///
-/// What a build can encode is the catalogue and nothing else, and this is
-/// the one place that reads it for a single codec, so that every layer above
-/// — [`Capabilities::opus`], and the C ABI's `SIPRAL_FEATURE_OPUS` on top of
-/// it — answers from the same fact instead of from whichever crate's feature
-/// flag was nearest.
+/// Whether a catalogue contains Opus, by walking it rather than asking a `cfg`, so
+/// [`Capabilities::opus`] and the C ABI's `SIPRAL_FEATURE_OPUS` answer from the catalogue and not
+/// from some crate's feature flag.
 const fn contains_opus(codecs: &[Codec]) -> bool {
     let mut rest = codecs;
     while let Some((codec, tail)) = rest.split_first() {
@@ -85,39 +58,27 @@ const fn contains_opus(codecs: &[Codec]) -> bool {
     false
 }
 
-/// The key exchanges a call on this build can actually complete.
-///
-/// Not "the ones SRTP defines" and not "the ones something in this workspace
-/// has a type for": the ones a call placed or answered through
-/// [`MediaEngine`](crate::MediaEngine) reaches. SDES always, and DTLS-SRTP
-/// wherever the `dtls` feature put a handshake behind it.
+/// The key exchanges a call through [`MediaEngine`](crate::MediaEngine) can complete: SDES always,
+/// DTLS-SRTP with the `dtls` feature.
 #[cfg(feature = "dtls")]
 const KEYING: [SrtpKeying; 2] = [SrtpKeying::Sdes, SrtpKeying::Dtls];
 
-/// Without the feature there is no handshake, no certificate and nothing that
-/// could produce a key on the media path, so the list is one long and a plan
-/// keyed by a handshake is refused where it arrives.
+/// Without the feature only SDES; DTLS-keyed plans are refused.
 #[cfg(not(feature = "dtls"))]
 const KEYING: [SrtpKeying; 1] = [SrtpKeying::Sdes];
 
-/// What this build can do, in one answer.
+/// What this build can do.
 ///
-/// This is about the build, never about one stack's configuration:
-/// [`crate::CodecCatalog::with_order`] narrows what one [`crate::MediaEngine`]
-/// offers, and narrowing it further does not change what the build could
-/// have offered. An application reads this once to decide which controls to
-/// show at all, and reads a stack's own settings — [`crate::CodecCatalog`]
-/// itself, or the FFI's `sipral_stack_settings` — to see what a particular
-/// instance is doing with them.
-// each bool here is an independent yes/no fact about the build, not a state
-// a caller steps through, which is what the lint is guarding against
+/// About the build, not one stack's configuration: [`crate::CodecCatalog::with_order`] narrows what
+/// one [`crate::MediaEngine`] offers without changing this. Read this once to decide which controls
+/// to show; read [`crate::CodecCatalog`] or the FFI's `sipral_stack_settings` for what an instance
+/// is doing.
+// independent yes/no facts about the build, not states
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Capabilities {
-    /// What [`crate::CodecCatalog::new`] would offer by default, quality
-    /// first. The slice's own length is the count: [`Codec::ALL`]'s, not a
-    /// number copied out of it.
+    /// What [`crate::CodecCatalog::new`] offers by default, best first. Its length is the count.
     pub codecs: &'static [Codec],
     /// Every transport this build carries signalling over.
     pub transports: &'static [TransportProtocol],
@@ -129,73 +90,42 @@ pub struct Capabilities {
     pub recording: bool,
     /// Whether B5's media-stall watchdog is compiled in.
     pub media_stall_watchdog: bool,
-    /// Whether a media stream can be keyed at all, which is
-    /// [`Capabilities::srtp_keying`] having anything in it and never a fact
-    /// of its own.
-    ///
-    /// It said `true` before any of the keying was reachable, which is
-    /// exactly the drift the head of this file is about: RFC 3711 was written
-    /// and tested, RFC 4568 was written and tested, and no offer this stack
-    /// wrote had ever named a secure profile.
+    /// Whether a stream can be keyed at all: [`Capabilities::srtp_keying`] is non-empty.
     pub srtp: bool,
-    /// Which key exchanges a call can complete, and therefore which ones are
-    /// worth showing a control for.
-    ///
-    /// SDES is always in it. DTLS-SRTP joins it when the `dtls` feature is
-    /// compiled in, which it is by default; a build without it keeps the
-    /// enumeration's variant and leaves the slice short, so that the absence
-    /// is something an application can read rather than something it has to
-    /// know.
+    /// Which key exchanges a call can complete, so which controls are worth showing. SDES always;
+    /// DTLS-SRTP with the default `dtls` feature. Without it the slice is shorter, so applications
+    /// can read the absence.
     pub srtp_keying: &'static [SrtpKeying],
     /// Whether RFC 6665 subscriptions and the dialog-state package this
     /// crate wraps ([`sipral_ua::UserAgent::subscribe`]) are compiled in.
     pub subscriptions: bool,
-    /// Whether this build has an Opus encoder and decoder, which is
-    /// [`Capabilities::codecs`] containing it and never a fact of its own.
+    /// Whether this build has Opus: [`Capabilities::codecs`] contains it.
     ///
-    /// The one codec a build can be without, because it is licensed rather
-    /// than written — `docs/05-media.md` says which customer needs it out.
-    /// It is a field and not a `cfg` a caller writes for itself so that a
-    /// crate above this one answers the question from this build's
-    /// catalogue: a Cargo feature belongs to the crate that declares it, and
-    /// another crate's is not evidence about this one.
+    /// The only optional codec, because it is linked rather than written (`docs/05-media.md`). A
+    /// field instead of a `cfg` because another crate's feature flags say nothing about this one.
     pub opus: bool,
-    /// Whether this build can run ICE in the full role (RFC 8445), which is
-    /// what makes [`IcePolicy::Offered`] and [`IcePolicy::Required`] mean
-    /// anything.
+    /// Whether this build runs full-role ICE (RFC 8445), which [`IcePolicy::Offered`] and
+    /// [`IcePolicy::Required`] need.
     ///
-    /// Behind a compile-time feature for the reason DTLS-SRTP is: a build
-    /// that will only ever place calls to one PBX on one network has no use
-    /// for a checklist, and off is what the policy defaults to anyway. The
-    /// numbers the ABI gives the two policies keep their values in a build
-    /// without it, and naming one there is refused rather than quietly
-    /// placing the call on a path nothing checked.
-    ///
-    /// An application that sets one of those policies must also drain
-    /// `sipral_media_poll_transmit`: a connectivity check that never leaves
-    /// is a call that never chooses a path.
+    /// A compile-time feature like DTLS-SRTP. Without it the ABI values for those policies stay,
+    /// and selecting one is refused rather than placing the call on an unchecked path. An
+    /// application using either policy must drain `sipral_media_poll_transmit`, or checks never
+    /// leave.
     ///
     /// [`IcePolicy::Offered`]: crate::IcePolicy::Offered
     /// [`IcePolicy::Required`]: crate::IcePolicy::Required
     pub ice: bool,
-    /// Whether this build can ask a STUN server where its sockets appear
-    /// from (RFC 8489): `Mappings`, and the public address it puts in a
-    /// `Contact` and a `c=` line.
+    /// Whether this build can ask a STUN server where its sockets appear (RFC 8489): `Mappings`,
+    /// and the public address in `Contact` and `c=`.
     ///
-    /// Behind a compile-time feature of its own. Without it a call can still
-    /// be described by a public address the application knows some other
-    /// way — [`CallMedia::public_address`] takes one from anywhere — and only
-    /// the asking is gone.
+    /// Without the feature a public address known another way still works through
+    /// [`CallMedia::public_address`].
     ///
     /// [`CallMedia::public_address`]: crate::CallMedia::public_address
     pub stun: bool,
-    /// Whether a relay can reach its TURN server over TCP or over TLS
-    /// (RFC 8656 §3.1) as well as over UDP: [`Relays::over`], for the
-    /// network that lets no UDP out. The connection is the application's,
-    /// and for TLS so is the handshake, with the platform's own stack.
-    ///
-    /// It comes with [`Capabilities::ice`], since a relay is only ever a
-    /// call's relayed ICE candidate.
+    /// Whether a relay can reach its TURN server over TCP or TLS as well as UDP (RFC 8656 §3.1):
+    /// [`Relays::over`]. The application owns the connection and, for TLS, the handshake. Comes
+    /// with [`Capabilities::ice`].
     ///
     /// [`Relays::over`]: crate::Relays::over
     pub turn_streams: bool,
@@ -205,16 +135,13 @@ pub struct Capabilities {
     ///
     /// [`MediaEngine::readdress`]: crate::MediaEngine::readdress
     pub call_readdress: bool,
-    /// Whether an incoming call's typed identity (RFC 3325's asserted
-    /// identity behind a per-account trust gate, `Diversion`,
-    /// `History-Info`, `verstat`, `Privacy`), how it asked to be answered
-    /// (RFC 5373, `Alert-Info`), why a call ended (RFC 3326) and a 3xx
-    /// redirect are all read and written.
+    /// Whether incoming caller identity (RFC 3325 asserted identity behind a per-account trust
+    /// gate, `Diversion`, `History-Info`, `verstat`, `Privacy`), answer mode (RFC 5373,
+    /// `Alert-Info`), call end reason (RFC 3326) and 3xx redirects are read and written.
     pub caller_identity: bool,
-    /// Whether the engine can write a log through a sink the application
-    /// installs ([`crate::Log`]) and take a snapshot of its state for a crash
-    /// report ([`crate::MediaEngine::state`]). Both redact what they write,
-    /// so both come with the `redaction` feature, on by default.
+    /// Whether the engine can log through an application sink ([`crate::Log`]) and snapshot its
+    /// state for crash reports ([`crate::MediaEngine::state`]). Both redact, so both need the
+    /// default `redaction` feature.
     pub logging: bool,
     /// Whether an account can sign the calls it places and have the callers
     /// of the ones it receives verified (STIR/SHAKEN, RFC 8224 and RFC 8588):
@@ -226,16 +153,12 @@ pub struct Capabilities {
     /// report how its streams are protected ([`crate::MediaSession::encryption`]).
     /// In every build.
     pub srtp_per_account: bool,
-    /// Whether what a call carries inside its audio is heard and written:
-    /// keypad digits in the audio both ways ([`crate::DtmfDetection`],
-    /// [`crate::MediaSession::dial_in_band`]), call-progress tones and who
-    /// answered ([`crate::ProgressDetection`]), and the beep that says a call
-    /// is recorded ([`crate::ConsentTone`]).
+    /// Whether in-band signals are handled: DTMF in the audio both ways ([`crate::DtmfDetection`],
+    /// [`crate::MediaSession::dial_in_band`]), call progress and answer detection
+    /// ([`crate::ProgressDetection`]), and the recording beep ([`crate::ConsentTone`]).
     pub in_band_signals: bool,
-    /// Whether a recording can be written as [`crate::RecordingOptions`]
-    /// says — mixed or stereo, WAV growing into RF64, at a rate of its own,
-    /// checkpointed against a crash — and in Ogg Opus where
-    /// [`Capabilities::opus`] is true too.
+    /// Whether recordings follow [`crate::RecordingOptions`]: mixed or stereo, WAV/RF64, own rate,
+    /// crash checkpoints, and Ogg Opus when [`Capabilities::opus`] is true.
     pub recording_formats: bool,
     /// Whether a call can be recorded to a recording server (SIPREC, RFC
     /// 7866): [`crate::MediaEngine::record_to`].
@@ -250,19 +173,14 @@ pub struct Capabilities {
     /// Whether a call can negotiate RTP/AVPF and reduced-size RTCP (RFC
     /// 4585, RFC 5506): [`crate::CodecCatalog::with_feedback`].
     pub rtcp_feedback: bool,
-    /// Whether any number of calls, each on its own codec and rate, can be
-    /// mixed into one conference with or without this end:
-    /// [`crate::LocalConference`].
+    /// Whether calls on different codecs and rates can be mixed into one conference, with or
+    /// without this end: [`crate::LocalConference`].
     pub local_conference: bool,
 }
 
 impl Capabilities {
-    /// What this build of the `sipral` crate can do.
-    ///
-    /// Nothing here is read from a configuration or a running stack — there
-    /// is no `&self` because a build's capabilities do not vary between two
-    /// engines running in the same process, only between two builds of the
-    /// library.
+    /// What this build of the `sipral` crate can do. No `&self`: capabilities differ between
+    /// builds, not between engines.
     #[must_use]
     pub const fn of_this_build() -> Self {
         Self {
@@ -328,9 +246,8 @@ mod tests {
 
     #[test]
     fn a_build_that_links_this_crate_has_every_feature_it_implements() {
-        // documents the current build rather than asserting a tautology:
-        // this is the test that fails the day one of these genuinely stops
-        // being true, which is exactly when the answer must change
+        // records the current build: it fails the day one of these stops being true, which is when
+        // the answer must change
         let capabilities = Capabilities::of_this_build();
         assert!(capabilities.dtmf);
         assert!(capabilities.rtcp_mux);
@@ -342,12 +259,8 @@ mod tests {
         assert!(capabilities.recording_formats);
     }
 
-    /// The two ways of asking "does this build have Opus" have to agree,
-    /// because everything above reads one of them: the flag is what the C
-    /// ABI's `SIPRAL_FEATURE_OPUS` is derived from, and the catalogue is
-    /// what a negotiation actually offers. A build whose flag said yes and
-    /// whose catalogue had nothing in it would grey in a control that
-    /// negotiates nothing.
+    /// The Opus flag (behind `SIPRAL_FEATURE_OPUS`) and the catalogue (what is negotiated) must
+    /// agree, or a UI would enable a control that negotiates nothing.
     #[test]
     fn opus_reads_present_exactly_when_the_catalogue_contains_it() {
         let capabilities = Capabilities::of_this_build();
@@ -366,10 +279,8 @@ mod tests {
         );
     }
 
-    /// Every claim is checked against the behaviour rather than restated: an
-    /// offer written under a policy that asks for SDES has to name the secure
-    /// profile and carry a key, and a plan keyed by a handshake has to be
-    /// opened waiting where the build has one and refused where it does not.
+    /// Claims are checked against behaviour: an SDES offer names the secure profile and carries a
+    /// key, and a DTLS-keyed plan opens waiting with the feature and is refused without it.
     #[test]
     fn the_keying_this_build_lists_is_the_keying_a_call_can_reach() {
         let capabilities = Capabilities::of_this_build();
@@ -380,8 +291,7 @@ mod tests {
             "the flag is the list and not a second opinion about it"
         );
 
-        // one key per suite crate::keying::OFFERED names, in that order:
-        // AEAD_AES_256_GCM, then AES_CM_128_HMAC_SHA1_80
+        // one key per `crate::keying::OFFERED` suite, in order
         let offer = CodecCatalog::new()
             .with_srtp(SrtpPolicy::Offered)
             .offering(
@@ -432,10 +342,8 @@ mod tests {
             }),
             voip_metrics_xr: false,
         };
-        // the list and the code that reads a plan have to agree: a build that
-        // does not list DTLS-SRTP must refuse a plan keyed that way rather
-        // than open it in the clear, and a build that lists it must open the
-        // stream waiting for the handshake rather than refuse it
+        // a build that does not list DTLS-SRTP must refuse such a plan, and one that lists it must
+        // open the stream waiting for the handshake
         #[cfg(feature = "dtls")]
         assert!(
             matches!(opening(&handshaken), Ok(Opening::Awaiting(_))),

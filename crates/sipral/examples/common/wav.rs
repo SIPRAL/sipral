@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The smallest WAV file that holds what a call was heard saying: PCM, mono,
-//! sixteen-bit, at whatever rate the call negotiated.
-//!
-//! No dependency for this — a RIFF header is nine fields, and pulling in a
-//! WAV-writing crate for `examples/` to prove a machine with no audio device
-//! still heard something would be a stranger dependency than the one it
-//! replaced.
+//! The smallest WAV writer for what a call heard: mono 16-bit PCM at the call's rate. A RIFF header
+//! is nine fields, so no dependency is pulled in for it.
 
 use std::io::{self, Write};
 

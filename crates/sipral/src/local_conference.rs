@@ -115,22 +115,17 @@ pub struct ConferencePacket {
     pub transport: crate::TurnTransport,
 }
 
-/// What one call's own audio passes through on its way into a conference's
-/// mix and out of it: the gain, mute and meter its application keeps for
-/// the call whether or not it is in a conference, which
-/// [`LocalConference::filter`] puts in the member's path.
+/// A call's own audio controls (gain, mute, meter), kept by its application whether or not it is in
+/// a conference; [`LocalConference::filter`] puts them in the member's path.
 ///
-/// Both run on the thread that ticks the conference, once per frame of the
-/// member's own, at its own rate: they are the real-time path and take no
-/// lock that thread could wait on.
+/// Both methods run on the conference's tick thread, once per member frame at its own rate. They
+/// are real-time: take no lock that thread could wait on.
 pub trait MemberFilter: Send {
-    /// A frame the member said, at `hertz`, before it is mixed: what is
-    /// left of it is what every other member, this end included, hears of
-    /// that call.
+    /// A frame the member said, at `hertz`, before mixing. What remains is what everyone else hears
+    /// of that call.
     fn said(&mut self, frame: &mut [i16], hertz: u32);
-    /// A frame of the mix the member is owed, at `hertz`, before it is
-    /// encoded for its far end: what is left of it is what that far end
-    /// hears.
+    /// A frame of the mix owed to the member, at `hertz`, before encoding. What remains is what its
+    /// far end hears.
     fn heard(&mut self, frame: &mut [i16], hertz: u32);
 }
 
@@ -142,9 +137,8 @@ struct Seat {
     /// The session's rate and frame when it was last looked at.
     rate: u32,
     frame: usize,
-    /// Samples at the call's rate the conference owes the mixer from this
-    /// call and has not read yet: a tick adds one, each frame read takes
-    /// one frame.
+    /// Samples at the call's rate owed to the mixer and not read yet: each tick adds one tick's
+    /// worth, each frame read removes a frame.
     due: usize,
     /// One frame, reused.
     buffer: Vec<i16>,
@@ -154,63 +148,49 @@ struct Seat {
 
 /// A local conference of any number of calls, with or without this end.
 ///
-/// [`MediaEngine::join`](crate::MediaEngine::join) pairs two calls that
-/// already agree on a rate and a frame. This is the general case:
-/// `sipral_media::nway`'s mixer behind calls that each keep their own codec,
-/// their own rate and their own frame, so a G.711 call, a G.722 call and an
-/// Opus call can be in one conference. Every member hears everybody but
-/// itself; nobody's own voice comes back to it.
+/// [`MediaEngine::join`](crate::MediaEngine::join) pairs two calls with the same rate and frame.
+/// This is the general case: the `sipral_media::nway` mixer behind calls that each keep their
+/// codec, rate and frame, so G.711, G.722 and Opus calls can share a conference. Each member hears
+/// everyone but itself.
 ///
-/// # Who is in it
+/// # Members
 ///
-/// Calls, added with [`LocalConference::add`] and taken out with
-/// [`LocalConference::remove`], each reached through its [`SessionShare`] —
-/// the conference holds no engine and takes no engine lock, so the thread
-/// that runs it is the one that carries audio, as for a single call. And,
-/// when [`LocalConferenceConfig::local`] names a rate, this end: the
-/// microphone frame handed to [`LocalConference::tick`] is what this end
-/// says, and [`LocalConference::speaker`] is what it hears.
+/// Calls are added with [`LocalConference::add`] and removed with [`LocalConference::remove`], each
+/// through its [`SessionShare`]; the conference holds no engine lock, so it runs on the audio
+/// thread. When [`LocalConferenceConfig::local`] names a rate, this end is a member too: the
+/// microphone frame passed to [`LocalConference::tick`] is what it says, and
+/// [`LocalConference::speaker`] is what it hears.
 ///
-/// A call in a conference is driven by it and by nothing else: its
+/// A call in a conference must be driven only by it: the tick calls its
 /// [`MediaSession::playback`](crate::MediaSession::playback) and
-/// [`MediaSession::capture`](crate::MediaSession::capture) are called from
-/// the tick, and a thread calling them on the same call as well would take
-/// every other frame out from under the conference. A call joined into a
-/// pair with [`MediaEngine::join`](crate::MediaEngine::join) is the same
-/// mistake; `sipral-ffi` refuses both, and a Rust application keeps to it.
+/// [`MediaSession::capture`](crate::MediaSession::capture), and another caller would steal every
+/// other frame. The same applies to a call paired with
+/// [`MediaEngine::join`](crate::MediaEngine::join). `sipral-ffi` refuses both; Rust applications
+/// must not do it.
 ///
 /// # The tick
 ///
-/// [`LocalConference::tick`] is twenty milliseconds of conference: every
-/// member's decoded audio taken off its session, one mix formed, and every
-/// member's share of it encoded and queued for
-/// [`LocalConference::poll_transmit`]. A call whose frame is 10 ms is read
-/// twice a tick; one whose frame is 40 or 60 ms every second or third tick,
-/// and one at 30 ms every tick and a half, so that each call keeps its own
-/// packetisation. A frame of more than three ticks is refused.
+/// [`LocalConference::tick`] is 20 ms: each member's decoded audio is read, mixed once, and each
+/// member's share encoded and queued for [`LocalConference::poll_transmit`]. Each call keeps its
+/// packetisation: a 10 ms call is read twice per tick, 40 or 60 ms calls every second or third
+/// tick, 30 ms every tick and a half. Frames longer than three ticks are refused.
 ///
-/// # Hold, and calls that end
+/// # Hold and ending calls
 ///
-/// Nothing about hold is special here, and that is the point: a member this
-/// end holds has nothing sent to it (its session answers `None` for a frame
-/// it may not send) and a member that holds this end sends nothing, so it
-/// is mixed as silence. Everybody else goes on hearing everybody else. A
-/// member whose call ends leaves the conference on the next tick, and its
-/// departure is reported like any other.
+/// Hold needs nothing special: a held member is sent nothing (its session refuses the frame), and a
+/// member holding this end sends nothing and mixes as silence. A member whose call ends leaves on
+/// the next tick, reported like any departure.
 ///
-/// # What changes are reported
+/// # Reported changes
 ///
-/// [`LocalConference::poll_change`] hands out, in order, who joined, who
-/// left and why, when the list of who is talking changed
-/// ([`LocalConference::talkers`], loudest first, with the hysteresis
-/// `sipral_media::nway::talker` describes), and a recording that stopped by
-/// itself.
+/// [`LocalConference::poll_change`] returns, in order, joins, departures with reason, changes in
+/// [`LocalConference::talkers`] (loudest first, with `sipral_media::nway::talker` hysteresis), and
+/// recordings that stopped by themselves.
 ///
 /// # Recording
 ///
-/// [`LocalConference::start_recording`] writes the whole mix — everybody
-/// the conference hears, at each member's own level — through the recorder
-/// a call's recording uses, in any of its formats, as one channel.
+/// [`LocalConference::start_recording`] writes the whole mix, at each member's level, as one
+/// channel, using the call recorder and any of its formats.
 pub struct LocalConference {
     mixer: Mixer,
     /// How many members it was made for, this end included.
@@ -223,8 +203,7 @@ pub struct LocalConference {
     packets: VecDeque<ConferencePacket>,
     packets_dropped: u64,
     recorder: Option<Recorder>,
-    /// The rate the mix is recorded at before the recorder converts it to
-    /// the file's: this end's own, or 16 kHz.
+    /// The rate the mix is recorded at before conversion to the file rate: this end's, or 16 kHz.
     tap_rate: Rate,
     tap: Vec<i16>,
     /// Where Ogg stream serial numbers come from.
@@ -243,15 +222,16 @@ impl core::fmt::Debug for LocalConference {
 }
 
 impl LocalConference {
-    /// An empty conference, with this end in it when `config.local` says so.
-    /// `seed` is where the serial numbers of its Ogg recordings are drawn
-    /// from; [`MediaEngine::local_conference`](crate::MediaEngine::local_conference)
-    /// draws it from the engine's own randomness.
+    /// An empty conference, including this end if `config.local` says so. `seed` seeds the Ogg
+    /// recording serial numbers;
+    /// [`MediaEngine::local_conference`](crate::MediaEngine::local_conference) draws it from the
+    /// engine.
     ///
     /// # Errors
-    /// [`MediaError::ConferenceIncompatible`] for a local rate that is not
-    /// 8, 16, 32 or 48 kHz, and [`MediaError::ConferenceFull`] for a
-    /// `max_members` of zero or past [`MAX_CONFERENCE_MEMBERS`].
+    ///
+    /// [`MediaError::ConferenceIncompatible`] for a local rate other than 8, 16, 32 or 48 kHz;
+    /// [`MediaError::ConferenceFull`] for `max_members` of zero or above
+    /// [`MAX_CONFERENCE_MEMBERS`].
     pub fn new(config: LocalConferenceConfig, seed: u64) -> Result<Self, MediaError> {
         let mut mixer = Mixer::new(MixerConfig {
             max_participants: config.max_members,
@@ -322,10 +302,8 @@ impl LocalConference {
         self.local.map(|(_, rate)| rate.hz())
     }
 
-    /// Samples in one tick of this end's own audio: what [`Self::tick`]'s
-    /// microphone frame and [`Self::speaker`]'s frame are. Twenty
-    /// milliseconds at the local rate, or at 16 kHz when this end does not
-    /// take part.
+    /// Samples per tick of this end's audio, the size of [`Self::tick`]'s microphone frame and
+    /// [`Self::speaker`]'s output: 20 ms at the local rate, or at 16 kHz without this end.
     #[must_use]
     pub fn local_frame(&self) -> usize {
         self.tap_rate.tick_samples()
@@ -353,15 +331,13 @@ impl LocalConference {
         &self.talkers
     }
 
-    /// Add a call. It takes part from the next tick.
+    /// Add a call; it takes part from the next tick.
     ///
     /// # Errors
-    /// [`MediaError::InConference`] for a call already in this conference,
-    /// [`MediaError::ConferenceFull`] when every place is taken,
-    /// [`MediaError::NoSuchCall`] for a call whose media has ended, and
-    /// [`MediaError::ConferenceIncompatible`] for a call whose codec hears at
-    /// a rate other than 8, 16, 32 or 48 kHz or cuts frames longer than
-    /// three ticks.
+    ///
+    /// [`MediaError::InConference`] if already a member, [`MediaError::ConferenceFull`],
+    /// [`MediaError::NoSuchCall`] if its media has ended, [`MediaError::ConferenceIncompatible`]
+    /// for a rate other than 8, 16, 32 or 48 kHz or frames longer than three ticks.
     pub fn add(&mut self, call: CallHandle, share: SessionShare) -> Result<(), MediaError> {
         if self.contains(call) {
             return Err(MediaError::InConference);
@@ -389,15 +365,14 @@ impl LocalConference {
         Ok(())
     }
 
-    /// Put a call's own controls in its path, from the next tick until it
-    /// leaves: every frame it says passes through [`MemberFilter::said`]
-    /// before it is mixed, and every frame it is owed through
-    /// [`MemberFilter::heard`] before it is encoded, on top of the
-    /// conference's own controls for that member. A filter already there
-    /// is replaced, and dropped.
+    /// Put a call's own controls in its path from the next tick until it leaves: frames it says go
+    /// through [`MemberFilter::said`] before mixing, frames it is owed through
+    /// [`MemberFilter::heard`] before encoding, on top of the conference's own controls. Replaces
+    /// and drops any previous filter.
     ///
     /// # Errors
-    /// [`MediaError::NotInConference`] for a call that is not a member.
+    ///
+    /// [`MediaError::NotInConference`] for a non-member.
     pub fn filter(
         &mut self,
         call: CallHandle,
@@ -423,9 +398,8 @@ impl LocalConference {
         if frame == 0 {
             return Err(incompatible());
         }
-        // a frame that neither divides a tick nor is whole ticks — 30 ms —
-        // is read as it comes and queued as whole ticks; the mixer only
-        // needs to know how much to hold
+        // a 30 ms frame neither divides a tick nor is whole ticks: read as it comes, queued as
+        // whole ticks
         let held = if tick.is_multiple_of(frame) {
             frame
         } else {
@@ -436,11 +410,11 @@ impl LocalConference {
             .map_err(|error| refused(error, hertz, frame))
     }
 
-    /// Take a call out. It is gone from the next tick, and its session is
-    /// left exactly as the conference last drove it.
+    /// Remove a call from the next tick; its session is left as the conference last drove it.
     ///
     /// # Errors
-    /// [`MediaError::NotInConference`] for a call that is not a member.
+    ///
+    /// [`MediaError::NotInConference`] for a non-member.
     pub fn remove(&mut self, call: CallHandle) -> Result<(), MediaError> {
         self.depart(call, Departure::Removed)
             .ok_or(MediaError::NotInConference)
@@ -495,11 +469,12 @@ impl LocalConference {
         })
     }
 
-    /// Set the level of one way of a member, from the next tick: of what it
-    /// says for everybody else, or of what it hears.
+    /// Set the level of one direction of a member from the next tick: what it says to others, or
+    /// what it hears.
     ///
     /// # Errors
-    /// [`MediaError::NotInConference`] for a member that is not in it.
+    ///
+    /// [`MediaError::NotInConference`] for a non-member.
     pub fn set_gain(
         &mut self,
         member: Member,
@@ -529,11 +504,12 @@ impl LocalConference {
         })
     }
 
-    /// Whether a member was talking in the last tick, muted or not: what a
-    /// client needs to say "you are muted" to somebody talking into a mute.
+    /// Whether a member talked in the last tick, muted or not, so a client can warn someone talking
+    /// into a mute.
     ///
     /// # Errors
-    /// [`MediaError::NotInConference`] for a member that is not in it.
+    ///
+    /// [`MediaError::NotInConference`] for a non-member.
     pub fn is_talking(&self, member: Member) -> Result<bool, MediaError> {
         self.mixer
             .is_talking(self.id_of(member)?)
@@ -552,17 +528,16 @@ impl LocalConference {
         .ok_or(MediaError::NotInConference)
     }
 
-    /// Twenty milliseconds of conference.
+    /// Run 20 ms of conference.
     ///
-    /// `mic` is this end's own frame, [`Self::local_frame`] samples at the
-    /// local rate; a conference this end does not take part in reads none of
-    /// it. Every member's audio is read, mixed and encoded; the packets wait
-    /// for [`Self::poll_transmit`] and this end's share for
-    /// [`Self::speaker`].
+    /// `mic` is this end's frame of [`Self::local_frame`] samples at the local rate, ignored when
+    /// this end is not a member. Every member is read, mixed and encoded; packets wait for
+    /// [`Self::poll_transmit`] and this end's share for [`Self::speaker`].
     ///
     /// # Errors
-    /// [`MediaError::LocalFrame`] for a microphone frame of any other
-    /// length, when this end takes part. Nothing was mixed.
+    ///
+    /// [`MediaError::LocalFrame`] for a microphone frame of the wrong length when this end is a
+    /// member; nothing is mixed then.
     pub fn tick(&mut self, mic: &[i16], now: Instant) -> Result<(), MediaError> {
         if let Some((id, rate)) = self.local {
             if mic.len() != rate.tick_samples() {
@@ -581,10 +556,9 @@ impl LocalConference {
         Ok(())
     }
 
-    /// What this end hears, into `out`, and how many samples that was: one
-    /// tick after every [`Self::tick`], at the local rate. Whatever `out`
-    /// has room for past what was mixed is silence. A conference this end
-    /// does not take part in fills it with silence.
+    /// Write what this end hears into `out` and return the sample count: one tick at the local rate
+    /// after each [`Self::tick`]. Extra room is filled with silence, as is everything when this end
+    /// is not a member.
     pub fn speaker(&mut self, out: &mut [i16]) -> usize {
         let taken = match self.local {
             Some((id, _)) => self.mixer.pull(id, out).unwrap_or(0),
@@ -621,11 +595,11 @@ impl LocalConference {
     /// Start writing the whole mix to `sink`.
     ///
     /// # Errors
-    /// [`MediaError::AlreadyRecording`] when one is running,
-    /// [`MediaError::ConferenceStereo`] for a stereo layout — a conference is
-    /// one mix, recorded as one channel — and whatever
-    /// [`MediaSession::start_recording_with`](crate::MediaSession::start_recording_with)
-    /// refuses about the options or the sink.
+    ///
+    /// [`MediaError::AlreadyRecording`], [`MediaError::ConferenceStereo`] for a stereo layout (the
+    /// mix is one channel), and whatever
+    /// [`MediaSession::start_recording_with`](crate::MediaSession::start_recording_with) refuses
+    /// about the options or sink.
     pub fn start_recording(
         &mut self,
         sink: Box<dyn RecordingSink>,
@@ -727,9 +701,8 @@ impl LocalConference {
         }
     }
 
-    /// A call whose codec moved under it: a new place in the mixer at the
-    /// new rate and frame, with the same controls, or out of the
-    /// conference when there is none.
+    /// A member's codec changed: reseat it at the new rate and frame with the same controls, or
+    /// remove it if that is not possible.
     fn reseat(&mut self, call: CallHandle, (hertz, frame): (u32, usize)) {
         let Some(at) = self.seats.iter().position(|seat| seat.call == call) else {
             return;

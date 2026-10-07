@@ -3,20 +3,15 @@
 
 //! The range a deployment's RTP ports come from.
 //!
-//! The application owns every socket, so this range opens nothing: it is
-//! the rule [`crate::MediaEngine::reserve_rtp_port`] hands ports out by, and
-//! the one a firewall is configured to. The rule is RFC 3550's, as this stack
-//! uses it:
+//! The application owns every socket, so this opens nothing: it is the rule
+//! [`crate::MediaEngine::reserve_rtp_port`] follows and the firewall is configured to. Following
+//! RFC 3550:
 //!
-//! - **RTP on an even port** (§11: "RTP data SHOULD be carried on an even UDP
-//!   port number").
-//! - **RTCP on the odd port above it** (§11, and `sipral_rtp::rtcp::paired_rtcp_port`,
-//!   which is where the stack sends and expects it unless the far end said
-//!   otherwise with `a=rtcp`). The pair is reserved whole even when this end
-//!   offers RFC 5761 multiplexing, because the far end may decline it and the
-//!   odd port is then needed after all.
-//! - So a range holds as many calls as it holds even ports whose odd partner
-//!   is still inside it, and not one more.
+//! - **RTP on an even port** (§11: "RTP data SHOULD be carried on an even UDP port number").
+//! - **RTCP on the odd port above** (§11, and `sipral_rtp::rtcp::paired_rtcp_port`, unless the far
+//!   end says otherwise with `a=rtcp`). The pair is reserved even when RFC 5761 mux is offered,
+//!   since the far end may decline it.
+//! - So a range holds as many calls as it has even ports whose odd partner is also inside it.
 
 use std::fmt;
 

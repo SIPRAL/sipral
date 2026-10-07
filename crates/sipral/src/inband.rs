@@ -1,52 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What a call carries inside its audio rather than beside it: keypad digits
-//! both ways, the tones a network plays to a caller, who or what answered,
-//! and the beep that tells both ends a call is being recorded.
+//! What a call carries inside its audio: keypad digits both ways, network call-progress tones, who
+//! answered, and the recording beep.
 //!
-//! `sipral-media`'s `inband` module does the listening and the writing; this
-//! is where it meets a call. A call hears at the rate its codec decodes to,
-//! and the detectors listen at eight or sixteen kilohertz, so what the far end
-//! sent is converted on the way in when the two differ — Opus's 48 kHz, taken
-//! down to 16. Writing needs no conversion: a digit and a beep are sines, and
-//! a sine is written at whatever rate the codec hears.
+//! `sipral-media`'s `inband` module listens and writes; this connects it to a call. Detectors run
+//! at 8 or 16 kHz, so far-end audio at another codec rate (Opus's 48 kHz) is converted down to 16
+//! kHz first. Writing needs no conversion: digits and beeps are sines generated at the codec's
+//! rate.
 //!
 //! # Digits in the audio
 //!
-//! RFC 4733 takes a digit out of the audio, and most far ends send it that
-//! way. A far end that never offered `telephone-event` has no other way to
-//! send one than to leave the two tones in the voice band, so by default
-//! ([`DtmfDetection::Auto`]) this end listens for them exactly when the call
-//! negotiated no named events. [`DtmfDetection::Always`] listens on every
-//! call — for a gateway that negotiates events and still passes the tones
-//! through — and then a press heard both ways is one press: an in-band digit
-//! is held back for [`IN_BAND_DIGIT_HOLD`] after it ends, and one the far end also
-//! sent as an event in that time is not reported a second time.
+//! Most far ends send digits as RFC 4733 events. One that never offered `telephone-event` can only
+//! leave the tones in the audio, so by default ([`DtmfDetection::Auto`]) this end listens exactly
+//! when no named events were negotiated. [`DtmfDetection::Always`] listens on every call, for
+//! gateways that negotiate events and still pass the tones. A press heard both ways is reported
+//! once: an in-band digit waits [`IN_BAND_DIGIT_HOLD`] after it ends, and is dropped if the same
+//! press arrives as an event meanwhile.
 //!
-//! Going the other way, a digit on a call with no telephone event is written
-//! into the outgoing audio in place of the microphone, for as long as it
-//! lasts and the pause after it.
+//! Outgoing, a digit on a call without telephone events replaces the microphone for its tone and
+//! the pause after it.
 //!
 //! # Call progress and who answered
 //!
-//! Opt-in, per call ([`ProgressDetection`]). From the first frame of early
-//! media the far end's audio is listened to for the tones of one network —
-//! ringback, busy, congestion, the special information tone — and each one
-//! heard is reported once. When the call is answered, an answering-machine
-//! detector starts deciding from the pattern of speech and silence, the
-//! tones are listened for until it has decided (a gateway that answers to
-//! play an intercept is caught that way), and after a verdict of
-//! [`AmdVerdict::Machine`] the machine's beep is listened for, so that a
-//! message is left after it rather than over the greeting.
+//! Opt-in per call ([`ProgressDetection`]). From the first early-media frame the far-end audio is
+//! checked for one network's tones (ringback, busy, congestion, special information tone), each
+//! reported once. On answer, an answering-machine detector decides from the speech and silence
+//! pattern while tones are still checked (catching gateways that answer to play an intercept).
+//! After [`AmdVerdict::Machine`] the machine's beep is awaited, so a message starts after it rather
+//! than over the greeting.
 //!
 //! # The consent tone
 //!
-//! A beep repeated while the call is being recorded, mixed into what goes to
-//! the far end and, unless told otherwise, into what this end plays too. It
-//! starts with the recording — the first beep sounds at once — and stops
-//! with it, and it goes into the recording's own local side, which is the
-//! evidence that it was played.
+//! A repeating beep while the call is recorded, mixed into what goes to the far end and, by
+//! default, into local playback. It starts with the recording (first beep at once), stops with it,
+//! and is in the recording's local side as evidence it was played.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -69,28 +57,23 @@ use crate::error::MediaError;
 use crate::event::{DigitSource, MediaEvent};
 use crate::share::Outbox;
 
-/// How long a digit heard in the audio is held back before it is reported,
-/// on a call that also negotiated named events: the time a far end sending
-/// both takes to put the event beside the tone.
+/// How long an in-band digit is held before reporting, on a call that also negotiated named events:
+/// the time a far end sending both needs to send the event.
 ///
-/// Sixty milliseconds either side of a press is what
-/// `KeyPress::is_same_press` in `sipral-media` treats as one press; the
-/// event of RFC 4733 is reported only once its closing packet has played
-/// out, so the wait is that and a frame or two of jitter on top.
+/// `KeyPress::is_same_press` in `sipral-media` treats 60 ms either side as one press, and an RFC
+/// 4733 event is reported only after its end packet, so this is that plus a frame or two of jitter.
 pub const IN_BAND_DIGIT_HOLD: Duration = Duration::from_millis(250);
 
-/// How far apart a digit heard in the audio and one received as an event
-/// may be and still be one press: the slack `sipral-media` allows between a
-/// gateway's event timestamp and the tone it leaves in the audio.
+/// How far apart an in-band digit and an event digit may be and still count as one press:
+/// `sipral-media`'s allowance between a gateway's event timestamp and its tone.
 const SAME_PRESS: Duration = Duration::from_millis(60);
 
 /// How many events received by RFC 4733 are remembered for telling a press
 /// heard both ways apart from two presses.
 const REMEMBERED: usize = 8;
 
-/// The rate the detectors listen at when the call's own is neither of the
-/// two they take: sixteen kilohertz, which keeps everything a telephone tone
-/// or a voice has.
+/// Detector rate when the call's rate is neither 8 nor 16 kHz: 16 kHz keeps everything tones and
+/// voice need.
 const LISTENING_RATE: SampleRate = SampleRate::Hz16000;
 
 /// When to listen for keypad digits in the far end's audio.
@@ -302,12 +285,9 @@ struct Listener {
     clock: Clock,
     /// The rate the call's frames arrive at.
     call_rate: u32,
-    /// From the call's rate to the listening rate, when the two differ:
-    /// built the first time something listens, since a filter bank is not
-    /// free to compute and most calls never listen. It stays `None` where no
-    /// resampler can be built between the two, which for a rate a codec here
-    /// decodes to is never; the detectors then hear nothing rather than
-    /// audio at the wrong speed.
+    /// Converter from the call rate to the listening rate, when they differ. Built on first use,
+    /// since most calls never listen. Stays `None` if no resampler fits, which never happens for
+    /// supported codec rates; the detectors then hear nothing rather than audio at the wrong speed.
     convert: Option<Resampler>,
     converted: Vec<i16>,
     /// Samples at the listening rate taken since the detectors were built.
@@ -787,13 +767,11 @@ impl Signals {
         self.beeps_in = None;
     }
 
-    /// What goes to the far end instead of `captured`, when anything here
-    /// changes it: a digit being written replaces the microphone for its
-    /// tone and its pause, and the consent beep is mixed in. `false` leaves
-    /// `shaped` alone and the frame as it was.
+    /// What goes to the far end instead of `captured`, if anything changes it: a digit being
+    /// written replaces the microphone for its tone and pause, and the consent beep is mixed in.
+    /// `false` leaves `shaped` and the frame alone.
     ///
-    /// `held_back` is a digit going out as an RFC 4733 event, which a digit
-    /// in the audio waits behind rather than sounds under.
+    /// `held_back` is a digit going out as an RFC 4733 event, which an in-band digit waits behind.
     pub(crate) fn shape(
         &mut self,
         captured: &[i16],

@@ -3,43 +3,26 @@
 
 //! What this build can encode, in what order, and what a call settled on.
 //!
-//! A fixed codec order is not enough. Which codec a site wants first is a
-//! configuration — a carrier that bills by the minute wants the narrowband one
-//! and a company on its own network wants the wideband one — and the order is
-//! the whole of the negotiation's outcome, since RFC 3264 §6.1 has the peer's
-//! preference decide among what both ends list.
+//! The offer order is configuration: a carrier billing by the minute wants narrowband first, an
+//! internal network wants wideband. With RFC 3264 §6.1 the peer's preference decides among what
+//! both list, so the order matters.
 //!
-//! Three things are therefore separate here. What the build contains is
-//! [`Codec::ALL`], and it is a compile-time fact: no configuration can add a
-//! codec that was not linked. What to offer and in what order is
-//! [`CodecCatalog`], and it is set once. What one call actually agreed is
-//! [`Codec::of`], read back off the plan the negotiation produced.
-//!
-//! A codec named in an order that this build does not contain is **rejected
-//! where it is set**, with the name in the error. That is deliberate: a
-//! setting that is accepted and then ignored is the failure that costs months,
-//! because neither side can tell it happened.
+//! Three separate things: [`Codec::ALL`] is what the build contains (compile time).
+//! [`CodecCatalog`] is what to offer and in what order. [`Codec::of`] is what one call agreed. A
+//! codec the build lacks is **rejected where it is set**, by name, since a silently ignored setting
+//! is the hardest bug to find.
 //!
 //! # Three numbers, not one
 //!
-//! For G.711 the samples in a frame, the octets in a frame and the RTP
-//! timestamp ticks a frame covers are all 160, so one constant appears to
-//! serve all three. It does not. G.722's are 320, 160 and 160 — RFC 3551
-//! §4.5.2 fixes its RTP clock at 8000 although it samples at 16000, "for
-//! historical reasons" — and Opus's are 960, whatever the encoder produced,
-//! and 960. Anything written against the G.711 shape encodes half a frame and
-//! calls it a packet, which is why [`Codec::sample_rate`] and
-//! [`Codec::clock_rate`] are two functions and not one. G.729 is the fourth
-//! shape: 160 samples, 160 ticks and twenty octets, eight samples to the
-//! octet.
+//! Samples per frame, octets per frame and RTP ticks per frame are all 160 for G.711, but not for
+//! others: G.722 is 320/160/160 (RFC 3551 §4.5.2 fixes its clock at 8000 "for historical reasons"),
+//! Opus is 960/variable/960, G.729 is 160/20/160. Hence separate [`Codec::sample_rate`] and
+//! [`Codec::clock_rate`].
 //!
 //! # In the build is not in the offer
 //!
-//! G.729 is in [`Codec::ALL`] and not in what [`CodecCatalog::new`] offers.
-//! It is narrowband and eight kilobits, worse than G.711 to the ear and far
-//! worse than G.722 or Opus, and a peer offered it beside them may still pick
-//! it first; it is here for the carrier that insists on it, and a site that
-//! wants it names it ([`CodecCatalog::with_order`]).
+//! G.729 is in [`Codec::ALL`] but not in [`CodecCatalog::new`]: it sounds worse than the others and
+//! a peer might still pick it first. A site that needs it names it ([`CodecCatalog::with_order`]).
 
 use sipral_core::sdp::{
     KeySalt, MediaCapabilities, MediaDescription, MediaPlan, NegotiatedCodec, RtpMap, SrtpSupport,
@@ -54,43 +37,31 @@ use crate::error::MediaError;
 use crate::ice::IcePolicy;
 use crate::keying::{self, SdesSignalling, SrtpPolicy};
 
-/// The packetisation this stack offers unless told otherwise. Twenty
-/// milliseconds is what every peer expects and what every codec here cuts
-/// cleanly.
+/// Default packetisation. 20 ms is what every peer expects and every codec here cuts cleanly.
 pub const DEFAULT_FRAME_MS: u32 = 20;
 
-/// The first dynamic payload type, from RFC 3551 table 5's "96-127 dynamic".
+/// The first dynamic payload type (RFC 3551 table 5).
 ///
-/// Handed out from here, in offer order, to every codec in the catalogue that
-/// has no static number of its own — which is Opus, and has only ever been
-/// Opus. A build that linked it therefore offers it on 96, and in a build
-/// without it no codec takes this number at all: every one left is in table
-/// 4, and the first thing to reach 96 is the named-event type the DTMF line
-/// carries. `named_events_get_a_dynamic_type_no_codec_took` asserts both
-/// halves.
+/// Assigned in offer order to codecs without a static number, which so far means Opus. Without Opus
+/// the named-event type is the first to get 96; `named_events_get_a_dynamic_type_no_codec_took`
+/// checks both cases.
 const FIRST_DYNAMIC: u8 = 96;
 
-/// The rate [`Codec::L16Narrowband`] is sampled and clocked at.
 const L16_NARROWBAND: u32 = 8_000;
 
-/// The rate [`Codec::L16Wideband`] is sampled and clocked at.
 const L16_WIDEBAND: u32 = 16_000;
 
-/// The largest payload one frame of any codec here may be: RFC 6716's
-/// longest Opus frame, and the bound the 1500-octet datagram a session
-/// builds is sized around.
+/// Largest payload of one frame: the longest Opus frame (RFC 6716). The 1500-octet datagram is
+/// sized around it.
 const LARGEST_PAYLOAD: usize = 1_275;
 
-/// G.729's `a=fmtp` parameters: whether Annex B is allowed (RFC 4856
-/// §2.1.9), written out either way rather than left to the default of
-/// `yes` a missing parameter means, so that a reader of the description does
-/// not have to know the default.
+/// G.729 `a=fmtp` parameters (RFC 4856 §2.1.9). Always written explicitly so readers need not know
+/// the default.
 const fn annex_b_parameter(allowed: bool) -> &'static str {
     if allowed { "annexb=yes" } else { "annexb=no" }
 }
 
-/// Whether a G.729 `a=fmtp` line allows Annex B. RFC 4856 §2.1.9 reads a
-/// missing `annexb` as `yes`, so only one that says `no` refuses it.
+/// Whether a G.729 `a=fmtp` allows Annex B. A missing `annexb` means `yes` (RFC 4856 §2.1.9).
 pub(crate) fn annex_b_allowed(fmtp: Option<&str>) -> bool {
     !fmtp.is_some_and(|parameters| {
         parameters.split(';').any(|parameter| {
@@ -102,59 +73,36 @@ pub(crate) fn annex_b_allowed(fmtp: Option<&str>) -> bool {
     })
 }
 
-/// One codec this build contains.
-///
-/// Not a list of everything with an IANA name: a variant here means there is
-/// an encoder and a decoder behind it, which is what makes the enumeration
-/// worth reporting to a user interface at all.
+/// One codec this build contains, with an encoder and decoder behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Codec {
-    /// G.711 mu-law: payload type 0, the one format RFC 3551 makes every
-    /// implementation carry.
+    /// G.711 mu-law, payload type 0; RFC 3551 makes it mandatory.
     Pcmu,
-    /// G.711 A-law: payload type 8, and the ordinary European default. The
-    /// first real PBX this stack met allowed nothing else.
+    /// G.711 A-law, payload type 8; the usual European default.
     Pcma,
-    /// G.722: wideband at the price of a narrowband stream, and accepted by
-    /// almost every PBX in service.
+    /// G.722: wideband at narrowband bitrate, supported by almost every PBX.
     G722,
-    /// G.729 with Annex A: eight kilobits of narrowband speech, for the
-    /// carrier that insists on it. Always in the build and never in the
-    /// default offer — see [`Codec::offered_by_default`]. Annex B's silence
-    /// compression goes with it where both ends allow it — see
-    /// [`CodecCatalog::with_g729_annex_b`].
+    /// G.729 Annex A: 8 kbit/s narrowband for carriers that require it. Always built, never offered
+    /// by default ([`Codec::offered_by_default`]). Annex B is used where both ends allow it
+    /// ([`CodecCatalog::with_g729_annex_b`]).
     G729,
-    /// Opus: the best of them, and the only one here that is linked rather
-    /// than written, which is why it is the one behind a feature. A build
-    /// with the `opus` feature off has no variant for it at all — see
+    /// Opus. The only linked (not written) codec, so it sits behind the `opus` feature; see
     /// `docs/05-media.md`.
     #[cfg(feature = "opus")]
     Opus,
-    /// L16 at 8 kHz, one channel (RFC 3551 §4.5.11): the samples
-    /// themselves, 128 kbit/s of them, for a far end that wants audio no
-    /// codec has touched — a recorder, a speech engine, a bridge that
-    /// transcodes anyway. Never in the default offer, like G.729, and on a
-    /// dynamic payload type as `L16/8000`.
+    /// L16 at 8 kHz mono (RFC 3551 §4.5.11): raw samples at 128 kbit/s, for recorders, speech
+    /// engines or transcoding bridges. Not offered by default; dynamic payload type as `L16/8000`.
     L16Narrowband,
-    /// L16 at 16 kHz, one channel: wideband with nothing lost, at 256
-    /// kbit/s, on a dynamic payload type as `L16/16000`.
+    /// L16 at 16 kHz mono, 256 kbit/s, dynamic payload type as `L16/16000`.
     L16Wideband,
 }
 
 impl Codec {
-    /// Every codec this build contains.
+    /// Every codec this build contains, best quality first, which is the default offer order.
     ///
-    /// The order is quality first, which is the order to offer them in when
-    /// nobody has said otherwise; [`CodecCatalog::with_order`] is how a site
-    /// says otherwise.
-    ///
-    /// Its length is the build's own and not a number to be relied on: seven
-    /// here, six where the `opus` feature is off. Anything that needs the
-    /// count reads it from this array.
-    ///
-    /// G.729 and the two L16s are last, and they are the members
-    /// [`CodecCatalog::new`] leaves out: see [`Codec::offered_by_default`].
+    /// The length depends on the build; read it from the array. G.729 and the two L16s come last
+    /// and are not offered by default ([`Codec::offered_by_default`]).
     #[cfg(feature = "opus")]
     pub const ALL: [Self; 7] = [
         Self::Opus,
@@ -165,9 +113,7 @@ impl Codec {
         Self::L16Wideband,
         Self::L16Narrowband,
     ];
-    /// Every codec this build contains, which is the written ones: the
-    /// `opus` feature is off, so there is no encoder for Opus to offer. See
-    /// the other declaration of this constant for the rest.
+    /// Every codec this build contains, without Opus.
     #[cfg(not(feature = "opus"))]
     pub const ALL: [Self; 6] = [
         Self::G722,
@@ -178,24 +124,18 @@ impl Codec {
         Self::L16Narrowband,
     ];
 
-    /// Whether [`CodecCatalog::new`] offers it: every codec but G.729 and
-    /// the two L16s.
+    /// Whether [`CodecCatalog::new`] offers it: all but G.729 and the two L16s.
     ///
-    /// Those are offered only where an order names them. A peer's own
-    /// preference decides among what both ends list (RFC 3264 §6.1), so a
-    /// narrowband codec in every offer is a narrowband call with every peer
-    /// that happens to prefer it — and the one reason to carry it at all is
-    /// a carrier that accepts nothing else, which is a site's configuration
-    /// and not a default. L16 is the other way round: the best sound there
-    /// is, at eight to sixteen times G.711's bandwidth, which is also a
-    /// site's to choose.
+    /// The peer's preference decides (RFC 3264 §6.1), so offering G.729 by default would give
+    /// narrowband calls with peers that prefer it. L16 costs 8 to 16 times G.711's bandwidth. Both
+    /// are a site's choice.
     #[must_use]
     pub const fn offered_by_default(self) -> bool {
         !matches!(self, Self::G729 | Self::L16Narrowband | Self::L16Wideband)
     }
 
-    /// What a codec order calls it: the encoding name, and for L16, which is
-    /// one name at two rates, the rate after it — `L16/8000`, `L16/16000`.
+    /// The name in a codec order: the encoding name, plus the rate for L16 (`L16/8000`,
+    /// `L16/16000`).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -205,8 +145,7 @@ impl Codec {
         }
     }
 
-    /// The name that goes on an `a=rtpmap` line, spelled as IANA registered
-    /// it.
+    /// The `a=rtpmap` encoding name, as IANA registered it.
     #[must_use]
     pub const fn encoding_name(self) -> &'static str {
         match self {
@@ -220,16 +159,10 @@ impl Codec {
         }
     }
 
-    /// Whether this is Opus: the one codec in the catalogue that is linked
-    /// rather than written, and therefore the one a build can be without.
+    /// Whether this is Opus, the codec a build can lack.
     ///
-    /// The question has to be answerable from the value, because a crate
-    /// above this one cannot ask a `cfg` for it. Cargo features are
-    /// per-crate and additive, so `sipral-ffi`'s own `opus` being off says
-    /// nothing about whether this catalogue has the codec in it — and an
-    /// answer derived from the wrong crate's flag is an ABI that lies about
-    /// what the build can negotiate. The variant is the fact; the feature
-    /// only decides whether there is one.
+    /// Answered from the value because Cargo features are per crate: `sipral-ffi`'s own `opus` flag
+    /// says nothing about this crate's build.
     #[must_use]
     pub const fn is_opus(self) -> bool {
         match self {
@@ -244,10 +177,8 @@ impl Codec {
         }
     }
 
-    /// The payload type RFC 3551 table 4 assigns it, for the four that have
-    /// one. Opus does not: it is newer than the static table and always
-    /// travels as a dynamic type. Nor does L16 at these rates: the table's
-    /// two L16 types, 10 and 11, are 44.1 kHz.
+    /// The RFC 3551 table 4 payload type, for the four codecs that have one. Opus is always
+    /// dynamic, and the table's L16 types (10, 11) are 44.1 kHz.
     #[must_use]
     pub const fn static_payload(self) -> Option<u8> {
         match self {
@@ -261,27 +192,13 @@ impl Codec {
         }
     }
 
-    /// The ITU-T G.113 Appendix I `Ie`/`Bpl` pair this codec is rated with,
-    /// for the RFC 3611 §4.7.5 R factor and MOS a call's VoIP Metrics
-    /// report carries — `None` for a codec Table I.4 does not tabulate.
+    /// The ITU-T G.113 Appendix I `Ie`/`Bpl` pair for the RFC 3611 §4.7.5 R factor and MOS, or
+    /// `None` if Table I.4 does not rate this codec.
     ///
-    /// G.722 gets `None` rather than G.711's numbers: it is a different
-    /// codec with its own entry in G.113, not on this build's copy of the
-    /// Recommendation text, and reporting the R.711 figures for a
-    /// wideband stream would rate it either better or worse than it
-    /// actually sounds, in a direction nothing here has measured. Opus
-    /// gets `None` for the same reason: it postdates G.113's own codec
-    /// list. RFC 3611 §4.7.5's own answer for a metric this stack cannot
-    /// honestly compute is the sentinel, not a guess — see
-    /// `sipral_rtp::RtpSession::voip_metrics`.
-    ///
-    /// G.729 gets `None` too, for a narrower reason. Table I.4 does rate it,
-    /// but only as "G.729 Annex A with Annex B (VAD)", and a call here runs
-    /// Annex B only where both ends allowed it — which the codec alone, all
-    /// this function is asked about, does not say. A call with Annex B off is
-    /// not the configuration the table rates, and Table I.1 rates Annex A
-    /// alone for `Ie` and gives no `Bpl` to go with it. Half a pair is not a
-    /// model.
+    /// G.722 and Opus get `None`: G.722 has its own entry (not in our copy of the text), and Opus
+    /// postdates the list. RFC 3611 §4.7.5 wants the sentinel rather than a guess; see
+    /// `sipral_rtp::RtpSession::voip_metrics`. G.729 gets `None` too: Table I.4 rates it only with
+    /// Annex B, which depends on the call, and Table I.1 gives no `Bpl` for Annex A alone.
     #[must_use]
     pub const fn quality_model(self) -> Option<sipral_rtp::CodecQualityModel> {
         match self {
@@ -294,11 +211,10 @@ impl Codec {
         }
     }
 
-    /// The RTP timestamp clock, which is what the `a=rtpmap` line carries and
-    /// what the timestamps on the wire count in.
+    /// The RTP timestamp clock, as written in `a=rtpmap`.
     ///
-    /// G.722's is 8000 and it samples at 16000. That is not a mistake to be
-    /// tidied up: a peer that reads 16000 on a G.722 line refuses the stream.
+    /// G.722's is 8000 although it samples at 16000; a peer reading 16000 on a G.722 line refuses
+    /// the stream.
     #[must_use]
     pub const fn clock_rate(self) -> u32 {
         match self {
@@ -311,8 +227,7 @@ impl Codec {
         }
     }
 
-    /// The rate the codec actually hears at, which is what the samples handed
-    /// to it and taken from it are in.
+    /// The rate the codec samples at, which is the rate of the frames passed in and out.
     #[must_use]
     pub const fn sample_rate(self) -> u32 {
         match self {
@@ -321,34 +236,26 @@ impl Codec {
             Self::G729 => g729::SAMPLE_RATE,
             #[cfg(feature = "opus")]
             Self::Opus => opus::CLOCK_RATE,
-            // a sample-based encoding: the clock counts samples
+            // L16: the clock counts samples
             Self::L16Narrowband | Self::L16Wideband => self.clock_rate(),
         }
     }
 
-    /// Samples in one frame of `millis` milliseconds, at the rate the codec
-    /// hears.
-    ///
-    /// Every rate here is a whole number of samples per millisecond, so the
-    /// division comes first and nothing is lost to it.
+    /// Samples in a frame of `millis` milliseconds. Every rate is a whole number of samples per
+    /// millisecond, so dividing first loses nothing.
     #[must_use]
     pub fn frame_samples(self, millis: u32) -> usize {
         usize::try_from(self.sample_rate() / 1_000 * millis).unwrap_or(usize::MAX)
     }
 
-    /// RTP timestamp ticks one frame of `millis` milliseconds covers, at the
-    /// clock the wire counts in.
+    /// RTP ticks a frame of `millis` milliseconds covers.
     #[must_use]
     pub const fn frame_ticks(self, millis: u32) -> u32 {
         self.clock_rate() / 1_000 * millis
     }
 
-    /// The largest payload one frame can turn into, which is what a send
-    /// buffer has to hold.
-    ///
-    /// Fixed for the four written here — one octet a sample, one per two for
-    /// G.722, ten per eighty for G.729 — and a bound rather than a size for
-    /// Opus, whose whole point is that the size depends on what was said.
+    /// The largest payload one frame can produce, which the send buffer must hold. Exact for the
+    /// written codecs, a bound for Opus.
     #[must_use]
     pub fn max_payload(self, millis: u32) -> usize {
         match self {
@@ -363,23 +270,17 @@ impl Codec {
         }
     }
 
-    /// Whether a frame of `millis` milliseconds fits the one datagram an RTP
-    /// packet of this build is: every codec's does but L16's past a length,
-    /// since L16 is the one whose payload grows with the frame and is never
-    /// small. The ceiling is the largest payload any codec here writes,
-    /// the 1275 octets of RFC 6716's longest Opus frame, so that header, tag
-    /// and payload stay inside the 1500-octet datagram a session builds.
+    /// Whether a frame of `millis` fits one datagram. Only L16 can exceed it, since its payload
+    /// grows with the frame. The limit is the longest Opus frame (RFC 6716), 1275 octets.
     #[must_use]
     pub fn fits(self, millis: u32) -> bool {
         self.max_payload(millis) <= LARGEST_PAYLOAD
     }
 
-    /// The `a=rtpmap` mapping this codec gets at the payload type given.
+    /// The `a=rtpmap` for this codec at the given payload type.
     ///
-    /// Opus is written `opus/48000/2` even for one channel: RFC 7587 §7 makes
-    /// the channel count on the line always two, "regardless of the number of
-    /// channels actually being used", and a peer that sees a 1 there may
-    /// refuse the stream.
+    /// Opus is always `opus/48000/2`, even mono (RFC 7587 §7); a peer seeing 1 may refuse the
+    /// stream.
     #[must_use]
     pub fn rtpmap(self, payload: u8) -> RtpMap {
         RtpMap {
@@ -389,7 +290,7 @@ impl Codec {
             parameters: match self {
                 #[cfg(feature = "opus")]
                 Self::Opus => Some(opus::RTPMAP_CHANNELS.to_string()),
-                // one channel, which RFC 4566 §6 has a missing count mean
+                // one channel, which a missing count means (RFC 4566 §6)
                 Self::Pcmu
                 | Self::Pcma
                 | Self::G722
@@ -400,19 +301,12 @@ impl Codec {
         }
     }
 
-    /// The `a=fmtp` parameters to offer with it, where there are any worth
-    /// sending.
+    /// The `a=fmtp` parameters to offer, if any.
     ///
-    /// Opus gets `useinbandfec=1`, which RFC 7587 §7.1 defines as this end
-    /// being prepared to use the redundancy the far end may put in its
-    /// packets. It costs nothing when the peer does not send it and it is the
-    /// difference between a lost packet and a heard one when it does.
-    ///
-    /// G.729 gets `annexb=yes`, which is what a default catalogue offers;
-    /// one made with [`CodecCatalog::with_g729_annex_b`] off offers
-    /// `annexb=no` instead, and its answers say what that method describes.
-    /// Every other codec's parameters in an answer are the offer's own,
-    /// echoed, the way `sipral_core`'s answer writes them.
+    /// Opus gets `useinbandfec=1` (RFC 7587 §7.1): free when unused, and it recovers lost packets
+    /// when the peer sends FEC. G.729 gets `annexb=yes`, or `annexb=no` with
+    /// [`CodecCatalog::with_g729_annex_b`] off. In answers, other codecs echo the offer's
+    /// parameters.
     #[must_use]
     pub const fn fmtp(self) -> Option<&'static str> {
         match self {
@@ -423,16 +317,11 @@ impl Codec {
         }
     }
 
-    /// Which codec a negotiated stream ended up on, or `None` for one this
-    /// build cannot decode.
+    /// Which codec a negotiated stream uses, or `None` if this build cannot decode it.
     ///
-    /// The encoding name decides, not the payload type: a static type means
-    /// what the table says it means, but a dynamic one means whatever the
-    /// `a=rtpmap` called it, and reading the number alone is how a stack
-    /// decodes Opus as if it were somebody else's codec. For L16 the rate
-    /// and the channel count decide too, because the name alone is every
-    /// rate and every count: `L16/44100/2` is not a stream either L16 here
-    /// can decode.
+    /// Decided by encoding name, not payload type, since a dynamic number means whatever its
+    /// `a=rtpmap` says. For L16 the rate and channel count must match too: `L16/44100/2` is neither
+    /// of ours.
     #[must_use]
     pub fn of(negotiated: &NegotiatedCodec) -> Option<Self> {
         Self::ALL.into_iter().find(|codec| {
@@ -454,9 +343,8 @@ impl Codec {
     /// The codec a plan settled on.
     ///
     /// # Errors
-    /// [`MediaError::UnknownPayload`] when the far end answered with a format
-    /// that was not in the offer, which happens and is better said than played
-    /// as noise.
+    ///
+    /// [`MediaError::UnknownPayload`] when the far end answered with a format not in the offer.
     pub fn of_plan(plan: &MediaPlan) -> Result<Self, MediaError> {
         Self::of(&plan.codec).ok_or_else(|| MediaError::UnknownPayload {
             payload: plan.codec.payload(),
@@ -464,12 +352,9 @@ impl Codec {
         })
     }
 
-    /// Every codec this build recognises among a stream's listed formats.
-    ///
-    /// Membership only, in no particular order: telling one candidate from
-    /// another only needs to know whether the far end named it at all, and
-    /// which one it preferred is already spent deciding the winner a caller
-    /// hands to [`CodecCatalog::candidates`].
+    /// Every codec this build recognises among a stream's formats, in no particular order. Only
+    /// membership matters; preference already chose the winner passed to
+    /// [`CodecCatalog::candidates`].
     #[must_use]
     pub fn named_in(stream: &MediaDescription) -> Vec<Self> {
         stream
@@ -490,43 +375,28 @@ impl core::fmt::Display for Codec {
     }
 }
 
-/// The two lines a DTLS-SRTP description carries, as the engine worked them
-/// out: the fingerprint of this stack's certificate (RFC 8122) and the
-/// `a=setup` that says which end starts the handshake (RFC 4145).
-///
-/// Borrowed rather than owned because they are written once into a
-/// description and the engine holds both for longer than that.
+/// The fingerprint (RFC 8122) and `a=setup` (RFC 4145) lines for a DTLS-SRTP description. Borrowed,
+/// since the engine owns them longer than the description.
 #[cfg(feature = "dtls")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Keyed<'a> {
-    /// The value of `a=fingerprint`.
     pub(crate) fingerprint: &'a str,
-    /// The value of `a=setup`.
     pub(crate) setup: &'a str,
 }
 
-/// With the `dtls` feature off nothing ever constructs one, and the signature
-/// that takes it still has to name a type.
+/// Never constructed without `dtls`; the signature still needs a type.
 #[cfg(not(feature = "dtls"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Keyed<'a>(core::marker::PhantomData<&'a ()>);
 
-/// What to offer, in what order, and how a frame is cut.
+/// What to offer, in what order, and how frames are cut.
 ///
-/// A stack keeps one as its site policy — what a carrier or a PBX deployment
-/// configures once — and every call takes it unless told otherwise, which is
-/// what keeps two calls on the same engine comparable rather than each one a
-/// surprise. D6 in `docs/13-client-requirements.md` still asks for a way out:
-/// an attended transfer holds two calls at once, and a consultation leg to a
-/// gateway that only speaks one codec needs its own order without changing
-/// what every other call on the same engine offers.
-/// [`place_with`](crate::MediaEngine::place_with) and
-/// [`answer_with`](crate::MediaEngine::answer_with) are that way out — an
-/// explicit catalogue named for one call, not a global anybody could be
-/// mutating underneath a call already in progress, which is the race D6 is
-/// actually about.
-// each bool is an independent choice a site makes about what its calls offer
-// (named events, multiplexing, Annex B, feedback), not a state stepped through
+/// A stack keeps one as its site policy and every call uses it by default. D6 in
+/// `docs/13-client-requirements.md` needs a per-call exception, for example a consultation leg to a
+/// one-codec gateway during an attended transfer; [`place_with`](crate::MediaEngine::place_with)
+/// and [`answer_with`](crate::MediaEngine::answer_with) take a catalogue for one call instead of
+/// mutating a shared one.
+// independent site choices (named events, mux, Annex B, feedback), not a state machine
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodecCatalog {
@@ -535,11 +405,10 @@ pub struct CodecCatalog {
     dtmf: bool,
     rtcp_mux: bool,
     srtp: SrtpPolicy,
-    /// The SRTP transforms this call will run, most preferred first, when
-    /// something named them ([`CodecCatalog::with_srtp_suites`]); `None`
-    /// for this build's own choice in each place a suite is chosen.
+    /// SRTP transforms in preference order, if set ([`CodecCatalog::with_srtp_suites`]); `None`
+    /// uses this build's defaults.
     srtp_suites: Option<Vec<Suite>>,
-    /// Whether an SDES key may travel in signalling that is not encrypted
+    /// Whether an SDES key may travel in unencrypted signalling
     /// ([`CodecCatalog::with_sdes_signalling`]).
     sdes_signalling: SdesSignalling,
     ice: IcePolicy,
@@ -549,17 +418,11 @@ pub struct CodecCatalog {
 }
 
 impl CodecCatalog {
-    /// Every codec this build offers by default — all it contains but G.729
-    /// ([`Codec::offered_by_default`]) — quality first, twenty-millisecond
-    /// frames, named events offered, RTCP on its own port, no SRTP offered,
-    /// and G.729's Annex B allowed where G.729 is named.
+    /// Every codec offered by default ([`Codec::offered_by_default`]), best first, 20 ms frames,
+    /// named events on, RTCP on its own port, no SRTP, Annex B allowed if G.729 is named.
     ///
-    /// RTCP multiplexing is off because RFC 5761 §5.1.1 only permits it when
-    /// both ends asked, and the equipment this stack is deployed against —
-    /// an Asterisk-family PBX behind consumer NAT — does not. Asking for it
-    /// unasked costs a line in every offer and buys a port on the calls where
-    /// nobody answers. SDES is off for the same shape of reason, which
-    /// [`SrtpPolicy::NotOffered`] states in full.
+    /// RTCP mux is off because RFC 5761 §5.1.1 needs both ends to ask, and typical Asterisk PBXs
+    /// behind NAT do not. SDES is off for similar reasons; see [`SrtpPolicy::NotOffered`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -580,35 +443,24 @@ impl CodecCatalog {
         }
     }
 
-    /// The same, offering these codecs in this order and nothing else.
+    /// The same, offering only these codecs in this order.
     ///
     /// # Errors
-    /// [`MediaError::NoCodecs`] for an empty order, and
-    /// [`MediaError::UnsupportedCodec`] for a name this build has no encoder
-    /// for or for one named twice — a duplicate would put the same payload
-    /// type on the `m=` line twice, which no peer has to make sense of.
+    ///
+    /// [`MediaError::NoCodecs`] for an empty order, [`MediaError::UnsupportedCodec`] for an unknown
+    /// or duplicate name.
     pub fn with_order(codecs: &[&str]) -> Result<Self, MediaError> {
         Self::new().with_codecs(codecs)
     }
 
-    /// This catalogue, offering these codecs in this order and nothing else.
-    ///
-    /// Everything else it was built with — frame length, named events,
-    /// multiplexing, SRTP — is kept. That is what makes this the way one call
-    /// says what it offers without also inheriting the defaults for the four
-    /// settings it said nothing about, which is what starting again from
-    /// [`CodecCatalog::with_order`] would hand it.
+    /// This catalogue with only these codecs in this order, keeping every other setting. Starting
+    /// from [`CodecCatalog::with_order`] would reset them.
     ///
     /// # Errors
-    /// [`MediaError::NoCodecs`] for an empty order, and
-    /// [`MediaError::UnsupportedCodec`] for a name this build has no encoder
-    /// for or for one named twice — a duplicate would put the same payload
-    /// type on the `m=` line twice, which no peer has to make sense of.
-    /// [`MediaError::BadFrameLength`] when the frame length already set is one
-    /// the new order has no frame size for: Opus arriving in a catalogue cut
-    /// at thirty milliseconds is that case, and the answer is the same
-    /// refusal [`CodecCatalog::with_frame_length`] would have given had the
-    /// two been named the other way round.
+    ///
+    /// [`MediaError::NoCodecs`] for an empty order, [`MediaError::UnsupportedCodec`] for an unknown
+    /// or duplicate name, [`MediaError::BadFrameLength`] when the current frame length does not
+    /// suit the new codecs (Opus at 30 ms, for example).
     pub fn with_codecs(self, codecs: &[&str]) -> Result<Self, MediaError> {
         if codecs.is_empty() {
             return Err(MediaError::NoCodecs);
@@ -628,23 +480,18 @@ impl CodecCatalog {
         Self { order, ..self }.with_frame_length(frame_ms)
     }
 
-    /// Cut frames at `millis` milliseconds instead of twenty.
+    /// Cut frames at `millis` milliseconds instead of 20.
     ///
     /// # Errors
-    /// [`MediaError::BadFrameLength`] for zero, for an interval Opus has no
-    /// frame size for when Opus is in this build and is one of the codecs
-    /// offered, and for one that is not a whole number of ten-millisecond
-    /// frames when G.729 is offered. G.711 and G.722 cut a whole number of
-    /// samples at any whole millisecond, because every rate here is a
-    /// multiple of a thousand; Opus has a fixed set of frame durations and
-    /// encodes nothing else, and G.729 codes ten milliseconds at a time and
-    /// nothing shorter (RFC 3551 §4.5.6), so a packet of fifteen would carry
-    /// a frame and a half.
+    ///
+    /// [`MediaError::BadFrameLength`] for zero, for a length Opus cannot encode when Opus is
+    /// offered, and for a length that is not a multiple of 10 ms when G.729 is offered (RFC 3551
+    /// §4.5.6). G.711 and G.722 accept any whole millisecond.
     pub fn with_frame_length(mut self, millis: u32) -> Result<Self, MediaError> {
         #[cfg(feature = "opus")]
         let opus_refuses = self.order.contains(&Codec::Opus)
             && opus::FrameDuration::from_micros(millis.saturating_mul(1_000)).is_err();
-        // the one opinion about frame length left is G.729's, below
+        // only G.729 constrains the frame length here
         #[cfg(not(feature = "opus"))]
         let opus_refuses = false;
         let g729_refuses = self.order.contains(&Codec::G729)
@@ -659,8 +506,7 @@ impl CodecCatalog {
         Ok(self)
     }
 
-    /// Say whether RFC 4733 named events are offered. On by default: a phone
-    /// that cannot send a digit cannot navigate a menu.
+    /// Whether RFC 4733 named events are offered. On by default, so menus can be navigated.
     #[must_use]
     pub const fn with_dtmf(mut self, dtmf: bool) -> Self {
         self.dtmf = dtmf;
@@ -674,10 +520,7 @@ impl CodecCatalog {
         self
     }
 
-    /// Say what this call does about SRTP.
-    ///
-    /// Per call rather than per engine, and off by default: see
-    /// [`SrtpPolicy`] for both halves of the reason.
+    /// What this call does about SRTP. Off by default; see [`SrtpPolicy`].
     #[must_use]
     pub const fn with_srtp(mut self, srtp: SrtpPolicy) -> Self {
         self.srtp = srtp;
@@ -690,9 +533,8 @@ impl CodecCatalog {
         self.srtp
     }
 
-    /// Say whether an SDES key may travel in signalling that is not
-    /// encrypted ([`SdesSignalling`]): by default it may, and the call says
-    /// it did.
+    /// Whether an SDES key may travel in unencrypted signalling ([`SdesSignalling`]). Allowed by
+    /// default, and reported.
     #[must_use]
     pub const fn with_sdes_signalling(mut self, sdes: SdesSignalling) -> Self {
         self.sdes_signalling = sdes;
@@ -705,25 +547,18 @@ impl CodecCatalog {
         self.sdes_signalling
     }
 
-    /// Run only these SRTP transforms, most preferred first, wherever a
-    /// suite is chosen: the `a=crypto` lines an SDES offer carries, in this
-    /// order and one each; the offered lines an SDES answer will take, still
-    /// in the offerer's order (RFC 4568 §5.1.2) but only among these; and
-    /// the protection profiles a DTLS-SRTP handshake offers and accepts, in
-    /// this order, of the four there are profiles for — `AEAD_AES_256_GCM`
-    /// and `AEAD_AES_128_GCM` (RFC 7714 §14.2) and the two AES-CM ones (RFC
-    /// 5764 §4.1.2). Leaving the two GCM suites out is how an account turns
-    /// them off, and naming them first is how it asks for them first.
+    /// Use only these SRTP transforms, most preferred first, wherever a suite is chosen: SDES offer
+    /// lines (one each, in this order), SDES answers (offerer's order, RFC 4568 §5.1.2, among
+    /// these), and DTLS-SRTP profiles for the four with profiles: `AEAD_AES_256_GCM`,
+    /// `AEAD_AES_128_GCM` (RFC 7714 §14.2) and the two AES-CM ones (RFC 5764 §4.1.2).
     ///
-    /// Unset, an SDES offer names `AEAD_AES_256_GCM` then
-    /// `AES_CM_128_HMAC_SHA1_80`, an answer takes any of the seven, and a
-    /// handshake the four strongest first. Every line is in the INVITE, so
-    /// a long list costs octets RFC 3261 §18.1.1 counts against a datagram:
-    /// past two or three suites an offer over UDP needs a stream.
+    /// Unset, an SDES offer names `AEAD_AES_256_GCM` then `AES_CM_128_HMAC_SHA1_80`, an answer
+    /// accepts any of the seven, and a handshake offers the four strongest first. Each line adds to
+    /// the INVITE (RFC 3261 §18.1.1); more than two or three suites over UDP needs TCP.
     ///
     /// # Errors
-    /// [`MediaError::NoSrtpSuite`] for an empty list or one naming a suite
-    /// twice.
+    ///
+    /// [`MediaError::NoSrtpSuite`] for an empty list or a duplicate.
     pub fn with_srtp_suites(mut self, suites: &[Suite]) -> Result<Self, MediaError> {
         let repeated = suites
             .iter()
@@ -736,15 +571,14 @@ impl CodecCatalog {
         Ok(self)
     }
 
-    /// The SRTP transforms this call is held to, when something named them.
+    /// The SRTP transforms this call is limited to, if set.
     #[must_use]
     pub fn srtp_suites(&self) -> Option<&[Suite]> {
         self.srtp_suites.as_deref()
     }
 
-    /// The SRTP transforms this catalogue's calls run, in order: the ones it
-    /// named ([`CodecCatalog::with_srtp_suites`]), or this build's own when
-    /// it named none.
+    /// The SRTP transforms in order: those set with [`CodecCatalog::with_srtp_suites`], or the
+    /// build defaults.
     #[must_use]
     pub fn srtp_suites_in_force(&self) -> Vec<Suite> {
         self.srtp_suites.clone().unwrap_or_else(|| {
@@ -760,17 +594,10 @@ impl CodecCatalog {
         keying::sdes_suites(self.srtp_suites())
     }
 
-    /// Say what this call does about ICE.
+    /// What this call does about ICE. Off by default; see [`IcePolicy`].
     ///
-    /// Per call rather than per engine, and off by default: see [`IcePolicy`]
-    /// for both halves of the reason.
-    ///
-    /// A policy that offers ICE also asks for RFC 5761 multiplexing, whatever
-    /// [`CodecCatalog::with_rtcp_mux`] was told and in the same way a DTLS
-    /// policy does. Without it the stream has a second ICE component, and a
-    /// facade that knows one local address cannot give the second one a
-    /// candidate — an offer written that way fails this stack's own mismatch
-    /// check (RFC 8839 §4.2.5) before any peer sees it.
+    /// A policy that offers ICE also forces RFC 5761 mux, as DTLS does: a second component would
+    /// need a second address, and the offer would fail our own mismatch check (RFC 8839 §4.2.5).
     #[must_use]
     pub const fn with_ice(mut self, ice: IcePolicy) -> Self {
         self.ice = ice;
@@ -783,18 +610,12 @@ impl CodecCatalog {
         self.ice
     }
 
-    /// Say whether G.729's Annex B — silence compression: SID frames and
-    /// nothing in a pause, and the comfort noise both ends make from them —
-    /// is allowed.
+    /// Whether G.729 Annex B (SID frames and comfort noise in pauses) is allowed.
     ///
-    /// On by default, which is what `G729` means with no parameter (RFC 4856
-    /// §2.1.9): an offer says `annexb=yes`, and an answer says whatever the
-    /// offer did, `yes` included only where the offer allowed it. Off, both
-    /// say `annexb=no`, which RFC 3551 §4.5.6 makes the far end's cue to
-    /// send no SID frames. The encoder uses Annex B only where both
-    /// descriptions allowed it; the decoder plays a SID frame whatever was
-    /// said, since a peer that sends one anyway is better heard than not.
-    /// Nothing changes for a catalogue that does not name G.729.
+    /// On by default, as `G729` with no parameter means (RFC 4856 §2.1.9): offers say `annexb=yes`,
+    /// answers say `yes` only if the offer allowed it. Off, both say `annexb=no`, telling the far
+    /// end not to send SID (RFC 3551 §4.5.6). The encoder uses Annex B only where both allowed it;
+    /// the decoder always plays SID frames.
     #[must_use]
     pub const fn with_g729_annex_b(mut self, annex_b: bool) -> Self {
         self.annex_b = annex_b;
@@ -807,19 +628,13 @@ impl CodecCatalog {
         self.annex_b
     }
 
-    /// Say whether this call asks for RTCP feedback: RTP/AVPF (RFC 4585),
-    /// or RTP/SAVPF (RFC 5124) and UDP/TLS/RTP/SAVPF where it is keyed, with
-    /// Generic NACKs (`a=rtcp-fb:* nack`) and reduced-size RTCP
-    /// (`a=rtcp-rsize`, RFC 5506).
+    /// Whether this call asks for RTCP feedback: RTP/AVPF (RFC 4585), or RTP/SAVPF (RFC 5124) and
+    /// UDP/TLS/RTP/SAVPF when keyed, with Generic NACK and reduced-size RTCP (RFC 5506).
     ///
-    /// Off by default, and for the reason RTCP multiplexing is: the profile
-    /// is on the `m=` line itself, and a peer that knows only RTP/AVP refuses
-    /// a stream offered on RTP/AVPF rather than falling back. On, an offer
-    /// names the feedback profile, and an offer that arrived naming one is
-    /// answered with the feedback this stack does. Either way, a stream
-    /// whose offer and answer both name a feedback profile runs its RTCP by
-    /// RFC 4585's rules ([`sipral_rtp::RtpSession::use_feedback`]), and what
-    /// was agreed is in [`crate::StreamStatistics::feedback`].
+    /// Off by default: the profile is on the `m=` line, and a peer knowing only RTP/AVP refuses the
+    /// stream. When both descriptions name a feedback profile, RTCP follows RFC 4585
+    /// ([`sipral_rtp::RtpSession::use_feedback`]); the result is in
+    /// [`crate::StreamStatistics::feedback`].
     #[must_use]
     pub const fn with_feedback(mut self, feedback: bool) -> Self {
         self.feedback = feedback;
@@ -832,15 +647,11 @@ impl CodecCatalog {
         self.feedback
     }
 
-    /// Whether an offer asks for, and an answer offers, the VoIP metrics
-    /// report of RFC 3611 §4.7 (`a=rtcp-xr:voip-metrics`, §5.1).
+    /// Whether offers and answers ask for the RFC 3611 §4.7 VoIP metrics report
+    /// (`a=rtcp-xr:voip-metrics`, §5.1).
     ///
-    /// On by default: it is what lets a call this end placed hear what the
-    /// far end measured of its audio, for the quality report. Off, the
-    /// line is not written — twenty-four bytes off an INVITE that has to fit
-    /// a datagram — and a call reports only what this end measured itself;
-    /// an offer that asks for the report is still sent it, since RFC 3611
-    /// §5.2 makes that the offerer's request and not this end's.
+    /// On by default, so an outgoing call learns what the far end measured. Off saves 24 bytes per
+    /// INVITE. An offer that asks is still sent the report (§5.2).
     #[must_use]
     pub const fn with_voip_metrics(mut self, voip_metrics: bool) -> Self {
         self.voip_metrics = voip_metrics;
@@ -853,9 +664,8 @@ impl CodecCatalog {
         self.voip_metrics
     }
 
-    /// The `a=fmtp` parameters this catalogue offers `codec` with:
-    /// [`Codec::fmtp`], but for G.729, whose `annexb` is this catalogue's
-    /// to say.
+    /// The `a=fmtp` this catalogue offers for `codec`: [`Codec::fmtp`], except G.729's `annexb`,
+    /// which is the catalogue's.
     pub(crate) const fn offered_fmtp(&self, codec: Codec) -> Option<&'static str> {
         match codec {
             Codec::G729 => Some(annex_b_parameter(self.annex_b)),
@@ -863,11 +673,9 @@ impl CodecCatalog {
         }
     }
 
-    /// The `a=fmtp` parameters this end writes for `codec` in an answer to
-    /// an offer that gave it `offered`, where this end states them rather
-    /// than echoes the offer's: only G.729's `annexb`, which is `yes` only
-    /// if the offer allowed it (RFC 4856 §2.1.9 reads its absence as `yes`)
-    /// and this catalogue does.
+    /// The `a=fmtp` this end states for `codec` in an answer to `offered`: only G.729's `annexb`,
+    /// `yes` only if the offer (absent means `yes`, RFC 4856 §2.1.9) and the catalogue both allow
+    /// it.
     pub(crate) fn answered_fmtp(
         &self,
         codec: Codec,
@@ -888,21 +696,11 @@ impl CodecCatalog {
         self.frame_ms
     }
 
-    /// The vocabulary the negotiation takes: this catalogue as
-    /// [`MediaCapabilities`], which is what crosses the seam into
-    /// `sipral-core`'s offer/answer.
+    /// This catalogue as [`MediaCapabilities`] for `sipral-core`'s offer/answer.
     ///
-    /// Payload types are assigned here rather than being fields of
-    /// [`Codec`]: the three static ones are what RFC 3551 says they are, and
-    /// the dynamic ones are handed out in offer order from 96, so the same
-    /// build offering a different order writes different numbers and is right
-    /// both times.
-    ///
-    /// No `a=crypto` and no secure profile, whatever [`CodecCatalog::srtp`]
-    /// says. A key cannot be invented here: it comes out of the seeded token
-    /// stream the user agent owns, so
-    /// [`MediaEngine`](crate::MediaEngine) draws one per description and adds
-    /// the line itself. This is the vocabulary; the keys are the engine's.
+    /// Payload types are assigned here: static ones per RFC 3551, dynamic ones from 96 in offer
+    /// order. No `a=crypto` or secure profile: keys come from the engine's seeded stream, so
+    /// [`MediaEngine`](crate::MediaEngine) adds them per description.
     #[must_use]
     pub fn capabilities(&self) -> MediaCapabilities {
         let mut next_dynamic = FIRST_DYNAMIC;
@@ -925,31 +723,19 @@ impl CodecCatalog {
         MediaCapabilities::new(codecs)
             .with_dtmf(self.dtmf)
             .with_voip_metrics_xr(self.voip_metrics)
-            // an ICE stream has one component, and that is what asking for
-            // multiplexing makes true
+            // one ICE component is what mux gives
             .with_rtcp_mux(self.rtcp_mux || self.ice.offers())
     }
 
-    /// The same, with the keying a description under this policy carries.
+    /// The same, with the keying for a description under this policy.
     ///
-    /// `keys` is one master key and salt per suite
-    /// [`CodecCatalog::sdes_offered`] names, each already drawn for the
-    /// description being written and paired with its suite, and `dtls` is
-    /// the fingerprint of this stack's certificate with the `a=setup` that
-    /// goes beside it. A policy that does not offer, or a description with
-    /// neither to write, leaves the offer on `RTP/AVP` with nothing in the
-    /// body that has to be kept secret.
+    /// `keys` holds one master key and salt per suite in [`CodecCatalog::sdes_offered`]; `dtls` is
+    /// the certificate fingerprint and `a=setup`. With neither, the offer is plain `RTP/AVP`.
     ///
-    /// A DTLS description also asks for `a=rtcp-mux` whatever the catalogue
-    /// says, because RFC 5764 §4.2 puts a second handshake on a separate RTCP
-    /// port and this stack runs one; asking here is what keeps that from
-    /// becoming a refusal later.
-    ///
-    /// Under [`SrtpPolicy::DtlsOrSdes`] the offer is the SDES one, on
-    /// `RTP/SAVP` and asking for `a=rtcp-mux`; the engine adds the
-    /// fingerprint and `a=setup` beside its crypto lines once it is written,
-    /// since [`SrtpSupport`] names one way to key a stream and this offer
-    /// names two.
+    /// A DTLS description always asks for `a=rtcp-mux`, since RFC 5764 §4.2 would otherwise need a
+    /// second handshake. Under [`SrtpPolicy::DtlsOrSdes`] this is the SDES offer on `RTP/SAVP` with
+    /// mux; the engine adds the fingerprint afterwards, because [`SrtpSupport`] names only one
+    /// keying method.
     pub(crate) fn offering(
         &self,
         keys: Option<Vec<(sipral_core::sdp::CryptoSuite, KeySalt)>>,
@@ -977,7 +763,7 @@ impl CodecCatalog {
         #[cfg(not(feature = "dtls"))]
         let _ = dtls;
         match keys.filter(|_| self.srtp.offers()) {
-            // `SrtpPolicy::BestEffort`: the same lines, on the plain profile
+            // `SrtpPolicy::BestEffort`: same lines, plain profile
             Some(keys) if self.srtp.on_plain_profile() => {
                 capabilities.with_srtp(SrtpSupport::SdesOnAvp(keying::offer_lines(keys)))
             }
@@ -986,16 +772,12 @@ impl CodecCatalog {
         }
     }
 
-    /// What became of every codec in this catalogue, once a call settled on
-    /// `winner` — D5's losers, not only its winner.
+    /// What became of every codec in this catalogue once the call settled on `winner` (D5).
     ///
-    /// `remote` is the far end's own description of the stream: the answer,
-    /// when this build placed the call, and the offer, when it answered one
-    /// — whichever [`SessionDescription::media_plan`](sipral_core::sdp::SessionDescription::media_plan)
-    /// read `winner` off of. Computed once, at the point the negotiation is
-    /// worked out, rather than reconstructed afterwards from the two SDP
-    /// bodies: a reconstruction can disagree with what the negotiation
-    /// actually did in exactly the case somebody is debugging.
+    /// `remote` is the far end's description the winner was read from
+    /// ([`SessionDescription::media_plan`](sipral_core::sdp::SessionDescription::media_plan)).
+    /// Computed when negotiating, because a later reconstruction can disagree in exactly the case
+    /// being debugged.
     #[must_use]
     pub fn candidates(&self, remote: &MediaDescription, winner: Codec) -> Vec<CodecCandidate> {
         let named = Codec::named_in(remote);
@@ -1024,28 +806,20 @@ pub struct CodecCandidate {
     pub outcome: CodecOutcome,
 }
 
-/// Why a candidate did or did not become the codec a call is using.
+/// Why a candidate did or did not become the call's codec.
 ///
-/// "PCMU was chosen" is a fact a live call already reports
-/// ([`crate::MediaEvent::Started`]); this is the diagnosis, and it is what
-/// turns a wrong configuration into something visible instead of something
-/// inferred from a packet capture (D5, B6, in
-/// `docs/13-client-requirements.md`).
+/// The diagnosis behind "PCMU was chosen" ([`crate::MediaEvent::Started`]), so a configuration
+/// error is visible without a packet capture (D5, B6 in `docs/13-client-requirements.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CodecOutcome {
-    /// This is what the call settled on. Appears exactly once per call, on
-    /// [`MediaSession::codec`](crate::MediaSession::codec)'s own answer.
+    /// The codec the call uses. Exactly one per call, the one
+    /// [`MediaSession::codec`](crate::MediaSession::codec) returns.
     Chosen,
-    /// The far end's own description of the stream never named it, so there
-    /// was nothing on the other side to agree with — "Opus was offered and
-    /// the answer did not name it" is this variant.
+    /// The far end's description never named it.
     NotNamed,
-    /// The far end named it too, but the candidate this carries was
-    /// preferred first — "G.722 was offered and this build ranked it below
-    /// PCMU" is this variant, carrying PCMU. RFC 3264 §6.1 is what has the
-    /// far end's own listed order decide between two candidates both sides
-    /// could use.
+    /// The far end named it, but the carried candidate was preferred (RFC 3264 §6.1: the far end's
+    /// order decides).
     Outranked(Codec),
 }
 
@@ -1062,24 +836,15 @@ pub(crate) mod tests {
     use crate::keying::SrtpPolicy;
     use sipral_core::sdp::{Direction, NegotiatedCodec, RtpMap};
 
-    /// A codec this build has that the far end in these tests never names,
-    /// spelled the way an order spells it and named the way the enumeration
-    /// names it.
-    ///
-    /// Which codec that is depends on the build: Opus where it is compiled
-    /// in, and G.722 where it is not. What the tests using it are about is a
-    /// codec on this side that the other side does not offer — so that there
-    /// is always a candidate to come back `NotNamed` — and that has to be
-    /// some codec in either build. Declared once and shared with the
-    /// two-stack tests in `crate::tests`, which want the same thing of it.
+    /// A codec this build has that the test peer never names: Opus when built, G.722 otherwise.
+    /// Shared with `crate::tests`.
     #[cfg(feature = "opus")]
     pub(crate) const UNMATCHED: (&str, Codec) = ("opus", Codec::Opus);
     /// See the other declaration.
     #[cfg(not(feature = "opus"))]
     pub(crate) const UNMATCHED: (&str, Codec) = ("G722", Codec::G722);
 
-    /// The trap the interop harness walked into once already, kept here so
-    /// that it cannot be walked into again from the other side.
+    /// A trap the interop harness fell into once.
     #[test]
     fn a_frame_is_three_different_numbers() {
         assert_eq!(Codec::Pcmu.frame_samples(DEFAULT_FRAME_MS), 160);
@@ -1090,7 +855,7 @@ pub(crate) mod tests {
         assert_eq!(Codec::G722.max_payload(DEFAULT_FRAME_MS), 160);
         assert_eq!(Codec::G722.frame_ticks(DEFAULT_FRAME_MS), 160);
 
-        // two ten-octet frames: RFC 3551 §4.5.6's default packet
+        // two 10-octet frames, the RFC 3551 §4.5.6 default packet
         assert_eq!(Codec::G729.frame_samples(DEFAULT_FRAME_MS), 160);
         assert_eq!(Codec::G729.max_payload(DEFAULT_FRAME_MS), 20);
         assert_eq!(Codec::G729.frame_ticks(DEFAULT_FRAME_MS), 160);
@@ -1103,8 +868,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// G.722 counts at half the rate it hears at, and a line that says
-    /// otherwise is refused by real peers.
+    /// G.722's clock is half its sample rate, and real peers refuse a line that says otherwise.
     #[test]
     fn g722_counts_at_half_the_rate_it_hears_at() {
         assert_eq!(Codec::G722.clock_rate(), 8_000);
@@ -1128,9 +892,8 @@ pub(crate) mod tests {
         assert_eq!(Codec::Opus.static_payload(), None);
     }
 
-    /// L16 is named by its rate, offered only where an order names it, on a
-    /// dynamic type with the rate on its `a=rtpmap` line, and read back off a
-    /// description only at that rate and one channel.
+    /// L16 is named by rate, offered only when ordered, on a dynamic type with the rate in
+    /// `a=rtpmap`, and recognised only at that rate and mono.
     #[test]
     fn l16_is_named_and_recognised_by_its_rate() {
         assert!(!CodecCatalog::new().codecs().contains(&Codec::L16Wideband));
@@ -1143,7 +906,7 @@ pub(crate) mod tests {
         let offer = catalog
             .capabilities()
             .offer("audio", 40_000, Direction::SendRecv);
-        // and named events on each of the two clocks the codecs run on
+        // named events on both clocks
         assert_eq!(offer.formats, ["96", "97", "0", "98", "99"]);
         assert_eq!(
             offer.rtpmap(98).map(|map| map.to_value()).as_deref(),
@@ -1188,9 +951,8 @@ pub(crate) mod tests {
         assert_eq!(read("11 L16/44100"), None);
     }
 
-    /// L16 is the codec whose payload grows with the frame and is never
-    /// small, so a frame that would not fit a datagram is refused where it
-    /// is set rather than when the first packet is built.
+    /// L16 frames that would not fit a datagram are refused when set, not when the first packet is
+    /// built.
     #[test]
     fn a_frame_l16_cannot_fit_in_a_datagram_is_refused() {
         let wide = CodecCatalog::with_order(&["L16/16000"]).unwrap();
@@ -1208,8 +970,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// G.729 is in the build and out of the default offer, and an order
-    /// that names it offers it, on 18, saying whether it takes Annex B.
+    /// G.729 is built but not offered by default; when ordered it is offered on 18 with its Annex B
+    /// setting.
     #[test]
     fn g729_is_offered_only_when_an_order_names_it() {
         assert!(Codec::ALL.contains(&Codec::G729));
@@ -1245,9 +1007,8 @@ pub(crate) mod tests {
         assert_eq!(without.fmtp(18), Some("annexb=no"));
     }
 
-    /// RFC 4856 §2.1.9: `annexb` absent is `yes`, and only `no` refuses it;
-    /// an answer says `yes` only where the offer and the catalogue both
-    /// allow it, and nothing of its own for any codec but G.729.
+    /// RFC 4856 §2.1.9: absent `annexb` means `yes`, only `no` refuses. Answers say `yes` only when
+    /// offer and catalogue allow it, and nothing for other codecs.
     #[test]
     fn an_answer_allows_annex_b_only_where_the_offer_did() {
         use super::annex_b_allowed;
@@ -1278,9 +1039,7 @@ pub(crate) mod tests {
         assert_eq!(on.answered_fmtp(Codec::Pcma, None), None);
     }
 
-    /// G.729 codes ten milliseconds at a time, so an order naming it takes a
-    /// frame length only in whole tens — and the same length without it is
-    /// still taken.
+    /// With G.729 only multiples of 10 ms are accepted; without it the same length is fine.
     #[test]
     fn g729_takes_only_whole_ten_millisecond_frames() {
         let g729 = CodecCatalog::with_order(&["G729"]).unwrap();
@@ -1321,8 +1080,7 @@ pub(crate) mod tests {
         assert_eq!(offered, [8, 9]);
     }
 
-    /// The same, for the one codec that has no static number: it is the
-    /// dynamic types this build hands out that the order decides.
+    /// For Opus, which has no static number, the order decides the dynamic types.
     #[cfg(feature = "opus")]
     #[test]
     fn an_order_naming_opus_gives_it_the_first_dynamic_type_left() {
@@ -1337,9 +1095,7 @@ pub(crate) mod tests {
         assert_eq!(offered, [8, 96]);
     }
 
-    /// D6: one call names its own order without also losing the four settings
-    /// it said nothing about. Starting again from `with_order` would hand it
-    /// the defaults for all four, which is the bug this method exists to stop.
+    /// D6: `with_codecs` keeps the other four settings, unlike starting over with `with_order`.
     #[test]
     fn naming_codecs_on_a_catalogue_keeps_everything_else_it_was_built_with() {
         let site = CodecCatalog::with_order(&["PCMU", "G722"])
@@ -1359,14 +1115,11 @@ pub(crate) mod tests {
         assert_eq!(call.capabilities().rtcp_mux, site.capabilities().rtcp_mux);
     }
 
-    /// And the one setting that is not independent of the order stays
-    /// checked: a frame length the new order has no size for is refused here
-    /// rather than discovered in the offer.
+    /// The frame length is still checked against the new order.
     #[cfg(feature = "opus")]
     #[test]
     fn naming_codecs_rechecks_the_frame_length_against_the_new_order() {
-        // thirty milliseconds is a whole number of samples for all three
-        // written codecs and no frame Opus encodes
+        // 30 ms suits the written codecs but not Opus
         let narrowband = CodecCatalog::with_order(&["PCMU"])
             .unwrap()
             .with_frame_length(30)
@@ -1375,7 +1128,7 @@ pub(crate) mod tests {
             narrowband.clone().with_codecs(&["opus"]).unwrap_err(),
             MediaError::BadFrameLength { millis: 30 }
         );
-        // and the same order at a length Opus does encode is taken
+        // a length Opus can encode is accepted
         assert!(
             narrowband
                 .with_frame_length(20)
@@ -1385,12 +1138,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// B2: a setting that is accepted and ignored is worse than one that is
-    /// refused. A codec this build has no encoder for is refused, by name.
+    /// B2: a codec without an encoder is refused by name rather than ignored.
     #[test]
     fn a_codec_this_build_does_not_have_is_refused_by_name() {
-        // on its own, so that the refusal is about the name and cannot be the
-        // duplicate check answering for it
+        // alone, so the duplicate check cannot be what refuses it
         let error = CodecCatalog::with_order(&["SILK"]).unwrap_err();
         assert_eq!(
             error,
@@ -1399,14 +1150,12 @@ pub(crate) mod tests {
             }
         );
         assert!(error.to_string().contains("SILK"));
-        // and the message says what there is instead, which is what the build
-        // has and not a list written out somewhere
+        // the message lists what the build has
         assert!(error.to_string().contains("G722"));
         #[cfg(feature = "opus")]
         assert!(error.to_string().contains("opus"));
 
-        // and beside a codec that does exist, where the order is still refused
-        // rather than quietly shortened
+        // a valid codec beside it does not make the order acceptable
         assert!(CodecCatalog::with_order(&["PCMU", "SILK"]).is_err());
     }
 
@@ -1419,10 +1168,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Opus is the codec with an opinion about frame length. Thirty
-    /// milliseconds is a perfectly ordinary `ptime` for G.711 and Opus has no
-    /// such frame, so which answer comes back depends on what is being
-    /// offered — and both answers have to be the right one.
+    /// Opus constrains frame length: 30 ms is fine for G.711 but not for Opus, so the answer
+    /// depends on what is offered.
     #[cfg(feature = "opus")]
     #[test]
     fn a_frame_length_opus_has_no_frame_for_is_refused_only_where_opus_is() {
@@ -1451,9 +1198,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The other half of that, for the build with no Opus in it: nothing
-    /// left has an opinion about frame length, so thirty milliseconds is
-    /// taken and only zero is refused.
+    /// Without Opus, 30 ms is accepted and only zero is refused.
     #[cfg(not(feature = "opus"))]
     #[test]
     fn without_opus_every_whole_millisecond_cuts_a_frame() {
@@ -1470,15 +1215,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// The named-event payload type has to fall clear of the codecs, whatever
-    /// order they were put in.
+    /// The named-event payload type must not clash with any codec, whatever the order.
     #[test]
     fn named_events_get_a_dynamic_type_no_codec_took() {
         let capabilities = CodecCatalog::new().capabilities();
         #[cfg(feature = "opus")]
         {
-            // Opus is first and takes the first dynamic type, so events take
-            // the next one
+            // Opus takes 96, events the next
             assert_eq!(
                 capabilities.codecs.first().map(NegotiatedCodec::payload),
                 Some(96)
@@ -1487,8 +1230,7 @@ pub(crate) mod tests {
         }
         #[cfg(not(feature = "opus"))]
         {
-            // every codec left has a static number of its own, so events take
-            // the first dynamic one
+            // all remaining codecs are static, so events take 96
             assert_eq!(
                 capabilities.codecs.first().map(NegotiatedCodec::payload),
                 Some(9)
@@ -1506,8 +1248,7 @@ pub(crate) mod tests {
         assert_eq!(capabilities.dtmf_payload(), None);
     }
 
-    /// The offer this catalogue writes has to name every codec in it and
-    /// nothing else, with the fmtp line Opus needs.
+    /// The offer names exactly the catalogue's codecs, with Opus's fmtp.
     #[test]
     fn the_offer_names_what_the_catalogue_holds() {
         let offer = CodecCatalog::new()
@@ -1515,8 +1256,7 @@ pub(crate) mod tests {
             .offer("audio", 40_000, Direction::SendRecv);
         #[cfg(feature = "opus")]
         {
-            // named events on Opus's clock and on the others' eight
-            // kilohertz, G.722's RTP clock included (RFC 3551 §4.5.2)
+            // named events on Opus's clock and on 8 kHz, which includes G.722 (RFC 3551 §4.5.2)
             assert_eq!(offer.formats, ["96", "9", "0", "8", "97", "98"]);
             assert_eq!(offer.fmtp(96), Some("useinbandfec=1"));
             assert_eq!(offer.fmtp(97), Some("0-15"));
@@ -1541,8 +1281,7 @@ pub(crate) mod tests {
         assert!(offer.has_flag("rtcp-mux"));
     }
 
-    /// The name decides, not the number: a dynamic type means whatever the
-    /// rtpmap called it.
+    /// The encoding name decides, not the number.
     #[test]
     fn a_negotiated_codec_is_recognised_by_name_not_by_number() {
         let opus = NegotiatedCodec::new(RtpMap {
@@ -1553,8 +1292,7 @@ pub(crate) mod tests {
         });
         #[cfg(feature = "opus")]
         assert_eq!(Codec::of(&opus), Some(Codec::Opus));
-        // and a build that compiled it out does not recognise it, which is
-        // the whole of what "no Opus" means on the receiving side
+        // without Opus the name is not recognised
         #[cfg(not(feature = "opus"))]
         assert_eq!(Codec::of(&opus), None);
 
@@ -1567,8 +1305,7 @@ pub(crate) mod tests {
         assert_eq!(Codec::of(&unknown), None);
     }
 
-    /// A stream's own formats, read back as codecs regardless of what this
-    /// catalogue offers — membership, not agreement.
+    /// A stream's formats are read as codecs whatever this catalogue offers.
     #[test]
     fn named_in_reads_every_codec_a_stream_lists_by_encoding_not_by_number() {
         let stream = CodecCatalog::with_order(&[UNMATCHED.0, "PCMU"])
@@ -1577,8 +1314,7 @@ pub(crate) mod tests {
             .offer("audio", 40_000, Direction::SendRecv);
         assert_eq!(Codec::named_in(&stream), [UNMATCHED.1, Codec::Pcmu]);
 
-        // named events and comfort noise are not codecs, whatever number they
-        // land on
+        // named events and comfort noise are not codecs
         let catalog = CodecCatalog::new();
         let with_events = catalog
             .capabilities()
@@ -1586,13 +1322,12 @@ pub(crate) mod tests {
         assert_eq!(Codec::named_in(&with_events), catalog.codecs());
     }
 
-    /// D5: the codec chosen and why each other candidate was not — a lost
-    /// candidate is either never named by the far end, or named and beaten by
-    /// whichever candidate its own list preferred first.
+    /// D5: the chosen codec, and why each other one lost: not named by the far end, or outranked by
+    /// its own list.
     #[test]
     fn candidates_says_why_each_codec_that_was_not_chosen_was_not() {
         let catalog = CodecCatalog::with_order(&[UNMATCHED.0, "PCMA", "PCMU"]).unwrap();
-        // the far end's own description names only PCMA and PCMU, PCMA first
+        // the far end names only PCMA and PCMU, PCMA first
         let remote = CodecCatalog::with_order(&["PCMA", "PCMU"])
             .unwrap()
             .capabilities()

@@ -1,44 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Recording a call to a recording server (SIPREC, RFC 7866): the recording
-//! session's offer and metadata, and the copies of a call's audio that go to
-//! it.
+//! Recording a call to a recording server (SIPREC, RFC 7866): the recording session's offer and
+//! metadata, and the audio copies sent to it.
 //!
-//! [`crate::MediaEngine::record_to`] places a recording session for a call
-//! whose audio is running: a call of its own, to the recording server (the
-//! SRS), whose INVITE carries `Require: siprec`, `+sip.src` and, beside its
-//! offer, RFC 7865 metadata naming the call and its two parties
-//! (`sipral_ua::siprec`). The offer has two sendonly streams (RFC 7866
-//! §7.1.1), one per party, labelled `1` for this end and `2` for the far end,
-//! each on a socket of its own and on the codec the call is using.
+//! [`crate::MediaEngine::record_to`] places a recording session for a call with running audio: a
+//! separate call to the recording server (SRS), whose INVITE carries `Require: siprec`, `+sip.src`
+//! and RFC 7865 metadata naming the call and its two parties (`sipral_ua::siprec`). The offer has
+//! two sendonly streams (RFC 7866 §7.1.1), labelled `1` for this end and `2` for the far end, each
+//! on its own socket and the call's codec.
 //!
-//! **The audio is copied, not re-encoded.** Once the server has answered, the
-//! recorded call's session sends every packet it puts on the wire again to the
-//! first stream, and every packet it takes from the far end again to the
-//! second (RFC 7866 §8.2.1.1, the SRC as a forwarding translator): the same
-//! payload, the same payload type, the same timing, under a source and a
-//! numbering of each stream's own. What the application sends from which
-//! socket comes out of [`crate::MediaSession::poll_recording`]. A stream the
-//! server refused (a port of zero) gets nothing.
+//! **Audio is copied, not re-encoded.** Once answered, every packet the call sends is resent to
+//! stream 1 and every packet it receives to stream 2 (RFC 7866 §8.2.1.1, forwarding translator):
+//! same payload, type and timing, with each stream's own source and numbering. The application
+//! sends what [`crate::MediaSession::poll_recording`] returns. A refused stream (port zero) gets
+//! nothing.
 //!
-//! **The recording follows the call.** A hold changes which parties send, and
-//! the server is told in fresh metadata (RFC 7866 §7.1.1.1: "Media stream
-//! direction changes in the CS are conveyed in the metadata by the SRC"); a
-//! call that replaces the recorded one ([`sipral_ua::UaEvent::CallReplaced`],
-//! RFC 3891) takes the recording over, with the new far end as the second
-//! party. When the recorded call ends the recording session is hung up, and
-//! when the server hangs up the copies stop.
+//! **The recording follows the call.** A hold changes who sends, reported in new metadata (RFC 7866
+//! §7.1.1.1). A call replacing the recorded one ([`sipral_ua::UaEvent::CallReplaced`], RFC 3891)
+//! takes over the recording with its far end as party two. The recording session is hung up when
+//! the call ends; copying stops when the server hangs up.
 //!
-//! **An encrypted call is recorded encrypted** (RFC 7866 §12.2). Its two
-//! streams are offered as `RTP/SAVP` with SDES keys of their own (RFC 4568),
-//! different from the call's, and each copy goes out under this end's key
-//! for the line the server took; a stream the server will not take as SRTP
-//! gets nothing, unless the account allows its encrypted calls to be recorded
-//! in the clear ([`crate::AccountSrtp::recording_in_clear`]). Copies that move
-//! — to a call that replaced the recorded one, or to a stream the server took
-//! back — carry their numbering on, so no SRTP index goes out twice under one
-//! key.
+//! **Encrypted calls are recorded encrypted** (RFC 7866 §12.2): both streams are offered as
+//! `RTP/SAVP` with their own SDES keys (RFC 4568), and each copy goes out under our key for the
+//! line the server took. A stream the server will not take as SRTP gets nothing, unless the account
+//! allows clear recording ([`crate::AccountSrtp::recording_in_clear`]). Copies that move (to a
+//! replacing call, or a stream taken back) keep their numbering, so no SRTP index is reused under
+//! one key.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -60,8 +48,7 @@ pub(crate) const THIS_END: &str = "1";
 /// The label of the stream that carries the far end's audio.
 pub(crate) const FAR_END: &str = "2";
 
-/// The most copies waiting to be sent before the oldest are dropped: a
-/// second of both directions at twenty milliseconds a frame.
+/// Most copies queued before the oldest are dropped: one second of both directions at 20 ms frames.
 const QUEUE: usize = 100;
 
 /// Where to record a call, and from where.
@@ -71,16 +58,15 @@ pub struct RecordTo {
     pub server: Uri,
     /// Where to send the INVITE, when not where the call's account sends.
     pub destination: Option<(TransportId, SocketAddr)>,
-    /// The socket the copy of this end's audio is sent from, and the address
-    /// the offer names for the stream labelled `1`.
+    /// The socket this end's copy is sent from, and the address the offer names for stream `1`.
     pub this_end: SocketAddr,
     /// The same for the far end's audio, labelled `2`.
     pub far_end: SocketAddr,
 }
 
 impl RecordTo {
-    /// Record to `server`, sending this end's audio from `this_end` and the
-    /// far end's from `far_end`, two sockets the application bound.
+    /// Record to `server`, sending this end's audio from `this_end` and the far end's from
+    /// `far_end`, two sockets the application bound.
     #[must_use]
     pub const fn new(server: Uri, this_end: SocketAddr, far_end: SocketAddr) -> Self {
         Self {
@@ -107,21 +93,18 @@ pub struct RecordingDatagram<'a> {
     pub from: SocketAddr,
     /// Where the recording server receives that stream.
     pub destination: SocketAddr,
-    /// Whether it is a copy of the far end's audio, the stream labelled `2`,
-    /// rather than this end's: which of the two sockets `from` is, for a
-    /// caller that keeps them by role.
+    /// Whether this copies the far end's audio (stream `2`), i.e. which socket `from` is, for
+    /// callers that keep sockets by role.
     pub far_end: bool,
     /// The RTP packet.
     pub payload: &'a [u8],
 }
 
-/// The SDES keys a recording session's two streams are offered with, this
-/// end's stream first: one per suite, in the order they are offered.
+/// SDES keys offered for the two streams, this end's first: one per suite, in offer order.
 pub(crate) type StreamKeys = [Vec<(CryptoSuite, KeySalt)>; 2];
 
-/// The offer of a recording session: two sendonly streams on `codec`, one per
-/// party, labelled for the metadata (RFC 7866 §7.1.1). With `keys`, each
-/// stream is offered as SRTP (`RTP/SAVP`) with an RFC 4568 line per key.
+/// A recording session offer: two sendonly streams on `codec`, labelled for the metadata (RFC 7866
+/// §7.1.1). With `keys`, each is `RTP/SAVP` with one RFC 4568 line per key.
 pub(crate) fn offer(
     codec: &NegotiatedCodec,
     to: &RecordTo,
@@ -177,11 +160,9 @@ pub(crate) fn offer(
     description
 }
 
-/// What protects each stream's copies, read off the server's answer to an
-/// offer of `offered`: the transform and this end's key under the line the
-/// server took (RFC 4568 §5.1.2), with the tag of that line. `None` for a
-/// stream the server refused, answered off SRTP, or answered with a line
-/// this end did not offer or cannot be held to.
+/// Each stream's copy protection, from the server's answer to `offered`: the transform and our key
+/// under the line the server took (RFC 4568 §5.1.2), with its tag. `None` for a refused stream, one
+/// answered without SRTP, or with a line we did not offer or cannot honour.
 pub(crate) fn protection(
     answer: &SessionDescription,
     offered: &StreamKeys,
@@ -211,8 +192,7 @@ pub(crate) fn protection(
     [one(0), one(1)]
 }
 
-/// Where the recording server receives each of the two streams, read off its
-/// answer: `None` for a stream it refused, or one it named no address for.
+/// Where the server receives each stream, from its answer; `None` if refused or without an address.
 pub(crate) fn destinations(answer: &SessionDescription) -> [Option<SocketAddr>; 2] {
     let at = |index: usize| {
         let stream = answer.media.get(index)?;
@@ -225,8 +205,7 @@ pub(crate) fn destinations(answer: &SessionDescription) -> [Option<SocketAddr>; 
     [at(0), at(1)]
 }
 
-/// The session description a recording server's response carried: the body
-/// itself, or its `application/sdp` part when it answered in multipart.
+/// The SDP in a recording server's response: the body, or its `application/sdp` part if multipart.
 pub(crate) fn answer_in(message: &OwnedMessage) -> Option<SessionDescription> {
     let raw = message.as_raw();
     let kind = raw.content_type().ok()?;
@@ -238,15 +217,14 @@ pub(crate) fn answer_in(message: &OwnedMessage) -> Option<SessionDescription> {
     sipral_core::sdp::parse(part.body()).ok()
 }
 
-/// The two parties of a recorded call as the metadata names them: identifiers
-/// drawn once, addresses of record, display names.
+/// The recorded call's two parties as the metadata names them: identifiers drawn once, addresses of
+/// record, display names.
 #[derive(Clone, Debug)]
 pub(crate) struct Parties {
     pub(crate) call: RecordedCall,
 }
 
-/// Which of the two parties is sending, as the recorded call's direction
-/// says: `(this end, far end)`.
+/// Which parties send, given the call's direction: `(this end, far end)`.
 pub(crate) const fn sending(direction: Direction) -> (bool, bool) {
     match direction {
         Direction::SendRecv => (true, true),
@@ -257,8 +235,7 @@ pub(crate) const fn sending(direction: Direction) -> (bool, bool) {
 }
 
 impl Parties {
-    /// The metadata of the call as it stands: complete, with a party that is
-    /// not sending listed as sending nothing and nobody receiving from it.
+    /// The complete current metadata; a party not sending is listed as sending nothing.
     pub(crate) fn metadata(&self, direction: Direction) -> RecordingMetadata {
         let mut metadata = self.call.metadata();
         let (ours, theirs) = sending(direction);
@@ -277,8 +254,7 @@ impl Parties {
         metadata
     }
 
-    /// A new far end: the party the call now talks to, under a new
-    /// identifier, as a call that replaced the recorded one has.
+    /// Replace the far end with a new party under a new identifier, as after a replacing call.
     pub(crate) fn replace_far_end(&mut self, id: String, aor: String, name: Option<String>) {
         if let Some(far) = self.call.parties.get_mut(1) {
             far.id = id;
@@ -288,9 +264,7 @@ impl Parties {
     }
 }
 
-/// A metadata identifier (RFC 7865 §7: a UUID in base64) drawn from the user
-/// agent's own token stream, which is what every tag and branch it writes is
-/// drawn from too.
+/// A metadata identifier (RFC 7865 §7: a base64 UUID) from the user agent's token stream.
 pub(crate) fn draw_id(agent: &mut sipral_ua::UserAgent) -> String {
     let token = agent.endpoint().token();
     let mut uuid = [0_u8; 16];
@@ -306,8 +280,7 @@ pub(crate) fn draw_id(agent: &mut sipral_ua::UserAgent) -> String {
     sipral_ua::siprec::metadata_id(uuid)
 }
 
-/// One end of a call as the metadata names it: an address of record, and a
-/// display name when one is known.
+/// One end as the metadata names it: address of record and optional display name.
 pub(crate) type End = (String, Option<String>);
 
 /// The two parties of a call, with this end first.
@@ -353,21 +326,18 @@ struct Copy {
     from: SocketAddr,
     destination: SocketAddr,
     ssrc: u32,
-    /// Added to the original's sequence number and timestamp, fixed by the
-    /// first packet copied, so that loss, reordering and pauses in the
-    /// original stay where they were.
+    /// Offset added to the original's sequence number and timestamp, fixed by the first copied
+    /// packet, so loss, reordering and pauses keep their place.
     sequence: Option<u16>,
     timestamp: Option<u32>,
     base: (u16, u32),
-    /// The original's source that numbering was fixed by, on an SRTP
-    /// recording session: another source numbers its packets afresh.
+    /// The source that fixed the numbering, on an SRTP recording session; another source renumbers.
     source: Option<u32>,
 }
 
 impl Copy {
-    /// The copy of a packet with `header` and `payload`, carrying
-    /// `payload_type`: the number the server was offered the codec under.
-    /// With it, the sequence number and timestamp it went out with.
+    /// The copy of a packet with `header` and `payload` under `payload_type` (the number offered to
+    /// the server), plus its sequence number and timestamp.
     fn packet(
         &mut self,
         header: RtpHeader,
@@ -394,8 +364,7 @@ impl Copy {
         Some((out, (header.sequence, header.timestamp)))
     }
 
-    /// Carry on from `next` with whatever audio comes next, rather than with
-    /// the numbering the audio copied so far fixed.
+    /// Continue from `next` with whatever audio comes, dropping the previous numbering offset.
     const fn resume(&mut self, next: (u16, u32)) {
         self.sequence = None;
         self.timestamp = None;
@@ -404,19 +373,13 @@ impl Copy {
     }
 }
 
-/// How the copies are protected: whether they have to be, every protector each
-/// stream has had with the tag of the line it keys, and which line keys it
-/// now.
+/// How copies are protected: whether they must be, every protector each stream has had with its
+/// line tag, and which line keys it now.
 ///
-/// A protector is kept for the life of the recording, not for as long as its
-/// line is the one in use. The keys are drawn once per recording and a line's
-/// tag names the same key for as long as the recording runs, so a server
-/// that moves a stream to another line and back is keying it again with a
-/// key that has already protected packets: a protector built afresh for it
-/// would start its rollover counter at zero, and once the sequence numbers
-/// had wrapped it would send an index the key had already covered — the one
-/// thing SRTP must never do (RFC 3711 §9.1). The kept protector carries its
-/// counter on.
+/// Protectors live for the whole recording. Keys are drawn once and a tag always names the same
+/// key, so a server that moves a stream to another line and back reuses a key; a fresh protector
+/// would restart its rollover counter and, after a sequence wrap, repeat an index (RFC 3711 §9.1).
+/// The kept one continues its counter.
 #[derive(Default)]
 struct Protection {
     required: bool,
@@ -450,39 +413,29 @@ impl std::fmt::Debug for Protection {
 pub(crate) struct Tap {
     /// This end's audio, then the far end's.
     copies: [Option<Copy>; 2],
-    /// The payload type copied: the call's codec, under the number the
-    /// server was offered it with, which is the one this end sends it with.
-    /// Named events and comfort noise are not offered to the server, so they
-    /// are not sent to it.
+    /// The copied payload type: the call's codec under the number offered to the server, which is
+    /// the one this end sends with. Named events and comfort noise are not offered, so not sent.
     payload_type: u8,
-    /// The number the far end sends the codec with: this end's own for it,
-    /// which differs from `payload_type` where an answer renumbered it (RFC
-    /// 3264 §6.1). The far end's copies are sent under `payload_type`.
+    /// The number the far end sends the codec with (our own), which differs from `payload_type`
+    /// when an answer renumbered it (RFC 3264 §6.1). Far-end copies go out under `payload_type`.
     received_payload_type: u8,
     /// The sockets the copies go from, this end's first.
     sockets: [SocketAddr; 2],
-    /// What each stream's copies are protected with, when the recording
-    /// session is SRTP, and under which of the offered lines.
+    /// Each stream's protection on an SRTP recording session, and which offered line keys it.
     protection: Protection,
     /// The source, sequence number and timestamp each stream starts from.
     numbers: [(u32, u16, u32); 2],
-    /// The sequence number and timestamp each stream carries on from once
-    /// anything was copied on it: a stream the server took back, or one
-    /// that moved to a call that replaced the recorded one, starts there
-    /// rather than over — which on an SRTP recording session would send a
-    /// second packet under an index the key has already covered (RFC 3711
-    /// §9.1).
+    /// Where each stream continues once something was copied: a stream taken back or moved to a
+    /// replacing call starts there, not over, or SRTP would reuse an index (RFC 3711 §9.1).
     next: [Option<(u16, u32)>; 2],
     queue: VecDeque<(usize, SocketAddr, SocketAddr, Vec<u8>)>,
     out: Vec<u8>,
 }
 
 impl Tap {
-    /// Copies of the codec to the two destinations the server answered
-    /// with, sent from the two sockets `to` names, numbered from `numbers`
-    /// (a source, a sequence number and a timestamp per stream).
-    /// `payload_types` is the number this end sends the codec with, which the
-    /// server was offered, then the one the far end sends it with.
+    /// Copies to the server's two destinations, from the sockets in `to`, numbered from `numbers`
+    /// (source, sequence, timestamp per stream). `payload_types` is the number we send the codec
+    /// with (the one offered) then the far end's.
     pub(crate) fn new(
         to: &RecordTo,
         destinations: [Option<SocketAddr>; 2],
@@ -504,8 +457,8 @@ impl Tap {
         tap
     }
 
-    /// The server answered again: a stream may have moved, been refused, or
-    /// been taken back. One that carries on keeps its numbering.
+    /// The server answered again: streams may have moved, been refused or taken back. Continuing
+    /// streams keep their numbering.
     pub(crate) fn redirect(&mut self, destinations: [Option<SocketAddr>; 2]) {
         for (stream, destination) in destinations.into_iter().enumerate() {
             let (Some(slot), Some(&from), Some(&(ssrc, sequence, timestamp)), Some(next)) = (
@@ -534,8 +487,7 @@ impl Tap {
         }
     }
 
-    /// Copy another session's audio from here on — a call that replaced the
-    /// recorded one — carrying each stream on from where its copies got to.
+    /// Copy a replacing call's audio from now on, each stream continuing its numbering.
     pub(crate) fn follow(&mut self) {
         for (copy, next) in self.copies.iter_mut().zip(self.next) {
             if let (Some(copy), Some(next)) = (copy.as_mut(), next) {
@@ -544,13 +496,9 @@ impl Tap {
         }
     }
 
-    /// Protect the copies as the server's answer said ([`protection`]), for
-    /// a recording session offered as SRTP: from here on a stream is copied
-    /// only while it has a protector, and never in the clear. A stream keyed
-    /// by a line that has keyed it before — the one it had, or one it had
-    /// earlier and went back to — takes up the protector that line had, and
-    /// with it its place in the keystream; the one `answered` built afresh
-    /// is dropped.
+    /// Apply the server's answer ([`protection`]) on an SRTP recording session: a stream is copied
+    /// only while it has a protector, never in the clear. A line that keyed the stream before gets
+    /// its old protector back, keystream position included; the fresh one in `answered` is dropped.
     pub(crate) fn protect(&mut self, answered: [Option<(u32, Protector)>; 2]) {
         self.protection.required = true;
         for ((kept, active), answered) in self
@@ -569,16 +517,15 @@ impl Tap {
         }
     }
 
-    /// The recorded call moved to the codec this end sends on
-    /// `payload_types.0` and takes on `payload_types.1`, and the server was
-    /// offered it under the first: copy that from here on.
+    /// The call moved to a codec we send on `payload_types.0` and receive on `payload_types.1`; the
+    /// server was offered the first. Copy it from now on.
     pub(crate) const fn copy_payload_type(&mut self, payload_types: (u8, u8)) {
         self.payload_type = payload_types.0;
         self.received_payload_type = payload_types.1;
     }
 
-    /// This end sent `wire`, whose payload before protection was `payload`.
-    /// The header is read off what went out, which SRTP leaves in the clear.
+    /// This end sent `wire`, whose plaintext payload was `payload`. The header is read from the
+    /// wire, which SRTP leaves in clear.
     pub(crate) fn sent(&mut self, wire: &[u8], payload: &[u8]) {
         let Ok(packet) = RtpPacket::parse(wire) else {
             return;
@@ -608,10 +555,8 @@ impl Tap {
             return;
         };
         let after = self.next.get(stream).copied().flatten();
-        // RFC 3711 §3.3.1: an SRTP sender's index only moves forward, and a
-        // receiver finds it from the sequence numbers. Another source's
-        // numbers are carried on from where the copies got to, so they do
-        // not jump.
+        // RFC 3711 §3.3.1: an SRTP index only moves forward and receivers derive it from sequence
+        // numbers, so another source continues our numbering without a jump
         if self.protection.required {
             if copy.source.is_some_and(|source| source != header.ssrc)
                 && let Some(after) = after
@@ -626,11 +571,8 @@ impl Tap {
             return;
         };
         if self.protection.required {
-            // and a packet that arrived after one numbered past it is not
-            // copied: protected behind the last, it would either repeat that
-            // index under the same key (§9.1) or read to the server as a
-            // rollover it never saw, and every copy after it would fail its
-            // check there
+            // a packet arriving after a higher-numbered one is not copied: it would repeat an index
+            // (§9.1) or look like a rollover the server never saw, breaking every later check
             if after.is_some_and(|(after, _)| sequence.wrapping_sub(after) >= 0x8000) {
                 return;
             }
@@ -644,15 +586,14 @@ impl Tap {
             };
             packet.truncate(written);
         }
-        // a packet the original stream reordered moves nothing back
+        // reordered packets move nothing back
         if let Some(next) = self.next.get_mut(stream)
             && next.is_none_or(|(after, _)| sequence.wrapping_sub(after) < 0x8000)
         {
             *next = Some((sequence.wrapping_add(1), timestamp.wrapping_add(1)));
         }
         let (from, destination) = (copy.from, copy.destination);
-        // the oldest goes first: a copy nobody collected for a second is
-        // audio the server would play late, and the newest is what it wants
+        // drop the oldest: copies uncollected for a second would play late
         if self.queue.len() >= QUEUE {
             self.queue.pop_front();
         }
@@ -713,8 +654,7 @@ mod tests {
         ]
     }
 
-    /// Every copy waiting: whether it is the far end's, and its payload
-    /// type.
+    /// Every queued copy: whether it is the far end's, and its payload type.
     fn drained(tap: &mut Tap) -> Vec<(bool, u8)> {
         let mut copied = Vec::new();
         while let Some(copy) = tap.poll() {
@@ -724,9 +664,8 @@ mod tests {
         copied
     }
 
-    /// A call whose answer renumbered its codec (RFC 3264 §6.1) sends it on
-    /// one number and takes it on another. Both parties' copies are the
-    /// codec, and both go to the server under the number it was offered.
+    /// When an answer renumbered the codec (RFC 3264 §6.1), both parties' copies go to the server
+    /// under the offered number.
     #[test]
     fn the_far_ends_audio_on_this_ends_own_number_is_copied_under_the_offered_one() {
         let mut tap = Tap::new(
@@ -757,10 +696,8 @@ mod tests {
         sent
     }
 
-    /// Under one SRTP key a sequence number goes out once (RFC 3711 §9.1):
-    /// copies that move to a call that replaced the recorded one, or to a
-    /// stream the server took back, carry on from where they got to rather
-    /// than starting their numbering over.
+    /// Under one SRTP key a sequence number goes out once (RFC 3711 §9.1): copies moving to a
+    /// replacing call or a taken-back stream continue their numbering.
     #[test]
     fn copies_that_move_carry_their_numbering_on_under_the_same_key() {
         use sipral_rtp::srtp::{Master, Policy, Protector, Suite};
@@ -777,7 +714,7 @@ mod tests {
         }
         assert_eq!(sequences(&mut tap), [10, 11]);
 
-        // the call that replaced the recorded one numbers its own packets
+        // the replacing call numbers its own packets
         tap.follow();
         tap.sent(&packet(0, 5_000), &[7; 40]);
         assert_eq!(sequences(&mut tap), [12]);
@@ -790,18 +727,15 @@ mod tests {
         tap.sent(&packet(0, 9_000), &[7; 40]);
         assert_eq!(sequences(&mut tap), [13]);
 
-        // and a stream the server's answer left without a key gets nothing
+        // a stream left without a key gets nothing
         tap.protect([None, Some((2, key()))]);
         tap.sent(&packet(0, 9_001), &[7; 40]);
         assert_eq!(sequences(&mut tap), []);
     }
 
-    /// A server that moves a stream to another line and back keys it again
-    /// with a key that has protected packets before, and past a wrap of the
-    /// sequence numbers a protector built afresh for it would send indices
-    /// that key already covered (RFC 3711 §9.1). Every copy here carries the
-    /// same payload, so an index protected twice under one key would show as
-    /// the same ciphertext twice.
+    /// A stream moved to another line and back reuses a key; after a sequence wrap a fresh
+    /// protector would repeat indices (RFC 3711 §9.1). Identical payloads would then show identical
+    /// ciphertext.
     #[test]
     fn a_stream_moved_to_another_line_and_back_never_protects_an_index_twice_under_one_key() {
         use sipral_rtp::srtp::{Master, Policy, Protector, Suite};
@@ -822,7 +756,7 @@ mod tests {
                 tap.sent(&packet(0, sequence), &[7; 40]);
                 sequence = sequence.wrapping_add(1);
                 while let Some(copy) = tap.poll() {
-                    // the forty bytes of ciphertext, without the tag after
+                    // the 40 bytes of ciphertext, without the tag
                     let payload = RtpPacket::parse(copy.payload)
                         .expect("RTP")
                         .payload()
@@ -838,10 +772,10 @@ mod tests {
             }
         };
 
-        // under line 1 past a wrap of the sequence numbers
+        // under line 1, past a sequence wrap
         tap.protect([Some((1, key(1))), None]);
         send(&mut tap, 65_536 + 10);
-        // the server moves the stream to line 2, and then back to line 1
+        // moved to line 2, then back to line 1
         tap.protect([Some((2, key(2))), None]);
         send(&mut tap, 5);
         tap.protect([Some((1, key(1))), None]);
@@ -849,10 +783,8 @@ mod tests {
         assert_eq!(copied, 65_536 + 35, "every packet was copied");
     }
 
-    /// The far end's packets as the network hands them over — one late,
-    /// one twice, then from a source that numbers its packets afresh — and
-    /// what a recording server keyed for the copies opens of them: every
-    /// copy it is sent, rather than nothing from the late packet on.
+    /// Far-end packets as the network delivers them (one late, one duplicated, then a new source):
+    /// a keyed server can open every copy it gets, not only those before the late packet.
     #[test]
     fn the_far_end_reordered_or_renumbered_leaves_every_protected_copy_open_to_the_server() {
         use sipral_rtp::srtp::{Master, Policy, Protector, Suite, Unprotector};

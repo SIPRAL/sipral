@@ -1,84 +1,52 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Where this end appears from, asked of a STUN server (RFC 8489), and the
-//! two places the answer goes.
+//! Where this end appears from, asked of a STUN server (RFC 8489), and where the answer goes.
 //!
-//! A softphone behind a NAT writes its own address into two things the far
-//! end reads and acts on: the `Contact` of every REGISTER and INVITE, which is
-//! where requests for it are sent, and the `c=` and `m=` lines of every
-//! description, which is where its audio is sent. Both name a private address
-//! nobody outside can reach unless something corrects them. `rport` corrects
-//! the path a response takes (RFC 3581) and symmetric RTP at the far end
-//! corrects the media (RFC 7362), and `docs/06-nat.md` explains why those
-//! carry most paths without any of this. What they cannot carry is a far end
-//! that believes what it was told: a registrar with no NAT helper, a peer
-//! that sends where `c=` says and nowhere else. For those, this end has to
-//! say the right address in the first place, and a STUN Binding request from
-//! the socket in question is how it learns it.
+//! Behind a NAT a softphone writes a private address into two places the far end acts on: the
+//! `Contact` of REGISTER and INVITE, and the `c=`/`m=` lines of each description. `rport` (RFC
+//! 3581) and symmetric RTP (RFC 7362) fix most paths (`docs/06-nat.md`), but not a registrar
+//! without a NAT helper or a peer that sends only where `c=` says. For those this end must state
+//! the right address, learned with a STUN Binding request from the socket in question.
 //!
 //! # Two sockets, two answers
 //!
-//! The signalling socket and each media socket are different NAT bindings,
-//! and a NAT that maps them to different public ports — most do — answers
-//! differently for each. So [`Mappings`] keeps one Binding transaction per
-//! socket the application names, and says for each one where it appears
-//! from.
+//! The signalling socket and each media socket are separate NAT bindings and usually map to
+//! different public ports. [`Mappings`] runs one Binding transaction per named socket.
 //!
-//! - **The signalling socket** is kept mapped for as long as it is open
-//!   ([`Keep::Refreshed`]): a request every [`Mappings::refresh`] interval,
-//!   twenty-five seconds unless set otherwise — the figure the endpoint's own
-//!   stream keepalive uses, for the same NATs. Signalling is idle for minutes
-//!   at a time, a mapping nothing refreshes is released, and an answer that
-//!   comes back different is a mapping that moved, which is
-//!   [`MappingEvent::Moved`]. Both answers go to
-//!   [`UserAgent::readdress`](crate::UserAgent::readdress), which moves every
-//!   account's `Contact` onto the public address and registers it again.
-//! - **A media socket** is asked before the description that names it is
-//!   written ([`Keep::Once`]), and the answer goes to
-//!   [`CallMedia::public_address`](crate::CallMedia::public_address). Until
-//!   then it is asked again every refresh interval, as the signalling socket
-//!   is: nothing else crosses its binding while it waits, and an answer
-//!   minutes old names a mapping the NAT may have let go. From the call on,
-//!   RTP every frame and RTCP every few seconds hold the binding, a STUN
-//!   request beside them would only compete with them for the same mapping,
-//!   and the application forgets the socket.
+//! - **The signalling socket** stays mapped while open ([`Keep::Refreshed`]): asked again every
+//!   [`Mappings::refresh`] interval, 25 s by default like the endpoint's stream keepalive. An idle
+//!   mapping is released by the NAT, and a changed answer is [`MappingEvent::Moved`]. Both answers
+//!   go to [`UserAgent::readdress`](crate::UserAgent::readdress), which moves every account's
+//!   `Contact` and re-registers.
+//! - **A media socket** is asked before its description is written ([`Keep::Once`]), and the answer
+//!   goes to [`CallMedia::public_address`](crate::CallMedia::public_address). Until the call it is
+//!   refreshed like the signalling socket, since nothing else crosses its binding. Once the call
+//!   runs, RTP and RTCP hold the binding and the application forgets the socket.
 //!
 //! # More than one server
 //!
-//! A public STUN server is somebody else's machine, and it goes away without
-//! notice. [`Mappings::fallbacks`] names the servers to turn to, in order, and
-//! a transaction that ends without an address — no answer in five and a half
-//! seconds, or a refusal, since a server that answers without an address is
-//! no more use than a silent one — moves every socket asking that server onto
-//! the next one in the list at once. The server that failed backs off: it is
-//! passed over for thirty seconds, then for twice as long each time it fails
-//! again, up to ten minutes, and an answer from it clears that. While it
-//! backs off, only a signalling socket's refresh ever goes back to it, once
-//! its time is up, so a better server that recovers is used again without a
-//! media socket's first answer — which a call is waiting for — ever being
-//! spent on finding out. [`MappingEvent::ServerChanged`] says when the server
-//! in use moves, and [`MappingEvent::ServersFailed`] when every server of the
-//! socket's family has failed and none is left to turn to: the sockets are
-//! then described as the last answer had them, or by their own address.
-//! [`Mappings::set_servers`] replaces the list on a running stack.
+//! Public STUN servers disappear without notice. [`Mappings::fallbacks`] lists servers in order. A
+//! transaction that ends without an address (no answer in 5.5 s, or a refusal) moves every socket
+//! using that server to the next one at once. The failed server is skipped for 30 s, doubling per
+//! failure up to 10 minutes, and an answer clears that. While it backs off only a signalling
+//! refresh retries it, so a recovered better server is found again without spending a media
+//! socket's first answer, which a call waits for. [`MappingEvent::ServerChanged`] reports a switch;
+//! [`MappingEvent::ServersFailed`] reports that every server of the family failed, and sockets then
+//! keep their last answer or their own address. [`Mappings::set_servers`] replaces the list at run
+//! time.
 //!
 //! # What this does not do
 //!
-//! **No socket.** The application's socket sends what
-//! [`Mappings::poll_transmit`] hands back and hands in what arrives, exactly
-//! as it does for signalling and media. **No `Via`.** The `sent-by` of a
-//! request stays the local address: `rport` already takes the response back
-//! along the path the request came in on, and a `Via` naming a public address
-//! the local host does not own would be a lie a strict server can catch.
-//! **No NAT classification**, for the reason RFC 5389 removed it.
+//! **No socket**: the application sends what [`Mappings::poll_transmit`] returns and hands in what
+//! arrives. **No `Via` change**: `sent-by` stays local, since `rport` already routes responses and
+//! a strict server could catch a `Via` naming an address the host does not own. **No NAT
+//! classification**, which RFC 5389 dropped.
 //!
-//! The transaction ids come from a seed the application supplies, or from
-//! the media engine's own generator through [`MediaEngine::mappings`]. They
-//! are the whole of what stops an attacker off the path from answering
-//! first: a response carrying a guessed id and an address of the attacker's
-//! choosing would have this end advertise that address as its own, in every
-//! `Contact` and every offer.
+//! Transaction ids come from an application seed or the media engine's generator
+//! ([`MediaEngine::mappings`]). They are all that stops an off-path attacker from answering first
+//! with an address of its choosing, which this end would then advertise in every `Contact` and
+//! offer.
 //!
 //! [`MediaEngine::mappings`]: crate::MediaEngine::mappings
 
@@ -89,64 +57,50 @@ use std::time::{Duration, Instant};
 use sipral_core::auth::KeySource;
 use sipral_nat::stun::{BindingClient, BindingConfig, Failure, Progress, TransactionId};
 
-/// How often the signalling socket's mapping is asked again, unless
-/// [`Mappings::refresh`] says otherwise.
+/// How often the signalling socket's mapping is refreshed unless [`Mappings::refresh`] says
+/// otherwise.
 ///
-/// Twenty-five seconds, the interval the endpoint's own keepalive on a stream
-/// uses (`EndpointConfig::keepalive_interval`): short enough for the NATs that
-/// release an idle UDP mapping after thirty seconds, which RFC 4787 §4.3
-/// forbids and which are deployed all the same.
+/// 25 s, as `EndpointConfig::keepalive_interval`: short enough for NATs that drop idle UDP mappings
+/// after 30 s, which RFC 4787 §4.3 forbids but which exist.
 pub const DEFAULT_REFRESH: Duration = Duration::from_secs(25);
 
-/// How many requests one transaction sends before it gives up.
-///
-/// Four, at 0, 0.5, 1.5 and 3.5 seconds, and then two more seconds for the
-/// last one to be answered: five and a half seconds in all. RFC 8489 §6.2.1
-/// lets Rc be configured, and its default of seven waits 39.5 seconds —
-/// which, for the first answer, is a REGISTER or an offer held that long for
-/// a server that is not there. The same order as ICE's own gathering timeout.
+/// Requests per transaction before giving up: at 0, 0.5, 1.5 and 3.5 s, then 2 s for the last
+/// answer, 5.5 s in all. RFC 8489 §6.2.1's default Rc of 7 waits 39.5 s, too long to hold a
+/// REGISTER or an offer.
 const REQUESTS: u32 = 4;
 
 /// Multiples of the RTO waited after the last request (RFC 8489 §6.2.1's Rm).
 const LAST_WAIT: u32 = 4;
 
-/// How long a server that failed is passed over the first time: past the
-/// twenty-five-second refresh, so that the refresh straight after a failure
-/// goes to the server that took over rather than back to the one that just
-/// failed.
+/// How long a failed server is first skipped. Longer than the 25 s refresh, so the next refresh
+/// goes to the replacement.
 const FIRST_BACK_OFF: Duration = Duration::from_secs(30);
 
-/// The longest a failed server is ever passed over. A server that has been
-/// down for an hour costs one unanswered refresh every ten minutes, and one
-/// that comes back is in use again within ten minutes of it.
+/// The longest a failed server is skipped: a dead server costs one unanswered refresh every ten
+/// minutes, and a recovered one is used again within ten minutes.
 const LONGEST_BACK_OFF: Duration = Duration::from_secs(600);
 
 /// How long a socket's mapping is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
-    /// Asked again every [`Mappings::refresh`] for as long as the socket is
-    /// mapped: the signalling socket, which is idle for minutes at a time
-    /// and whose mapping has to outlive the silence.
+    /// Refreshed every [`Mappings::refresh`] while mapped: the signalling socket, idle for minutes,
+    /// whose mapping must outlive the silence.
     Refreshed,
-    /// A media socket, whose own traffic holds its binding once a call is
-    /// running on it. Named again, it drops the answer it had; answered, it
-    /// is asked again every [`Mappings::refresh`] until it is forgotten, so
-    /// that the answer a call is described with is never older than that.
+    /// A media socket, whose own traffic holds the binding once its call runs. Named again, it
+    /// drops its old answer; once answered it is refreshed every [`Mappings::refresh`] until
+    /// forgotten, so a call's address is never older than that.
     Once,
 }
 
 /// Where one socket's mapping stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MappingState {
-    /// Asked, and not answered yet. A description that names this socket
-    /// would name the wrong address, so the answer is worth waiting for: it
-    /// arrives within five and a half seconds either way.
+    /// Asked, not answered yet. A description naming this socket would be wrong, so wait; the
+    /// answer comes within 5.5 s either way.
     Asking,
     /// This socket appears at this address.
     Mapped(SocketAddr),
-    /// The server did not answer. The socket is described by its own
-    /// address, which is what it would have been with no STUN at all — the
-    /// fallback is the configuration that worked before STUN was turned on.
+    /// The server did not answer. The socket is described by its own address, as without STUN.
     Unmapped,
 }
 
@@ -160,11 +114,9 @@ pub enum MappingEvent {
         /// Where the server saw it.
         public: SocketAddr,
     },
-    /// A refresh came back with a different address: the NAT released the
-    /// mapping and made another, or the network under the socket changed.
-    /// Everything that advertised `previous` now names somewhere that reaches
-    /// nothing. For a media socket still waiting for its call, the call it is
-    /// described in names `public`.
+    /// A refresh returned a different address: the NAT made a new mapping or the network changed.
+    /// Anything advertising `previous` is now unreachable. A media socket waiting for its call is
+    /// described with `public`.
     Moved {
         /// The socket, as the application named it.
         local: SocketAddr,
@@ -173,26 +125,21 @@ pub enum MappingEvent {
         /// What it is now.
         public: SocketAddr,
     },
-    /// The transaction [`Mappings::map`] started ended without an address,
-    /// on a socket with none to fall back on. The
-    /// socket is [`MappingState::Unmapped`] and described by its own address;
-    /// a socket kept [`Keep::Refreshed`] asks again at the next refresh, and a
-    /// later answer arrives as [`MappingEvent::Learned`].
+    /// The first transaction for a socket ([`Mappings::map`]) ended without an address and no other
+    /// server was left. The socket is [`MappingState::Unmapped`] and described by its own address;
+    /// a [`Keep::Refreshed`] socket asks again at the next refresh, and a later answer arrives as
+    /// [`MappingEvent::Learned`].
     ///
-    /// A refresh that goes unanswered is not reported: the last address the
-    /// server gave is still the best knowledge there is, and the next refresh
-    /// asks again.
+    /// An unanswered refresh is not reported: the last address stays the best guess.
     Unanswered {
         /// The socket, as the application named it.
         local: SocketAddr,
         /// Why.
         failure: Failure,
     },
-    /// The server in use for sockets of `server`'s address family is another
-    /// one now: `previous` failed and the next in the list took over, a
-    /// refresh found a server earlier in the list answering again, or
-    /// [`Mappings::set_servers`] named another list. What was learned stands
-    /// until the new server's answers say otherwise, which may be
+    /// The server used for `server`'s address family changed: `previous` failed and the next took
+    /// over, a refresh found an earlier server answering again, or [`Mappings::set_servers`]
+    /// replaced the list. Learned addresses stand until the new server says otherwise, possibly as
     /// [`MappingEvent::Moved`] behind a NAT that maps per destination.
     ServerChanged {
         /// The server that was in use.
@@ -200,11 +147,9 @@ pub enum MappingEvent {
         /// The server in use now.
         server: SocketAddr,
     },
-    /// Every server of `last`'s address family has failed and each one is
-    /// backing off: there is nobody left to ask. Sockets keep the address
-    /// they last learned, or are described by their own, and refreshes go on
-    /// asking the server whose back-off ends first. Said once until a server
-    /// answers again.
+    /// Every server of `last`'s family failed and is backing off. Sockets keep their last address
+    /// or their own, and refreshes keep asking the server whose back-off ends first. Reported once
+    /// until a server answers again.
     ServersFailed {
         /// The server whose failure left none.
         last: SocketAddr,
@@ -252,8 +197,7 @@ impl Server {
     }
 }
 
-/// Which address family `address` is, as [`PerFamily`] reads it: `true` for
-/// IPv4.
+/// The [`PerFamily`] slot of `address`: `true` for IPv4.
 const fn family(address: SocketAddr) -> bool {
     address.is_ipv4()
 }
@@ -275,22 +219,18 @@ impl<T> PerFamily<T> {
     }
 }
 
-/// The STUN mappings of the sockets an application named, against one
-/// server and the ones behind it.
+/// The STUN mappings of the application's sockets, against one server and its fallbacks.
 ///
-/// Sans-I/O, like everything else in this crate: `now` arrives at every entry
-/// point, the application's sockets send and receive, and nothing here reads
-/// a clock or draws from the operating system.
+/// Sans-I/O: `now` is passed in, the application's sockets do the I/O, and nothing here reads a
+/// clock or OS randomness.
 pub struct Mappings {
     /// In order of preference; never empty.
     servers: Vec<Server>,
-    /// The first of them, which is where a stack whose list has no IPv4
-    /// server at all says it asks.
+    /// The first server, reported as the one asked when the list has no IPv4 server.
     first: SocketAddr,
     /// The server in use, per address family, once one has been asked.
     in_use: PerFamily<Option<SocketAddr>>,
-    /// Whether [`MappingEvent::ServersFailed`] was said, per address family,
-    /// and no server has answered since.
+    /// Whether [`MappingEvent::ServersFailed`] was reported per family, with no answer since.
     exhausted: PerFamily<bool>,
     refresh: Duration,
     keys: KeySource,
@@ -302,11 +242,9 @@ pub struct Mappings {
 impl Mappings {
     /// Mappings against `server`, with transaction ids drawn from `seed`.
     ///
-    /// `seed` must be thirty-two bytes from the platform's cryptographic
-    /// generator, and not bytes any other part of the stack is given: see
-    /// the module documentation for what a guessable id is worth to an
-    /// attacker. [`MediaEngine::mappings`](crate::MediaEngine::mappings)
-    /// draws them from the engine's own generator instead.
+    /// `seed` must be 32 bytes from a cryptographic generator, not shared with any other part of
+    /// the stack; see the module docs for why.
+    /// [`MediaEngine::mappings`](crate::MediaEngine::mappings) uses the engine's generator instead.
     #[must_use]
     pub fn new(server: SocketAddr, seed: [u8; 32]) -> Self {
         Self {
@@ -326,20 +264,16 @@ impl Mappings {
         }
     }
 
-    /// Ask again every `every` instead of [`DEFAULT_REFRESH`], on sockets
-    /// kept [`Keep::Refreshed`] and on answered ones kept [`Keep::Once`]. A
-    /// zero is taken as one second, so that a setting cannot make the refresh
-    /// spin.
+    /// Refresh every `every` instead of [`DEFAULT_REFRESH`], for [`Keep::Refreshed`] sockets and
+    /// answered [`Keep::Once`] ones. Zero is taken as one second so it cannot spin.
     #[must_use]
     pub fn refresh(mut self, every: Duration) -> Self {
         self.refresh = every.max(Duration::from_secs(1));
         self
     }
 
-    /// Turn to `more`, in this order, when the server before them fails. A
-    /// server already in the list is not added twice. See the module
-    /// documentation for when a server is turned to and when it is turned
-    /// back from.
+    /// Fall back to `more`, in order, when the server before them fails. Duplicates are ignored.
+    /// See the module docs for the switching rules.
     #[must_use]
     pub fn fallbacks(mut self, more: impl IntoIterator<Item = SocketAddr>) -> Self {
         for address in more {
@@ -358,8 +292,7 @@ impl Mappings {
         }
     }
 
-    /// The server a new IPv4 socket would be asked about now: the one in
-    /// use, or the first in the list before any has been asked.
+    /// The server a new IPv4 socket would ask now: the one in use, or the first in the list.
     #[must_use]
     pub fn server(&self) -> SocketAddr {
         self.in_use
@@ -379,17 +312,13 @@ impl Mappings {
         self.servers.iter().map(|server| server.address)
     }
 
-    /// Ask `first`, and `rest` behind it in this order, from now on: the
-    /// list replaced on a running stack, with no socket forgotten.
+    /// Replace the server list on a running stack with `first` then `rest`, keeping every socket.
     ///
-    /// Every socket is asked again at once of the first server of its
-    /// family — a transaction in flight to a server no longer listed is
-    /// abandoned — and what each one learned stands until the new server
-    /// answers. A server kept from the old list keeps its back-off, so that
-    /// naming the list again does not make a dead server look alive.
-    /// [`MappingEvent::ServerChanged`] says so where the server in use moves.
-    /// A socket of a family the new list has no server of stops being
-    /// asked, and keeps what it learned.
+    /// Every socket is asked again at once of its family's first server, abandoning transactions to
+    /// servers no longer listed. Learned addresses stand until the new server answers. A server
+    /// kept from the old list keeps its back-off. [`MappingEvent::ServerChanged`] reports where the
+    /// server in use changes. Sockets of a family with no server stop being asked and keep what
+    /// they learned.
     pub fn set_servers(
         &mut self,
         first: SocketAddr,
@@ -431,8 +360,7 @@ impl Mappings {
             }
         }
         for slot in [true, false] {
-            // with no socket of the family asked again, nothing will move
-            // the server in use off one that is not listed any more
+            // otherwise nothing would move the in-use server off an unlisted one
             let listed = self
                 .in_use
                 .of(slot)
@@ -449,19 +377,14 @@ impl Mappings {
 
     /// Start asking where `local` appears from.
     ///
-    /// A socket named again is asked again at once, and the answer is
-    /// reported whichever way it goes; `keep` replaces what it was kept as.
-    /// Kept [`Keep::Refreshed`], it keeps the address it had until the answer
-    /// says otherwise, and an answer that differs is
-    /// [`MappingEvent::Moved`]. Kept [`Keep::Once`], its old answer is
-    /// dropped: it is [`MappingState::Asking`] until the server says, and
-    /// what the server says is [`MappingEvent::Learned`] or
-    /// [`MappingEvent::Unanswered`], as the first time.
+    /// A socket named again is asked again at once, and the answer is reported either way; `keep`
+    /// replaces its old setting. [`Keep::Refreshed`] keeps its address until the answer differs
+    /// ([`MappingEvent::Moved`]). [`Keep::Once`] drops its old answer and is
+    /// [`MappingState::Asking`] until [`MappingEvent::Learned`] or [`MappingEvent::Unanswered`].
     ///
-    /// A server of the other address family is never asked: a socket of a
-    /// family no server in the list is of is [`MappingState::Unmapped`] at
-    /// once, and [`MappingEvent::Unanswered`] says so with
-    /// [`Failure::TimedOut`], since that is what asking would have come to.
+    /// Servers of the other family are never asked: a socket with no server of its family is
+    /// [`MappingState::Unmapped`] at once, reported as [`MappingEvent::Unanswered`] with
+    /// [`Failure::TimedOut`].
     pub fn map(&mut self, local: SocketAddr, keep: Keep, now: Instant) {
         let socket = self.sockets.entry(local).or_insert_with(|| Socket {
             keep,
@@ -473,12 +396,9 @@ impl Mappings {
             server: None,
         });
         socket.keep = keep;
-        // named again, a socket is asked a new question, and its answer is
-        // reported whichever way it goes. A media socket's old answer is
-        // dropped with it: the application named it again because nothing
-        // kept that answer true, so a description written before the new one
-        // arrives is refused rather than lent the old one. A signalling
-        // socket keeps what it had, because every `Contact` already names it
+        // a renamed media socket drops its old answer: the application renamed it because nothing
+        // kept it true, so descriptions wait for the new one. A signalling socket keeps its
+        // address, which every `Contact` already names
         if keep == Keep::Once {
             socket.public = None;
         }
@@ -507,18 +427,15 @@ impl Mappings {
             .any(|server| family(server.address) == family(local))
     }
 
-    /// Ask again now, whatever the schedule said: after a network change,
-    /// when the old answer is the one thing most likely to be wrong. The
-    /// first server of the list that is not backing off is asked, as a
-    /// refresh would. Nothing for a socket that is not mapped.
+    /// Ask again now, ignoring the schedule, typically after a network change. Uses the first
+    /// server not backing off, as a refresh does. No-op for an unmapped socket.
     pub fn ask_again(&mut self, local: SocketAddr, now: Instant) {
         if self.sockets.contains_key(&local) && self.serves(local) {
             self.ask(local, now, true);
         }
     }
 
-    /// Stop keeping `local`: nothing more is sent for it, and what it
-    /// learned is forgotten.
+    /// Stop keeping `local`: nothing more is sent, and its answer is forgotten.
     pub fn forget(&mut self, local: SocketAddr) {
         self.sockets.remove(&local);
         self.outbox.retain(|datagram| datagram.local != local);
@@ -541,18 +458,13 @@ impl Mappings {
         self.sockets.get(&local).and_then(|socket| socket.public)
     }
 
-    /// Hand in a datagram that arrived on `local` from `from`, and say
-    /// whether it was a STUN message from a server this asks — which the
-    /// caller then passes to nothing else.
+    /// Feed a datagram that arrived on `local` from `from`, and say whether it was STUN from a
+    /// listed server; if so, pass it nowhere else.
     ///
-    /// A STUN message from a listed server is taken whether or not it
-    /// answers anything still in flight: a retransmitted answer that arrives
-    /// after the first one is still the server's, and so is a late answer
-    /// from a server the socket has since been moved off, and handing either
-    /// to the SIP parser or the RTP session instead would be a malformed
-    /// message logged for nothing. Only the server the socket's transaction
-    /// asked is believed, and a datagram from anywhere else is left alone,
-    /// even if it looks like STUN.
+    /// Any STUN message from a listed server is taken, even when nothing is in flight (a
+    /// retransmitted or late answer), so it does not reach the SIP or RTP parser. Only the server
+    /// the transaction asked is believed; anything from elsewhere is left alone even if it looks
+    /// like STUN.
     pub fn receive(
         &mut self,
         local: SocketAddr,
@@ -576,10 +488,8 @@ impl Mappings {
         true
     }
 
-    /// The next request to send, from the socket it names.
-    ///
-    /// Drain to empty after every [`Mappings::map`], every datagram handed
-    /// in and every deadline [`Mappings::poll_timeout`] named.
+    /// The next request to send, from the socket it names. Drain after every [`Mappings::map`],
+    /// every datagram handed in and every [`Mappings::poll_timeout`] deadline.
     pub fn poll_transmit(&mut self) -> Option<StunDatagram> {
         self.outbox.pop_front()
     }
@@ -589,8 +499,7 @@ impl Mappings {
         self.events.pop_front()
     }
 
-    /// When something is next due: a retransmission, a transaction giving
-    /// up, or a refresh.
+    /// When something is next due: a retransmission, a timeout or a refresh.
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         self.sockets
@@ -633,12 +542,10 @@ impl Mappings {
         }
     }
 
-    /// The server a new transaction for a socket of `slot`'s family goes
-    /// to. A `probe` — a signalling socket's refresh, or a question asked
-    /// after a network change — takes the first in the list that is not
-    /// backing off, which is how a better server that came back is found
-    /// again; anything else stays with the server in use while it holds.
-    /// With every one backing off, the one whose back-off ends first.
+    /// The server for a new transaction of `slot`'s family. A `probe` (a signalling refresh, or a
+    /// question after a network change) takes the first server not backing off, so a recovered
+    /// better server is found again; otherwise stay with the server in use. If all are backing off,
+    /// the one whose back-off ends first.
     fn choose(&self, slot: bool, now: Instant, probe: bool) -> Option<SocketAddr> {
         if !probe
             && let Some(current) = *self.in_use.of(slot)
@@ -662,8 +569,7 @@ impl Mappings {
             .map(|server| server.address)
     }
 
-    /// A fresh transaction on `local`, to the server [`Mappings::choose`]
-    /// picks.
+    /// A new transaction on `local`, to the server [`Mappings::choose`] picks.
     fn ask(&mut self, local: SocketAddr, now: Instant, probe: bool) {
         let slot = family(local);
         let Some(server) = self.choose(slot, now, probe) else {
@@ -705,10 +611,9 @@ impl Mappings {
         *self.in_use.of_mut(slot) = Some(server);
     }
 
-    /// `asked` failed a transaction of `local`'s: it backs off, and when
-    /// another server of the family is not backing off, every socket asking
-    /// `asked` is asked again there, `local` among them. `true` when that
-    /// happened, and the failure is then nobody's to report.
+    /// `asked` failed a transaction of `local`: it backs off, and if another server of the family
+    /// is available every socket using `asked` moves there. `true` if so, and then nothing is
+    /// reported.
     fn fail_over(&mut self, local: SocketAddr, asked: SocketAddr, now: Instant) -> bool {
         let slot = family(local);
         if let Some(server) = self
@@ -717,9 +622,8 @@ impl Mappings {
             .find(|server| server.address == asked)
             && !server.backing_off(now)
         {
-            // a server already backing off failed a transaction started
-            // before it was found out, or one asked with nothing better to
-            // ask: that is the same failure, not a second one
+            // a server already backing off failed a transaction started earlier, or one asked for
+            // lack of a better one: the same failure, not a new one
             server.back_off = (server.back_off * 2).clamp(FIRST_BACK_OFF, LONGEST_BACK_OFF);
             server.until = now.checked_add(server.back_off);
         }
@@ -771,9 +675,7 @@ impl Mappings {
                 return;
             }
             Progress::Mapped(_) => None,
-            // no credentials are ever configured here, so a challenge is a
-            // server that wants what this client cannot give: the same end as
-            // a refusal
+            // no credentials are configured, so a challenge ends like a refusal
             Progress::Challenged => Some(Failure::Unauthenticated),
             Progress::Failed(failure) => Some(failure),
         };
@@ -798,8 +700,8 @@ impl Mappings {
         let Some(socket) = self.sockets.get_mut(&local) else {
             return;
         };
-        // only the transaction that was to give a socket its first address
-        // is reported when it fails; see `MappingEvent::Unanswered`
+        // only the failure of a socket's first transaction is reported; see
+        // `MappingEvent::Unanswered`
         let first = socket.public.is_none() && !socket.settled;
         let ended = match (progress, failure) {
             (Progress::Mapped(public), _) => {
@@ -820,11 +722,8 @@ impl Mappings {
         };
         socket.asking = false;
         socket.settled = true;
-        // a media socket's answer is asked again on the same schedule for as
-        // long as it waits for its call: nothing else crosses that NAT
-        // binding until the call's RTP does, and an answer that is minutes
-        // old names a mapping the NAT may have let go. A socket that never
-        // had an answer is described by its own address and left alone
+        // refresh a waiting media socket's answer, since nothing else holds its binding before the
+        // call. A socket that never got an answer uses its own address and is left alone
         socket.refresh_at = match socket.keep {
             Keep::Refreshed => now.checked_add(refresh),
             Keep::Once => socket.public.and_then(|_| now.checked_add(refresh)),
@@ -835,8 +734,8 @@ impl Mappings {
     }
 }
 
-/// Written by hand, so that what is printed is what was learned rather than
-/// the state of every transaction, and so that the seed stays out of a log.
+/// Written by hand to print what was learned, not every transaction, and to keep the seed out of
+/// logs.
 impl core::fmt::Debug for Mappings {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Mappings")
@@ -899,8 +798,7 @@ pub(crate) mod tests {
         all
     }
 
-    /// What a STUN server writes back: the request's own id, and the
-    /// address it saw the request come from.
+    /// A STUN server's answer: the request's id and the address it came from.
     pub(crate) fn answer(request: &[u8], seen: SocketAddr) -> Vec<u8> {
         let id = Message::parse(request)
             .expect("a STUN request")
@@ -960,9 +858,8 @@ pub(crate) mod tests {
 
     #[test]
     fn an_answer_to_a_question_nobody_asked_changes_nothing() {
-        // the server's own address, and a well-formed answer, but an id this
-        // end never sent: what an attacker who can spoof the server's address
-        // and cannot see the request has to guess, and cannot
+        // right server address and well-formed answer, but an id we never sent: what an off-path
+        // attacker must guess
         let now = Instant::now();
         let mut mappings = Mappings::new(at(SERVER), [7; 32]);
         mappings.map(at(MEDIA), Keep::Once, now);
@@ -1098,8 +995,7 @@ pub(crate) mod tests {
         let _learned = events(&mut mappings);
         let mut clock = now + super::DEFAULT_REFRESH;
         mappings.handle_timeout(clock);
-        // the whole refresh transaction goes unanswered, and the next
-        // refresh is scheduled behind it
+        // the refresh goes unanswered and the next one is scheduled after it
         let mut requests = 0;
         while let Some(next) = mappings.poll_timeout() {
             requests += drain(&mut mappings).len();
@@ -1130,8 +1026,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Run every deadline until nothing more is due or `until` is passed, and
-    /// count the requests that went out.
+    /// Run every deadline until nothing is due or `until` passes, counting requests sent.
     fn run_out(mappings: &mut Mappings, until: Instant) -> usize {
         let mut sent = drain(mappings).len();
         while let Some(due) = mappings.poll_timeout() {
@@ -1146,9 +1041,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_socket_named_again_after_a_silence_is_a_new_question_with_its_own_answer() {
-        // what an application does when the server did not answer for a media
-        // socket and it tries once more before the call: it waits for the
-        // event again, and it must get one either way
+        // the application retries a media socket before the call and must get an event either way
         let start = Instant::now();
         let mut mappings = Mappings::new(at(SERVER), [7; 32]);
         mappings.map(at(MEDIA), Keep::Once, start);
@@ -1197,8 +1090,8 @@ pub(crate) mod tests {
         );
         let _learned = events(&mut mappings);
 
-        // asked again: until the server says, the socket is being asked
-        // about, and the answer that comes back is reported as what it is
+        // asked again: the socket is Asking until the server answers, and the answer is reported as
+        // such
         let later = now + Duration::from_secs(120);
         mappings.map(at(MEDIA), Keep::Once, later);
         assert_eq!(mappings.state(at(MEDIA)), Some(MappingState::Asking));
@@ -1220,12 +1113,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_media_answer_waiting_for_its_call_does_not_grow_old() {
-        // an application that maps the socket for its next call as soon as
-        // the last one ends, and places that call ten minutes later: a NAT
-        // lets an idle mapping go long before that (RFC 4787 REQ-5 allows
-        // two minutes, and thirty seconds is deployed), and the answer it
-        // gave then names a port that reaches nothing now. Until a call is
-        // described on it, the socket is asked again as the signalling one is
+        // mapped right after one call, used for a call ten minutes later: NATs drop idle mappings
+        // long before (RFC 4787 REQ-5 allows two minutes, 30 s exists), so a waiting socket is
+        // refreshed like signalling
         let start = Instant::now();
         let mut mappings = Mappings::new(at(SERVER), [7; 32]);
         mappings.map(at(MEDIA), Keep::Once, start);
@@ -1271,10 +1161,8 @@ pub(crate) mod tests {
 
     #[test]
     fn an_ipv6_socket_reads_the_address_the_way_rfc_8489_masks_it() {
-        // the answer written out by hand from RFC 8489 §14.2 rather than
-        // with this tree's own builder: the port masked with the cookie's
-        // top sixteen bits, the address with the cookie and then the
-        // transaction id
+        // the answer built by hand from RFC 8489 §14.2, not with our builder: port XORed with the
+        // cookie's top 16 bits, address with cookie then transaction id
         const COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
         let server = at("[2001:db8::1]:3478");
         let local = at("[2001:db8:ffff::10]:40000");
@@ -1319,19 +1207,16 @@ pub(crate) mod tests {
         assert_eq!(mappings.state(at(MEDIA)), None);
     }
 
-    // -- more than one server ------------------------------------------------
-
     const SECOND: &str = "198.51.100.2:3478";
     const THIRD: &str = "198.51.100.3:3478";
 
-    /// Two servers, the first one silent.
+    /// Two servers; the first never answers.
     fn two() -> Mappings {
         Mappings::new(at(SERVER), [7; 32]).fallbacks([at(SECOND)])
     }
 
-    /// Run the deadlines up to `until`, answering every request sent to one
-    /// of `alive` as the server would and leaving the rest unanswered; the
-    /// destinations of every request, in order.
+    /// Run deadlines up to `until`, answering requests to `alive` and dropping the rest; returns
+    /// every request destination in order.
     fn run_with(
         mappings: &mut Mappings,
         alive: &[&str],
@@ -1365,8 +1250,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// What a server writes back when it will not say: an error response
-    /// to the request's own id.
+    /// A server's error response to the request's id.
     fn refusal(request: &[u8], code: u16) -> Vec<u8> {
         let id = Message::parse(request)
             .expect("a STUN request")
@@ -1393,9 +1277,8 @@ pub(crate) mod tests {
             "the first in the list is asked first: {first:?}"
         );
 
-        // both transactions give up together; the first to be found out
-        // takes the other with it, so the second is not left to spend its
-        // own five and a half seconds on a server already known to be gone
+        // both transactions fail together; the first detected moves the other too, so it does not
+        // wait 5.5 s on a known-dead server
         let mut now = start;
         while mappings.state(at(SIP)) == Some(MappingState::Asking)
             && drain(&mut mappings)
@@ -1475,10 +1358,8 @@ pub(crate) mod tests {
         mappings.map(at(SIP), Keep::Refreshed, start);
         let failed_at = start + Duration::from_millis(5_500);
 
-        // passed over for thirty seconds: the refresh at 30.5 s goes to the
-        // second server, the one at 55.5 s is past the back-off and tries
-        // the first again, which is still silent, so it is passed over for
-        // sixty seconds from 61 s, and the refreshes until then stay away
+        // skipped for 30 s: the 30.5 s refresh goes to the second server, the 55.5 s one retries
+        // the first, which fails again and is skipped for 60 s from 61 s
         let asked = run_with(
             &mut mappings,
             &[SECOND],
@@ -1494,12 +1375,11 @@ pub(crate) mod tests {
         });
         let expected: Vec<(String, usize)> = vec![
             (SERVER.into(), 4),
-            // first answer, then the refresh at 30.5 s
+            // first answer, then the 30.5 s refresh
             (SECOND.into(), 2),
-            // 55.5 s: the back-off has run out
+            // 55.5 s: back-off over
             (SERVER.into(), 4),
-            // 61 s, straight after, and the refreshes at 86 s and 111 s;
-            // the first server is passed over until 121 s
+            // 61 s, then refreshes at 86 s and 111 s; the first server is skipped until 121 s
             (SECOND.into(), 3),
         ];
         assert_eq!(runs, expected, "{asked:?}");
@@ -1532,7 +1412,7 @@ pub(crate) mod tests {
         );
         let _ = events(&mut mappings);
 
-        // the first server's thirty seconds are over, and a call is waiting
+        // the first server's 30 s are over and a call is waiting
         let later = start + Duration::from_secs(40);
         mappings.map(at(MEDIA), Keep::Once, later);
         let sent = drain(&mut mappings);
@@ -1557,7 +1437,7 @@ pub(crate) mod tests {
         );
         let _ = events(&mut mappings);
 
-        // the refresh past the back-off asks the first again, and it answers
+        // the refresh after the back-off retries the first server, which answers
         let asked = run_with(
             &mut mappings,
             &[SERVER, SECOND],
@@ -1603,8 +1483,7 @@ pub(crate) mod tests {
         );
         assert_eq!(mappings.state(at(SIP)), Some(MappingState::Unmapped));
 
-        // the refreshes go on, to the server whose back-off ends first, and
-        // a second round of silence is not a second announcement
+        // refreshes continue to the server whose back-off ends first, and are not reported again
         let asked = run_with(
             &mut mappings,
             &[],
@@ -1614,7 +1493,7 @@ pub(crate) mod tests {
         assert!(!asked.is_empty());
         assert!(events(&mut mappings).is_empty());
 
-        // until one answers, which clears it
+        // until one answers
         let asked = run_with(
             &mut mappings,
             &[SERVER, SECOND],

@@ -1,24 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A user agent and a media engine, with a plain UDP socket for SIP under
-//! them: the plumbing `call.rs`, `register-and-call.rs` and
-//! `headless-agent.rs` all need. `tls.rs` signals over a different transport
-//! and writes its own.
+//! A user agent and a media engine over a plain UDP SIP socket: the plumbing `call.rs`,
+//! `register-and-call.rs` and `headless-agent.rs` share. `tls.rs` uses another transport and has
+//! its own.
 //!
-//! `sipral::MediaEngine::poll_event` is the one place events may be drained
-//! from — its own documentation says so, because it drains the agent under it
-//! too — so this is the whole of the event loop: bind a socket, start a user
-//! agent on it, and round a loop that flushes what is queued, drains what
-//! that produced, and reads what arrived.
+//! `sipral::MediaEngine::poll_event` is the only place events may be drained (it drains the agent
+//! too), so the event loop is: bind a socket, start a user agent on it, then repeatedly flush,
+//! drain and read.
 //!
-//! This is shared source, included afresh into each example's own binary
-//! (`#[path = "common/udp_endpoint.rs"]`), and no single example calls every
-//! method it offers — `headless-agent.rs` opens media for a call it is about
-//! to answer, which nothing that only ever places one does. `dead_code`
-//! reads that as an unused method in whichever binary does not happen to
-//! call it, so it is silenced here rather than by inventing a use for it in
-//! an example that has no reason to make one.
+//! Included into each example with `#[path = "common/udp_endpoint.rs"]`. No single example uses
+//! every method, so `dead_code` is allowed here rather than inventing uses.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
@@ -43,63 +35,51 @@ pub(crate) struct Endpoint {
     sip: UdpSocket,
     pub(crate) local: SocketAddr,
     pub(crate) transport: TransportId,
-    /// One RTP socket per call that has media, opened before the call is
-    /// placed or answered so its port can go in the offer or the answer.
+    /// One RTP socket per call with media, opened before placing or answering so its port can go in
+    /// the SDP.
     pub(crate) media: HashMap<CallHandle, MediaSocket>,
     sip_inbox: Vec<u8>,
-    /// The thread reading the SIP socket, once [`Endpoint::read_in_background`]
-    /// started one; until then the socket is read where the loop turns.
+    /// The thread reading the SIP socket, once [`Endpoint::read_in_background`] started it; until
+    /// then the loop reads the socket itself.
     reader: Option<Reader>,
-    /// What the agent wrote for a transport other than this socket — a
-    /// connection the example opened and bound itself — oldest first, for
-    /// that example to send. Empty in every example with one transport.
+    /// Output the agent wrote for a transport other than this socket (a connection the example
+    /// opened itself), oldest first, for the example to send. Empty in single-transport examples.
     pub(crate) elsewhere: VecDeque<Transmit>,
-    /// Every SIP datagram read, kept whole once set to `Some`: what a test
-    /// reads a header field off when no event carries the message.
+    /// Every SIP datagram read, once set to `Some`, for tests that need a header no event carries.
     pub(crate) tap: Option<Vec<Vec<u8>>>,
 }
 
 /// One SIP datagram as the reader thread took it off the socket.
 type Datagram = (Vec<u8>, SocketAddr);
 
-/// How long the reader thread blocks on the SIP socket before it looks
-/// whether the socket is still the endpoint's. A socket given up (a move to
-/// another address, the endpoint dropped) is sent an empty datagram that
-/// ends the read at once ([`Reader`]'s `Drop`); this is the most it stays
-/// bound when that datagram cannot reach it, an address gone with the
-/// network that held it. Long, so an idle agent's reader wakes twelve times
-/// a minute and no more.
+/// How long the reader thread blocks before checking that the socket is still the endpoint's. A
+/// retired socket is normally woken at once by an empty datagram ([`Reader`]'s `Drop`); this bounds
+/// how long it stays bound when that datagram cannot arrive (the address left with the network).
+/// Long, so an idle reader wakes twelve times a minute.
 const READER_LOOK: Duration = Duration::from_secs(5);
 
-/// How long the reader thread pauses after a read that failed for a reason
-/// other than its timeout, so that a failure which repeats cannot spin.
+/// Pause after a read error other than a timeout, so a repeating failure cannot spin.
 const READER_PAUSE: Duration = Duration::from_millis(10);
 
-/// The SIP socket read on a thread of its own, every datagram handed over a
-/// channel.
+/// The SIP socket read on its own thread, each datagram sent over a channel.
 ///
-/// A loop that waits on the socket itself waits with `SO_RCVTIMEO`, which
-/// Linux counts in scheduler ticks: a 5 ms wait at the common 250 ticks a
-/// second is two of them, and ends anywhere from 4 to 8 ms later. A
-/// channel's wait ends at its deadline to within the system's timer slack,
-/// and as soon as a datagram is sent on it, so a loop waiting there turns
-/// when it said it would and still answers SIP the moment it arrives. One
-/// thread for the process, whatever the number of calls.
+/// Waiting on the socket uses `SO_RCVTIMEO`, which Linux counts in scheduler ticks: a 5 ms wait at
+/// 250 Hz ends 4 to 8 ms later. A channel wait ends at its deadline within timer slack, and
+/// immediately when a datagram arrives. One thread per process regardless of call count.
 struct Reader {
     inbox: mpsc::Receiver<Datagram>,
     /// Taken off the channel by a wait, not yet handed to the user agent.
     held: VecDeque<Datagram>,
-    /// Set when the socket the thread reads is no longer the endpoint's; the
-    /// thread sees it at its next read and ends, closing its copy.
+    /// Set when the socket is no longer the endpoint's; the thread notices at its next read and
+    /// exits, closing its copy.
     retired: Arc<AtomicBool>,
-    /// Where the socket the thread reads is bound, which `Drop` wakes it at.
+    /// The socket's bound address, where `Drop` sends the wake-up.
     bound: SocketAddr,
 }
 
 impl Reader {
-    /// Start a thread reading `sip`, which is switched to blocking reads
-    /// with a timeout of [`READER_LOOK`]: the endpoint only writes to it
-    /// from then on, which a blocking UDP socket does as well.
+    /// Start a thread reading `sip`, switched to blocking reads with a [`READER_LOOK`] timeout. The
+    /// endpoint only writes to it afterwards, which works the same on a blocking socket.
     fn spawn(sip: &UdpSocket) -> std::io::Result<Self> {
         let socket = sip.try_clone()?;
         socket.set_nonblocking(false)?;
@@ -114,13 +94,12 @@ impl Reader {
                 let mut buffer = vec![0_u8; 65_535];
                 while !seen.load(Ordering::Relaxed) {
                     match socket.recv_from(&mut buffer) {
-                        // whatever arrived once the socket was given up is
-                        // not the endpoint's any more, the datagram that
-                        // woke this read to say so among it
+                        // anything after retirement, including the wake-up datagram, is no longer
+                        // the endpoint's
                         Ok(_) if seen.load(Ordering::Relaxed) => return,
                         Ok((length, from)) => {
                             let data = buffer.get(..length).unwrap_or_default().to_vec();
-                            // the endpoint has gone, and the thread with it
+                            // the endpoint is gone; so is the thread
                             if sender.send((data, from)).is_err() {
                                 return;
                             }
@@ -130,8 +109,7 @@ impl Reader {
                                 error.kind(),
                                 ErrorKind::WouldBlock | ErrorKind::TimedOut
                             ) => {}
-                        // whatever else a datagram socket reports is about one
-                        // datagram, not the socket
+                        // other datagram socket errors concern one datagram, not the socket
                         Err(_) => std::thread::sleep(READER_PAUSE),
                     }
                 }
@@ -144,8 +122,8 @@ impl Reader {
         })
     }
 
-    /// Wait for the next datagram no later than `until`, or for as long as
-    /// it takes with `None`. `false` when the thread has ended.
+    /// Wait for the next datagram until `until`, or indefinitely with `None`. `false` when the
+    /// thread has ended.
     fn wait(&mut self, until: Option<Instant>) -> bool {
         if !self.held.is_empty() {
             return true;
@@ -177,8 +155,8 @@ impl Reader {
 }
 
 impl Drop for Reader {
-    /// Retire the thread, and wake its read with an empty datagram so that it
-    /// ends now rather than at its next [`READER_LOOK`].
+    /// Retire the thread and wake its read with an empty datagram, so it ends now rather than after
+    /// [`READER_LOOK`].
     fn drop(&mut self) {
         self.retired.store(true, Ordering::Relaxed);
         let to = if self.bound.ip().is_unspecified() {
@@ -192,11 +170,9 @@ impl Drop for Reader {
 }
 
 impl Endpoint {
-    /// Bind the SIP socket and start a user agent on it. `bind_addr` should
-    /// already name a routable address — [`route_to`] finds one — not a
-    /// wildcard: it becomes both this endpoint's own idea of its address and,
-    /// through [`Endpoint::open_media`], the address a call's offer or answer
-    /// advertises for its media.
+    /// Bind the SIP socket and start a user agent on it. `bind_addr` should be routable
+    /// ([`route_to`] finds one), not a wildcard: it is the endpoint's own address and, through
+    /// [`Endpoint::open_media`], the media address calls advertise.
     pub(crate) fn bind(
         bind_addr: SocketAddr,
         mut agent: UserAgent,
@@ -207,8 +183,8 @@ impl Endpoint {
         sip.set_nonblocking(true)?;
         let local = sip.local_addr()?;
         let transport = TransportId(1);
-        // §18.1.1: a transport has to say it is open, and what it is open on,
-        // before anything is written to it
+        // §18.1.1: a transport must be reported open, with its address, before anything is written
+        // to it
         let _ = agent.receive(
             Input::TransportBound {
                 transport,
@@ -232,23 +208,20 @@ impl Endpoint {
         })
     }
 
-    /// Read the SIP socket on a thread of its own from now on, so that
-    /// [`Endpoint::wait_sip`] waits on a channel, which ends on time, rather
-    /// than on the socket, which ends on the next scheduler tick ([`Reader`]
-    /// says why that matters). [`Endpoint::read_sip`] then takes what the
-    /// thread read, and [`Endpoint::rebind_sip`] starts a thread on the new
-    /// socket.
+    /// From now on read SIP on a thread, so [`Endpoint::wait_sip`] waits on a channel that ends on
+    /// time rather than on scheduler ticks ([`Reader`]). [`Endpoint::read_sip`] takes what it read,
+    /// and [`Endpoint::rebind_sip`] starts a new thread on the new socket.
     ///
     /// # Errors
-    /// Copying the socket, switching it to blocking reads, or starting the
-    /// thread.
+    ///
+    /// Cloning the socket, switching it to blocking, or starting the thread.
     pub(crate) fn read_in_background(&mut self) -> std::io::Result<()> {
         self.reader = Some(Reader::spawn(&self.sip)?);
         Ok(())
     }
 
-    /// Bind a fresh RTP socket for a call about to be placed or answered, and
-    /// say where its offer or its answer should send media.
+    /// Bind a fresh RTP socket for a call about to be placed or answered, and return the media
+    /// address for its SDP.
     pub(crate) fn open_media(
         &mut self,
         call: CallHandle,
@@ -260,13 +233,13 @@ impl Endpoint {
         Ok(SocketAddr::new(self.local.ip(), port))
     }
 
-    /// Bind the SIP socket again at `ip`, on the port it had, and tell the
-    /// agent its transport is open there now: what an application does
-    /// first when the address it was reached at is gone. The answer is where
-    /// the socket is.
+    /// Rebind the SIP socket at `ip` on the same port and tell the agent its transport is open
+    /// there, which an application does first when its old address is gone. Returns the new socket
+    /// address.
     ///
     /// # Errors
-    /// Binding the new socket, or the agent refusing the transport.
+    ///
+    /// Binding, or the agent refusing the transport.
     pub(crate) fn rebind_sip(
         &mut self,
         ip: std::net::IpAddr,
@@ -292,8 +265,8 @@ impl Endpoint {
             )
             .map_err(|error| format!("cannot bind the transport again: {error}"))?;
         if let Some(old) = self.reader.as_mut() {
-            // what the old socket had already been sent is still for this
-            // agent, and is handed over before anything the new one reads
+            // datagrams already sent to the old socket are still this agent's and are handed over
+            // first
             let mut new = Reader::spawn(&sip)
                 .map_err(|error| format!("cannot read the new SIP socket: {error}"))?;
             while let Some(datagram) = old.take() {
@@ -306,12 +279,9 @@ impl Endpoint {
         Ok(local)
     }
 
-    /// Offer `call` again from this endpoint's own address, on the port its
-    /// RTP socket already has — the answer to `UaEvent::CallAddressWanted`
-    /// once [`Endpoint::rebind_sip`] moved the endpoint. Every example's RTP
-    /// socket is bound to the wildcard address, so it goes on receiving at
-    /// the new address unchanged, and only the description has to say so.
-    /// A call that cannot be offered again is said on standard error.
+    /// Re-offer `call` from the endpoint's current address on its existing RTP port, answering
+    /// `UaEvent::CallAddressWanted` after [`Endpoint::rebind_sip`]. RTP sockets are bound to the
+    /// wildcard, so they keep receiving; only the description changes. Failures go to stderr.
     pub(crate) fn readdress(&mut self, call: CallHandle, now: Instant) {
         let Some(port) = self.media.get(&call).and_then(|media| media.port().ok()) else {
             eprintln!("{call:?} has no media socket to offer again");
@@ -326,11 +296,9 @@ impl Endpoint {
         }
     }
 
-    /// Forget a call's RTP socket once the call itself has ended, closing the
-    /// port along with it. A process that places or answers one call and
-    /// exits, such as `call.rs`, never notices its absence; one that keeps
-    /// running and keeps answering, such as `headless-agent.rs`, leaks a
-    /// bound socket per call otherwise — call this from a `CallEnded` handler.
+    /// Drop a call's RTP socket after the call ended. Short-lived examples like `call.rs` never
+    /// notice; a long-running one like `headless-agent.rs` leaks a socket per call without it, so
+    /// call this on `CallEnded`.
     pub(crate) fn close_media(&mut self, call: CallHandle) {
         self.media.remove(&call);
     }
@@ -355,10 +323,9 @@ impl Endpoint {
         }
     }
 
-    /// Run every active call's media for one tick, handing each one's socket
-    /// and session to `per_call` — which is where the example puts a real
-    /// device, a WAV file or an echo — and carry whatever the engine had
-    /// queued to send on a call's behalf (RTCP, a goodbye, a DTLS record).
+    /// Run one media tick for every active call, passing its socket and session to `per_call` (a
+    /// device, a WAV file or an echo), and send whatever the engine queued for the call (RTCP, a
+    /// BYE, a DTLS record).
     pub(crate) fn run_media(
         &mut self,
         now: Instant,
@@ -371,8 +338,8 @@ impl Endpoint {
             if let Some(media) = self.media.get_mut(&call) {
                 per_call(call, media, &mut session, now);
             }
-            // `session` (a `SessionGuard`) derefs to `&mut MediaSession`,
-            // which is what `per_call` above actually receives
+            // `session` (a `SessionGuard`) derefs to the `&mut MediaSession` that `per_call`
+            // receives
         }
         while let Some((call, destination, payload)) = self.engine.poll_rtcp(now) {
             if let Some(media) = self.media.get(&call) {
@@ -384,9 +351,7 @@ impl Endpoint {
                 media.send_rtcp(destination, &payload);
             }
         }
-        // A DTLS-SRTP handshake record, from whichever of `dtls` or `ice`
-        // this build has; `MediaEngine::poll_transmit` does not exist
-        // without at least one of them.
+        // `MediaEngine::poll_transmit` exists only with `dtls` or `ice`
         #[cfg(any(feature = "dtls", feature = "ice"))]
         while let Some((call, destination, payload)) = self.engine.poll_transmit(now) {
             if let Some(media) = self.media.get(&call) {
@@ -400,15 +365,11 @@ impl Endpoint {
         self.agent.handle_timeout(now);
     }
 
-    /// Read whatever SIP datagrams have arrived, non-blockingly: off the
-    /// socket, or what the reader thread took off it once
-    /// [`Endpoint::read_in_background`] started one. `true` when at least one
-    /// did.
+    /// Read whatever SIP datagrams have arrived without blocking, from the socket or from the
+    /// reader thread once [`Endpoint::read_in_background`] started one. `true` if any arrived.
     ///
-    /// A datagram the parser refused is said on standard error: the stack has
-    /// already answered it 400 or 513 when it could be addressed, and counted
-    /// it either way, but a line here is what an operator watching this
-    /// process sees without asking.
+    /// Datagrams the parser refused are logged to stderr: the stack already answered 400 or 513
+    /// where it could and counted them, but an operator watching the process sees this line.
     pub(crate) fn read_sip(&mut self, now: Instant) -> bool {
         let mut arrived = false;
         if self.reader.is_some() {
@@ -433,8 +394,7 @@ impl Endpoint {
         arrived
     }
 
-    /// Hand one datagram to the user agent, and say on standard error when
-    /// it refused it.
+    /// Hand one datagram to the user agent and log a refusal to stderr.
     fn deliver(&mut self, data: &[u8], from: SocketAddr, now: Instant) {
         if let Some(kept) = self.tap.as_mut() {
             kept.push(data.to_vec());
@@ -453,18 +413,13 @@ impl Endpoint {
         }
     }
 
-    /// Wait until a SIP datagram is waiting to be read or `until` has come,
-    /// whichever is first; with `until` `None`, until a datagram. Nothing
-    /// is handed to the user agent: [`Endpoint::read_sip`] does that.
+    /// Wait until a SIP datagram is ready or `until` arrives; with `None`, until a datagram.
+    /// Nothing is handed to the agent; [`Endpoint::read_sip`] does that.
     ///
-    /// With a reader thread the wait is on its channel, and ends on time.
-    /// Without one it is on the socket itself, which is non-blocking
-    /// everywhere else and blocks, with a timeout, on a look at the next
-    /// datagram that leaves it queued; that timeout is counted in scheduler
-    /// ticks ([`Reader`]). A failure to switch either way is a wait that
-    /// does not happen — the caller turns at once — never one that does not
-    /// end, and a reader thread that has ended leaves the socket to be
-    /// waited on and read here again.
+    /// With a reader thread the wait is on its channel and ends on time. Without one it peeks the
+    /// socket with a timeout counted in scheduler ticks ([`Reader`]). If switching blocking mode
+    /// fails, the wait returns at once rather than hang, and if the reader thread has ended the
+    /// socket is waited on and read here again.
     pub(crate) fn wait_sip(&mut self, until: Option<Instant>) {
         if let Some(reader) = self.reader.as_mut() {
             if reader.wait(until) {
@@ -485,8 +440,7 @@ impl Endpoint {
         if self.sip.set_read_timeout(timeout).is_err() || self.sip.set_nonblocking(false).is_err() {
             return;
         }
-        // one byte is enough to know a datagram is there; the rest of it is
-        // left where it is, since this only looks
+        // one byte shows a datagram is there; peeking leaves it queued
         let mut look = [0_u8; 1];
         let _ = self.sip.peek_from(&mut look);
         let _ = self.sip.set_nonblocking(true);
@@ -498,16 +452,14 @@ impl Endpoint {
     }
 }
 
-/// Bind an RTP socket, place `outgoing` on it, and remember the socket under
-/// the call handle placing it mints.
+/// Bind an RTP socket, place `outgoing` on it, and store the socket under the new call handle.
 ///
-/// The three steps go together because a [`CallHandle`] does not exist until
-/// [`MediaEngine::place`] returns one, and the socket has to exist before
-/// that call so its port can go in the offer — the same reordering every
-/// application places a call around.
+/// Together because the handle only exists after [`MediaEngine::place`] returns, while the socket
+/// must exist before so its port can go in the offer.
 ///
 /// # Errors
-/// Whatever binding the RTP socket or placing the call returns.
+///
+/// Whatever binding or placing returns.
 pub(crate) fn place(
     endpoint: &mut Endpoint,
     account: AccountId,
@@ -524,10 +476,8 @@ pub(crate) fn place(
     Ok(call)
 }
 
-/// Which of this host's addresses a datagram to `remote` would leave from —
-/// what goes in `Contact`, so the far end has somewhere to send its own
-/// requests back to. Binding to a wildcard address answers with it, and a
-/// registrar told to send calls to `0.0.0.0` sends them nowhere.
+/// The local address a datagram to `remote` would leave from, for `Contact`. A wildcard bind would
+/// advertise `0.0.0.0`, and a registrar sending calls there sends them nowhere.
 pub(crate) fn route_to(remote: SocketAddr) -> std::net::IpAddr {
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|socket| {

@@ -1,23 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Where a SIP domain says its server is: the SRV lookup of RFC 3263 §4.2, as
-//! little of it as an example needs.
+//! Where a SIP domain says its server is: just enough of RFC 3263 §4.2's SRV lookup for the
+//! examples.
 //!
-//! The library leaves DNS to the application (`docs/04-ua.md`), and
-//! `std::net` resolves a name to addresses and nothing else. That is not
-//! enough for a real domain: `sip2sip.info`'s own address refuses SIP
-//! outright, and the server is the one its `_sip._udp` record names. So this
-//! asks the system's resolver for that record directly — one query, one
-//! answer, over UDP — and falls back to the plain address when there is no
-//! record, no resolver to ask, or no answer, which is what §4.2 says to do
-//! when SRV finds nothing.
+//! The library leaves DNS to the application (`docs/04-ua.md`), and `std::net` only resolves names
+//! to addresses. `sip2sip.info`'s own address refuses SIP; its `_sip._udp` record names the real
+//! server. So this sends one SRV query over UDP to the system resolver, and falls back to the plain
+//! address when there is no record, resolver or answer, as §4.2 says.
 //!
-//! Not a resolver: no retries, no TCP fallback for a truncated answer, no
-//! NAPTR, no cache, and of several targets only the first in RFC 2782's
-//! order — lowest priority, then highest weight rather than a weighted draw.
-//! An application should use its platform's resolver; this is here so the
-//! examples can be run as they are.
+//! Not a resolver: no retries, no TCP fallback, no NAPTR, no cache, and only the first target in
+//! RFC 2782 order (lowest priority, then highest weight, without a weighted draw). Applications
+//! should use the platform resolver.
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -29,8 +23,8 @@ const TYPE_SRV: u16 = 33;
 const CLASS_IN: u16 = 1;
 /// How long one nameserver gets to answer.
 const PATIENCE: Duration = Duration::from_secs(3);
-/// Labels followed through compression pointers before a name is given up
-/// on: a pointer loop in a hostile answer would otherwise never end.
+/// Compression pointers followed before giving up on a name, so a pointer loop in a hostile answer
+/// terminates.
 const MAX_JUMPS: usize = 16;
 
 /// The address `domain`'s `service` record names (`"_sip._udp"`,
@@ -71,8 +65,7 @@ fn query(server: SocketAddr, name: &str) -> io::Result<Option<(String, u16)>> {
     socket.set_read_timeout(Some(PATIENCE))?;
     socket.connect(server)?;
 
-    // an identifier that is not the same on every run is all an example
-    // needs from it; the answer is also checked against the question
+    // a per-run identifier is enough here; the answer is also matched against the question
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

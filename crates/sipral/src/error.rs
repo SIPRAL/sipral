@@ -3,10 +3,8 @@
 
 //! What can go wrong where signalling meets media.
 //!
-//! Every variant here is a refusal with a reason, never a silence. A codec
-//! order naming something this build does not contain is rejected where it is
-//! set rather than ignored where it is used, and a call whose media could not
-//! be opened says so instead of standing up with no audio in it.
+//! Every variant is a refusal with a reason. An unknown codec is rejected where it is set, and a
+//! call whose media could not open says so instead of standing up silent.
 
 use core::fmt;
 
@@ -21,11 +19,8 @@ use crate::codec::Codec;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaError {
-    /// A codec order named the same codec twice, or named one that is not in
-    /// this build.
-    ///
-    /// The set of codecs is a compile-time fact, so this is the answer a
-    /// configuration gets, not a run-time surprise later.
+    /// A codec order named the same codec twice, or one not in this build. Codecs are fixed at
+    /// compile time, so this is a configuration error.
     UnsupportedCodec {
         /// What was asked for.
         name: String,
@@ -37,19 +32,16 @@ pub enum MediaError {
         /// What was asked for, in milliseconds.
         millis: u32,
     },
-    /// The negotiation settled on a payload type this build cannot decode.
-    ///
-    /// It means the peer answered with something that was not in the offer,
-    /// which happens, and it is better said than played as noise.
+    /// The negotiation settled on a payload type this build cannot decode: the peer answered with
+    /// something not in the offer.
     UnknownPayload {
         /// The type the answer named.
         payload: u8,
         /// What its `a=rtpmap` called it.
         encoding: String,
     },
-    /// A codec new to the call cannot be offered on it: every dynamic payload
-    /// type number has already been given to something else, and RFC 3264
-    /// §8.3.2 does not let a number be given again within a session.
+    /// No dynamic payload type is left for a codec new to the call; RFC 3264 §8.3.2 forbids reusing
+    /// a number within a session.
     NoPayloadType,
     /// The description this end wrote or the one that arrived could not be
     /// read.
@@ -57,217 +49,133 @@ pub enum MediaError {
     /// The two descriptions were read but they agree on nothing that can carry
     /// audio.
     NoCommonCodec,
-    /// One end refused the stream: a port of zero in the answer, which
-    /// RFC 3264 §6 makes the way to say no to an offered stream. The call is
-    /// up and carries no audio, which is a thing a peer is allowed to want.
+    /// One end refused the stream with port zero (RFC 3264 §6). The call is up without audio, which
+    /// a peer may want.
     StreamRefused,
-    /// There is no session description to work from: an INVITE with no body
-    /// that was answered without one either, or a call whose media was never
-    /// opened.
+    /// No session description to work from: an INVITE without a body answered without one, or a
+    /// call whose media never opened.
     NoDescription,
     /// The call is not one this engine placed or answered.
     NoSuchCall,
-    /// The negotiation would have keyed the stream from a DTLS handshake, and
-    /// there is no DTLS in this build.
-    ///
-    /// Refused rather than opened in the clear on a secure profile. The whole
-    /// of what a build without the `dtls` feature does about keys is SDES, and
-    /// [`Capabilities`](crate::Capabilities) says so before a call is placed.
+    /// The negotiation would key the stream by DTLS and this build has no DTLS. Refused rather than
+    /// opened in the clear; [`Capabilities`](crate::Capabilities) reports it before calling.
     NoDtlsSrtp,
-    /// This stack could not make the key and certificate it would have
-    /// presented (RFC 8122).
-    ///
-    /// The one way to reach it is a media seed that is not entropy, which is
-    /// the caller's to supply and the one thing about SRTP that fails
-    /// silently everywhere else: see
-    /// [`MediaEngine::new`](crate::MediaEngine::new).
+    /// The DTLS key and certificate (RFC 8122) could not be made. Only a media seed that is not
+    /// real entropy causes this; see [`MediaEngine::new`](crate::MediaEngine::new).
     #[cfg(feature = "dtls")]
     DtlsIdentity,
-    /// The two `a=setup` values cannot both be honoured, so neither end knows
-    /// which of them sends the ClientHello (RFC 4145 §4.1, RFC 5763 §5).
+    /// The two `a=setup` values are incompatible, so neither end knows who sends the ClientHello
+    /// (RFC 4145 §4.1, RFC 5763 §5).
     ///
-    /// Refused here rather than left to the handshake, because the failure it
-    /// would otherwise cause is the quiet one: two ends that both believe
-    /// they are the server wait for each other until the handshake gives up,
-    /// which is two minutes of a call with no audio and no error.
+    /// Refused up front: otherwise both ends act as server and wait two minutes with no audio and
+    /// no error.
     #[cfg(feature = "dtls")]
     DtlsRole,
-    /// The peer's `a=fingerprint` cannot be read, or names a hash function
-    /// this build has no implementation of (RFC 8122 §5).
-    ///
-    /// A fingerprint that cannot be read cannot authenticate anything, and a
-    /// handshake run without one is a handshake with whoever answers.
+    /// The peer's `a=fingerprint` is unreadable or uses a hash this build lacks (RFC 8122 §5).
+    /// Without it the handshake would accept anyone.
     #[cfg(feature = "dtls")]
     DtlsFingerprint,
-    /// The handshake did not produce keys: the peer's certificate is not the
-    /// one its signalling named (RFC 8122 §5.1), it offered nothing this end
-    /// can key with, it sent an alert, or it never answered at all.
+    /// The handshake produced no keys: wrong certificate for the signalled fingerprint (RFC 8122
+    /// §5.1), nothing keyable offered, an alert, or no answer.
     ///
-    /// The call itself is untouched — whether to hang it up is a decision
-    /// with a person on the other end of it — but no audio will flow, because
-    /// a stream that agreed to be secured is never opened in the clear
-    /// instead.
+    /// The call is left up for the application to decide, but no audio flows: a stream that agreed
+    /// to encryption never falls back to clear.
     #[cfg(feature = "dtls")]
     DtlsHandshake,
     /// The far end closed the DTLS connection before it was keyed, or while
     /// it was running (RFC 6347 §4.2.8).
     #[cfg(feature = "dtls")]
     DtlsClosed,
-    /// The handshake agreed an SRTP protection profile this build has no
-    /// transform for (RFC 5764 §4.1.2).
-    ///
-    /// Not reachable against a peer, since only profiles this end offered can
-    /// be agreed; it is the arm a profile added to the handshake and not to
-    /// the stream would land in, loudly, rather than opening a stream under
-    /// the wrong transform.
+    /// The handshake agreed an SRTP profile this build has no transform for (RFC 5764 §4.1.2).
+    /// Unreachable from a peer; it catches a profile added to the handshake but not to the stream.
     #[cfg(feature = "dtls")]
     DtlsProfile,
-    /// The call agreed DTLS-SRTP and did not agree to multiplex its control
-    /// traffic, so RFC 5764 §4.2 would need a second handshake on the RTCP
-    /// port and this stack runs one.
-    ///
-    /// Refused rather than opened with an SRTCP half nothing will ever key.
-    /// An offer written under a DTLS policy always asks for `a=rtcp-mux`, so
-    /// the peer is one that took the attribute out of its answer.
+    /// DTLS-SRTP was agreed without rtcp-mux, which would need a second handshake on the RTCP port
+    /// (RFC 5764 §4.2); this stack runs one. Our DTLS offers always ask for mux, so the peer
+    /// removed it.
     #[cfg(feature = "dtls")]
     DtlsNeedsRtcpMux,
-    /// A re-negotiation named a different certificate for the far end
-    /// (RFC 5763 §6.6).
+    /// A renegotiation named a different far-end certificate (RFC 5763 §6.6).
     ///
-    /// §6.6 asks for a new DTLS association there, and this stack does not
-    /// start one: a re-offer from the far end that names one is answered 488
-    /// (RFC 8842 §5.3 has an answerer that will not start the association
-    /// refuse it), an answer that names one is not adopted, and either way
-    /// the session keeps running on keys both ends still agree on and the
-    /// call is told. Carrying on silently would be worse than either — the
-    /// far end would have moved to a certificate this end never checked, and
-    /// the media would keep flowing as though it had.
+    /// That requires a new DTLS association, which this stack does not start. A re-offer naming one
+    /// is answered 488 (RFC 8842 §5.3); an answer naming one is not adopted. The session keeps its
+    /// keys and the call is told, instead of trusting an unchecked certificate.
     #[cfg(feature = "dtls")]
     DtlsFingerprintChanged,
-    /// A re-negotiation would change how a running stream is keyed: turn
-    /// encryption on or off, or move it between SDES and a DTLS-SRTP
-    /// handshake.
+    /// A renegotiation would change how a running stream is keyed: encryption on or off, or SDES to
+    /// DTLS-SRTP or back.
     ///
-    /// A stream that has sent under one kind of keying has no way to carry
-    /// on under another, and adopting the plan anyway left it running the
-    /// old kind while the far end ran the new — encrypted audio to a peer
-    /// expecting it in the clear, or the reverse, and a call that went silent
-    /// with nothing said. So a re-offer that asks for it is answered 488 and
-    /// an answer that does it is not adopted; either way the session keeps
-    /// running as it was, and the call is told.
+    /// A running stream cannot switch. A re-offer asking for it is answered 488, an answer doing it
+    /// is not adopted; the session continues unchanged and the call is told.
     KeyingChanged,
-    /// A re-negotiation would swap which end is the DTLS client and which the
-    /// server (RFC 8842 §3.1).
+    /// A renegotiation would swap the DTLS client and server roles (RFC 8842 §3.1).
     ///
-    /// The same new association a moved certificate asks for, and refused the
-    /// same way: a re-offer from the far end that asks for it is answered
-    /// 488, an answer that takes it is not adopted, and either way the session
-    /// keeps running on the association it has. An offer from this end hands
-    /// the choice back with `actpass` (§5.5), so a far end that keeps the
-    /// association answers with the roles already in force (§5.3) and never
-    /// reaches this.
+    /// Refused like a changed certificate: a re-offer gets 488, an answer is not adopted, the
+    /// association continues. Our own offers send `actpass` (§5.5), so a peer keeping the
+    /// association answers with the current roles (§5.3).
     #[cfg(feature = "dtls")]
     DtlsRoleChanged,
-    /// The ICE agent refused what it was given: an address RFC 8445 §5.1.1.1
-    /// rules out of a candidate, credentials outside RFC 8839 §5.4's shape,
-    /// or a peer that changed its credentials without restarting ICE.
-    ///
-    /// The cause is carried rather than flattened, because the three are
-    /// different faults: the first is this end's own configuration, the
-    /// second is a peer that wrote a fragment nobody can use, and the third
-    /// is a peer that restarted ICE without saying so.
+    /// The ICE agent refused its input: a candidate address RFC 8445 §5.1.1.1 rules out,
+    /// credentials outside RFC 8839 §5.4, or a peer that changed credentials without a restart. The
+    /// cause is kept because these are different faults: our configuration, a bad peer fragment, an
+    /// unannounced restart.
     #[cfg(feature = "ice")]
     Ice(sipral_nat::ice::IceError),
-    /// The call is set to [`IcePolicy::Required`] and the far end described
-    /// no usable ICE: no attributes at all, candidates none of which can be
-    /// paired, or a description whose default destinations are missing from
-    /// its own candidate lines (RFC 8839 §4.2.5, an ICE mismatch).
-    ///
-    /// Under [`IcePolicy::Offered`] every one of those is a fallback to the
-    /// signalled address instead, which is the whole difference between the
-    /// two and the reason they are separate settings.
+    /// The call requires ICE ([`IcePolicy::Required`]) and the far end described none usable: no
+    /// attributes, no pairable candidates, or default destinations missing from its candidates (RFC
+    /// 8839 §4.2.5). Under [`IcePolicy::Offered`] each of these falls back to the signalled
+    /// address.
     ///
     /// [`IcePolicy::Required`]: crate::IcePolicy::Required
     /// [`IcePolicy::Offered`]: crate::IcePolicy::Offered
     #[cfg(feature = "ice")]
     IceRequired,
-    /// The call offered ICE and did not agree to multiplex its control
-    /// traffic, so the stream has an RTCP component whose address this end
-    /// cannot name.
-    ///
-    /// The mirror of [`MediaError::DtlsNeedsRtcpMux`], and refused for the
-    /// same shape of reason: an offer written under an ICE policy always asks
-    /// for `a=rtcp-mux`, so this is a peer that took the attribute out, and
-    /// an offer that named a second component without a second address would
-    /// fail this stack's own mismatch check.
+    /// ICE was offered and rtcp-mux was not agreed, leaving an RTCP component with no address. As
+    /// for [`MediaError::DtlsNeedsRtcpMux`]: our ICE offers always ask for mux, so the peer removed
+    /// it.
     #[cfg(feature = "ice")]
     IceNeedsRtcpMux,
-    /// Consent to send on the pair ICE selected is gone: no authenticated
-    /// response for thirty seconds, or a 403 revoking it (RFC 7675 §5).
+    /// Consent on the selected pair is gone: no authenticated response for 30 s, or a 403 (RFC 7675
+    /// §5).
     ///
-    /// Nothing more may be sent on that pair and the same credentials may not
-    /// be used on it again. The remedy is an ICE restart, which draws new
-    /// ones and checks every pair again
-    /// ([`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice)), or
-    /// ending the call.
+    /// Nothing more may be sent on the pair, and its credentials are spent. Restart ICE
+    /// ([`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice)) or end the call.
     #[cfg(feature = "ice")]
     IcePathLost,
-    /// [`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice) was
-    /// asked of a call that runs no ICE agent: its catalogue offers no ICE,
-    /// its peer answered without any, or its session has not opened yet.
-    ///
-    /// Nothing is sent. A restart is a new ICE session on a running one (RFC
-    /// 8445 §9), and a call with none has nothing for new credentials to
-    /// replace.
+    /// [`MediaEngine::restart_ice`](crate::MediaEngine::restart_ice) on a call without an ICE agent
+    /// (no ICE offered or answered, or no session yet). Nothing is sent.
     #[cfg(feature = "ice")]
     NoIce,
-    /// [`MediaEngine::readdress`](crate::MediaEngine::readdress) was asked
-    /// of a call whose session runs ICE.
-    ///
-    /// Nothing is sent. Its candidates were gathered on the socket the call
-    /// started on, so a description that moved only `c=` and `m=` would
-    /// contradict every candidate line beside them (RFC 8839 §4.2.5): a call
-    /// that runs ICE moves by a restart gathered on the new socket.
+    /// [`MediaEngine::readdress`](crate::MediaEngine::readdress) on a call running ICE. Nothing is
+    /// sent: moving only `c=` and `m=` would contradict the candidates (RFC 8839 §4.2.5); such a
+    /// call moves by an ICE restart on the new socket.
     #[cfg(feature = "ice")]
     MovesWithIce,
-    /// The call asked for SRTP and would have carried audio without it: a
-    /// plain offer arriving at a call set to [`SrtpPolicy::Required`], a
-    /// plain re-offer inside one, a plain answer to its own offer, or an
-    /// answer keyed the way its policy exists to avoid.
+    /// The call requires SRTP and would have carried audio without it: a plain offer or re-offer to
+    /// a [`SrtpPolicy::Required`] call, a plain answer to its offer, or an answer keyed the way its
+    /// policy forbids.
     ///
-    /// The refusal is the point. Answering it plainly would be a silent
-    /// downgrade, and there is no way for anyone on either end to notice one.
-    /// The call is refused with it, not left to the application: an INVITE
-    /// with 488 Not Acceptable Here (RFC 3261 §21.4.26), a re-offer the same
-    /// way, and a call this end placed and the far end answered plainly
-    /// with a BYE whose `Reason` says 488 (RFC 3326), once its 2xx has been
-    /// acknowledged (§13.2.2.4).
+    /// The call is refused, never silently downgraded: an INVITE or re-offer gets 488 (RFC 3261
+    /// §21.4.26), and a call we placed that was answered plainly is hung up with `Reason` 488 (RFC
+    /// 3326) once its 2xx is acknowledged (§13.2.2.4).
     ///
     /// [`SrtpPolicy::Required`]: crate::SrtpPolicy::Required
     SrtpRequired,
-    /// The description would carry an SDES key (`a=crypto` with `inline:`)
-    /// over signalling that is not encrypted, and this call's catalogue says
-    /// [`SdesSignalling::SecureOnly`](crate::SdesSignalling::SecureOnly)
-    /// (RFC 4568 §8.3). Nothing was sent: a call placed was not placed, and
-    /// a call being answered is still ringing for the application to reject.
+    /// The description would carry an SDES key over unencrypted signalling while the catalogue says
+    /// [`SdesSignalling::SecureOnly`](crate::SdesSignalling::SecureOnly) (RFC 4568 §8.3). Nothing
+    /// was sent: an outgoing call was not placed, an incoming one is still ringing for the
+    /// application to reject.
     KeysWouldTravelInClear,
     /// A list of SRTP suites that names none, or names one twice
     /// ([`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites)).
     NoSrtpSuite,
-    /// The crypto line the negotiation settled on asks for something this
-    /// build will not be held to: more than one master key on the line, one
-    /// of RFC 4568 §6.3's session parameters that turns off encryption or
-    /// authentication, a key derivation rate, or a parameter that has to be
-    /// honoured and cannot be read.
-    ///
-    /// Refused rather than half-honoured: a stream opened on terms only one
-    /// end believes produces packets the far end drops, which looks like a
-    /// network fault for as long as somebody is willing to keep looking.
+    /// The agreed crypto line asks for terms this build does not support: several master keys, an
+    /// RFC 4568 §6.3 parameter disabling encryption or authentication, a key derivation rate, or an
+    /// unreadable mandatory parameter. Refused, because a stream on terms only one end believes
+    /// looks like a network fault.
     UnusableKeying,
-    /// The codec refused a frame. Opus is the only one that can, and it does
-    /// so for a frame length it was not built for — so a build with the
-    /// `opus` feature off has nothing that produces this and no variant for
-    /// it.
+    /// The codec refused a frame. Only Opus can, for a frame length it was not set up for; the
+    /// variant exists only with the `opus` feature.
     #[cfg(feature = "opus")]
     Codec(CodecError),
     /// The packet did not fit the buffer it had to be built in.
@@ -277,12 +185,8 @@ pub enum MediaError {
         /// What there was.
         got: usize,
     },
-    /// A render-to-capture delay longer than anything between a loudspeaker
-    /// and a microphone in the same room.
-    ///
-    /// Refused where it is set rather than turned into half a second of
-    /// history per call: a number that large is a platform reporting
-    /// something other than what was asked of it.
+    /// A render-to-capture delay longer than any loudspeaker-to-microphone path. Such a value is a
+    /// platform reporting something else, so it is refused where it is set.
     RenderDelayTooLong {
         /// What was asked for.
         asked: std::time::Duration,
@@ -296,8 +200,7 @@ pub enum MediaError {
         /// The floor RFC 4733 §2.5.2.1 takes from ITU-T Q.24.
         least: std::time::Duration,
     },
-    /// A digit longer than any key is held: the same ceiling a digit sent or
-    /// received by INFO is held to.
+    /// A digit longer than any key is held; the same ceiling as INFO digits.
     DigitTooLong {
         /// What was asked for.
         asked: std::time::Duration,
@@ -311,20 +214,15 @@ pub enum MediaError {
         /// The character.
         key: char,
     },
-    /// A recording could not be started, or stopped writing part-way through.
-    ///
-    /// The kind rather than the error itself, because a call carries on when
-    /// its recording fails and this has to be comparable and cloneable to
-    /// travel in an event.
+    /// A recording could not start, or stopped part-way. Carries the error kind so the event stays
+    /// comparable and cloneable; the call continues.
     Recording(std::io::ErrorKind),
     /// Nothing is being recorded on this call.
     NotRecording,
-    /// A recording was asked for while one was already running. Two writers on
-    /// one stream would interleave frames into both files.
+    /// A recording was asked for while one runs; two writers would interleave frames.
     AlreadyRecording,
-    /// A recording was asked for at a sampling rate its format cannot be
-    /// written at: outside 8 to 48 kHz for WAV, or not one of Opus's five
-    /// rates for Ogg Opus.
+    /// A recording rate the format cannot write: outside 8 to 48 kHz for WAV, or not one of Opus's
+    /// five rates for Ogg Opus.
     RecordingRate {
         /// What was asked for.
         hertz: u32,
@@ -349,27 +247,17 @@ pub enum MediaError {
     /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to join a
     /// call to itself.
     SameCall,
-    /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to pair a
-    /// call that is already paired with another.
-    ///
-    /// A call leaves the pair it is in
-    /// ([`MediaEngine::leave`](crate::MediaEngine::leave)) before it joins
-    /// another: two pairs sharing a call is a mix of three far ends and this
-    /// end, which is not what this stack's own [`mix_two`](crate::mix_two)
-    /// does the arithmetic for.
+    /// [`MediaEngine::join`](crate::MediaEngine::join) on a call already paired. Leave first
+    /// ([`MediaEngine::leave`](crate::MediaEngine::leave)); [`mix_two`](crate::mix_two) mixes
+    /// exactly two far ends and this end.
     AlreadyJoined,
     /// [`MediaEngine::leave`](crate::MediaEngine::leave) or
     /// [`MediaEngine::mix`](crate::MediaEngine::mix) was asked about a call
     /// that is not currently joined to another.
     NotJoined,
-    /// [`MediaEngine::join`](crate::MediaEngine::join) was asked to pair two
-    /// calls whose sessions decode at different sample rates, or cut audio
-    /// into frames of different lengths.
-    ///
-    /// Nothing in [`mix_two`](crate::mix_two) resamples, so the samples it
-    /// decodes out of one session have to line up, index for index, with the
-    /// ones it decodes out of the other — which two codecs only agree on
-    /// when they cut a frame the same way.
+    /// [`MediaEngine::join`](crate::MediaEngine::join) on calls with different sample rates or
+    /// frame lengths. [`mix_two`](crate::mix_two) does not resample, so samples must line up one to
+    /// one.
     JoinIncompatible,
     /// A [`LocalConference`](crate::LocalConference) has no place left, or
     /// was asked to be made with none or with more than
@@ -378,24 +266,21 @@ pub enum MediaError {
         /// How many members it holds, this end included.
         capacity: usize,
     },
-    /// A call whose codec a [`LocalConference`](crate::LocalConference)
-    /// cannot mix: it hears at a rate other than 8, 16, 32 or 48 kHz, or cuts
-    /// frames longer than sixty milliseconds. A conference made for this end
-    /// at such a rate is refused the same way, with no frame.
+    /// A call a [`LocalConference`](crate::LocalConference) cannot mix: a rate other than 8, 16, 32
+    /// or 48 kHz, or frames over 60 ms. A conference made for this end at such a rate is refused
+    /// the same way.
     ConferenceIncompatible {
         /// The rate asked for.
         hertz: u32,
         /// The frame asked for, in samples at that rate.
         frame_samples: usize,
     },
-    /// The call is already in a [`LocalConference`](crate::LocalConference)
-    /// or joined into a pair with
-    /// [`MediaEngine::join`](crate::MediaEngine::join): two drivers of one
-    /// call would each take every other frame from the other.
+    /// The call is already in a [`LocalConference`](crate::LocalConference) or a
+    /// [`MediaEngine::join`](crate::MediaEngine::join) pair; two drivers would each take half the
+    /// frames.
     InConference,
-    /// A member was named that is not in the
-    /// [`LocalConference`](crate::LocalConference): a call never added or
-    /// already gone, or this end in a conference made without it.
+    /// A member not in the [`LocalConference`](crate::LocalConference): never added, already gone,
+    /// or this end in a conference made without it.
     NotInConference,
     /// A [`LocalConference`](crate::LocalConference) is recorded as one mix,
     /// in one channel; a stereo layout has nothing to put on its second.
@@ -408,10 +293,9 @@ pub enum MediaError {
         /// Samples given.
         given: usize,
     },
-    /// Text was asked for on a call that negotiated no real-time text stream
-    /// (RFC 4103): it was given no text socket
-    /// ([`CallMedia::text`](crate::CallMedia::text)), the far end refused or
-    /// never offered one, or the call keys its audio.
+    /// Text on a call without an RFC 4103 text stream: no text socket
+    /// ([`CallMedia::text`](crate::CallMedia::text)), the far end refused or never offered one, or
+    /// the audio is keyed.
     NoText,
     /// More text than the call holds unsent; none of it was queued.
     TextBufferFull {
@@ -421,11 +305,8 @@ pub enum MediaError {
 }
 
 impl MediaError {
-    /// The codec this build has no encoder for, when that is what went wrong.
-    ///
-    /// A caller reporting a failed call wants the name, and digging it out of
-    /// the variant at every call site is how a log line ends up saying
-    /// "media error".
+    /// The codec this build lacks, when that is the error, so a failed call can be logged with its
+    /// name.
     #[must_use]
     pub fn unsupported(codec: &str) -> Self {
         Self::UnsupportedCodec {
@@ -493,10 +374,8 @@ impl From<std::io::Error> for MediaError {
 }
 
 impl MediaError {
-    /// The sentence for a refusal about mixing calls — a pair or a local
-    /// conference — or about the rate a call's frames are converted to,
-    /// which `Display` hands here for the reason it hands the path's to
-    /// `about_the_path`.
+    /// The sentence for mixing refusals (pair or local conference) and application rate errors,
+    /// split out of `Display` like `about_the_path`.
     fn about_mixing(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::SameCall => f.write_str("a call cannot be joined to itself"),
@@ -539,14 +418,8 @@ impl MediaError {
         }
     }
 
-    /// The refusals about how a call is secured and how its path is chosen.
-    ///
-    /// Lifted out of [`fmt::Display`] because the one match there had grown
-    /// past what a reader holds at once, and because these are the group that
-    /// travels together: every one of them is a call that could have carried
-    /// audio and was not allowed to, and every one of them is one fixed
-    /// sentence. `None` for everything else, which the match below still
-    /// answers.
+    /// The sentences for refusals about securing a call and choosing its path, split out of
+    /// [`fmt::Display`] to keep that match readable. `None` for everything else.
     fn about_the_path(&self) -> Option<&'static str> {
         Some(match self {
             #[cfg(feature = "dtls")]
@@ -602,13 +475,9 @@ impl MediaError {
     }
 }
 
-/// What a variant with no sentence of its own would print.
-///
-/// Nothing reaches it: [`MediaError::about_the_path`] answers for every arm
-/// the match in [`fmt::Display`] does not, and
-/// `every_media_error_says_something_of_its_own` is the test that keeps that
-/// true as variants are added. It exists because a `Display` that panicked
-/// would turn a log line into an abort.
+/// Fallback text for a variant with no sentence. Unreachable:
+/// `every_media_error_says_something_of_its_own` checks every variant is covered. A panicking
+/// `Display` would turn a log line into an abort.
 const UNNAMED: &str = "this call's media was refused and this build has no sentence for why";
 
 impl fmt::Display for MediaError {
@@ -711,9 +580,7 @@ impl fmt::Display for MediaError {
                 f,
                 "the text does not fit: there is room for {room} more characters unsent"
             ),
-            // every refusal about how a call is secured and how its path is
-            // chosen, which `about_the_path` holds because the match here had
-            // grown past what a reader holds at once
+            // refusals about security and path, kept in `about_the_path`
             other => f.write_str(other.about_the_path().unwrap_or(UNNAMED)),
         }
     }
@@ -725,12 +592,8 @@ impl core::error::Error for MediaError {}
 mod tests {
     use super::{MediaError, UNNAMED};
 
-    /// The dead branch, held dead.
-    ///
-    /// [`MediaError::about_the_path`] answers for every arm the match in
-    /// `Display` does not, so `UNNAMED` can only be printed by a variant that
-    /// was added to neither. This is what notices, rather than a caller
-    /// reading a log line that explains nothing.
+    /// `UNNAMED` stays unreachable: a variant added to neither match would print it, and this test
+    /// notices first.
     #[test]
     fn every_media_error_says_something_of_its_own() {
         let refusals = [

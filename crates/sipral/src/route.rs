@@ -3,25 +3,16 @@
 
 //! Which of this machine's addresses a peer can reach it at.
 //!
-//! A socket bound to the wildcard address has no address to advertise, and
-//! one bound to `127.0.0.1` has one nobody else can use. The address a
-//! `Contact` and a `c=` line should carry is the one the operating system
-//! sends from toward the peer: the address of the interface its route leaves
-//! on. [`route_to`] asks for exactly that, the way every platform allows
-//! without privileges: a UDP socket, connected to the peer — which for a
-//! datagram socket sends nothing, and only fixes the destination, so the
-//! kernel picks the route and the source address (RFC 1122 §3.3.4.3 has the
-//! source chosen from the outgoing interface) — then asked for its own
-//! address, and closed.
+//! A wildcard bind has no address to advertise, and `127.0.0.1` is useless to others. `Contact` and
+//! `c=` should carry the address the OS sends from toward the peer. [`route_to`] finds it without
+//! privileges: it connects a UDP socket to the peer (which sends nothing for a datagram socket,
+//! only fixes the route and source address, RFC 1122 §3.3.4.3), reads its local address, and closes
+//! it.
 //!
-//! It is the one call in this crate that touches a socket, and it touches
-//! nothing the application owns: the socket is its own, bound to an
-//! ephemeral port and dropped before it returns. [`advertised_address`] is
-//! the policy on top: a wildcard bind takes the route's address, a loopback
-//! bind is refused toward anything that is not loopback, and nothing is ever
-//! silently advertised on loopback to a peer on another machine — the user
-//! agent refuses that too, where it writes the address
-//! (`sipral_ua::advertise`).
+//! The only socket this crate touches, and it is its own, on an ephemeral port, dropped before
+//! returning. [`advertised_address`] adds the policy: a wildcard bind takes the route's address, a
+//! loopback bind is refused toward a non-loopback peer, and loopback is never silently advertised
+//! to another machine (the user agent also refuses it, in `sipral_ua::advertise`).
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -30,11 +21,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdvertiseError {
-    /// The socket is bound to a loopback address, or the only route to the
-    /// peer leaves on one, and the peer is not a loopback address: whatever
-    /// this end advertised, the peer could not reach it. Bind to the address
-    /// of the interface that routes to the peer, or to the wildcard address
-    /// and let [`advertised_address`] find it.
+    /// The bind address, or the only route to the peer, is loopback while the peer is not, so the
+    /// peer could not reach anything advertised. Bind to the interface that routes to the peer, or
+    /// to the wildcard and let [`advertised_address`] find it.
     Loopback {
         /// The address that would have been advertised.
         local: IpAddr,
@@ -76,20 +65,17 @@ pub fn route_to(peer: SocketAddr) -> io::Result<IpAddr> {
     Ok(socket.local_addr()?.ip())
 }
 
-/// The address to advertise, in a `Contact` or a `c=` line, for a socket
-/// bound at `bound` whose traffic goes to `peer`.
+/// The address to advertise in `Contact` or `c=` for a socket bound at `bound` talking to `peer`.
 ///
-/// A socket bound to a specific address advertises it, unless it is a
-/// loopback address and `peer` is not. A socket bound to the wildcard
-/// address advertises the address of the route toward `peer`
-/// ([`route_to`]), with its own port. `peer` is the registrar for the
-/// signalling socket and the far end, or the registrar when the far end is
-/// not known yet, for a media socket.
+/// A specific bind advertises itself, unless it is loopback and `peer` is not. A wildcard bind
+/// advertises the route's address toward `peer` ([`route_to`]) with its own port. `peer` is the
+/// registrar for the signalling socket, and the far end (or the registrar if unknown) for a media
+/// socket.
 ///
 /// # Errors
-/// [`AdvertiseError::Loopback`] when the address would be a loopback one and
-/// `peer` is not; [`AdvertiseError::NoRoute`] when there is no route to
-/// `peer` to take an address from.
+///
+/// [`AdvertiseError::Loopback`] when the address would be loopback and `peer` is not;
+/// [`AdvertiseError::NoRoute`] when there is no route to `peer`.
 pub fn advertised_address(
     bound: SocketAddr,
     peer: SocketAddr,
@@ -134,7 +120,7 @@ mod tests {
 
     #[test]
     fn the_route_to_a_loopback_peer_leaves_on_loopback_and_sends_nothing() {
-        // a peer that is listening would see a datagram if one went
+        // a listening peer would see any datagram sent
         let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -167,7 +153,7 @@ mod tests {
 
     #[test]
     fn loopback_is_never_advertised_to_a_peer_on_another_machine() {
-        // the trial: bindHost left at its default, a silent call
+        // the trial: bindHost left at its default gave a silent call
         assert_eq!(
             advertised_address(at("127.0.0.1:5060"), at("192.0.2.9:5060")),
             Err(AdvertiseError::Loopback {
@@ -193,8 +179,8 @@ mod tests {
         );
     }
 
-    /// A dual-stack socket writes an IPv4 address mapped into IPv6:
-    /// `::ffff:127.0.0.1` is loopback, whichever side it is on.
+    /// A dual-stack socket reports IPv4 as mapped IPv6: `::ffff:127.0.0.1` is loopback on either
+    /// side.
     #[test]
     fn an_ipv4_mapped_loopback_is_loopback_on_either_side() {
         assert_eq!(

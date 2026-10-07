@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A softphone's own shape: register with a real account, place a call, put
-//! it on hold and take it off again, and hand it to somebody else with a
-//! blind transfer — everything `call.rs` skips by dialling an address that
-//! needs none of it.
+//! A softphone's shape: register an account, place a call, hold and resume it, and blind-transfer
+//! it, all of which `call.rs` skips.
 //!
-//! Nothing here is runnable with no configuration, because a registrar wants
-//! a real account: name one on the command line.
+//! A registrar needs a real account, so pass one:
 //!
 //! ```text
 //! cargo run --example register-and-call -- \
@@ -15,16 +12,13 @@
 //!     --target sip:bob@sip.example.com
 //! ```
 //!
-//! `--hold` puts the call on hold for two seconds and takes it off again
-//! before it ends; `--transfer sip:carol@sip.example.com` hands it to a third
-//! party with a blind transfer (RFC 3515) instead of hanging it up. With
-//! neither, the call stays up for a couple of seconds and is hung up from
-//! here. The account unregisters before the process exits, the same way a
-//! softphone gives its binding back when it quits rather than leaving the
-//! registrar to time it out.
+//! `--hold` holds the call for two seconds and resumes it; `--transfer sip:carol@sip.example.com`
+//! blind-transfers it (RFC 3515) instead of hanging up. With neither, the call stays up a couple of
+//! seconds and is hung up. The account unregisters before exit, as a softphone does, rather than
+//! leaving the binding to time out.
 
-// `udp_endpoint` needs `media_socket` at `crate::media_socket`, the same way
-// `call.rs` provides it, even though this file never names it itself.
+// `udp_endpoint` needs `media_socket` at `crate::media_socket`, as in `call.rs`, though this file
+// never names it
 #[path = "common/entropy.rs"]
 mod entropy;
 #[path = "common/media_socket.rs"]
@@ -48,14 +42,12 @@ use sipral::{
 
 use udp_endpoint::Endpoint;
 
-/// How long a call sits in each step — up, held, transferring — before the
-/// next one starts. Long enough that a person watching the far end's phone
-/// sees each change happen.
+/// Time spent in each step (up, held, transferring), long enough to watch it happen on the far
+/// phone.
 const PAUSE: Duration = Duration::from_secs(2);
 
-/// How long the whole run may take before this gives up and exits non-zero,
-/// so a registrar or a target that never answers does not hang the example
-/// forever.
+/// Overall time limit before exiting non-zero, so an unresponsive registrar or target cannot hang
+/// the example.
 const CEILING: Duration = Duration::from_secs(30);
 
 /// What the command line asked for.
@@ -70,9 +62,8 @@ struct Args {
     transfer: Option<String>,
 }
 
-/// Where this run is, in the order it moves through them. `Holding` and
-/// `Resuming` are skipped entirely when [`Args::hold`] is not asked for, and
-/// `Transferring` is skipped when [`Args::transfer`] names nobody.
+/// The run's steps, in order. `Holding` and `Resuming` are skipped without [`Args::hold`],
+/// `Transferring` without [`Args::transfer`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     Registering,
@@ -227,10 +218,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Every call still needs its media pumped, even one this example
-        // never plays or records: silence out, and whatever comes back is
-        // simply discarded. A real softphone hands the closures below a
-        // microphone and a speaker instead — see `call.rs` for exactly that.
+        // media must still be pumped: silence out, replies discarded. A real softphone passes a
+        // microphone and speaker; see `call.rs`
         endpoint.run_media(now, |_call, media, session, now| {
             media.turn(session, now, |room| room.fill(0), |_room| {});
         });
@@ -240,9 +229,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             && let Some(call) = call
         {
             step = advance(&mut endpoint, args, call, step, now)?;
-            // `Holding` and `Resuming` each need the same pause before the
-            // next thing happens to them; every other step is driven by an
-            // event instead, so nothing schedules a further wake-up for it.
+            // only `Holding` and `Resuming` wait on a timer; other steps advance on events
             step_at = matches!(step, Step::Holding | Step::Resuming).then(|| now + PAUSE);
         }
 
@@ -290,8 +277,8 @@ fn advance(
     }
 }
 
-/// A server named with a port is that address; a bare domain is looked up
-/// the way RFC 3263 §4.2 has it, by its `_sip._udp` record first.
+/// A server with a port is used as is; a bare domain is looked up per RFC 3263 §4.2, `_sip._udp`
+/// record first.
 fn resolve(server: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     if server.contains(':') {
         return server

@@ -3,91 +3,59 @@
 
 //! A softphone stack in one crate: signalling joined to media.
 //!
-//! Everything below this is deliberately unjoined. `sipral-ua` places and
-//! answers calls and has never heard of a codec; `sipral-rtp` carries payloads
-//! and has never seen a negotiation; `sipral-media` encodes audio and has
-//! never seen a call. `docs/01-architecture.md` makes that a rule rather than
-//! an accident — **signalling and media never call each other** — because the
-//! agent build links no audio pipeline at all and a user agent that reached
-//! into one could not be built without it.
+//! The crates below are kept apart on purpose: `sipral-ua` handles calls and knows no codec,
+//! `sipral-rtp` carries payloads and sees no negotiation, `sipral-media` encodes audio and sees no
+//! call. `docs/01-architecture.md` makes it a rule that **signalling and media never call each
+//! other**, so the agent build can link no audio pipeline at all.
 //!
-//! The rule leaves exactly one place for the two halves to meet, and this is
-//! it. What crosses is a description: [`MediaCapabilities`] on the way into an
-//! offer and [`MediaPlan`] on the way out of the answer, both of them written
-//! down in `sipral-core::sdp` and neither of them naming a socket, a device or
-//! a codec implementation.
+//! This crate is the one place they meet. What crosses is a description: [`MediaCapabilities`]
+//! into an offer and [`MediaPlan`] out of the answer, both from `sipral-core::sdp`, neither naming
+//! a socket, device or codec implementation.
 //!
 //! # What is here
 //!
-//! - [`CodecCatalog`] — what this build contains and in what order it is
-//!   offered, and [`Codec`] to report back what a live call agreed.
-//! - [`MediaSession`] — one call's audio: the RTP session, the codec, the
-//!   concealment, the recording tap and the watchdog that notices when the far
-//!   end goes quiet.
-//! - [`MediaEngine`] — the join. It writes the offers, reads the answers,
-//!   attaches a session to a call that is answered and lets it go when the
-//!   call ends. It is also, unrelatedly, where a *local* join lives:
-//!   [`MediaEngine::join`] pairs two of its own calls into a conference of
-//!   three with this end, [`MediaEngine::mix`] drives a frame of it, and
-//!   [`mix_two`] is the arithmetic either one or `sipral-ffi`'s own media
-//!   handles can call it through. [`LocalConference`] is the general case:
-//!   any number of calls, each at its own rate and on its own codec, with or
-//!   without this end, each hearing everybody but itself.
-//! - [`SessionShare`] — one call's media, for a thread that carries its audio
-//!   while another runs signalling. Each session has its own lock, so neither
-//!   thread waits on the other for longer than a frame.
-//! - `redacted_call_record` and `redacted_recording`, behind the `redaction`
-//!   feature (on by default) — a call's D1 record and a D2 recording with the
-//!   personal data taken out, for a report that leaves the organisation.
-//!   Beside them, behind the same feature: [`Log`], the engine's log through
-//!   a sink the application installs, rate-limited and redacted; and
-//!   [`EngineState`], one bounded, redacted snapshot of accounts, calls,
-//!   media and counters for a crash report.
-//! - [`RtpPorts`] — the range a deployment's media ports come from, even
-//!   ports for RTP with the odd one above each kept for its RTCP, handed out
-//!   by [`MediaEngine::reserve_rtp_port`] and refused once none is free.
-//! - Everything `sipral-ua` exports, re-exported, so that an application
-//!   depends on this crate and nothing else.
+//! - [`CodecCatalog`]: what this build contains and the offer order; [`Codec`] reports what a
+//!   call agreed.
+//! - [`MediaSession`]: one call's audio: RTP session, codec, concealment, recording tap, and the
+//!   watchdog that notices when the far end goes quiet.
+//! - [`MediaEngine`]: the join. It writes offers, reads answers, attaches a session when a call
+//!   is answered and releases it when the call ends. It also hosts local mixing:
+//!   [`MediaEngine::join`] pairs two calls into a three-way conference with this end,
+//!   [`MediaEngine::mix`] drives one frame, and [`mix_two`] is the arithmetic (also used by
+//!   `sipral-ffi`). [`LocalConference`] is the general case: any number of calls on any codecs and
+//!   rates, with or without this end.
+//! - [`SessionShare`]: one call's media for an audio thread while another thread runs signalling.
+//!   Each session has its own lock, so neither waits longer than a frame.
+//! - `redacted_call_record` and `redacted_recording`, behind the default `redaction` feature: a
+//!   call's D1 record and a D2 recording with personal data removed, for reports leaving the
+//!   organisation. Also behind it: [`Log`], the rate-limited, redacted engine log, and
+//!   [`EngineState`], a bounded, redacted snapshot for crash reports.
+//! - [`RtpPorts`]: the media port range (even RTP ports, the odd port above for RTCP), handed out
+//!   by [`MediaEngine::reserve_rtp_port`] until none is free.
+//! - Everything `sipral-ua` exports, re-exported, so an application needs only this crate.
 //!
 //! # What is deliberately not here
 //!
-//! **No sockets and no audio device.** The application owns both, as it does
-//! everywhere else in this tree: it reads a datagram and hands it over, and it
-//! takes a frame of PCM and gives it to whichever `sipral-io-*` it linked. A
-//! facade that opened a socket would be a facade that could not be embedded in
-//! the runtimes this stack exists to be embedded in. The one exception is
-//! [`route_to`], which opens a datagram socket of its own, connects it to ask
-//! the operating system which address its route toward a peer leaves from,
-//! and closes it, without sending anything: the answer to "which address do
-//! I advertise", which an application that forgot to choose would otherwise
-//! answer with `127.0.0.1` ([`advertised_address`]).
+//! **No sockets and no audio device.** The application owns both: it hands over datagrams and
+//! passes PCM frames to whichever `sipral-io-*` it linked, so the stack embeds in any runtime. The
+//! one exception is [`route_to`], which opens and connects a datagram socket, without sending, to
+//! ask the OS which local address routes toward a peer; otherwise an application that forgot to
+//! choose would advertise `127.0.0.1` ([`advertised_address`]).
 //!
-//! **No clock.** `now: Instant` arrives at every entry point that needs one,
-//! which is what makes an hour of a call a test that finishes in a
-//! millisecond. The single number that cannot be derived from a monotonic
-//! instant — the wall clock an RTCP sender report carries — is set once, as a
-//! [`WallClock`].
+//! **No clock.** Every entry point takes `now: Instant`, so an hour of call runs as a millisecond
+//! test. The wall clock for RTCP sender reports is set once, as a [`WallClock`].
 //!
-//! # Features
+//! # The `opus` feature
 //!
-//! One, `opus`, and it is on by default. It is the only part of this stack a
-//! build can be without, because libopus is the only part that is licensed
-//! rather than written: the patent pool over Opus names IP phones as a
-//! category and prices them per unit, so a product shipping this stack
-//! inside hardware has to be able to leave the codec out of the binary
-//! rather than argue about it. `LICENSING.md` at the root of the repository
-//! carries the two arms this crate is offered under and
-//! `THIRD-PARTY-NOTICES.md` the position on libopus itself;
-//! `docs/05-media.md` says which customer needs it out.
+//! On by default. Opus is the only codec a build can leave out, because libopus is licensed
+//! rather than written and the Opus patent pool prices IP phones per unit, so hardware products
+//! must be able to ship without it. `LICENSING.md` gives this crate's two licences,
+//! `THIRD-PARTY-NOTICES.md` the position on libopus, and `docs/05-media.md` who needs it out.
 //!
-//! With the feature off there is no `Codec::Opus` variant at all and no
-//! `MediaError::Codec` for it to refuse anything with, so [`Codec::ALL`] is
-//! G.722, the two G.711 laws and G.729, [`Capabilities::opus`] reads false,
-//! and nothing links libopus. Nothing else is a special case: a codec order
-//! naming `opus` is refused where it is set, by name, exactly as one naming
-//! G.723 is, and a peer that offers nothing else ends as no common codec on
-//! the ordinary path. The published documentation is built with every
-//! feature on, so what is written here is the whole surface.
+//! Without it there is no `Codec::Opus` and no `MediaError::Codec`: [`Codec::ALL`] is G.722, both
+//! G.711 laws and G.729, [`Capabilities::opus`] is false, and libopus is not linked. A codec order
+//! naming `opus` is refused by name like any unknown codec, and a peer offering only Opus ends with
+//! no common codec. The published docs are built with every feature on.
 //!
 //! # Driving it
 //!
@@ -182,8 +150,7 @@ mod log;
 mod nat;
 pub mod network_test;
 mod payloads;
-// the published INVITE sizes, measured on the shipped build's catalogue:
-// Opus in it, ICE offered
+// the published INVITE sizes, measured on the shipped catalogue with Opus and ICE
 #[cfg(all(test, feature = "opus", feature = "ice"))]
 mod numbers_tests;
 #[cfg(test)]
@@ -263,15 +230,13 @@ pub use share::{SessionGuard, SessionShare, SessionUnavailable};
 /// [`MappingEvent::Unanswered`] reports it.
 #[cfg(feature = "stun")]
 pub use sipral_nat::stun::Failure as StunFailure;
-/// Why the TCP or TLS connection to a TURN server stopped carrying whole
-/// messages, as [`Relays::receive_stream`] and
-/// [`MediaSession::receive_stream`] report it: the connection is closed after
-/// it, and the relay on it is lost.
+/// Why a TCP or TLS connection to a TURN server stopped carrying whole messages
+/// ([`Relays::receive_stream`], [`MediaSession::receive_stream`]). The connection is then closed
+/// and its relay lost.
 #[cfg(feature = "ice")]
 pub use sipral_nat::turn::FrameError as TurnStreamError;
-/// How a relay reaches its TURN server, [`Relays::over`], and so how what is
-/// written for the server leaves: [`RelayDatagram::transport`],
-/// [`Datagram::transport`].
+/// How a relay reaches its TURN server ([`Relays::over`]), and so how its traffic leaves:
+/// [`RelayDatagram::transport`], [`Datagram::transport`].
 #[cfg(feature = "ice")]
 pub use sipral_nat::turn::Transport as TurnTransport;
 /// Why a TURN server gave no relay, or took one back, as
@@ -283,19 +248,15 @@ pub use siprec::{RecordTo, RecordingDatagram};
 pub use state::{AccountState, CallSnapshot, EngineState, LISTED, MediaState, StreamState};
 pub use stats::StreamStatistics;
 
-/// What the negotiation produces and consumes, from the layer that owns the
-/// offer/answer model. These two are the seam this crate exists to carry, so
-/// an application that reads a plan or builds a capability set does not have
-/// to name `sipral-core` to do it.
+/// The negotiation's input and output types, re-exported so applications need not depend on
+/// `sipral-core`.
 pub use sipral_core::sdp::{
     Direction, Keying, MediaCapabilities, MediaPlan, NegotiatedCodec, RtcpPlan, SessionDescription,
     SrtpSupport,
 };
-/// Where echo cancellation, gain control and noise suppression attach. None
-/// of the three is implemented in this tree — `docs/05-media.md` says why —
-/// so an application that has one wires it in through this trait, and
-/// [`MediaSession::attach_processor`] runs it against the far-end audio this
-/// crate kept for it.
+/// Where echo cancellation, gain control and noise suppression attach. None is implemented in this
+/// tree (`docs/05-media.md` says why); [`MediaSession::attach_processor`] runs an application's
+/// implementation against the far-end audio.
 pub use sipral_media::processor::{NoProcessor, Processor};
 /// What the de-jitter buffer counted, which is most of what a stream statistic
 /// is.
@@ -307,9 +268,8 @@ pub use sipral_rtp::{Discard, Quality, UNAVAILABLE, VoipMetricsBlock};
 /// or verifies outside a call as well.
 #[cfg(feature = "stir")]
 pub use sipral_stir as stir;
-/// Which end placed a call, renamed on the way through: `sipral-ua` and
-/// `sipral-core::sdp` both have a `Direction` and they are about different
-/// things, so the one an application meets less often gets the longer name.
+/// Which end placed a call. Renamed because `sipral-core::sdp` also has a `Direction`, about
+/// something else.
 pub use sipral_ua::Direction as CallDirection;
 /// What [`UserAgent::stop_recording`] hands back, for `redacted_recording`
 /// to be named against.
@@ -322,9 +282,8 @@ pub use sipral_ua::WebSocketTarget;
 /// ([`Account::located`]): the lookups [`UaEvent::LookupWanted`] asks for, the
 /// answers [`UserAgent::looked_up`] takes, and the procedure itself.
 pub use sipral_ua::locate::{MAX_TTL as MAX_LOCATION_TTL, MIN_TTL as MIN_LOCATION_TTL};
-/// The whole user agent, so that a softphone depends on this crate and nothing
-/// else: accounts, registration, calls, hold, transfer, and the five calls
-/// that drive them.
+/// The whole user agent, so a softphone depends only on this crate: accounts, registration, calls,
+/// hold, transfer, and the calls that drive them.
 pub use sipral_ua::{
     Account, AccountId, BearerChallenge, BearerError, CallEndReason, CallHandle, CallState,
     ChallengeRefusal, Compaction, Credentials, DatagramLimit, DtmfError, DtmfInfoForm,
@@ -337,11 +296,9 @@ pub use sipral_ua::{
 pub use sipral_ua::{
     AddressFamily, Answer, LocateError, Located, Locator, Naptr, Query, Record, RecordType, Srv,
 };
-/// Who is on a call and how it asked to be answered, why it ended, and where
-/// to send it instead: RFC 3325's asserted identity behind a per-account
-/// trust gate, RFC 3323's privacy, RFC 5806's `Diversion`, RFC 7044's
-/// `History-Info`, `verstat`, RFC 5373's answer modes, `Alert-Info`, RFC
-/// 3326's `Reason`, and a 3xx redirect.
+/// Caller identity, answer mode, end reason and redirection: RFC 3325 asserted identity behind a
+/// per-account trust gate, RFC 3323 privacy, RFC 5806 `Diversion`, RFC 7044 `History-Info`,
+/// `verstat`, RFC 5373 answer modes, `Alert-Info`, RFC 3326 `Reason`, and 3xx redirects.
 pub use sipral_ua::{
     AnswerMode, AnswerModeField, Answering, CallIdentity, CallerIdentity, Diversion, HistoryEntry,
     Party, Privacy, Reason, ReasonProtocol, Redirect, RemoteParty, Retarget, RingSource, Verstat,
@@ -355,10 +312,9 @@ pub use sipral_ua::{
 /// ([`Account::tls_pin`]) and checked by the application's certificate
 /// verifier with [`CertificatePin::check`].
 pub use sipral_ua::{CertificatePin, PinError, PinMismatch, PinnedCertificate};
-/// STIR/SHAKEN in calls: what an account signs with, and what the agent
-/// verifies against — [`UserAgent::set_stir`], [`Account::stir_signing`] —
-/// and the dialling plan numbers are read under,
-/// [`UserAgent::set_number_plan`].
+/// STIR/SHAKEN in calls: what an account signs with and what the agent verifies against
+/// ([`UserAgent::set_stir`], [`Account::stir_signing`]), and the numbering plan
+/// ([`UserAgent::set_number_plan`]).
 #[cfg(feature = "stir")]
 pub use sipral_ua::{DEFAULT_CERTIFICATE_WAIT, NumberPlan, StirConfig, StirSigning};
 

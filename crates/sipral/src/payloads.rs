@@ -3,21 +3,15 @@
 
 //! Which codec each dynamic payload type number has meant on one call.
 //!
-//! RFC 3264 §8.3.2 lets a re-offer change the list of formats, and pins the
-//! one thing that cannot change with it: "the mapping from a particular
-//! dynamic payload type number to a particular codec within that media stream
-//! MUST NOT change for the duration of a session" — in "any offers or
-//! answers", from either end, and not only in the exchange that is current. A
-//! number the far end gave a codec in an offer this end went on to refuse is
-//! still that codec's.
+//! RFC 3264 §8.3.2 lets a re-offer change the format list but says "the mapping from a particular
+//! dynamic payload type number to a particular codec within that media stream MUST NOT change for
+//! the duration of a session", in any offer or answer from either end. A number the far end gave a
+//! codec in an offer we refused still belongs to that codec.
 //!
-//! An offer written from a catalogue numbers its dynamic formats from 96 in
-//! catalogue order, which is right for the first description of a call and
-//! wrong for a later one: the same catalogue with a codec taken out hands its
-//! number to the next one along, and `telephone-event` moves whenever the list
-//! in front of it does. So a call keeps every binding either end has written
-//! on the stream it carries, and an offer that changes the list is renumbered
-//! against them before it goes.
+//! An offer numbered from the catalogue (from 96, in order) is right only for the first
+//! description: dropping a codec would shift the next one onto its number, and `telephone-event`
+//! moves whenever the list before it does. So a call keeps every binding either end wrote, and a
+//! changed offer is renumbered against them.
 
 use std::collections::BTreeMap;
 
@@ -74,18 +68,15 @@ impl Payloads {
         }
     }
 
-    /// Give every dynamic format of a stream about to be offered the number
-    /// its codec already has on this call, and a codec new to the call a
-    /// number nothing has ever had on it.
+    /// Give each dynamic format of a stream about to be offered the number its codec already has on
+    /// this call, and a new codec a number never used on it.
     ///
-    /// The formats, the `a=rtpmap` lines and the `a=fmtp` lines move
-    /// together, all at once, so a swap — the list's first dynamic codec
-    /// taking the number the second had — cannot land one line on the other's
-    /// number half-way through.
+    /// Formats, `a=rtpmap` and `a=fmtp` lines are renumbered together, so a swap of two numbers
+    /// cannot leave lines half-moved.
     ///
     /// # Errors
-    /// [`MediaError::NoPayloadType`] when a codec new to the call finds every
-    /// dynamic number already bound to something else.
+    ///
+    /// [`MediaError::NoPayloadType`] when a new codec finds every dynamic number already bound.
     pub(crate) fn renumber(&self, stream: &mut MediaDescription) -> Result<(), MediaError> {
         let mut moves = BTreeMap::new();
         let mut new = Vec::new();
@@ -347,10 +338,8 @@ mod tests {
 
     #[test]
     fn the_last_dynamic_number_is_127_and_it_is_given_out() {
-        // RFC 3551 §3 leaves 96 to 127 to be bound dynamically: with every
-        // number below 127 taken, the thirty-second codec of the call still
-        // has one. The test above cannot tell a range that stops short of
-        // 127 from one that does not, since both run out
+        // RFC 3551 §3 leaves 96 to 127 dynamic: with every number below 127 taken, the 32nd codec
+        // still gets one. The test above cannot tell whether the range reaches 127
         let mut call = Payloads::default();
         let formats: Vec<String> = (96..=126).map(|number: u8| number.to_string()).collect();
         let lines: Vec<(String, String)> = (96..=126)

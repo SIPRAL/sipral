@@ -3,40 +3,24 @@
 
 //! One codec, driven for one call.
 //!
-//! `sipral-media` holds an encoder and a decoder for every codec this build
-//! contains, and has no opinion about which of them a call is using because
-//! it never sees a negotiation. This is where the negotiation's answer
-//! becomes a pair of state machines: an encoder fed frames of PCM and a
-//! decoder fed payloads, both at the rate the codec hears at rather than the
-//! rate the wire counts in.
+//! `sipral-media` has every codec but never sees a negotiation. Here the negotiated codec becomes
+//! an encoder fed PCM and a decoder fed payloads, both at the codec's sample rate, not the RTP
+//! clock.
 //!
-//! Concealment belongs here for the same reason. What fills a lost frame is
-//! the codec's business, so it is settled once, where the pair is built,
-//! rather than at every lost packet: G.711 and G.722 get
-//! [`plc::Concealer`], which extends the pitch period of the last audio that
-//! arrived; G.729 carries the concealment its own Recommendation defines
-//! (§4.4), which repeats the last filter and decays the excitation inside the
-//! decoder's own state, so the frame after a loss decodes from where the
-//! concealment left it; and Opus, in a build that has it, carries its own —
-//! it can reconstruct the lost frame from the redundancy in the next packet,
-//! which is better than anything that works on the decoded waveform.
+//! Concealment is chosen here too, once per codec: G.711, G.722 and L16 use [`plc::Concealer`],
+//! which extends the last pitch period; G.729 uses its own §4.4 concealment inside the decoder
+//! state; Opus conceals itself and can rebuild a lost frame from FEC in the next packet.
 //!
 //! # G.729's silence
 //!
-//! A G.729 payload can end in an Annex B SID frame, the far end's way of
-//! saying it has gone quiet and will send nothing more until the background
-//! changes. The decoder turns it into Annex B's comfort noise — shaped by
-//! the SID's spectrum, at its level — and goes on making that noise for
-//! every frame that does not arrive while the pause lasts
-//! ([`Coder::pause`]), because in a pause a frame that does not arrive is
-//! one the far end did not send (B.4.5).
+//! A G.729 payload may end in an Annex B SID frame: the far end has gone quiet and sends nothing
+//! until the background changes. The decoder plays comfort noise shaped by the SID and keeps
+//! playing it for each missing frame during the pause ([`Coder::pause`]), since those frames were
+//! never sent (B.4.5).
 //!
-//! With Annex B negotiated both ways, the encoder runs Annex B's DTX too
-//! ([`Coder::set_annex_b`]): each ten-millisecond frame is speech, a SID
-//! frame or nothing, and a payload is cut from them the way RFC 3551
-//! §4.5.6 allows — speech frames and at most one SID frame after them. A
-//! frame length of several G.729 frames can hold a transition that no one
-//! payload can carry; [`Coder::encode`] says what it did with each case.
+//! With Annex B agreed both ways the encoder runs DTX too ([`Coder::set_annex_b`]): each 10 ms
+//! frame is speech, SID or nothing, and a payload holds speech frames and at most one trailing SID
+//! (RFC 3551 §4.5.6). Some transitions cannot fit one payload; [`Coder::encode`] says what happens.
 
 use sipral_media::g711::Law;
 #[cfg(feature = "opus")]
@@ -49,30 +33,20 @@ use sipral_media::{g722, g729, l16};
 use crate::codec::Codec;
 use crate::error::MediaError;
 
-/// The loss, in per cent, an Opus encoder is told to expect before the far
-/// end has reported any: a rate at which a call is already audibly
-/// suffering, so the copies of each frame it pays for start where they are
-/// worth their bits, and the first report replaces it.
+/// Opus expected loss before the far end reports any: high enough that FEC copies are worth their
+/// bits; the first report replaces it.
 pub(crate) const EXPECTED_LOSS_AT_START: u32 = 5;
 
-/// The most an Opus encoder is told to expect, in per cent. Its in-band FEC
-/// carries one copy of one frame in the next packet, which brings back a
-/// loss only when the packet after it arrives; past a third of the packets
-/// lost, most losses come in runs that one copy cannot bridge, and every
-/// further point would buy a coarser copy with bits taken from the frames
-/// that do arrive.
+/// The highest expected loss given to Opus. Its FEC carries one copy of one frame; past a third
+/// lost, losses come in runs one copy cannot bridge, and more would only degrade the frames that
+/// arrive.
 pub(crate) const EXPECTED_LOSS_CEILING: u32 = 30;
 
-/// The loss to tell the encoder after the far end reported losing
-/// `fraction_lost` 256ths of what this end sent over its last interval
-/// (RFC 3550 §6.4.1), where it was told `current` per cent before.
+/// The loss to tell the encoder after the far end reported `fraction_lost` 256ths lost (RFC 3550
+/// §6.4.1), given `current` per cent before.
 ///
-/// More loss is believed at once, rounded up to a whole per cent: the
-/// packets lost while the encoder still expected less are packets nothing
-/// brings back. Less loss is believed halfway, one report at a time, so one
-/// quiet interval on a link that loses in bursts does not take the copies
-/// away just before the next burst; on a link that has gone clean the
-/// expectation still falls to nothing within a few reports. Never above
+/// More loss is adopted at once, rounded up. Less loss is approached halfway per report, so one
+/// quiet interval on a bursty link does not drop the FEC before the next burst. Capped at
 /// [`EXPECTED_LOSS_CEILING`].
 pub(crate) fn expected_loss(current: u32, fraction_lost: u8) -> u32 {
     let reported = (u32::from(fraction_lost) * 100).div_ceil(256);
@@ -92,26 +66,17 @@ pub(crate) struct Coder {
     frame_samples: usize,
 }
 
-/// What is behind the pair, which is a different thing for each codec and not
-/// a trait: a handful of codecs is not enough to earn dynamic dispatch, and
-/// the differences between them — a stateless companding table, a filter bank
-/// with memory, a C library with a pointer — do not share a shape worth
-/// naming.
+/// What is behind the coder. An enum, not a trait: few codecs, and their shapes (a table, a filter
+/// bank, a C library) have nothing useful in common.
 enum Kind {
     /// G.711, either law. Stateless in both directions, so the only state is
     /// the concealer's history.
     Companded(Law, Concealer),
-    /// G.722. Its filter bank and step sizes carry across frames, so encoder
-    /// and decoder are as stateful as the audio is.
+    /// G.722, whose filter bank and step sizes carry across frames.
     ///
-    /// The concealer is the same one, run on sixteen-kilohertz audio, and its
-    /// two bounds are stated in samples rather than in time: the pitch search
-    /// therefore covers 100 to 800 Hz here instead of 50 to 400, and the gap
-    /// it will extend across is thirty milliseconds instead of sixty. Both are
-    /// still an extension of the voice that was there, and both are better
-    /// than the silence the alternative writes. A rate on
-    /// [`Concealer::new`](sipral_media::plc::Concealer::new) would make them
-    /// right rather than acceptable.
+    /// The concealer's bounds are in samples, so at 16 kHz the pitch search covers 100 to 800 Hz
+    /// and the longest gap is 30 ms instead of 60. Still better than silence; a rate parameter on
+    /// [`Concealer::new`](sipral_media::plc::Concealer::new) would make it exact.
     Wideband(Box<(g722::Encoder, g722::Decoder)>, Concealer),
     /// G.729, which conceals for itself (§4.4) and makes its own comfort
     /// noise (Annex B).
@@ -120,8 +85,7 @@ enum Kind {
     /// without it there is no codec here that libopus decodes.
     #[cfg(feature = "opus")]
     Opus(Box<(opus::Encoder, opus::Decoder)>),
-    /// L16: the samples, big-endian. Stateless like G.711, and concealed by
-    /// the same waveform concealer, at whichever of the two rates it runs.
+    /// L16, big-endian samples. Stateless; concealed by the waveform concealer at either rate.
     Linear(l16::Format, Concealer),
 }
 
@@ -143,31 +107,23 @@ pub(crate) enum Decoded {
 pub(crate) struct Sent {
     /// The payload's length in octets: zero for a frame with nothing to send.
     pub(crate) octets: usize,
-    /// Samples at the start of the frame that are not in the payload, so the
-    /// payload's timestamp is this much later than the frame's. Only G.729
-    /// with Annex B has any: a pause that ends inside the frame.
+    /// Samples at the start of the frame missing from the payload, so its timestamp is that much
+    /// later. Only G.729 Annex B, when a pause ends inside the frame.
     pub(crate) skipped: usize,
 }
 
-// Opus is the only codec here that refuses anything, so with the feature off
-// these four return a `Result` that is always `Ok`. The signature is the same
-// in both builds on purpose: a caller written against one of them compiles
-// against the other, and this crate has one shape of error path and not two.
+// only Opus can fail, so without it these always return `Ok`; the signature stays the same in both
+// builds
 #[cfg_attr(not(feature = "opus"), allow(clippy::unnecessary_wraps))]
 impl Coder {
-    /// The pair for a codec, cutting frames of `frame_ms` milliseconds.
+    /// The coder for a codec, with `frame_ms` millisecond frames.
     ///
-    /// Opus is asked for in-band forward error correction and told what loss
-    /// to expect. Both are §7.1 of RFC 7587: the flag says this end will
-    /// *decode* redundancy ([`Coder::recover`]), and the expected loss is
-    /// what makes libopus put redundancy in what it sends. It starts at
-    /// [`EXPECTED_LOSS_AT_START`] per cent and follows what the far end
-    /// reports losing from there ([`Coder::expect_loss`]).
+    /// Opus gets in-band FEC and an expected loss (RFC 7587 §7.1): the flag says we decode FEC
+    /// ([`Coder::recover`]); the expected loss makes libopus send it. It starts at
+    /// [`EXPECTED_LOSS_AT_START`] and follows far-end reports ([`Coder::expect_loss`]).
     ///
     /// # Errors
-    // the variant is Opus's and exists only where Opus does, so the link has
-    // to as well, or the documentation of a build without it points at
-    // nothing and promises an error that build cannot produce
+    // the variant exists only with Opus, so the link must too
     #[cfg_attr(
         feature = "opus",
         doc = "[`MediaError::Codec`] when Opus refuses the rate or the frame \
@@ -199,8 +155,7 @@ impl Coder {
                 Kind::Opus(Box::new((encoder, opus::Decoder::new(rate, frame)?)))
             }
             Codec::L16Narrowband | Codec::L16Wideband => Kind::Linear(
-                // one channel at a rate that is not zero, which is every
-                // rate either variant names
+                // mono at a non-zero rate, always valid
                 l16::Format::new(codec.clock_rate(), 1)
                     .map_err(|_| MediaError::unsupported(codec.name()))?,
                 Concealer::new(),
@@ -223,10 +178,8 @@ impl Coder {
         self.frame_samples
     }
 
-    /// Run G.729's encoder with Annex B's DTX, or without it: what the
-    /// negotiation settled, both ends having allowed Annex B. A change
-    /// starts the encoder afresh, since its state is the DTX's too; every
-    /// other codec has no Annex B, and nothing changes for it.
+    /// Turn G.729 Annex B DTX on or off, as negotiated. A change restarts the encoder, whose state
+    /// includes the DTX. No effect on other codecs.
     pub(crate) fn set_annex_b(&mut self, on: bool) {
         if let Kind::Celp(pair) = &mut self.kind
             && pair.0.dtx() != on
@@ -244,23 +197,16 @@ impl Coder {
         matches!(&self.kind, Kind::Celp(pair) if pair.0.dtx())
     }
 
-    /// Turn one frame of PCM into a payload, and say how long it is.
+    /// Encode one PCM frame into a payload and return its length.
     ///
-    /// For G.729 with Annex B, each ten-millisecond frame is speech, a SID
-    /// frame or nothing, and the payload is what RFC 3551 §4.5.6 lets one
-    /// carry: speech frames and, after them, at most one SID frame. Frames
-    /// with nothing to send before the first one that has something are
-    /// left out and counted in [`Sent::skipped`]. A SID frame followed by
-    /// speech in the same frame — a pause of ten milliseconds — is left out
-    /// the same way, since the payload cannot carry a SID before speech and
-    /// the speech is what matters; and after a SID frame nothing more goes
-    /// in: a pause frame is only time, and speech after it, in a frame of
-    /// thirty milliseconds or more, is not sent.
+    /// With G.729 Annex B each 10 ms frame is speech, SID or nothing, and the payload holds speech
+    /// then at most one SID (RFC 3551 §4.5.6). Leading empty frames are counted in
+    /// [`Sent::skipped`]. A SID followed by speech (a 10 ms pause) is dropped the same way, since a
+    /// SID cannot precede speech. After a SID nothing more is added, so speech after it in a 30 ms
+    /// or longer frame is not sent.
     ///
     /// # Errors
-    // the variant is Opus's and exists only where Opus does, so the link has
-    // to as well, or the documentation of a build without it points at
-    // nothing and promises an error that build cannot produce
+    // the variant exists only with Opus, so the link must too
     #[cfg_attr(
         feature = "opus",
         doc = "[`MediaError::Codec`] when Opus refuses the frame."
@@ -287,18 +233,14 @@ impl Coder {
         }
     }
 
-    /// Turn one payload into PCM, and say what it held: audio, comfort noise
-    /// alone, or nothing readable.
+    /// Decode one payload into PCM, and say whether it held audio, only comfort noise, or nothing
+    /// readable.
     ///
-    /// A G.729 payload fills the whole of `out`: its frames and its SID
-    /// frame decoded, and the rest — a payload that carried less than a
-    /// frame's worth — as the pause going on if it ended in one, and
-    /// concealed as speech if it did not.
+    /// A G.729 payload always fills `out`; whatever it did not cover is the pause continuing if it
+    /// ended in a SID, else concealed speech.
     ///
     /// # Errors
-    // the variant is Opus's and exists only where Opus does, so the link has
-    // to as well, or the documentation of a build without it points at
-    // nothing and promises an error that build cannot produce
+    // the variant exists only with Opus, so the link must too
     #[cfg_attr(
         feature = "opus",
         doc = "[`MediaError::Codec`] when Opus refuses the packet, which for \
@@ -354,21 +296,15 @@ impl Coder {
         }
     }
 
-    /// Whether the far end is in a pause it announced: a G.729 stream whose
-    /// last frame was an Annex B SID frame, or the pause one began. `false`
-    /// for every other codec, which announces nothing.
+    /// Whether the far end announced a pause: a G.729 stream whose last frame was a SID. `false`
+    /// for other codecs.
     pub(crate) fn far_end_paused(&self) -> bool {
         matches!(&self.kind, Kind::Celp(pair) if pair.1.in_pause())
     }
 
-    /// A frame was played that this coder neither decoded nor concealed —
-    /// silence while the jitter buffer refills, or comfort noise — so the
-    /// waveform concealer's history ends here: the next frame it is given
-    /// is not next to the last one in time, and a history joined across the
-    /// hole can look periodic where the audio is not. A gap it had open ends
-    /// here too, since what was played after it was not its extension.
-    /// G.729 and Opus keep their decoders' own state, which is theirs to
-    /// carry across a pause.
+    /// A frame was played that this coder did not produce (refill silence or comfort noise), so the
+    /// waveform concealer's history and any open gap end here; a history joined across the hole
+    /// could look periodic. G.729 and Opus keep their decoder state.
     pub(crate) fn interrupted(&mut self) {
         if let Kind::Companded(_, concealer)
         | Kind::Wideband(_, concealer)
@@ -378,14 +314,12 @@ impl Coder {
         }
     }
 
-    /// Fill a frame nobody sent, played to lengthen the delay in a pause:
-    /// concealment, except that the waveform concealer's history goes on
-    /// across it, since the frame after it is the one the far end sent next.
+    /// Fill a frame nobody sent, to lengthen the delay in a pause. Like concealment, but the
+    /// waveform concealer's history continues, since the next frame is the far end's next.
     ///
     /// # Errors
     ///
-    /// Those of [`Coder::conceal`], for the codecs that conceal inside the
-    /// decoder.
+    /// Those of [`Coder::conceal`], for codecs that conceal in the decoder.
     pub(crate) fn stretch(&mut self, out: &mut [i16]) -> Result<usize, MediaError> {
         let frame = self.frame_samples.min(out.len());
         if let Kind::Companded(_, concealer)
@@ -398,11 +332,8 @@ impl Coder {
         self.conceal(out)
     }
 
-    /// Fill a frame the far end did not send, when it did not send it
-    /// because it is in a pause: G.729's comfort noise, carried on from the
-    /// last SID frame (B.4.4). `None` for every other case — another codec,
-    /// or G.729 whose far end was last heard speaking — and nothing is
-    /// written.
+    /// Fill a frame missing because the far end is in a pause: G.729 comfort noise continued from
+    /// the last SID (B.4.4). `None` otherwise, writing nothing.
     pub(crate) fn pause(&mut self, out: &mut [i16]) -> Option<usize> {
         let Kind::Celp(pair) = &mut self.kind else {
             return None;
@@ -425,9 +356,7 @@ impl Coder {
     /// Fill a frame the far end sent and this end did not get.
     ///
     /// # Errors
-    // the variant is Opus's and exists only where Opus does, so the link has
-    // to as well, or the documentation of a build without it points at
-    // nothing and promises an error that build cannot produce
+    // the variant exists only with Opus, so the link must too
     #[cfg_attr(
         feature = "opus",
         doc = "[`MediaError::Codec`] when Opus refuses, which it does only \
@@ -447,10 +376,8 @@ impl Coder {
                 concealer.conceal(out.get_mut(..frame).unwrap_or_default());
                 Ok(frame)
             }
-            // a frame length is a whole number of G.729 frames, which the
-            // catalogue checks where it is set; only an `out` shorter than
-            // one leaves a remainder, and that is written silent. In a pause
-            // the decoder's concealment is the pause going on (B.4.5)
+            // frame lengths are whole G.729 frames (checked by the catalogue); a shorter `out`
+            // leaves a silent remainder. In a pause, concealment is the pause continuing (B.4.5)
             Kind::Celp(pair) => {
                 let (frames, tail) = out
                     .get_mut(..frame)
@@ -467,13 +394,9 @@ impl Coder {
         }
     }
 
-    /// Fill a frame the far end sent and this end did not get out of the
-    /// copy of it the packet sent after it carries — Opus's in-band forward
-    /// error correction (RFC 7587 §3.3) — and say how many samples that
-    /// wrote. `None` leaves the frame to [`Coder::conceal`]: every other
-    /// codec, an Opus packet that carries no copy
-    /// ([`opus::carries_fec`]), and one the decoder refuses. The packet
-    /// itself is decoded as usual when its own turn comes.
+    /// Rebuild a lost frame from the FEC copy in the next packet (RFC 7587 §3.3) and return the
+    /// samples written. `None` leaves it to [`Coder::conceal`]: other codecs, a packet without FEC
+    /// ([`opus::carries_fec`]), or a refused one. The packet is decoded normally in its turn.
     #[cfg_attr(not(feature = "opus"), allow(clippy::unused_self))]
     pub(crate) fn recover(&mut self, following: &[u8], out: &mut [i16]) -> Option<usize> {
         #[cfg(feature = "opus")]
@@ -487,15 +410,13 @@ impl Coder {
         None
     }
 
-    /// Tell the encoder what share of what it sends, in per cent, is
-    /// expected to go missing: what decides how much of its bitrate Opus
-    /// spends on the copy of each frame it carries in the next packet. Every
-    /// other codec carries no copy, and nothing changes for it.
+    /// Tell the encoder what percentage of packets to expect lost, which sets how much bitrate Opus
+    /// spends on FEC. No effect on other codecs.
     #[cfg_attr(not(feature = "opus"), allow(clippy::unused_self))]
     pub(crate) fn expect_loss(&mut self, percent: u32) {
         #[cfg(feature = "opus")]
         if let Kind::Opus(pair) = &mut self.kind {
-            // refused only above a hundred, which the caller never asks
+            // fails only above 100
             let _ = pair.0.set_expected_loss(percent);
         }
         #[cfg(not(feature = "opus"))]
@@ -522,8 +443,7 @@ fn discontinuous(encoder: &mut g729::Encoder, samples: &[i16], out: &mut [u8]) -
 fn cut(frames: impl Iterator<Item = g729::Encoded>, out: &mut [u8]) -> Sent {
     let mut sent = Sent::default();
     let mut speech = 0_usize;
-    // a SID frame is in the payload, or a pause came after its speech:
-    // nothing more may go in
+    // a SID is in, or a pause followed the speech: nothing more may go in
     let mut closed = false;
     for encoded in frames {
         match encoded {
@@ -536,8 +456,7 @@ fn cut(frames: impl Iterator<Item = g729::Encoded>, out: &mut [u8]) -> Sent {
             }
             g729::Encoded::Speech(octets) => {
                 if closed && speech == 0 {
-                    // a SID alone, and speech after it: the SID's frame goes
-                    // the way of a frame with nothing to send
+                    // a lone SID followed by speech is treated like an empty frame
                     sent.skipped += g729::FRAME_SAMPLES;
                     sent.octets = 0;
                     closed = false;
@@ -570,9 +489,7 @@ fn append(out: &mut [u8], written: &mut usize, octets: &[u8]) -> bool {
 }
 
 impl core::fmt::Debug for Coder {
-    /// Written out rather than derived: `opus::Encoder` and `plc::Concealer`
-    /// both write their own, and neither has anything a `Coder` would want to
-    /// print twice.
+    /// Written by hand: `opus::Encoder` and `plc::Concealer` print themselves.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Coder")
             .field("codec", &self.codec)
@@ -589,8 +506,7 @@ mod tests {
     use crate::codec::{Codec, DEFAULT_FRAME_MS};
     use sipral_media::g729::{Encoded, Sid};
 
-    /// A tone the codecs can all carry, at a quarter of full scale so that
-    /// nothing is clipping and the comparison is about the codec.
+    /// A tone every codec carries, at a quarter of full scale so nothing clips.
     fn tone(samples: &mut [i16], rate: u32, phase: &mut u32) {
         let period = (rate / 444).max(2);
         for slot in samples.iter_mut() {
@@ -611,13 +527,11 @@ mod tests {
         total / i64::try_from(samples.len()).unwrap_or(1).max(1)
     }
 
-    /// What the far end reports losing, in 256ths, moves what the encoder
-    /// is told to expect: up at once, down halfway a report, never past the
+    /// Reported loss moves the expectation: up at once, down halfway per report, never past the
     /// ceiling.
     #[test]
     fn the_loss_expected_follows_the_far_ends_reports() {
-        // nothing lost, from the starting guess: halfway down each report,
-        // and nothing left within a few
+        // no loss: halfway down each report, zero within a few
         let mut expected = EXPECTED_LOSS_AT_START;
         let mut seen = Vec::new();
         for _ in 0..4 {
@@ -625,16 +539,14 @@ mod tests {
             seen.push(expected);
         }
         assert_eq!(seen, [2, 1, 0, 0]);
-        // a fifth lost is 51 256ths, 19.9 %, which is said as 20; believed
-        // at once, however little was expected before
+        // 51/256 is 19.9 %, reported as 20, adopted at once
         assert_eq!(expected_loss(0, 51), 20);
         assert_eq!(expected_loss(5, 51), 20);
-        // a single packet in a report's worth is still loss
+        // one lost packet still counts
         assert_eq!(expected_loss(0, 1), 1);
-        // less than expected comes down halfway: 31 256ths is 12.1 %, said
-        // as 13, and 20 comes down to 16
+        // 31/256 is 12.1 %, said as 13; 20 comes down to 16
         assert_eq!(expected_loss(20, 31), 16);
-        // and no further than the ceiling, whatever is reported
+        // capped
         assert_eq!(expected_loss(0, 128), EXPECTED_LOSS_CEILING);
         assert_eq!(expected_loss(0, u8::MAX), EXPECTED_LOSS_CEILING);
         assert_eq!(
@@ -643,8 +555,7 @@ mod tests {
         );
     }
 
-    /// Every codec but Opus carries no copy of a frame to rebuild it from,
-    /// and an Opus packet without one is left to concealment as well.
+    /// Only Opus carries a copy to rebuild from, and an Opus packet without one is concealed too.
     #[test]
     fn only_a_packet_carrying_a_copy_rebuilds_a_lost_frame() {
         let mut out = vec![0_i16; 960];
@@ -665,7 +576,7 @@ mod tests {
         #[cfg(feature = "opus")]
         {
             let mut coder = Coder::new(Codec::Opus, DEFAULT_FRAME_MS).unwrap();
-            // nothing expected lost: no copy is spent, and none is decoded
+            // nothing expected lost: no copy is sent or decoded
             coder.expect_loss(0);
             let mut payload = vec![0_u8; 1_500];
             let mut samples = vec![0_i16; coder.frame_samples()];
@@ -679,10 +590,8 @@ mod tests {
         }
     }
 
-    /// Every codec has to carry a frame there and back at its own rate, and
-    /// the number of samples that comes back has to be the number that went
-    /// in. This is the test that catches a frame length taken from the wrong
-    /// one of the three numbers.
+    /// Every codec round-trips a frame at its own rate with the same sample count. Catches a frame
+    /// length taken from the wrong one of the three numbers.
     #[test]
     fn every_codec_carries_a_frame_at_its_own_rate() {
         for codec in Codec::ALL {
@@ -695,8 +604,7 @@ mod tests {
             let mut back = vec![0_i16; frame];
             let mut phase = 0_u32;
 
-            // several frames: G.722's filters and Opus's encoder both need a
-            // moment before what comes out means anything
+            // G.722's filters and Opus's encoder need a few frames to settle
             let mut written = 0;
             let mut decoded = Decoded::Unreadable;
             for _ in 0..25 {
@@ -718,10 +626,8 @@ mod tests {
         }
     }
 
-    /// How many frames of audio a codec's own cost is timed over: five
-    /// seconds' worth, unless `SIPRAL_CODEC_BENCH_FRAMES` raises it —
-    /// `scripts/bench.sh` runs a minute's worth, the same way it raises
-    /// `crates/sipral-ffi`'s own load test.
+    /// Frames each codec's cost is timed over: five seconds by default; `SIPRAL_CODEC_BENCH_FRAMES`
+    /// raises it (`scripts/bench.sh` uses a minute, as for the `sipral-ffi` load test).
     fn bench_frames() -> usize {
         std::env::var("SIPRAL_CODEC_BENCH_FRAMES")
             .ok()
@@ -730,12 +636,9 @@ mod tests {
             .unwrap_or(250)
     }
 
-    /// How many calls' worth of one codec `codec_cost_at_load_shape` runs at
-    /// once, across `LOAD_THREADS` — `crates/sipral-ffi`'s own load test's
-    /// own two hundred and four, unless `SIPRAL_CODEC_BENCH_CALLS` says
-    /// otherwise: the ordinary `cargo test` run keeps this small, since it
-    /// pays for every codec in `Codec::ALL` in turn, and `scripts/bench.sh`
-    /// raises it to two hundred to match the load test's own shape exactly.
+    /// Calls of one codec `codec_cost_at_load_shape` runs at once across `LOAD_THREADS`. Small by
+    /// default since `cargo test` runs every codec; `scripts/bench.sh` sets
+    /// `SIPRAL_CODEC_BENCH_CALLS` to 200 to match the `sipral-ffi` load test.
     fn bench_calls() -> usize {
         std::env::var("SIPRAL_CODEC_BENCH_CALLS")
             .ok()
@@ -746,11 +649,8 @@ mod tests {
 
     const LOAD_THREADS: usize = 4;
 
-    /// One codec, one call: encode and decode timed separately, over
-    /// `bench_frames()` frames after twenty-five to let G.722's filters and
-    /// Opus's encoder settle — the same warm-up
-    /// `every_codec_carries_a_frame_at_its_own_rate` gives every codec above.
-    /// Microseconds per frame, encode and decode each.
+    /// One codec, one call: encode and decode timed separately over `bench_frames()` frames after
+    /// 25 warm-up frames. Microseconds per frame for each.
     #[allow(clippy::cast_precision_loss)]
     fn single_frame_cost(codec: Codec) -> (f64, f64, f64) {
         let mut pair = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
@@ -789,12 +689,9 @@ mod tests {
         )
     }
 
-    /// `bench_calls()` calls' worth of one codec, `LOAD_THREADS` of them
-    /// driven at once — `crates/sipral-ffi`'s own load test's shape, at the
-    /// codec layer rather than the whole stack's: no session, no jitter
-    /// buffer, no socket, one `Coder` a call and a frame of encode and
-    /// decode each turn, `bench_frames()` turns. Microseconds per frame,
-    /// encode and decode together, over every call and every thread.
+    /// `bench_calls()` calls of one codec over `LOAD_THREADS`, the `sipral-ffi` load test's shape
+    /// at the codec layer only (no session, jitter buffer or socket). Microseconds per frame,
+    /// encode plus decode.
     #[allow(clippy::cast_precision_loss)]
     fn codec_cost_at_load_shape(codec: Codec) -> f64 {
         let calls = bench_calls();
@@ -813,8 +710,7 @@ mod tests {
                     let mut payload = vec![0_u8; codec.max_payload(DEFAULT_FRAME_MS)];
                     let mut back = vec![0_i16; frame];
                     let mut phase = 0_u32;
-                    // twenty-five frames of warm-up, unmeasured, the same
-                    // reason `single_frame_cost` gives one
+                    // unmeasured warm-up, as in `single_frame_cost`
                     for _ in 0..25 {
                         tone(&mut samples, codec.sample_rate(), &mut phase);
                         for coder in &mut coders {
@@ -842,30 +738,20 @@ mod tests {
             total += elapsed;
             done_calls += calls;
         }
-        // every thread ran for the same number of frames, so the total time
-        // divided by the total frames every thread carried is the per-frame
-        // cost under the same contention two hundred calls on four threads
-        // gives the load test
+        // every thread ran the same frames, so total time over total frames is the per-frame cost
+        // under load-test contention
         let total_frames = done_calls * frames;
         total.as_secs_f64() * 1e6 / total_frames.max(1) as f64
     }
 
-    /// The numbers `scripts/bench.sh` collects into docs/19-numbers.md's own
-    /// "Opus against G.711" table: every codec this build has, alone and at
-    /// the load test's own shape. Printed rather than asserted against a
-    /// ceiling — the load test itself already asserts a per-frame ceiling
-    /// for G.711 at the whole stack's own shape; this is the codec alone,
-    /// on whatever machine runs it, and the numbers vary by more than a
-    /// fixed ceiling could stay honest about across a laptop and a build
-    /// server. What it does assert is the ordering nothing here should ever
-    /// invert: Opus, doing real signal processing, costs more than G.711
-    /// companding a sample at a time.
+    /// The figures `scripts/bench.sh` puts in the "Opus against G.711" table of docs/19-numbers.md,
+    /// for every codec alone and at load-test shape. Printed, not asserted, since they vary by
+    /// machine; the load test already asserts a G.711 ceiling. Asserts only that Opus costs more
+    /// than G.711.
     #[test]
     fn cost_of_a_frame_by_codec() {
-        // compared by each codec's median frame, which a thread descheduled
-        // for a few milliseconds under another build's load moves by one
-        // frame at most; the mean is what is printed, and a mean taken while
-        // the machine was busy once put G.711 at twice Opus
+        // compared by median frame, which a short deschedule moves little; a busy-machine mean once
+        // put G.711 at twice Opus
         let mut by_codec = std::collections::HashMap::new();
         for codec in Codec::ALL {
             let (encode, decode, median) = single_frame_cost(codec);
@@ -896,8 +782,7 @@ mod tests {
         }
     }
 
-    /// A concealed frame is a whole frame of audio, whichever concealment ran.
-    /// A short one is a click in the earpiece and a gap in the recording.
+    /// A concealed frame is always a whole frame; a short one is a click and a recording gap.
     #[test]
     fn concealment_fills_a_whole_frame_for_every_codec() {
         for codec in Codec::ALL {
@@ -923,10 +808,8 @@ mod tests {
         }
     }
 
-    /// A frame stretched into a pause is a whole frame for every codec, and
-    /// for the codecs the waveform concealer serves it is no hole in the
-    /// stream: the next loss is concealed sample for sample as it would have
-    /// been had the pause not been stretched.
+    /// A frame stretched into a pause is whole for every codec, and for the waveform concealer it
+    /// leaves no hole: the next loss is concealed exactly as without the stretch.
     #[test]
     fn a_stretched_frame_leaves_the_concealment_as_it_was() {
         for codec in Codec::ALL {
@@ -936,8 +819,8 @@ mod tests {
             let mut stretched = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
             let mut straight = Coder::new(codec, DEFAULT_FRAME_MS).unwrap();
             let mut sent = Vec::new();
-            // two tones that share no period the concealer could search:
-            // a history cut short at the stretch would settle on another lag
+            // two tones with no common period, so a history cut at the stretch would pick another
+            // lag
             let rate = f64::from(codec.sample_rate());
             for index in 0..25 {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -970,8 +853,7 @@ mod tests {
         }
     }
 
-    /// Opus is the codec that has an opinion about frame length, and it says
-    /// so when the pair is built rather than at the first packet of a call.
+    /// Opus refuses a bad frame length when the coder is built, not at the first packet.
     #[cfg(feature = "opus")]
     #[test]
     fn opus_refuses_a_frame_length_it_has_no_frame_for() {
@@ -984,9 +866,8 @@ mod tests {
         assert!(Coder::new(Codec::Pcmu, 30).is_ok());
     }
 
-    /// And without it, nothing here refuses one. G.729's whole tens are the
-    /// catalogue's to enforce where the length is set, and thirty
-    /// milliseconds is three of its frames.
+    /// Without Opus nothing refuses one here; G.729's multiples of ten are checked by the
+    /// catalogue.
     #[cfg(not(feature = "opus"))]
     #[test]
     fn without_opus_every_codec_takes_thirty_milliseconds() {
@@ -995,8 +876,7 @@ mod tests {
         }
     }
 
-    /// A G.729 coder that has decoded a second of the tone, and the last
-    /// payload it sent.
+    /// A G.729 coder after a second of tone, and its last payload.
     fn g729_talking() -> (Coder, Vec<u8>) {
         let mut coder = Coder::new(Codec::G729, DEFAULT_FRAME_MS).unwrap();
         let mut samples = [0_i16; 160];
@@ -1011,10 +891,8 @@ mod tests {
         (coder, payload.to_vec())
     }
 
-    /// A SID frame at the end of a payload decodes the speech before it and
-    /// the pause after it, all of the frame written; the frames that then do
-    /// not arrive are the pause going on, at the SID's level; and a SID
-    /// alone is a frame of noise.
+    /// A trailing SID decodes the speech before it and the pause after it, filling the frame;
+    /// missing frames then continue the pause at the SID's level; a lone SID is a frame of noise.
     #[test]
     fn a_g729_sid_frame_is_comfort_noise_and_the_pause_goes_on() {
         let (mut coder, payload) = g729_talking();
@@ -1051,8 +929,7 @@ mod tests {
         assert!(loudness(&louder) > 10 * loudness(&quiet));
     }
 
-    /// Speech after a pause ends it: a frame that then does not arrive is
-    /// concealed as speech, not carried on as noise.
+    /// Speech ends a pause: a later missing frame is concealed as speech, not noise.
     #[test]
     fn g729_speech_ends_a_pause() {
         let (mut coder, payload) = g729_talking();
@@ -1066,9 +943,8 @@ mod tests {
         assert_eq!(coder.pause(&mut back), None);
     }
 
-    /// With Annex B, a tone goes out as speech, a pause as a SID frame and
-    /// then nothing, and the tone again as speech; and a coder that decodes
-    /// what went out plays the pause as noise.
+    /// With Annex B a tone goes out as speech, a pause as one SID then nothing, the tone as speech
+    /// again; the decoder plays the pause as noise.
     #[test]
     fn g729_with_annex_b_sends_a_pause_as_a_sid_and_then_nothing() {
         let mut coder = Coder::new(Codec::G729, DEFAULT_FRAME_MS).unwrap();
@@ -1110,8 +986,7 @@ mod tests {
         assert!(loudness(&back) > 500, "the tone decoded again");
     }
 
-    /// The payloads a run of frames with Annex B makes, one case at a time:
-    /// what RFC 3551 §4.5.6 lets one payload carry, and what is left out.
+    /// Annex B payloads case by case: what RFC 3551 §4.5.6 allows and what is dropped.
     #[test]
     fn a_payload_is_speech_and_then_at_most_one_sid() {
         let speech = Encoded::Speech([7; 10]);
@@ -1128,16 +1003,15 @@ mod tests {
         assert_eq!(run(&[nothing, nothing]), (0, 160));
         assert_eq!(run(&[nothing, sid]), (2, 80));
         assert_eq!(run(&[nothing, speech]), (10, 80));
-        // a ten-millisecond pause: the SID gives way to the speech after it
+        // a 10 ms pause: the SID yields to the following speech
         assert_eq!(run(&[sid, speech]), (10, 80));
         assert_eq!(run(&[nothing, sid, speech]), (10, 160));
-        // after speech and a SID nothing more fits, speech included
+        // after speech and a SID nothing more fits
         assert_eq!(run(&[speech, sid, speech]), (12, 0));
         assert_eq!(run(&[speech, sid, nothing]), (12, 0));
     }
 
-    /// A length that is no arrangement of frames, and a payload with nothing
-    /// in it, are not decoded as a guess.
+    /// A length matching no frame arrangement, or an empty payload, is not decoded.
     #[test]
     fn a_g729_payload_of_no_known_shape_is_unreadable() {
         let (mut coder, _) = g729_talking();

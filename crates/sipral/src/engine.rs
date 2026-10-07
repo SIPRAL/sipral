@@ -1,60 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The join: a call the user agent reports gets audio, and a call that ends
-//! gives it up.
+//! Joins signalling to media: a call the user agent reports gets audio, and a call that ends gives
+//! it up.
 //!
-//! `docs/01-architecture.md` states the rule this keeps: **`sipral-ua` never
-//! depends on `sipral-media`, `sipral-rtp` or `sipral-nat`, and none of those
-//! depends on `sipral-ua`.** Signalling and media never call each other. What
-//! passes between them is a description — [`MediaCapabilities`] out of a
-//! catalogue and into an offer, [`MediaPlan`] out of the negotiation and into
-//! a stream — and until this crate existed, nothing carried it, so every
-//! application wrote the join itself and each one wrote it differently.
-//!
-//! This is that carrier, and it is deliberately not a wrapper around
-//! [`UserAgent`]. Wrapping would mean restating twenty-five methods whose
-//! semantics live somewhere else, and every one of them would be a place to
-//! get registration or transfer subtly wrong. What is here instead is the
-//! small number of operations that genuinely need both halves — placing a call
-//! with an offer in it, answering one, and draining the events so that media
-//! is attached before the application sees the news — and the user agent is
-//! passed in for those. Everything else an application does, it does on the
-//! user agent directly.
+//! `docs/01-architecture.md` keeps `sipral-ua` and the media crates independent of each other. What
+//! passes between them is a description: [`MediaCapabilities`] into an offer, [`MediaPlan`] out of
+//! the negotiation and into a stream. This is not a wrapper around [`UserAgent`]. It holds only the
+//! operations that need both halves (placing, ringing, answering, draining events); everything else
+//! is done on the user agent directly.
 //!
 //! # One drain
 //!
-//! [`MediaEngine::poll_event`] is the one place events come from, and it takes
-//! the user agent because it drains it. That is not a convenience: an
-//! application that polled the user agent itself would take the events this
-//! engine needs in order to know a call has been answered, and the failure
-//! would look like a call that rings, answers, and is silent.
+//! [`MediaEngine::poll_event`] drains the user agent itself. An application that polled the user
+//! agent on its own would steal the events this engine needs, and the call would ring, answer and
+//! stay silent.
 //!
-//! # What a call has to be for this to manage it
+//! # Which calls it manages
 //!
-//! Placed with [`MediaEngine::place`], answered with [`MediaEngine::answer`],
-//! or taken from a transfer with [`MediaEngine::accept_transfer`]. A call
-//! placed straight on the user agent is one this engine has never described
-//! anything for, and it is left alone rather than guessed at.
+//! Calls placed with [`MediaEngine::place`], rung with [`MediaEngine::ring`], answered with
+//! [`MediaEngine::answer`] or taken from a transfer with [`MediaEngine::accept_transfer`]. A call
+//! placed straight on the user agent is left alone. Answering a rung call reuses the session and
+//! description the ring wrote; RFC 3262 §5 and RFC 6337 §3.1.1 decide what the 200 OK repeats.
 //!
-//! An incoming call may also be rung with [`MediaEngine::ring`] before it is
-//! answered: the far end hears the answer to its offer, and this end's
-//! session, before anybody picks up. [`MediaEngine::answer`] on a call rung
-//! this way does not negotiate a second time — it reuses the session and the
-//! description [`MediaEngine::ring`] already wrote, and RFC 3262 §5 together
-//! with RFC 6337 §3.1.1 decide what, if anything, the 200 OK repeats.
+//! # Per-call catalogue
 //!
-//! # One call, its own catalogue
-//!
-//! [`MediaEngine::place`] and [`MediaEngine::answer`] draw the codec
-//! catalogue and the [`MediaConfig`] a call opens with from this engine's own
-//! defaults, but neither is copied into the call as a standing reference to
-//! them — a call keeps what it started with even if the engine's defaults
-//! change under it later. [`MediaEngine::place_with`], [`MediaEngine::ring_with`]
-//! and [`MediaEngine::answer_with`] take a [`CallMedia`] naming both for one
-//! call alone, which is what an attended transfer needs: `UserAgent::consult`
-//! holds two calls at once, and a global codec order or a global render delay
-//! would make the second one a race against whichever call touches it last.
+//! Each call copies the catalogue and [`MediaConfig`] it starts with, so later changes to the
+//! engine defaults do not move it. The `_with` variants take a [`CallMedia`] for one call; an
+//! attended transfer needs this, since `UserAgent::consult` holds two calls at once.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -95,35 +68,25 @@ use crate::ports::{PortsExhausted, RtpPorts};
 use crate::session::{MediaConfig, MediaSession, Start, StreamIdentity};
 use crate::share::{self, Held, Ready, SessionGuard, SessionShare};
 
-/// The media type this stack negotiates. There is no video, deliberately, and
-/// an offered stream of anything else is refused rather than half-taken.
+/// The media type this stack negotiates. There is no video; any other stream is refused.
 pub(crate) const AUDIO: &str = "audio";
 
-/// RFC 4733's named events, which ride alongside a codec rather than being
-/// one, and which an answer therefore keeps without there being a codec behind
-/// them.
+/// RFC 4733 named events. An answer keeps them even though no codec is behind them.
 const TELEPHONE_EVENT: &str = "telephone-event";
 
 /// RFC 3389 comfort noise, likewise.
 const COMFORT_NOISE: &str = "CN";
 
-/// How many of the far end's connectivity checks one socket keeps while the
-/// call described on it has no session yet ([`MediaEngine::receive_early`]).
+/// How many early connectivity checks one socket keeps while its call has no session yet
+/// ([`MediaEngine::receive_early`]).
 ///
-/// A peer paces its checks at one per Ta, fifty milliseconds unless both ends
-/// agree on less (RFC 8445 §14.2), and starts them when it sends its answer,
-/// so what reaches the socket before that answer is read is a handful: this
-/// holds most of a second of them. One more pushes out the oldest, since the
-/// newest are the checks the far end is still waiting on; a retransmission
-/// takes the place of the copy it repeats rather than a second one.
+/// Checks arrive one per Ta, 50 ms by default (RFC 8445 §14.2), so this covers most of a second.
+/// The oldest is dropped first, and a retransmission replaces the copy it repeats.
 #[cfg(feature = "ice")]
 const EARLY_CHECKS: usize = 16;
 
-/// How long a kept check is still worth answering: RFC 8489 §6.2.1's
-/// defaults — Rc of 7, Rm of 16, an RTO of 500 ms — end the far end's
-/// transaction 39.5 seconds after its first request, and an answer after
-/// that reaches nobody. A check kept longer, on a call whose session is slow
-/// to open, is dropped rather than answered.
+/// How long a kept check is still worth answering. With the RFC 8489 §6.2.1 defaults (Rc 7, Rm 16,
+/// RTO 500 ms) the far end gives up after 39.5 s.
 #[cfg(feature = "ice")]
 const EARLY_CHECK_LIFETIME: Duration = Duration::from_millis(39_500);
 
@@ -132,11 +95,8 @@ const EARLY_CHECK_LIFETIME: Duration = Duration::from_millis(39_500);
 #[cfg(feature = "ice")]
 #[derive(Debug)]
 struct EarlyCheck {
-    /// Where it came from, which is where the answer goes.
     from: SocketAddr,
-    /// The whole datagram, as it arrived.
     data: Vec<u8>,
-    /// When it arrived, for [`EARLY_CHECK_LIFETIME`].
     at: Instant,
 }
 
@@ -147,7 +107,6 @@ impl EarlyCheck {
         self.data.get(8..20)
     }
 
-    /// Whether it is still worth answering at `now`.
     fn live(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.at) < EARLY_CHECK_LIFETIME
     }
@@ -156,102 +115,55 @@ impl EarlyCheck {
 /// What this engine knows about one call.
 #[derive(Clone, Debug)]
 struct Managed {
-    /// What this end has described. Absent for an incoming call between the
-    /// INVITE arriving and it being answered.
+    /// What this end has described. `None` for an incoming call until it is answered.
     local: Option<SessionDescription>,
-    /// What the far end has.
     remote: Option<SessionDescription>,
-    /// Where this end receives media, which the application chose because it
-    /// owns the socket.
-    ///
-    /// Also what tells a call this engine describes from one it only heard
-    /// about: it is set by the calls that write a description — placing,
-    /// ringing with media, answering — and by nothing else. An incoming call
-    /// the application answered with a description of its own keeps `None`
-    /// for its whole life, and its re-offers and session changes are the
-    /// application's; see [`MediaEngine::answer_reoffer`].
+    /// Where this end receives media. Set only by the calls that write a description (place, ring
+    /// with media, answer), so `None` marks a call whose media the application handles itself; see
+    /// [`MediaEngine::answer_reoffer`].
     address: Option<SocketAddr>,
-    /// Where that socket appears from outside, when the call was given it
-    /// ([`CallMedia::public_address`]): what every description of the call
-    /// names in `c=` and `m=` instead of `address`.
+    /// The socket's address as seen from outside ([`CallMedia::public_address`]), written in `c=`
+    /// and `m=` instead of `address`.
     public: Option<SocketAddr>,
     identity: StreamIdentity,
     session_id: u64,
-    /// The `o=` version this end is up to. RFC 3264 §8 makes it the way one
-    /// end says "this differs from what I said before".
+    /// The `o=` version this end is up to (RFC 3264 §8).
     version: u64,
-    /// D6: what this call offers and in what order — this engine's default
-    /// unless [`MediaEngine::place_with`] or [`MediaEngine::answer_with`] was
-    /// asked for something else, but this call's own from here on regardless
-    /// of what the engine's default becomes afterwards.
+    /// What this call offers, in order. Copied from the engine default or the `_with` override when
+    /// the call starts, and never re-read from the engine.
     catalog: CodecCatalog,
-    /// D6: how this call's session is opened — this engine's default unless
-    /// overridden the same way.
+    /// How this call's session is opened, copied the same way as `catalog`.
     config: MediaConfig,
-    /// What this end wrote for DTLS-SRTP in the description it last sent:
-    /// which side of the exchange it was on, and the `a=setup` it wrote.
-    ///
-    /// Kept because [`dtls_role`](sipral_dtls::setup::dtls_role) reads the
-    /// offer's value and the answer's together, and only one of the two ever
-    /// arrives from the far end. `None` on every call not keyed this way.
+    /// The DTLS side and `a=setup` this end wrote in its last description.
+    /// [`dtls_role`](sipral_dtls::setup::dtls_role) needs both offer and answer values, and only
+    /// one arrives from the far end.
     dtls: Option<(Side, String)>,
-    /// The key and certificate this call named in its first description
-    /// under a DTLS policy, kept for the rest of the call: its handshake is
-    /// started with them and every later description writes their
-    /// fingerprint, whatever this engine has renewed to since. `None` until
-    /// that description is written, and on every call not keyed this way.
+    /// The DTLS key and certificate this call named in its first description. Kept for the whole
+    /// call so the fingerprint never changes, even after the engine renews its own.
     #[cfg(feature = "dtls")]
     dtls_identity: Option<Arc<Identity>>,
-    /// What this end has settled about ICE on this call: its credentials, its
-    /// role, its tiebreaker and its candidates.
+    /// This call's ICE credentials, role, tiebreaker and candidates.
     ///
-    /// Written when the call's first description is, and then repeated on
-    /// every later one — RFC 8839 §4.4.1.1.1 wants the attributes on each,
-    /// and a hold re-offer that drew fresh credentials would read to the peer
-    /// as an ICE restart nobody asked for. `None` on every call not using it,
-    /// which is every call whose catalogue leaves [`IcePolicy`] off.
-    ///
-    /// [`IcePolicy`]: crate::IcePolicy
+    /// Repeated on every later description (RFC 8839 §4.4.1.1.1). Fresh credentials on a hold
+    /// re-offer would look like an unrequested ICE restart.
     #[cfg(feature = "ice")]
     ice: Option<crate::ice::LocalIce>,
-    /// The ICE an ICE restart this end offered ([`MediaEngine::restart_ice`])
-    /// runs on once the far end accepts it: new credentials, and the
-    /// candidates the agent still held when it was written.
-    ///
-    /// It becomes [`Managed::ice`] with the session change that carries its
-    /// credentials, and a refusal drops it: "Should a subsequent offer fail,
-    /// ICE processing continues as if the subsequent offer had never been
-    /// made" (RFC 8839 §4.4), so nothing of it reaches the running agent
-    /// before the answer does.
+    /// The ICE for a restart this end offered ([`MediaEngine::restart_ice`]). Becomes
+    /// [`Managed::ice`] once accepted; a refusal drops it (RFC 8839 §4.4).
     #[cfg(feature = "ice")]
     restarting: Option<crate::ice::LocalIce>,
-    /// Whether [`MediaEngine::ring_with`] has already described and opened
-    /// this call's session, before it was answered.
-    ///
-    /// What [`MediaEngine::answer_with`] reads to tell early media it wrote
-    /// itself from a call answered without ever ringing: the first writes
-    /// `local` and starts the session on the spot, since there is no later
-    /// event to hang that on the way there is for an answer, so `local` alone
-    /// cannot say which one happened. Once true, it stays true for the life
-    /// of the call — this is a one-way door, and ringing with media a second
-    /// time is refused rather than reopened.
+    /// Whether [`MediaEngine::ring_with`] already described the call and opened its session.
+    /// One-way: ringing with media twice is refused.
     rung_with_media: bool,
-    /// Every dynamic payload type number either end has written on this
-    /// call's stream, and the codec it named — what RFC 3264 §8.3.2 says a
-    /// number goes on naming for as long as the session lasts, and what
-    /// [`MediaEngine::change_codecs`] numbers its offer against.
+    /// Every dynamic payload type either end has written on this call. RFC 3264 §8.3.2 keeps a
+    /// number bound to its codec for the whole session; [`MediaEngine::change_codecs`] numbers
+    /// against this.
     payloads: Payloads,
-    /// The codecs [`MediaEngine::change_codecs`] offered and the far end has
-    /// not answered yet. They become [`Managed::catalog`] when it accepts;
-    /// until then a refusal leaves the call on the list it had, as RFC 3261
-    /// §14.1 leaves the session.
+    /// Codecs offered by [`MediaEngine::change_codecs`] and not answered yet. A refusal leaves the
+    /// old list (RFC 3261 §14.1).
     pending: Option<Pending>,
-    /// Whether the far end answered this end's offer in a way the call's
-    /// SRTP policy refuses ([`MediaError::SrtpRequired`], or under
-    /// [`SrtpPolicy::BestEffort`] [`MediaError::UnusableKeying`] for crypto
-    /// lines both ends wrote and no key came of): a call placed from
-    /// here that is to be hung up, with a `Reason` saying why, once its 2xx
-    /// has been acknowledged.
+    /// The far end answered with keying the call's SRTP policy refuses. The call is hung up with a
+    /// `Reason` once its 2xx is acknowledged.
     refused_keying: bool,
     /// Who besides the far end may hold the SDES key this end wrote.
     exposure: Exposure,
@@ -263,15 +175,10 @@ struct Managed {
 /// Who besides the far end may hold the SDES key this end wrote for a call.
 #[derive(Clone, Copy, Debug, Default)]
 struct Exposure {
-    /// Whether it went out in signalling that is not encrypted
-    /// ([`MediaEngine::keys_in_clear`]). Decided when the call's first
-    /// description leaves, since the transport under a dialog does not
-    /// change after that.
+    /// Whether the key went out in unencrypted signalling ([`MediaEngine::keys_in_clear`]).
     in_clear: bool,
-    /// Whether the call's INVITE was seen to fork, and so reached user
-    /// agents that are not the one that answers: every one of them holds the
-    /// key its offer carried. Cleared once the answered branch has been
-    /// offered a key of its own ([`MediaEngine::rekey_after_fork`]).
+    /// Whether the INVITE forked, so other user agents hold the offered key. Cleared by
+    /// [`MediaEngine::rekey_after_fork`].
     forked: bool,
 }
 
@@ -280,8 +187,7 @@ struct Exposure {
 struct Pending {
     /// What the call's catalogue becomes once the offer is accepted.
     catalog: CodecCatalog,
-    /// The formats the offer listed, which is how the description that comes
-    /// back is told apart from one describing something else.
+    /// The offered formats, used to recognise the answer to this change.
     formats: Vec<String>,
 }
 
@@ -297,33 +203,21 @@ impl Managed {
     }
 }
 
-/// What one call opens with, when it is not this engine's defaults.
+/// What one call opens with when it does not use the engine defaults.
 ///
-/// [`MediaEngine::place_with`] and [`MediaEngine::answer_with`] take one of
-/// these rather than a catalogue and a configuration as two loose parameters:
-/// D6's whole point is that the two travel together as one call's own
-/// choice, and a caller overriding one nearly always has something to say
-/// about the other too — a consultation leg to a gateway that only speaks
-/// one codec is also a call whose render delay and device belong to that
-/// gateway's headset, not to whatever the primary call is using.
-///
-/// Not `Clone`: it can carry a [`Relay`](crate::Relay), which is an
-/// allocation on a server, and one call is all it can serve.
+/// Not `Clone`: it can carry a [`Relay`](crate::Relay), which is a server allocation for one call.
 #[derive(Debug)]
 pub struct CallMedia {
     /// What to offer, in what order.
     pub catalog: CodecCatalog,
     /// How to open the session.
     pub config: MediaConfig,
-    /// Where the call's media socket appears from outside, when that is not
-    /// where it is bound — see [`CallMedia::public_address`].
+    /// Where the media socket appears from outside; see [`CallMedia::public_address`].
     pub public: Option<SocketAddr>,
-    /// A relay on a TURN server, allocated from the call's media socket —
-    /// see [`CallMedia::relay`].
+    /// A TURN relay allocated from the media socket; see [`CallMedia::relay`].
     #[cfg(feature = "ice")]
     pub relay: Option<crate::Relay>,
-    /// Where the call's real-time text arrives, when it offers or takes one
-    /// — see [`CallMedia::text`].
+    /// Where real-time text arrives; see [`CallMedia::text`].
     pub text: Option<SocketAddr>,
 }
 
@@ -341,58 +235,33 @@ impl CallMedia {
         }
     }
 
-    /// Give the call real-time text (RFC 4103), on a second socket the
-    /// application bound at `address`: an offer carries an `m=text` stream
-    /// beside the audio, and an offer that carries one is answered with it.
-    /// Once both descriptions agree it, [`MediaSession::send_text`] sends,
-    /// [`MediaSession::poll_text`] and [`MediaSession::receive_text`] carry
-    /// the packets on this socket, and [`MediaEvent::TextReceived`] says
-    /// what the far end typed (`crate::text` has the whole of it).
+    /// Give the call real-time text (RFC 4103) on a second socket bound at `address`. An offer
+    /// carries an `m=text` stream, and an offer with one is answered with it. `crate::text` has the
+    /// details.
     ///
-    /// Text runs on plain `RTP/AVP` with no RTCP, so a call whose catalogue
-    /// offers SRTP or ICE, or an offer whose audio is keyed, leaves it out
-    /// rather than send typed text in the clear beside encrypted audio, or
-    /// a stream no candidate describes. The address goes into the
-    /// description as the call's own `c=` with this socket's port.
+    /// Text runs on plain `RTP/AVP` without RTCP, so it is left out when the catalogue offers SRTP
+    /// or ICE, or when the offered audio is keyed.
     #[must_use]
     pub const fn text(mut self, address: SocketAddr) -> Self {
         self.text = Some(address);
         self
     }
 
-    /// Give the call a relay on a TURN server, allocated from its media
-    /// socket with [`Relays`](crate::Relays) before the call.
+    /// Give the call a TURN relay, allocated from its media socket with [`Relays`](crate::Relays).
     ///
-    /// Under an [`IcePolicy`](crate::IcePolicy) that offers full ICE, the
-    /// relay is the call's relayed candidate (RFC 8445 §5.1.1.2), and the
-    /// server-reflexive address the Allocate response named goes beside it —
-    /// and into `c=` and `m=`, as [`CallMedia::public_address`] would put it,
-    /// when the call was not given one of those. ICE uses the relay only
-    /// when no cheaper pair answers. From the moment the call is described
-    /// the allocation is the call's agent's: it installs the permissions and
-    /// binds the channel the media needs, keeps the allocation and the NAT
-    /// binding under it alive, and gives it back to the server (a Refresh
-    /// with a lifetime of zero, RFC 8656 §8) when the call ends, ICE settles
-    /// on another pair, or the peer turns out to do no ICE at all — though
-    /// the branches of a forked call each hold it with an agent of their
-    /// own, and it goes back only when the last of them lets go. What that
-    /// sends comes out of [`MediaEngine::poll_transmit`] while the call is
-    /// being set up and [`MediaEngine::poll_farewell`] once it is over, for
-    /// the socket the relay was allocated from.
+    /// With an [`IcePolicy`](crate::IcePolicy) that offers full ICE, the relay becomes the relayed
+    /// candidate (RFC 8445 §5.1.1.2) and the server-reflexive address goes beside it, also into
+    /// `c=` and `m=` unless the call has a public address. Once the call is described, its ICE
+    /// agent owns the allocation: permissions, channel binding, keepalives, and the final Refresh
+    /// with lifetime zero (RFC 8656 §8). Forked branches share it; it goes back when the last one
+    /// lets go. Those datagrams come out of [`MediaEngine::poll_transmit`] and
+    /// [`MediaEngine::poll_farewell`].
     ///
-    /// A call that cannot use it — its catalogue offers no ICE, or only the
-    /// lite role, or the relay is of the other address family — gives it
-    /// back at once, the same way. A description that is refused —
-    /// [`MediaEngine::place_with`] or [`MediaEngine::accept_transfer_with`]
-    /// refused by the user agent, [`MediaEngine::ring_with`] or
-    /// [`MediaEngine::answer_with`] refused for a call already described or
-    /// a handle that names no call, or anything else any of them answers with
-    /// an error — sent nothing that named the relay, and hands it back whole
-    /// through [`MediaEngine::poll_returned_relay`], still live on its
-    /// server, for [`Relays::put_back`](crate::Relays::put_back) to keep for
-    /// the next call on the socket. So does [`MediaEngine::answer_with`] on a
-    /// call [`MediaEngine::ring_with`] already described: the 200 OK carries
-    /// the description the 183 did, which named the ring's relay or none.
+    /// A call that cannot use the relay (no ICE, lite role, other address family) gives it back at
+    /// once. If the description is refused, nothing named the relay, and it comes back live through
+    /// [`MediaEngine::poll_returned_relay`] for [`Relays::put_back`](crate::Relays::put_back). The
+    /// same happens on [`MediaEngine::answer_with`] after [`MediaEngine::ring_with`], since the 183
+    /// already carried the description.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn relay(mut self, relay: crate::Relay) -> Self {
@@ -400,8 +269,7 @@ impl CallMedia {
         self
     }
 
-    /// The call's media without its relay, and the relay on its own, for the
-    /// description to hold until it can no longer be refused.
+    /// Split off the relay so the description can hold it until it can no longer be refused.
     #[cfg(feature = "ice")]
     fn handing_over(mut self) -> (Self, Handed) {
         let handed = Handed {
@@ -417,33 +285,20 @@ impl CallMedia {
         (self, Handed)
     }
 
-    /// Describe the call's media socket by the address it appears at from
-    /// outside rather than the one it is bound to.
+    /// Describe the media socket by its public address instead of the bound one.
     ///
-    /// What `Mappings` learns from a STUN server for a
-    /// socket behind a NAT, or what a one-to-one NAT's configuration says.
-    /// Every description of the call names it in `c=` and `m=` — the offer,
-    /// the answer and every re-offer after them — while the session keeps
-    /// the bound address for everything that is local: the socket, and the
-    /// base of the call's ICE candidates.
-    ///
-    /// Two further things follow, and both are for the same reason — one
-    /// mapping describes one port. The description asks for `a=rtcp-mux`
-    /// (RFC 5761), as an ICE offer does, since RTCP on a port of its own
-    /// would need a mapping of its own; a peer that declines leaves RTCP on
-    /// the public port plus one, which a NAT that preserves ports maps
-    /// correctly and another does not, and what is lost then is the reports,
-    /// never the audio. And under an [`IcePolicy`](crate::IcePolicy) that
-    /// offers ICE, the address is a server-reflexive candidate beside the
-    /// host one, and the default candidate RFC 8839 §4.2.1.2 puts in `c=`.
+    /// The address comes from a STUN mapping or a static one-to-one NAT. Every description uses it
+    /// in `c=` and `m=`; the bound address stays for the socket and the ICE candidate base. Because
+    /// one mapping covers one port, the description asks for `a=rtcp-mux` (RFC 5761). Under an
+    /// [`IcePolicy`](crate::IcePolicy) that offers ICE, the address is also a server-reflexive
+    /// candidate and the default candidate in `c=` (RFC 8839 §4.2.1.2).
     #[must_use]
     pub fn public_address(mut self, public: SocketAddr) -> Self {
         self.public = Some(public);
         self
     }
 
-    /// The catalogue this call offers from: its own, asking for multiplexing
-    /// when the call is described by a public address.
+    /// The catalogue a call offers from, asking for multiplexing when it uses a public address.
     fn offering(catalog: CodecCatalog, public: Option<SocketAddr>) -> CodecCatalog {
         if public.is_some() {
             catalog.with_rtcp_mux(true)
@@ -456,165 +311,110 @@ impl CallMedia {
 /// Signalling joined to media, for as many calls as there are.
 #[derive(Debug)]
 pub struct MediaEngine {
-    /// The site policy: what a call offers and how its session is opened
-    /// unless [`MediaEngine::place_with`] or [`MediaEngine::answer_with`]
-    /// named something else for it. D6: kept here as the default a call is
-    /// drawn from at the moment it starts, never read again on its behalf
-    /// afterwards — a call's own copy lives in [`Managed`], so changing this
-    /// engine's default cannot move a call already in progress.
+    /// The default catalogue for new calls. Each call keeps its own copy in [`Managed`], so
+    /// changing this does not affect calls in progress.
     catalog: CodecCatalog,
-    /// What each account's calls do about SRTP, where the account said
-    /// something of its own ([`MediaEngine::set_account_srtp`]): laid over
-    /// [`MediaEngine::catalog`] when a call of that account is placed or
-    /// arrives, and never read again on the call's behalf afterwards.
+    /// Per-account SRTP settings ([`MediaEngine::set_account_srtp`]), applied over
+    /// [`MediaEngine::catalog`] when a call starts.
     accounts: BTreeMap<AccountId, AccountSrtp>,
     config: MediaConfig,
     clock: WallClock,
-    /// Ordered rather than hashed so that two runs of the same test drain
-    /// events in the same order.
+    /// A `BTreeMap` so tests drain events in a stable order.
     ///
-    /// Each behind a lock of its own, and this is the one strong reference to
-    /// each: a thread that carries a call's audio reaches it through a
-    /// [`SessionShare`], which works for as long as the entry is here.
+    /// Each session sits behind its own lock, and this is its only strong reference. An audio
+    /// thread reaches it through a [`SessionShare`].
     sessions: BTreeMap<CallHandle, Held>,
-    /// The calls in `sessions` that have an event waiting, raised by the
-    /// session itself: what makes [`MediaEngine::poll_event`] cost the
-    /// sessions with something to say rather than every session held.
+    /// Calls whose sessions have an event waiting, so [`MediaEngine::poll_event`] only locks those.
     ready: Arc<Ready>,
-    /// How many sessions [`MediaEngine::poll_event`] has locked, all told:
-    /// the figure the test of its cost counts.
+    /// Sessions locked by [`MediaEngine::poll_event`], for the cost test.
     #[cfg(test)]
     sessions_polled: usize,
-    /// Where the drain of [`MediaEngine::poll_rtcp`] under way picks up: the
-    /// call it last answered for, or `None` to start from the first.
+    /// Where the current [`MediaEngine::poll_rtcp`] drain resumes.
     rtcp_after: Option<CallHandle>,
-    /// How many sessions [`MediaEngine::poll_rtcp`] has locked, all told.
+    /// Sessions locked by [`MediaEngine::poll_rtcp`], for the cost test.
     #[cfg(test)]
     rtcp_looked: usize,
     calls: BTreeMap<CallHandle, Managed>,
     events: VecDeque<(CallHandle, MediaEvent)>,
-    /// The RTCP goodbyes of calls that have ended, waiting to be polled.
-    ///
-    /// Owned bytes rather than a borrow of a session's scratch buffer,
-    /// because the session they came from is gone by the time anyone asks.
+    /// RTCP goodbyes of ended calls. Owned bytes, since the session is gone by the time they are
+    /// polled.
     farewells: VecDeque<(CallHandle, SocketAddr, Vec<u8>)>,
-    /// Every call currently in a local conference of two, both directions:
-    /// `a` maps to `b` and `b` maps to `a`, so [`MediaEngine::joined_with`]
-    /// answers either call without knowing which one
-    /// [`MediaEngine::join`] was given first. Nothing outside `crate::join`
-    /// reads a value out of this beyond the partner it names — the mixing
-    /// itself is [`crate::join::mix_two`], which touches sessions and not
-    /// this map.
+    /// Calls in a two-call local conference, mapped both ways so [`MediaEngine::joined_with`] works
+    /// from either side.
     joins: BTreeMap<CallHandle, CallHandle>,
-    /// D3's health counters, fed from the same drain that hands events to
-    /// the application — see `crate::counters`.
+    /// Health counters; see `crate::counters`.
     counters: Counters,
-    /// Where every SRTP master key comes from, and every DTLS secret with
-    /// them, and nothing else does.
+    /// Source of every SRTP master key and DTLS secret.
     ///
-    /// Its own stream, separate from the endpoint's, because a replay
-    /// recording carries in clear the seed the endpoint's stream runs on
-    /// while it records. A recording must
-    /// be able to reproduce a session byte for byte without carrying the
-    /// means to decrypt any of the media that went with it — nor, since the
-    /// certificate key is drawn from the same stream, the means to be
-    /// mistaken for the stack that made it.
+    /// Separate from the endpoint's generator because a replay recording carries the endpoint seed
+    /// in clear. A recording must not carry the means to decrypt its media or to impersonate the
+    /// stack.
     keys: KeySource,
-    /// The key and certificate this stack presents for DTLS-SRTP, made on the
-    /// first call that needs one and re-made when it is close to running out.
+    /// The DTLS-SRTP key and certificate, made on the first call that needs one and renewed near
+    /// expiry.
     ///
-    /// `None` until then, because a stack that never places an encrypted call
-    /// should not spend a P-256 key pair on starting up.
-    ///
-    /// Shared rather than owned, because a call keeps the one it first
-    /// described itself with ([`Managed::dtls_identity`]) for as long as it
-    /// lasts, and a renewal here must not take it away from under the call.
+    /// `None` until then, so a stack without encrypted calls never generates a P-256 key. Shared
+    /// because each call keeps the identity it described ([`Managed::dtls_identity`]).
     #[cfg(feature = "dtls")]
     identity: Option<Arc<Identity>>,
-    /// The ICE agents of calls that were described with a relay
-    /// ([`CallMedia::relay`]) and have no session yet, waiting for the
-    /// negotiation to settle.
+    /// ICE agents of calls described with a relay and still waiting for a session.
     ///
-    /// Kept here rather than rebuilt from [`Managed::ice`] when the session
-    /// opens, the way every other call's agent is: the allocation inside it
-    /// is state on the TURN server, and nothing written into a description
-    /// can make it again. Driven by [`MediaEngine::handle_timeout`] and
-    /// [`MediaEngine::poll_transmit`] while it waits, so that the NAT binding
-    /// towards the server outlives a phone that rings for a minute.
+    /// Kept rather than rebuilt from [`Managed::ice`], because the TURN allocation is server state.
+    /// They are driven by [`MediaEngine::handle_timeout`] and [`MediaEngine::poll_transmit`] so the
+    /// NAT binding survives a long ring.
     #[cfg(feature = "ice")]
     gathered: BTreeMap<CallHandle, crate::ice::Ice>,
-    /// The far end's connectivity checks that reached a socket a call was
-    /// described on before that call's session opened, by the socket, oldest
-    /// first: what [`MediaEngine::receive_early`] kept for the agent the
-    /// session opens with, which answers them then (RFC 8445 §7.3).
+    /// Early connectivity checks per socket, oldest first, kept for the session's agent (RFC 8445
+    /// §7.3).
     #[cfg(feature = "ice")]
     early: BTreeMap<SocketAddr, VecDeque<EarlyCheck>>,
-    /// Relays handed to descriptions that were refused before there was a
-    /// call to hold them, whole and live on their servers, waiting for
-    /// [`MediaEngine::poll_returned_relay`].
+    /// Relays from refused descriptions, waiting for [`MediaEngine::poll_returned_relay`].
     #[cfg(feature = "ice")]
     returned: VecDeque<crate::Relay>,
-    /// Every branch a proxy forked off a call this engine placed, and the
-    /// call the first description was written for: the fork the branch is
-    /// one of.
+    /// Each branch of a forked call, mapped to the call the first description was written for.
     #[cfg(feature = "ice")]
     branches: BTreeMap<CallHandle, CallHandle>,
-    /// The allocation a call's first description named, by that call, for
-    /// as long as any branch of its fork is left: what the agent of every
-    /// branch holds beside the others ([`crate::ice::LocalIce::shared_agent`]).
+    /// The relay allocation a fork shares, kept while any branch is left
+    /// ([`crate::ice::LocalIce::shared_agent`]).
     #[cfg(feature = "ice")]
     fork_relays: BTreeMap<CallHandle, sipral_nat::ice::SharedRelay>,
-    /// What calls wrote for a relay's TCP or TLS connection to its TURN
-    /// server, out of what [`MediaEngine::poll_transmit`],
-    /// [`MediaEngine::poll_rtcp`] and the farewells would otherwise have
-    /// handed out as datagrams, waiting for
-    /// [`MediaEngine::poll_turn_stream`].
+    /// Bytes for a relay's TCP or TLS connection, waiting for [`MediaEngine::poll_turn_stream`].
     #[cfg(feature = "ice")]
     streamed: VecDeque<(CallHandle, crate::RelayDatagram)>,
-    /// The range [`MediaEngine::reserve_rtp_port`] hands ports out of, when
-    /// the deployment set one.
+    /// The range [`MediaEngine::reserve_rtp_port`] hands out, if set.
     rtp_ports: Option<RtpPorts>,
-    /// The RTP ports handed out and not yet let go, each with whether a call
-    /// has since been seen describing its media there: a reservation a call
-    /// took and then stopped using — the call ended, or moved — is over.
+    /// Reserved RTP ports, each flagged once a call is seen using it. A flagged port no call uses
+    /// any more is released.
     reserved_ports: BTreeMap<u16, bool>,
-    /// Which pair of the range the next reservation starts looking at: round
-    /// the range rather than lowest first, so a port a call has just let go
-    /// is the last to be handed out again while its stragglers still arrive.
+    /// Where the next reservation starts searching. Round-robin, so a just-released port is reused
+    /// last.
     next_pair: u16,
     /// Where this engine's log lines go, once the application installed one.
     #[cfg(feature = "redaction")]
     log: Option<crate::Log>,
-    /// How many decisions of each diagnostic record have already been
-    /// logged, by `Call-ID` (`None` for the endpoint's own record), so a
-    /// decision is logged once.
+    /// How many decisions of each diagnostic record were already logged, by `Call-ID` (`None` for
+    /// the endpoint record).
     #[cfg(feature = "redaction")]
     logged: BTreeMap<Option<Vec<u8>>, u64>,
-    /// The recording sessions this engine placed (`crate::siprec`), by the
-    /// handle of the recording session itself.
+    /// Recording sessions this engine placed (`crate::siprec`), by recording session handle.
     recordings: BTreeMap<CallHandle, Recording>,
 }
 
 /// One recording session, and the call it records.
 #[derive(Debug)]
 struct Recording {
-    /// The call whose audio is copied: the one recorded, or the one that
-    /// replaced it.
+    /// The recorded call, or the call that replaced it.
     recorded: CallHandle,
     to: crate::siprec::RecordTo,
     parties: crate::siprec::Parties,
-    /// The call's codec, which is what the two streams were offered.
     payload_type: u8,
-    /// The `o=` session id the recording session's descriptions carry (RFC
-    /// 4566 §5.2 keeps it for the life of the session).
+    /// The `o=` session id of the recording session (RFC 4566 §5.2).
     session_id: u64,
-    /// Where each stream's copies start their numbering.
+    /// Where each stream's sequence numbers and timestamps start.
     numbers: [(u32, u16, u32); 2],
     /// Where the server receives each stream, once it has answered.
     destinations: Option<[Option<SocketAddr>; 2]>,
-    /// The SDES keys the two streams were offered with, for a recorded call
-    /// that is encrypted: its copies go to the server as SRTP (RFC 7866
-    /// §12.2), and a stream the server will not take as SRTP gets nothing.
+    /// SDES keys offered for the two streams when the recorded call is encrypted (RFC 7866 §12.2).
     /// `None` copies in the clear.
     keys: Option<crate::siprec::StreamKeys>,
     /// Whether the recorded call's account lets an encrypted call be copied
@@ -623,23 +423,17 @@ struct Recording {
     /// Whether `keys` went to the server in signalling that is not
     /// encrypted ([`MediaEngine::keys_in_clear`]).
     keys_in_clear: bool,
-    /// The server's last answer, which says which offered line keys each
-    /// stream.
+    /// The server's last answer, which says which offered line keys each stream.
     answer: Option<SessionDescription>,
-    /// The copies taken off a recorded call that another replaced, waiting
-    /// for that call's session to carry on in.
+    /// Copies taken off a replaced call, waiting for the new call's session.
     parked: Option<crate::siprec::Tap>,
-    /// The direction the metadata last told the server about, and whether
-    /// new metadata is waiting for a change in the recording session to end.
+    /// The direction last reported in the metadata.
     told: Option<Direction>,
     owed: bool,
 }
 
-/// The relay a description was handed, for as long as the description can
-/// still be refused: in `relay` until it is drawn into the call's ICE, and in
-/// `kept` from then until the user agent has taken what it was drawn for.
-/// Whatever is left in it when the description is refused goes back to the
-/// application whole ([`MediaEngine::hand_back`]).
+/// The relay a description was handed, kept while the description can still be refused. Whatever is
+/// left on refusal goes back via [`MediaEngine::hand_back`].
 #[cfg(feature = "ice")]
 struct Handed {
     relay: Option<crate::Relay>,
@@ -653,8 +447,7 @@ impl Handed {
         self.relay.as_ref().and_then(crate::Relay::mapped)
     }
 
-    /// The relay is one this call has no use for, and goes back to its
-    /// server with the call's farewells.
+    /// The call has no use for the relay; it goes back with the call's farewells.
     fn unusable(&mut self) {
         if let Some(relay) = self.relay.take() {
             self.kept = Some(Kept::Unused(Box::new(relay)));
@@ -674,53 +467,44 @@ impl Handed {
     }
 }
 
-/// Who a datagram on a socket calls were described on goes to
-/// ([`MediaEngine::branch_for`]).
+/// Who a datagram on a described socket goes to ([`MediaEngine::branch_for`]).
 #[cfg(feature = "ice")]
 enum Branch {
     /// A call's session.
     Session(share::Held),
     /// An agent still waiting for its session.
     Waiting,
-    /// Nobody described there has a session or an agent yet.
+    /// No session or agent there yet.
     None,
 }
 
-/// Which call reads the messages back off a relay's connection, once its
-/// bytes went in through that call ([`MediaEngine::receive_stream`]).
+/// Which call reads messages off a relay connection ([`MediaEngine::receive_stream`]).
 #[cfg(feature = "ice")]
 enum StreamReader {
-    /// An agent waiting for its session, by the call it was described for.
+    /// An agent waiting for its session.
     Waiting(CallHandle),
     /// A call's session.
     Session(share::Held),
 }
 
-/// What a call's first description left of the relay it was given.
+/// What a call's first description left of its relay.
 #[cfg(feature = "ice")]
 enum Kept {
     /// The agent that holds it, for the session to run.
     Agent(crate::ice::Ice),
-    /// The relay itself, which this call cannot use: its catalogue offers no
-    /// ICE, or only the lite role, or the relay is of the other address
-    /// family. It goes back to the server at once. Boxed, since it carries a
-    /// whole TURN client and the agent beside it is boxed already.
+    /// A relay this call cannot use (no ICE, lite role, other address family). It goes back to the
+    /// server at once. Boxed because it carries a full TURN client.
     Unused(Box<crate::relay::Relay>),
 }
 
 impl MediaEngine {
-    /// An engine that will offer what `catalog` holds.
+    /// An engine that offers what `catalog` holds.
     ///
-    /// `media_seed` is thirty-two bytes of entropy this engine derives every
-    /// SRTP master key from. **It must not be the bytes handed to
-    /// `UserAgent::new`, and no two engines may be given the same ones.**
-    /// Neither rule can be enforced here — both are a caller's to keep, the
-    /// way the seed itself is — and the first one is what keeps a replay
-    /// recording, which carries the signalling seed in clear, from carrying
-    /// the means to derive every key this stack will ever offer.
+    /// `media_seed` is 32 bytes of entropy for every SRTP master key. **It must differ from the
+    /// seed given to `UserAgent::new`, and no two engines may share one.** A replay recording
+    /// carries the signalling seed in clear, so sharing it would leak every key.
     ///
-    /// `clock` is what the RTCP sender reports need and the only thing here
-    /// that a monotonic instant cannot supply; see [`WallClock`].
+    /// `clock` is needed for RTCP sender reports; see [`WallClock`].
     #[must_use]
     pub fn new(
         catalog: CodecCatalog,
@@ -745,8 +529,7 @@ impl MediaEngine {
             farewells: VecDeque::new(),
             joins: BTreeMap::new(),
             counters: Counters::default(),
-            // forward secure: a later read of this engine's memory gives
-            // away no SDES key, ICE password or DTLS seed already drawn
+            // forward secure: a later memory read cannot recover keys already drawn
             keys: KeySource::forward_secure(media_seed),
             #[cfg(feature = "dtls")]
             identity: None,
@@ -773,71 +556,52 @@ impl MediaEngine {
         }
     }
 
-    /// STUN mappings against `server`, whose transaction ids are drawn from
-    /// this engine's own generator.
+    /// STUN mappings against `server`, with transaction ids from this engine's key generator.
     ///
-    /// The generator every SRTP key comes from, and the reason it is used
-    /// here rather than a seed of the application's: a transaction id is the
-    /// whole of what stops an attacker off the path from answering first and
-    /// naming an address of its choosing as this end's own, so it needs the
-    /// same unpredictability a key does, and this is the one place in a stack
-    /// that already has it. Drawing from it moves the keys this engine makes
-    /// afterwards along, the same as any other draw does, and reveals none of
-    /// them.
+    /// The transaction id is all that stops an off-path attacker from answering first with an
+    /// address of its choosing, so it needs key-grade randomness. Drawing from the generator
+    /// reveals no keys.
     #[cfg(feature = "stun")]
     #[must_use]
     pub fn mappings(&mut self, server: SocketAddr) -> crate::Mappings {
         crate::Mappings::new(server, self.keys.block())
     }
 
-    /// Relays on the TURN server at `server`, which knows this end by
-    /// `username` and `password`, whose transaction ids are drawn from this
-    /// engine's own generator — for the reason [`MediaEngine::mappings`]
-    /// gives, which a forged Allocate response naming a relay of an
-    /// attacker's choosing makes no weaker.
+    /// Relays on the TURN server at `server`, with transaction ids from this engine's key
+    /// generator, for the same reason as [`MediaEngine::mappings`].
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn relays(&mut self, server: SocketAddr, username: &str, password: &str) -> crate::Relays {
         crate::Relays::new(server, username, password, self.keys.block())
     }
 
-    /// The key and certificate this stack presents, making one if there is
-    /// none or if the one there is has nearly run out.
+    /// The DTLS key and certificate, made or renewed if missing or nearly expired.
     ///
     /// # Errors
-    /// [`MediaError::DtlsIdentity`], which a sound media seed does not
-    /// produce.
+    ///
+    /// [`MediaError::DtlsIdentity`], which a sound media seed does not produce.
     #[cfg(feature = "dtls")]
     fn identity(&mut self, now: Instant) -> Result<Arc<Identity>, MediaError> {
         let unix = self.clock.unix_at(now);
         if self.identity.as_ref().is_none_or(|had| had.is_stale(unix)) {
-            // a fresh one rather than a refused call: `MediaEngine` is made
-            // once and a desk phone runs for months, so a certificate that
-            // outlives its own period is the ordinary case rather than a
-            // fault. Calls already described keep the one they named
+            // renew instead of refusing: a desk phone runs for months, longer than a certificate.
+            // Calls already described keep theirs
             self.identity = Some(Arc::new(Identity::new(&mut self.keys, unix)?));
         }
         self.identity.clone().ok_or(MediaError::DtlsIdentity)
     }
 
-    /// The identity a description just written for a call named, when it was
-    /// written under a DTLS policy: this engine's own, which `dtls_lines` has
-    /// just made sure is there and current. What the call keeps.
+    /// The identity a just-written DTLS description named; the call keeps it.
     #[cfg(feature = "dtls")]
     fn named(&self, keyed: bool) -> Option<Arc<Identity>> {
         if keyed { self.identity.clone() } else { None }
     }
 
-    /// The identity a call named in the first description it wrote under a
-    /// DTLS policy, or this engine's own for one that has not written one
-    /// yet.
+    /// The identity `call` named in its first DTLS description, or the engine's current one if it
+    /// has none yet.
     ///
-    /// A renewal between a call's offer and its handshake used to hand the
-    /// handshake the new certificate, whose hash was not the fingerprint the
-    /// far end had been given — RFC 8122 §5.1's "MUST NOT establish the
-    /// connection", once a month, on every call ringing at the time — and a
-    /// running call's next re-offer or answer then wrote a fingerprint that
-    /// read as a new association (RFC 8842 §3.1).
+    /// A renewal between offer and handshake must not change the certificate, or the fingerprint
+    /// check fails (RFC 8122 §5.1) and later re-offers look like a new association (RFC 8842 §3.1).
     #[cfg(feature = "dtls")]
     fn identity_for(
         &mut self,
@@ -853,26 +617,18 @@ impl MediaEngine {
         }
     }
 
-    /// The `a=fingerprint` this end writes into the description it is about
-    /// to send and the `a=setup` beside it, or `None` for a call that is not
-    /// keyed by a handshake.
+    /// The `a=fingerprint` and `a=setup` for the description about to be sent, or `None` if the
+    /// call is not DTLS-keyed.
     ///
-    /// Owned strings rather than a borrow, because the call remembers what it
-    /// wrote: [`dtls_role`](sipral_dtls::setup::dtls_role) needs both halves
-    /// of the exchange, and only one of them ever arrives from the far end.
-    ///
-    /// `running` names the call an answer is for once it already has an
-    /// association, which is every re-offer on a keyed call. Its answer then
-    /// takes the role the association gives this end rather than the one a
-    /// fresh answer would (RFC 8842 §5.3): to the `actpass` every re-offer
-    /// carries (§5.5), a fresh answer says `active` every time, and a server
-    /// that said so would be asking to become the client.
+    /// Owned, because the call remembers what it wrote for
+    /// [`dtls_role`](sipral_dtls::setup::dtls_role). `running` is the existing association for a
+    /// re-offer answer: the answer keeps that role (RFC 8842 §5.3) instead of answering `active` to
+    /// the `actpass` every re-offer carries (§5.5).
     ///
     /// # Errors
-    /// As [`MediaEngine::identity`]; [`MediaError::DtlsRole`] for an offer
-    /// whose `a=setup` cannot be read; and [`MediaError::DtlsRoleChanged`]
-    /// for a re-offer whose `a=setup` leaves this end only the role it does
-    /// not have.
+    ///
+    /// As [`MediaEngine::identity`]; [`MediaError::DtlsRole`] for an unreadable `a=setup`;
+    /// [`MediaError::DtlsRoleChanged`] for a re-offer that leaves this end only the other role.
     #[cfg(feature = "dtls")]
     fn dtls_lines(
         &mut self,
@@ -885,8 +641,7 @@ impl MediaEngine {
         if !catalog.srtp().wants_dtls() {
             return Ok(None);
         }
-        // a call whose suites leave the handshake nothing to offer is
-        // refused before any description names a fingerprint
+        // refuse before any description names a fingerprint
         crate::dtls::profiles(catalog.srtp_suites())?;
         let theirs = offered.and_then(setup_in);
         let role = running
@@ -900,8 +655,7 @@ impl MediaEngine {
         Ok(Some((fingerprint, setup.name().to_owned())))
     }
 
-    /// Without the feature there is no handshake to describe, and every
-    /// description this engine writes is keyed by SDES or not at all.
+    /// Without the feature every description is keyed by SDES or not at all.
     #[cfg(not(feature = "dtls"))]
     #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn dtls_lines(
@@ -915,15 +669,11 @@ impl MediaEngine {
         Ok(None)
     }
 
-    /// Whether answering `offer` with `answer` would move a running stream
-    /// onto another kind of keying ([`Shape`]).
+    /// Whether answering `offer` with `answer` would move a running stream to another kind of
+    /// keying ([`Shape`]).
     ///
-    /// Read off the plan the two would settle, which is the one `settle`
-    /// will work out once they are agreed, rather than off either
-    /// description alone: an offer carrying both an `a=crypto` and an
-    /// `a=fingerprint` settles on whichever the answer took. A call with no
-    /// stream running yet has nothing to move, and a pair that settles no
-    /// plan at all is refused where the plan is worked out.
+    /// Read from the plan the pair would settle, since an offer with both `a=crypto` and
+    /// `a=fingerprint` settles on whichever the answer took.
     fn changes_keying(
         &self,
         call: CallHandle,
@@ -940,18 +690,15 @@ impl MediaEngine {
         )
     }
 
-    /// Whether a re-offer keeps the certificate the call's association was
-    /// checked against.
+    /// Whether a re-offer keeps the certificate the association was checked against.
     ///
-    /// RFC 8842 §3.1 has a fingerprint "modified, added, or removed" ask for a
-    /// new association, and §5.3 has an answerer that will not start one
-    /// refuse the offer. A re-offer that names no fingerprint at all is not
-    /// judged here: it has moved off DTLS-SRTP altogether, and whether that is
-    /// allowed is the call's policy, which `keying_allows` and `keying_holds`
-    /// already read.
+    /// A changed fingerprint asks for a new association (RFC 8842 §3.1), which this end refuses
+    /// (§5.3). A re-offer without any fingerprint is judged by `keying_allows` and `keying_holds`
+    /// instead.
     ///
     /// # Errors
-    /// [`MediaError::DtlsFingerprintChanged`] for one that names another.
+    ///
+    /// [`MediaError::DtlsFingerprintChanged`] for a different fingerprint.
     #[cfg(feature = "dtls")]
     fn keeps_certificate(
         &self,
@@ -976,19 +723,15 @@ impl MediaEngine {
         }
     }
 
-    /// What this call says about ICE in the description about to be written.
+    /// The ICE lines for the description about to be written.
     ///
-    /// `Ok(None)` for a catalogue that does not offer it, which is the
-    /// default. For one that does, the credentials and candidates this call
-    /// already has if it has any, and a fresh draw if it does not: RFC 8839
-    /// §4.4.1.1.1 puts the attributes on every description of a session, and
-    /// drawing again part-way through is how an ICE restart is announced.
+    /// `Ok(None)` when the catalogue does not offer ICE. Otherwise the call's existing credentials
+    /// and candidates, or a fresh draw. RFC 8839 §4.4.1.1.1 repeats them on every description;
+    /// drawing again means a restart.
     ///
     /// # Errors
     ///
-    /// As [`crate::ice::LocalIce::draw`]: an address RFC 8445 §5.1.1.1 rules
-    /// out of a candidate is refused here rather than offered as one no peer
-    /// can reach.
+    /// As [`crate::ice::LocalIce::draw`]: an address RFC 8445 §5.1.1.1 rules out is refused.
     #[cfg(feature = "ice")]
     fn ice_lines(
         &mut self,
@@ -1019,17 +762,10 @@ impl MediaEngine {
         .map(Some)
     }
 
-    /// What a call's first description says about ICE, when the call was
-    /// given a relay: [`MediaEngine::ice_lines`], with the relayed candidate
-    /// among the ones drawn, and what is left of the relay in `handed` for
-    /// [`MediaEngine::keep`] to put away once the user agent has taken the
-    /// description.
-    ///
-    /// The relay is taken into a full agent only when the call will run one:
-    /// a catalogue that offers ICE in the full role, a call that has not
-    /// already drawn its candidates, and a relay of the socket's own address
-    /// family. Anything else leaves it as [`Kept::Unused`]. A refusal here
-    /// leaves it where it was, for [`MediaEngine::hand_back`].
+    /// ICE lines for a call's first description when the call has a relay. The relay is drawn into
+    /// a full agent only if the catalogue offers full ICE, no candidates exist yet, and the address
+    /// family matches; otherwise it stays [`Kept::Unused`]. What remains goes in `handed` for
+    /// [`MediaEngine::keep`].
     ///
     /// # Errors
     ///
@@ -1076,8 +812,7 @@ impl MediaEngine {
         Ok(ice)
     }
 
-    /// Without the feature there is no relay to draw, and a call's first
-    /// description says what [`MediaEngine::ice_lines`] says.
+    /// Without the feature there is no relay.
     #[cfg(not(feature = "ice"))]
     #[allow(clippy::too_many_arguments)]
     fn first_ice(
@@ -1093,23 +828,19 @@ impl MediaEngine {
         self.ice_lines(call, catalog, address, public, we_are_offerer, now)
     }
 
-    /// Put away what a call's first description left of its relay, once the
-    /// user agent has taken the description: the agent until the session
-    /// opens, or the relay's farewell at once.
+    /// Store what the first description left of the relay once the user agent took it: the agent
+    /// until the session opens, or the relay's farewell now.
     #[cfg(feature = "ice")]
     fn keep(&mut self, call: CallHandle, handed: &mut Handed, now: Instant) {
         match handed.kept.take() {
             Some(Kept::Agent(ice)) => {
-                // the offer that named the relay goes to every branch a proxy
-                // forks it to, and each branch's agent holds the one
-                // allocation beside the others
+                // every fork branch gets the same offer, so each branch agent holds the one
+                // allocation
                 if let Some(relay) = ice.shared_relay() {
                     self.fork_relays.insert(call, relay);
                 }
-                // `first_ice` draws a relayed agent only for a call that has
-                // drawn no candidates yet, so none is waiting here; were one
-                // ever replaced, its allocation goes back rather than being
-                // dropped with nothing sent
+                // `first_ice` only draws a relayed agent for a call with no candidates yet, so
+                // nothing should be here; if it is, return its allocation
                 if let Some(before) = self.gathered.insert(call, ice) {
                     self.release_ice(call, before, now);
                 }
@@ -1124,12 +855,8 @@ impl MediaEngine {
     #[allow(clippy::unused_self)]
     const fn keep(&mut self, _call: CallHandle, _handed: &mut Handed, _now: Instant) {}
 
-    /// What a refused description leaves of the relay it was handed goes
-    /// back to the application, whole and still live on its server: the
-    /// relay itself if it was never drawn into anything, and out of the
-    /// agent it was drawn into if it was. Nothing was sent that named it but
-    /// the description that was refused, so nothing was promised to a peer,
-    /// and the socket it was allocated from can offer it to the next call.
+    /// Return a refused description's relay to the application, still live. Nothing that named it
+    /// was accepted, so the socket can offer it to the next call.
     #[cfg(feature = "ice")]
     fn hand_back(&mut self, handed: Handed) {
         let Handed { relay, kept } = handed;
@@ -1146,10 +873,8 @@ impl MediaEngine {
     #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
     const fn hand_back(&mut self, _handed: Handed) {}
 
-    /// The agent a call described with a relay was waiting with, for a call
-    /// that ended before its session opened: it lets go of the relay, which
-    /// goes back to its server among the call's farewells unless another
-    /// branch of its fork still holds it (RFC 8445 §8.3.1).
+    /// The waiting agent of a call that ended before its session opened. Its relay goes back with
+    /// the farewells unless another branch still holds it (RFC 8445 §8.3.1).
     #[cfg(feature = "ice")]
     fn let_go(&mut self, call: CallHandle, now: Instant) {
         let Some(ice) = self.gathered.remove(&call) else {
@@ -1158,25 +883,18 @@ impl MediaEngine {
         self.release_ice(call, ice, now);
     }
 
-    /// The fork `call` is a branch of: the call its first description was
-    /// written for.
+    /// The fork `call` belongs to.
     #[cfg(feature = "ice")]
     fn root_of(&self, call: CallHandle) -> CallHandle {
         self.branches.get(&call).copied().unwrap_or(call)
     }
 
-    /// An agent for a branch of a forked call, holding the relay the fork's
-    /// offer named beside every other branch's agent — or `None` when the
-    /// fork has no relay left for it.
+    /// An agent for a fork branch that shares the fork's relay, or `None` if the fork has no relay
+    /// left.
     ///
-    /// One offer went to every branch, with one relayed candidate in it, and
-    /// one allocation stands behind it: the server knows an allocation by
-    /// the addresses it runs between, and "If the client wishes to allocate
-    /// a second relayed transport address, it must create a second
-    /// allocation using a different 5-tuple" (RFC 8656 §3.2), while the
-    /// offer named the one socket. It serves them all the same — "TURN
-    /// supports multiple peers per relayed transport address" (RFC 8656 §1)
-    /// — and each branch runs its own ICE session over it (RFC 8839 §7).
+    /// One offer with one relayed candidate went to every branch. A second allocation would need
+    /// another 5-tuple (RFC 8656 §3.2), but one allocation serves many peers (§1), and each branch
+    /// runs its own ICE session (RFC 8839 §7).
     #[cfg(feature = "ice")]
     fn branch_agent(
         &mut self,
@@ -1197,9 +915,7 @@ impl MediaEngine {
         local.shared_agent(address, &relay, &mut self.keys, now)
     }
 
-    /// Forget a branch of a fork that has ended, and the fork's relay with
-    /// the last of its branches. The allocation itself went back, or not,
-    /// with the agents that held it.
+    /// Forget an ended fork branch, and the fork's relay with the last branch.
     #[cfg(feature = "ice")]
     fn forget_branch(&mut self, call: CallHandle) {
         let root = self.root_of(call);
@@ -1211,10 +927,8 @@ impl MediaEngine {
         }
     }
 
-    /// One of `call`'s own datagrams as a farewell, `local` being the socket
-    /// the call was described on: among the rest, or with
-    /// [`MediaEngine::poll_turn_stream`]'s when it goes through a relay's
-    /// connection to its TURN server.
+    /// Queue one farewell datagram of `call` from socket `local`, or route it to
+    /// [`MediaEngine::poll_turn_stream`] if it goes over a relay connection.
     fn say_farewell(
         &mut self,
         call: CallHandle,
@@ -1249,8 +963,7 @@ impl MediaEngine {
         self.farewells_of(call, local, released);
     }
 
-    /// Give back every relay `ice` holds among `call`'s farewells, from the
-    /// socket it runs on.
+    /// Give back every relay `ice` holds among `call`'s farewells.
     #[cfg(feature = "ice")]
     fn release_ice(&mut self, call: CallHandle, mut ice: crate::ice::Ice, now: Instant) {
         let local = ice.local();
@@ -1258,9 +971,8 @@ impl MediaEngine {
         self.farewells_of(call, local, said);
     }
 
-    /// `call`'s farewells from the socket `local`, each where it goes and
-    /// how: a datagram among the rest, and what is for a relay's connection
-    /// to its TURN server with [`MediaEngine::poll_turn_stream`]'s.
+    /// Queue `call`'s farewells from socket `local`, routing relay-connection traffic to
+    /// [`MediaEngine::poll_turn_stream`].
     #[cfg(feature = "ice")]
     fn farewells_of(
         &mut self,
@@ -1285,18 +997,12 @@ impl MediaEngine {
         }
     }
 
-    /// What this call says about ICE in its answer to a re-offer: what
-    /// [`MediaEngine::ice_lines`] says, unless the offer is an ICE restart.
+    /// ICE lines for the answer to a re-offer: as [`MediaEngine::ice_lines`], unless the offer is a
+    /// restart.
     ///
-    /// RFC 8839 §4.4.1.1.1 signals a restart by a change of both `ice-ufrag`
-    /// and `ice-pwd`, and §4.4.2.1 has an answerer that accepts one "change
-    /// the SDP "ice-pwd" and "ice-ufrag" attribute values". The answer
-    /// carries new credentials of this end's own, and candidates the running
-    /// agent still holds ([`crate::ice::LocalIce::restarted`]); the agent
-    /// takes both up once the answer has gone
-    /// ([`crate::ice::Ice::follow`]), a full one flushing its checklist and
-    /// checking again, a lite one keeping its pair until the peer nominates
-    /// under the new ones ([`sipral_nat::ice::LiteAgent::restart`]).
+    /// A restart changes both `ice-ufrag` and `ice-pwd` (RFC 8839 §4.4.1.1.1), and the answer then
+    /// carries new credentials too (§4.4.2.1) with the candidates the agent still holds. The agent
+    /// adopts them after the answer has gone ([`crate::ice::Ice::follow`]).
     ///
     /// # Errors
     ///
@@ -1338,14 +1044,8 @@ impl MediaEngine {
         }
     }
 
-    /// What this call says about ICE from the answer to a re-offer on: the
-    /// lines [`MediaEngine::reoffer_ice`] wrote into it.
-    ///
-    /// When they are a restart this end has just accepted, the far end
-    /// checks under this end's new credentials as soon as the answer reaches
-    /// it — possibly before the exchange is complete here and the agent has
-    /// taken the restart up — so the agent is told of them, and keeps those
-    /// checks for that moment rather than refusing them.
+    /// Tell the agent about a restart this end just accepted. The far end may check under the new
+    /// credentials before the exchange completes here, so the agent keeps those checks.
     #[cfg(feature = "ice")]
     fn answered_ice(&mut self, call: CallHandle, ice: Option<crate::ice::LocalIce>) {
         let Some(managed) = self.calls.get_mut(&call) else {
@@ -1363,7 +1063,7 @@ impl MediaEngine {
         }
     }
 
-    /// Without the feature there is no restart to follow.
+    /// Without the feature there is no restart.
     #[cfg(not(feature = "ice"))]
     fn reoffer_ice(
         &mut self,
@@ -1376,8 +1076,7 @@ impl MediaEngine {
         self.ice_lines(Some(call), catalog, address, public, false, now)
     }
 
-    /// Without the feature there is nothing to gather and no attribute to
-    /// write, and every description this engine writes names one address.
+    /// Without the feature there is no ICE, and every description names one address.
     #[cfg(not(feature = "ice"))]
     #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn ice_lines(
@@ -1392,28 +1091,17 @@ impl MediaEngine {
         Ok(None)
     }
 
-    /// The ICE agent a settled plan calls for, gathered and told what the
-    /// peer said — or `None` for a call that is not using ICE.
+    /// The ICE agent a settled plan calls for, or `None` if the call does not use ICE.
     ///
-    /// N7, written out: three different peers end here with `None`, and the
-    /// stream then runs on `c=`/`m=` and symmetric RTP exactly as it did
-    /// before this engine knew what ICE was. A peer that wrote no ICE
-    /// attributes at all — an Asterisk with `ice_support=no`, which is the
-    /// default — is the first and the commonest. A peer whose candidates are
-    /// all unusable is the second. A description whose own default
-    /// destinations are missing from its candidate lines is the third: RFC
-    /// 8839 §4.2.5's ICE mismatch, which is what an ALG rewriting `c=` and
-    /// the `m=` port without touching `a=candidate` looks like from here.
-    ///
-    /// Under [`IcePolicy::Required`] each of the three is
-    /// [`MediaError::IceRequired`] instead. That is the whole difference
-    /// between the two policies.
+    /// Three peers end up with `None` and run on `c=`/`m=` with symmetric RTP: one that wrote no
+    /// ICE lines (Asterisk's default), one whose candidates are all unusable, and one whose default
+    /// destination is missing from its candidates (the ICE mismatch of RFC 8839 §4.2.5, typical of
+    /// an ALG). Under [`IcePolicy::Required`] each is [`MediaError::IceRequired`].
     ///
     /// # Errors
     ///
-    /// [`MediaError::IceRequired`] as above, [`MediaError::IceNeedsRtcpMux`]
-    /// for a peer that took `a=rtcp-mux` out of its answer, and
-    /// [`MediaError::Ice`] for credentials the agent refuses.
+    /// [`MediaError::IceRequired`] as above, [`MediaError::IceNeedsRtcpMux`] when the peer dropped
+    /// `a=rtcp-mux`, [`MediaError::Ice`] for credentials the agent refuses.
     ///
     /// [`IcePolicy::Required`]: crate::IcePolicy::Required
     #[cfg(feature = "ice")]
@@ -1423,9 +1111,7 @@ impl MediaEngine {
         plan: &MediaPlan,
         now: Instant,
     ) -> Result<Option<crate::ice::Ice>, MediaError> {
-        // a call described with a relay kept the agent that holds it; any
-        // way out of here that does not run it gives the relay back, since a
-        // stream on `c=`/`m=` and symmetric RTP has no use for one
+        // a relayed agent that is not used gives its relay back
         let mut held = self.gathered.remove(&call);
         let built = self.build_ice(call, plan, &mut held, now);
         if let Some(unused) = held {
@@ -1434,9 +1120,8 @@ impl MediaEngine {
         built
     }
 
-    /// [`MediaEngine::ice_for`]'s decision, running `held` when the call has
-    /// one and taking it out of the option only when it is the agent
-    /// returned.
+    /// [`MediaEngine::ice_for`] with the call's held agent, taken out of `held` only when it is the
+    /// one returned.
     ///
     /// # Errors
     ///
@@ -1469,20 +1154,13 @@ impl MediaEngine {
         let Some(stream) = remote.media.iter().find(|media| !media.is_rejected()) else {
             return refuse(());
         };
-        // whether the peer does ICE at all is asked first, and before
-        // anything is held against it. A peer that described none did not
-        // "take `a=rtcp-mux` out of an ICE answer" — it answered a call it
-        // never agreed to run this way, and `a=rtcp-mux` is a thing such a
-        // peer does not ask for either. Complaining about the multiplexing
-        // there would report the second-order fault and hide the first
+        // check for ICE first: a peer without ICE never agreed to rtcp-mux, so complaining about
+        // that would hide the real reason
         let Some(peer) = sipral_nat::ice::parse_remote(remote, stream) else {
             return refuse(());
         };
         let muxed = matches!(plan.rtcp, RtcpPlan::Muxed | RtcpPlan::Off);
-        // two lite ends: neither checks, so there is no pair to wait for, and
-        // RFC 8445 §6.1.1 leaves both on the default candidates — which is
-        // `c=`/`m=` and symmetric RTP here, the same fallback as a peer that
-        // does no ICE at all
+        // two lite ends never check; RFC 8445 §6.1.1 leaves both on the default candidates
         if (local.is_lite() && peer.lite)
             || peer.mismatch
             || peer.candidates.is_empty()
@@ -1490,17 +1168,12 @@ impl MediaEngine {
         {
             return refuse(());
         }
-        // and only now: a peer that did agree to ICE and took `a=rtcp-mux`
-        // out left this stream a second ICE component, and this facade knows
-        // one local address. The offer asked for multiplexing —
-        // `CodecCatalog::capabilities` makes an ICE policy force it — so this
-        // is a peer that answered something else
+        // a peer that agreed to ICE but dropped rtcp-mux would need a second component, which this
+        // facade does not have
         if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) {
             return Err(MediaError::IceNeedsRtcpMux);
         }
-        // the agent that waited with the relay, one holding the relay the
-        // fork's offer named beside the other branches', or one built from
-        // what was written down
+        // the agent that waited with the relay, one sharing the fork's relay, or a new one
         let mut ice = if let Some(ice) = held.take() {
             ice
         } else if let Some(ice) = self.branch_agent(call, now)? {
@@ -1516,16 +1189,14 @@ impl MediaEngine {
         Ok(Some(ice))
     }
 
-    /// The handshake a settled plan calls for, ready to be driven.
+    /// The DTLS handshake a settled plan calls for.
     ///
-    /// `Ok(None)` for a call not keyed this way, and for one whose peer
-    /// answered `holdconn`.
+    /// `Ok(None)` when the call is not DTLS-keyed or the peer answered `holdconn`.
     ///
     /// # Errors
-    /// As [`crate::dtls::Handshake::start`], and [`MediaError::DtlsRole`]
-    /// when this call has no record of what it wrote — which cannot happen
-    /// for a plan that came back keyed by a handshake, since the same
-    /// description carried both.
+    ///
+    /// As [`crate::dtls::Handshake::start`], and [`MediaError::DtlsRole`] if the call has no record
+    /// of what it wrote.
     #[cfg(feature = "dtls")]
     fn handshake_for(
         &mut self,
@@ -1544,8 +1215,7 @@ impl MediaEngine {
             return Err(MediaError::DtlsRole);
         };
         let ours = Setup::parse(&ours).map_err(|_| MediaError::DtlsRole)?;
-        // the certificate the call's own description named, whatever this
-        // engine presents to calls described since
+        // the certificate this call's description named, not the engine's latest
         let identity = self.identity_for(Some(call), now)?;
         let profiles = self.calls.get(&call).map_or(Ok(Vec::new()), |managed| {
             crate::dtls::profiles(managed.catalog.srtp_suites())
@@ -1561,22 +1231,13 @@ impl MediaEngine {
         )
     }
 
-    /// A record of the DTLS-SRTP handshake that one call owes the far end,
-    /// the call it belongs to, and where it goes.
+    /// The next DTLS-SRTP handshake record a call owes the far end, with the call and destination.
     ///
-    /// One at a time, like every other poll here. **A caller loops until it
-    /// answers `None`, after every datagram delivered and at every deadline
-    /// [`MediaEngine::poll_timeout`] named.** A handshake that is never
-    /// drained is a ClientHello that never leaves, and a call that is up with
-    /// no audio, no encryption and no error.
+    /// **Loop until `None` after every datagram and at every [`MediaEngine::poll_timeout`]
+    /// deadline.** An undrained handshake means a call that is up with no audio and no error.
     ///
-    /// The octets are copied out rather than lent, for the reason
-    /// [`MediaEngine::poll_rtcp`] gives: a handshake is a few datagrams once
-    /// per call.
-    ///
-    /// What goes through a relay's TCP or TLS connection to its TURN server
-    /// is not handed out here but set aside for
-    /// [`MediaEngine::poll_turn_stream`], so drain that after this.
+    /// Records for a relay's TCP or TLS connection are set aside for
+    /// [`MediaEngine::poll_turn_stream`]; drain that afterwards.
     #[cfg(any(feature = "dtls", feature = "ice"))]
     #[must_use]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
@@ -1592,15 +1253,13 @@ impl MediaEngine {
                 }
                 return Some((*call, datagram.destination, datagram.payload.to_vec()));
             }
-            // without a relay there is no connection to set anything aside
-            // for, and the first datagram is the one handed out
+            // no relay connection without the feature
             #[cfg(not(feature = "ice"))]
             if let Some(datagram) = slot.session.poll_transmit(now) {
                 return Some((*call, datagram.destination, datagram.payload.to_vec()));
             }
         }
-        // a call described with a relay and still waiting for its session:
-        // the keepalives that hold the NAT binding towards the TURN server
+        // keepalives toward the TURN server for a call still waiting for its session
         #[cfg(feature = "ice")]
         for (call, ice) in &mut self.gathered {
             while let Some((destination, transport)) = ice.take_probe() {
@@ -1622,15 +1281,11 @@ impl MediaEngine {
         None
     }
 
-    /// Whether a call is described on the media socket `local`: placed, rung
-    /// or answered there, and not ended.
+    /// Whether a call is described on media socket `local` and has not ended.
     ///
-    /// What an application that opened a TCP or TLS connection to a TURN
-    /// server for the socket ([`crate::Relays::over`]) asks after a call on
-    /// it ends: while one is still described there — another branch of a
-    /// forked call, which may inherit the relay — the connection has a relay
-    /// to carry, and once none is, and the farewells are sent, it has
-    /// nothing left.
+    /// An application with a TCP or TLS connection to a TURN server ([`crate::Relays::over`]) asks
+    /// this after a call ends: once nothing is described there and the farewells are sent, the
+    /// connection can close.
     #[must_use]
     pub fn describes(&self, local: SocketAddr) -> bool {
         self.calls
@@ -1638,42 +1293,28 @@ impl MediaEngine {
             .any(|managed| managed.address == Some(local))
     }
 
-    /// What a call wrote for its relay's TCP or TLS connection to the TURN
-    /// server ([`crate::Relays::over`]), set aside by
-    /// [`MediaEngine::poll_transmit`], [`MediaEngine::poll_rtcp`] and a
-    /// call's ending rather than handed out as datagrams: the connection is
-    /// the one from [`crate::RelayDatagram::local`], and the bytes are
-    /// written on it as they are, in the order they come out here. One at a
-    /// time; loop until `None` after each of those.
+    /// Bytes a call wrote for its relay's TCP or TLS connection ([`crate::Relays::over`]), on the
+    /// connection from [`crate::RelayDatagram::local`]. Write them in order. Loop until `None`
+    /// after [`MediaEngine::poll_transmit`], [`MediaEngine::poll_rtcp`] and call endings.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn poll_turn_stream(&mut self) -> Option<(CallHandle, crate::RelayDatagram)> {
         self.streamed.pop_front()
     }
 
-    /// Hand in bytes read off the TCP or TLS connection from the media
-    /// socket `local` to the TURN server a call's relay runs over, in
-    /// whatever pieces it delivered them, and say whether a call's relay
-    /// runs over it.
+    /// Feed bytes read off the TCP or TLS connection from media socket `local` to a call's TURN
+    /// server, and say whether a call's relay runs over it.
     ///
-    /// The connection is one per socket and server, and the branches of a
-    /// forked call hold the one allocation over it, so its bytes are put
-    /// back together once and every whole message goes to the call it is
-    /// for, as a datagram from the server would ([`MediaEngine::receive_early`]
-    /// says how a branch is found): a session, as
-    /// [`MediaSession::receive_stream`](crate::MediaSession::receive_stream)
-    /// takes one, or the agent of a call described there and waiting for its
-    /// session — the refresh's answer above all, as
-    /// [`MediaEngine::receive_waiting`] takes it off a datagram. Drain
-    /// [`MediaEngine::poll_transmit`] and [`MediaEngine::poll_turn_stream`]
-    /// after it. `Ok(false)` leaves the bytes to
-    /// [`crate::Relays::receive_stream`], for a socket no call has taken the
-    /// relay of yet.
+    /// Bytes are reassembled once per connection and each message goes to its call, routed as in
+    /// [`MediaEngine::receive_early`]: to a session via
+    /// [`MediaSession::receive_stream`](crate::MediaSession::receive_stream), or to a waiting
+    /// agent. Drain [`MediaEngine::poll_transmit`] and [`MediaEngine::poll_turn_stream`]
+    /// afterwards. `Ok(false)` leaves the bytes to [`crate::Relays::receive_stream`].
     ///
     /// # Errors
     ///
-    /// The connection carried something that is not a TURN message, and the
-    /// relay is lost with it; the application closes the connection.
+    /// The connection carried something that is not TURN; the relay is lost and the application
+    /// should close the connection.
     #[cfg(feature = "ice")]
     pub fn receive_stream(
         &mut self,
@@ -1711,10 +1352,8 @@ impl MediaEngine {
         }
     }
 
-    /// Put `bytes` from the connection on `local` into the relay that runs
-    /// over it, through the first call there that holds one — an agent
-    /// waiting for its session before a session — and say which call reads
-    /// the messages back, and the server the connection goes to.
+    /// Feed connection bytes into the first relay on `local` (a waiting agent before a session),
+    /// and return the call that reads the messages and the server address.
     #[cfg(feature = "ice")]
     fn push_stream(
         &mut self,
@@ -1743,12 +1382,9 @@ impl MediaEngine {
             })
     }
 
-    /// A whole message off the relay's connection on `local` for the agents
-    /// waiting there for their sessions: the one that claims it, or failing
-    /// that the first whose relay runs over the connection. What a peer sent
-    /// through the relay has nowhere to play before a session, and the peer
-    /// sends it again once the answer lands; the agent's own answers are
-    /// what matter here.
+    /// Deliver one message from the relay connection on `local` to a waiting agent: the one that
+    /// claims it, else the first whose relay uses the connection. Peer media has nowhere to play
+    /// yet and will be resent.
     #[cfg(feature = "ice")]
     fn take_waiting_frame(
         &mut self,
@@ -1773,10 +1409,9 @@ impl MediaEngine {
         }
     }
 
-    /// The TCP or TLS connection from the media socket `local` to the TURN
-    /// server a call's relay ran over closed, and the relay is gone with it
-    /// ([`MediaSession::stream_closed`](crate::MediaSession::stream_closed)).
-    /// A call still waiting for its session opens it without the relay.
+    /// The TCP or TLS connection from `local` to a call's TURN server closed, and the relay is lost
+    /// ([`MediaSession::stream_closed`](crate::MediaSession::stream_closed)). A waiting call opens
+    /// its session without the relay.
     #[cfg(feature = "ice")]
     pub fn stream_closed(&mut self, local: SocketAddr, now: Instant) {
         for ice in self.gathered.values_mut() {
@@ -1793,21 +1428,14 @@ impl MediaEngine {
         }
     }
 
-    /// What this engine offers by default, in the order it offers it — A4's
-    /// first half. A call placed or answered with [`MediaEngine::place_with`]
-    /// or [`MediaEngine::answer_with`] may be running a different one; see
-    /// [`MediaEngine::call_catalog`] for what one specific call is actually
-    /// using.
+    /// The default catalogue. A call may use its own; see [`MediaEngine::call_catalog`].
     #[must_use]
     pub const fn catalog(&self) -> &CodecCatalog {
         &self.catalog
     }
 
-    /// Say what the wall clock reads, when the reading [`MediaEngine::new`]
-    /// was given was none worth having — an application that only learns the
-    /// time later. Every call's sender reports, the running ones' included,
-    /// carry it from here on (RFC 3550 §6.4.1), and so do the certificates a
-    /// DTLS-SRTP call makes.
+    /// Set the wall clock, for an application that learns the time after [`MediaEngine::new`].
+    /// Sender reports of all calls (RFC 3550 §6.4.1) and new DTLS certificates use it from now on.
     pub fn set_wall_clock(&mut self, clock: WallClock) {
         self.clock = clock;
         for held in self.sessions.values() {
@@ -1821,16 +1449,13 @@ impl MediaEngine {
         self.clock
     }
 
-    /// Give `account`'s calls an SRTP policy and suites of their own, laid
-    /// over this engine's catalogue: the policy a call placed from it offers
-    /// and holds its answer to, and the one an INVITE that arrives for it is
-    /// answered under. [`AccountSrtp::default`] takes the account back to the
-    /// engine's own.
-    ///
-    /// A call already in progress keeps the catalogue it started with.
+    /// Give `account`'s calls their own SRTP policy and suites, applied over the engine catalogue
+    /// for calls placed from or arriving for it. [`AccountSrtp::default`] restores the engine's.
+    /// Calls in progress are not affected.
     ///
     /// # Errors
-    /// What [`CodecCatalog::with_srtp_suites`] refuses, with nothing kept.
+    ///
+    /// What [`CodecCatalog::with_srtp_suites`] refuses; nothing is kept then.
     pub fn set_account_srtp(
         &mut self,
         account: AccountId,
@@ -1845,15 +1470,13 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// What `account` said about SRTP of its own, if anything
-    /// ([`MediaEngine::set_account_srtp`]).
+    /// The SRTP settings `account` set ([`MediaEngine::set_account_srtp`]).
     #[must_use]
     pub fn account_srtp(&self, account: AccountId) -> Option<&AccountSrtp> {
         self.accounts.get(&account)
     }
 
-    /// The catalogue a call of `account` starts from: this engine's own, with
-    /// whatever the account said about SRTP laid over it.
+    /// The catalogue a call of `account` starts from.
     #[must_use]
     pub fn account_catalog(&self, account: AccountId) -> CodecCatalog {
         self.accounts
@@ -1862,8 +1485,8 @@ impl MediaEngine {
             .unwrap_or_else(|| self.catalog.clone())
     }
 
-    /// How each stream of a call is protected, now: the encryption report
-    /// ([`MediaSession::encryption`]). `None` for a call with no session.
+    /// The current encryption report ([`MediaSession::encryption`]). `None` for a call with no
+    /// session.
     #[must_use]
     pub fn encryption(&self, call: CallHandle) -> Option<Vec<crate::StreamEncryption>> {
         self.sessions
@@ -1871,38 +1494,26 @@ impl MediaEngine {
             .map(|held| share::lock(held).session.encryption())
     }
 
-    /// What one call is actually offering, once it exists — this engine's
-    /// default unless [`MediaEngine::place_with`] or
-    /// [`MediaEngine::answer_with`] gave it its own, and that call's own from
-    /// then on regardless of what [`MediaEngine::catalog`] becomes
-    /// afterwards. `None` for a call this engine has never described anything
-    /// for.
+    /// The catalogue one call is using. `None` for a call this engine has not described.
     #[must_use]
     pub fn call_catalog(&self, call: CallHandle) -> Option<&CodecCatalog> {
         self.calls.get(&call).map(|managed| &managed.catalog)
     }
 
-    /// D3's flat set of health counters, kept since this engine was created.
-    ///
-    /// One struct copy: nothing here walks the call table or the session
-    /// map, so this is cheap enough to sample on a timer and ship as
-    /// telemetry.
+    /// The health counters since this engine was created. A plain copy, cheap enough to sample on a
+    /// timer.
     #[must_use]
     pub const fn counters(&self) -> Counters {
         self.counters
     }
 
-    /// One call's media, once there is any, held until the guard is dropped.
+    /// One call's media session, locked until the guard is dropped.
     ///
-    /// Waits for a thread that is working on the session through a
-    /// [`SessionShare`] to finish its frame. `None` as well for a thread that
-    /// is already inside this call's session through a share, which would
-    /// otherwise wait for itself for ever.
+    /// Waits for a thread working through a [`SessionShare`] to finish its frame. Also `None` for a
+    /// thread that is already inside this session through a share, which would otherwise deadlock.
     ///
-    /// The guard keeps the engine borrowed exclusively, so nothing else can be
-    /// asked of the engine while it is alive: every other way into the engine
-    /// may take the same session's lock, and a thread that did so while holding
-    /// the guard would be waiting for itself.
+    /// The guard borrows the engine exclusively, since every other engine call may take the same
+    /// lock:
     ///
     /// ```compile_fail
     /// fn next_wake(engine: &mut sipral::MediaEngine, call: sipral::CallHandle) {
@@ -1916,14 +1527,11 @@ impl MediaEngine {
         self.sessions.get(&call).and_then(SessionGuard::of)
     }
 
-    /// A way to one call's media for a thread that does not have this
-    /// engine — the one that carries the call's audio, while signalling runs
-    /// on another.
+    /// A handle to one call's media for a thread that does not own the engine, such as the audio
+    /// thread.
     ///
-    /// `None` until the negotiation has settled and the session exists. The
-    /// share stops reaching the session when the call ends or this engine is
-    /// dropped, and a change of codec, a hold or a resume leave it working:
-    /// those change the session rather than replace it.
+    /// `None` until the session exists. The share stops working when the call ends or the engine is
+    /// dropped; codec changes, hold and resume keep it valid.
     #[must_use]
     pub fn share(&self, call: CallHandle) -> Option<SessionShare> {
         self.sessions.get(&call).map(SessionShare::of)
@@ -1934,16 +1542,12 @@ impl MediaEngine {
         self.sessions.keys().copied()
     }
 
-    /// Listen for call progress on `call` and decide who answers it, or stop
-    /// with `None` — before its media exists as well as after.
-    ///
-    /// Meant for a call this end placed, straight after placing it: the
-    /// tones are listened for from the first frame of early media, and the
-    /// decision about who answered starts from the 2xx. A call's
-    /// [`MediaConfig::progress`](crate::MediaConfig::progress) is the same
-    /// setting made when it is placed.
+    /// Listen for call progress on `call` and decide who answered, or stop with `None`. Works
+    /// before the media exists too. Meant for outgoing calls; the same as setting
+    /// [`MediaConfig::progress`](crate::MediaConfig::progress) when placing.
     ///
     /// # Errors
+    ///
     /// [`MediaError::NoSuchCall`] for a call this engine does not describe.
     pub fn detect_progress(
         &mut self,
@@ -2009,40 +1613,29 @@ impl MediaEngine {
 }
 
 impl Drop for MediaEngine {
-    /// Every session this engine still holds ends with it.
+    /// Every session still held ends with the engine.
     ///
-    /// Two things have to happen here and cannot happen later. A WAVE header
-    /// carries two lengths that are only known when a recording stops, so a
-    /// recording whose recorder was dropped rather than closed is a file a
-    /// player calls corrupt, and this is the last moment anything can patch
-    /// them — however the engine goes, including with a stack destroyed from
-    /// inside its own event callback. And a [`SessionShare`] handed to a thread
-    /// that carries audio has to stop reaching its session once the engine
-    /// that ran the call's signalling is gone, including a share already
-    /// waiting for the lock while this runs.
+    /// Two things cannot wait. A WAVE recording gets its length fields only when it is closed, so
+    /// this patches them. And every [`SessionShare`] must stop reaching its session, including one
+    /// already waiting for the lock.
     fn drop(&mut self) {
         for held in self.sessions.values() {
             let mut slot = share::lock(held);
             slot.ended = true;
-            // there is nobody left to tell, and a failure here means the sink
-            // was already refusing the audio it was given
+            // nobody left to tell
             let _ = slot.session.stop_recording();
         }
     }
 }
 
-// -- placing and answering ---------------------------------------------------
-
 impl MediaEngine {
-    /// Place a call with an offer in it, offered from this engine's default
-    /// catalogue and opened on its default [`MediaConfig`].
+    /// Place a call with an offer from the default catalogue, opened with the default
+    /// [`MediaConfig`].
     ///
-    /// `local` is where this end will receive media: the application owns the
-    /// socket, so it is the only one that can say. Any offer already set on
-    /// `outgoing` is replaced — writing the description is what this method is
-    /// for, and two of them would be one too many.
+    /// `local` is where this end receives media. Any offer already on `outgoing` is replaced.
     ///
     /// # Errors
+    ///
     /// [`MediaError::Signalling`] when the user agent refuses the call.
     pub fn place(
         &mut self,
@@ -2056,19 +1649,13 @@ impl MediaEngine {
         self.place_with(agent, account, outgoing, local, media, now)
     }
 
-    /// The same as [`MediaEngine::place`], offering and opening the session
-    /// on `media` instead of this engine's defaults.
-    ///
-    /// D6: what an attended transfer needs. `UserAgent::consult` holds a
-    /// second call while the first is still up, and the consultation leg may
-    /// have to reach a different codec, a different render delay or a
-    /// different device than the call it is standing in for — without moving
-    /// what every other call this engine places gets.
+    /// Like [`MediaEngine::place`], with `media` instead of the engine defaults. Used for an
+    /// attended transfer, whose consultation leg may need another codec or device.
     ///
     /// # Errors
-    /// [`MediaError::Signalling`] when the user agent refuses the call. A
-    /// relay `media` carried then comes back from
-    /// [`MediaEngine::poll_returned_relay`].
+    ///
+    /// [`MediaError::Signalling`] when the user agent refuses the call. A relay in `media` then
+    /// comes back from [`MediaEngine::poll_returned_relay`].
     pub fn place_with(
         &mut self,
         agent: &mut UserAgent,
@@ -2084,8 +1671,7 @@ impl MediaEngine {
         placed
     }
 
-    /// [`MediaEngine::place_with`], with the relay the call was handed in
-    /// `handed` for as long as the call can still be refused.
+    /// [`MediaEngine::place_with`], holding the handed relay while the call can still be refused.
     #[allow(clippy::too_many_arguments)]
     fn place_handed(
         &mut self,
@@ -2107,8 +1693,8 @@ impl MediaEngine {
         let public = public.or_else(|| handed.mapped());
         let catalog = CallMedia::offering(catalog, public);
         let (identity, session_id) = draw(agent);
-        // drawn after the identity, so that the same call placed with and
-        // without SDES starts from the same SSRC and the same sequence number
+        // drawn after the identity so the same call with and without SDES starts from the same SSRC
+        // and sequence number
         let keys = catalog
             .srtp()
             .offers()
@@ -2151,7 +1737,6 @@ impl MediaEngine {
                 ice,
                 #[cfg(feature = "ice")]
                 restarting: None,
-                // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -2166,9 +1751,7 @@ impl MediaEngine {
         Ok(call)
     }
 
-    /// Mark `call` as one whose SDES keys went out in signalling that is not
-    /// encrypted ([`MediaEngine::keys_in_clear`]), and say so in the log at
-    /// warning level, once.
+    /// Mark `call` as having sent SDES keys over unencrypted signalling, and log a warning once.
     fn mark_keys_in_clear(&mut self, call: CallHandle, now: Instant) {
         let Some(managed) = self.calls.get_mut(&call) else {
             return;
@@ -2188,22 +1771,12 @@ impl MediaEngine {
         let _ = now;
     }
 
-    /// Whether an SDES key this end wrote for `call` — in its offer, or in
-    /// its answer to the far end's — went out in signalling that is not
-    /// encrypted, readable on every hop that carried the message (RFC 4568
-    /// §8.3). `Some(false)` for a call whose keys travelled over TLS or
-    /// secure WebSocket, and for one that wrote no SDES key; `None` for a
-    /// call this engine does not hold.
+    /// Whether an SDES key this end wrote for `call` went out over unencrypted signalling, readable
+    /// on every hop (RFC 4568 §8.3). `Some(false)` over TLS or secure WebSocket, or when no key was
+    /// written; `None` for an unknown call. Works for recording sessions too.
     ///
-    /// What a user interface reads before showing a call as encrypted the
-    /// same way whatever carried its keys: [`StreamEncryption`] says the
-    /// media is encrypted, and this says who else could have read the key.
-    /// [`CodecCatalog::with_sdes_signalling`] refuses such calls instead.
-    ///
-    /// [`StreamEncryption`]: crate::StreamEncryption
-    ///
-    /// A recording session ([`MediaEngine::record_to`]) is asked the same
-    /// way, by its own handle: its offer carries keys of its own.
+    /// A UI reads this together with [`StreamEncryption`](crate::StreamEncryption) before showing a
+    /// call as secure. [`CodecCatalog::with_sdes_signalling`] refuses such calls instead.
     #[must_use]
     pub fn keys_in_clear(&self, call: CallHandle) -> Option<bool> {
         self.calls
@@ -2212,23 +1785,13 @@ impl MediaEngine {
             .or_else(|| self.recordings.get(&call).map(|held| held.keys_in_clear))
     }
 
-    /// Take a transfer that was asked for, and place the call it names the
-    /// way [`MediaEngine::place`] places one: an offer from this engine's
-    /// default catalogue, opened on its default [`MediaConfig`].
+    /// Accept a requested transfer and place the new call like [`MediaEngine::place`].
     ///
-    /// `extra` means what it means on [`UserAgent::accept_transfer`], which
-    /// this passes it straight to — a destination other than the account's,
-    /// which forks to keep, and header fields of the caller's own, carried
-    /// separately from the offer because the target itself is not this
-    /// call's to give: `accept_transfer` draws it from the REFER that was
-    /// accepted, the same way [`MediaEngine::place`]'s caller draws its own
-    /// from a directory.
-    ///
-    /// The new call is managed exactly as one [`MediaEngine::place`] placed:
-    /// its session opens once the 2xx is acknowledged, and
-    /// [`MediaEvent::Started`] follows.
+    /// `extra` is passed to [`UserAgent::accept_transfer`] unchanged. The new call opens its
+    /// session when the 2xx is acknowledged, followed by [`MediaEvent::Started`].
     ///
     /// # Errors
+    ///
     /// [`MediaError::Signalling`] when the user agent refuses the call.
     pub fn accept_transfer(
         &mut self,
@@ -2246,14 +1809,12 @@ impl MediaEngine {
         self.accept_transfer_with(agent, call, local, extra, media, now)
     }
 
-    /// The same as [`MediaEngine::accept_transfer`], offering and opening the
-    /// session on `media` instead of this engine's defaults — D6, the same
-    /// reason [`MediaEngine::place_with`] takes one.
+    /// Like [`MediaEngine::accept_transfer`], with `media` instead of the engine defaults.
     ///
     /// # Errors
-    /// [`MediaError::Signalling`] when the user agent refuses the call. A
-    /// relay `media` carried then comes back from
-    /// [`MediaEngine::poll_returned_relay`].
+    ///
+    /// [`MediaError::Signalling`] when the user agent refuses the call. A relay in `media` then
+    /// comes back from [`MediaEngine::poll_returned_relay`].
     pub fn accept_transfer_with(
         &mut self,
         agent: &mut UserAgent,
@@ -2269,8 +1830,8 @@ impl MediaEngine {
         placed
     }
 
-    /// [`MediaEngine::accept_transfer_with`], with the relay the call was
-    /// handed in `handed` for as long as the call can still be refused.
+    /// [`MediaEngine::accept_transfer_with`], holding the handed relay while the call can still be
+    /// refused.
     #[allow(clippy::too_many_arguments)]
     fn transfer_handed(
         &mut self,
@@ -2309,8 +1870,7 @@ impl MediaEngine {
             text,
         );
         describe_ice(&mut offer, ice.as_ref(), None);
-        // the new call leaves from the transferred call's account, and is
-        // held to how that call's own signalling travels
+        // the new call inherits the transferred call's signalling security
         let keys_in_clear = sdes_in_clear(&catalog, &offer, agent.call_signalling_secure(call))?;
         let dtls = dtls.map(|(_, setup)| (Side::Offering, setup));
         let new = agent.accept_transfer(call, Some(Arc::from(offer.to_bytes())), extra, now)?;
@@ -2334,7 +1894,6 @@ impl MediaEngine {
                 ice,
                 #[cfg(feature = "ice")]
                 restarting: None,
-                // an outgoing call rings the far end's phone, not this one's
                 rung_with_media: false,
                 payloads: Payloads::default(),
                 pending: None,
@@ -2349,12 +1908,12 @@ impl MediaEngine {
         Ok(new)
     }
 
-    /// Say a call that came in is ringing, with the answer to the offer it
-    /// carried written from this call's own catalogue and the session opened
-    /// on this engine's default [`MediaConfig`] — before anybody answers.
+    /// Ring an incoming call with an answer from its own catalogue and the default [`MediaConfig`],
+    /// before anybody picks up.
     ///
     /// # Errors
-    /// The same as [`MediaEngine::ring_with`].
+    ///
+    /// As [`MediaEngine::ring_with`].
     pub fn ring(
         &mut self,
         agent: &mut UserAgent,
@@ -2372,46 +1931,25 @@ impl MediaEngine {
         self.ring_with(agent, call, local, media, now)
     }
 
-    /// The same as [`MediaEngine::ring`], keeping `media`'s catalogue for this
-    /// call from here on and opening the session on `media`'s configuration
-    /// instead of this engine's default.
+    /// Like [`MediaEngine::ring`], with `media` instead of the engine defaults.
     ///
-    /// The session opens the moment this returns, not when the call is later
-    /// confirmed: a 183 is never acknowledged the way a 2xx is, so there is no
-    /// later event for [`MediaEngine::answer_with`]'s own way of opening one —
-    /// off the ACK — to hang on, and the whole point of early media is that
-    /// the far end hears it before anybody answers. [`MediaEvent::Started`]
-    /// follows here, the same as it does after [`MediaEngine::answer`].
+    /// The session opens when this returns: a 183 is never acknowledged, so there is no later event
+    /// to open it on. [`MediaEvent::Started`] follows.
     ///
-    /// [`UserAgent::ring`] decides, from the INVITE's own `Require` or
-    /// `Supported`, whether the 183 carrying this description goes out
-    /// reliably (RFC 3262 §3). That choice is also what decides what a later
-    /// [`MediaEngine::answer`] or [`MediaEngine::answer_with`] on this call
-    /// may put in the 200 OK (RFC 3262 §5, RFC 6337 §3.1.1): sent reliably,
-    /// this description is already the real answer and the 200 OK must not
-    /// repeat it; sent unreliably, it was only a preview, and the 200 OK — the
-    /// exchange's first reliable non-failure response — still owes the far
-    /// end the same answer, unchanged. Either way that later call reuses this
-    /// session and this description rather than negotiating a second one: the
-    /// same `o=` id and version, described once.
+    /// [`UserAgent::ring`] decides from `Require`/`Supported` whether the 183 is sent reliably (RFC
+    /// 3262 §3). That decides what a later answer's 200 OK carries (RFC 3262 §5, RFC 6337 §3.1.1):
+    /// nothing if reliable, the same answer again if not. Either way the session and description
+    /// are reused.
     ///
     /// # Errors
-    /// [`MediaError::NoSuchCall`] for a call this engine never saw arrive,
-    /// [`MediaError::Signalling`] wrapping [`sipral_ua::UaError::WrongState`]
-    /// for a call this has already been called on — once is all a call gets,
-    /// though a plain [`UserAgent::ring`] with no description first is no
-    /// obstacle — and the same for a call whose provisional response already
-    /// carried a description [`UserAgent::ring`] was handed, since RFC 3261
-    /// §13.2.1 allows only "that same exact answer" in any response after it,
-    /// [`MediaError::NoDescription`] for an INVITE that carried no
-    /// offer, since the offer this end would make instead belongs in no
-    /// provisional response this engine can follow up (RFC 3261 §13.2.1,
-    /// RFC 6337 §3.1.2), [`MediaError::Description`] when the answer cannot be
-    /// built, [`MediaError::SrtpRequired`] when `media`'s catalogue requires
-    /// SRTP and the INVITE offered a stream that cannot carry it, and
-    /// [`MediaError::Signalling`] for whatever else the user agent refuses to
-    /// send it over. Whichever it is, a relay `media` carried comes back from
-    /// [`MediaEngine::poll_returned_relay`].
+    ///
+    /// [`MediaError::NoSuchCall`] for an unknown call; [`MediaError::Signalling`] wrapping
+    /// [`sipral_ua::UaError::WrongState`] if already rung with a description (RFC 3261 §13.2.1
+    /// allows only the same answer afterwards); [`MediaError::NoDescription`] for an INVITE without
+    /// an offer (RFC 3261 §13.2.1, RFC 6337 §3.1.2); [`MediaError::Description`] when the answer
+    /// cannot be built; [`MediaError::SrtpRequired`] when SRTP is required and not offered;
+    /// [`MediaError::Signalling`] for other user agent refusals. In every error case a relay in
+    /// `media` comes back from [`MediaEngine::poll_returned_relay`].
     pub fn ring_with(
         &mut self,
         agent: &mut UserAgent,
@@ -2426,8 +1964,7 @@ impl MediaEngine {
         rung
     }
 
-    /// [`MediaEngine::ring_with`], with the relay the call was handed in
-    /// `handed` for as long as the ring can still be refused.
+    /// [`MediaEngine::ring_with`], holding the handed relay while the ring can still be refused.
     fn ring_handed(
         &mut self,
         agent: &mut UserAgent,
@@ -2452,11 +1989,8 @@ impl MediaEngine {
             return Err(MediaError::from(UaError::WrongState(state)));
         }
         let (session_id, version) = (managed.session_id, managed.version);
-        // an INVITE with no offer leaves this end to make one, and RFC 3261
-        // §13.2.1 puts it in "the first reliable non-failure message" while
-        // RFC 6337 §3.1.2 keeps it out of every other response; sent reliably,
-        // the answer to it comes back in the PRACK (RFC 3262 §5), and nothing
-        // hands a PRACK's body to this engine
+        // with no offer this end would have to offer, and RFC 3261 §13.2.1 / RFC 6337 §3.1.2 keep
+        // that out of a provisional; the answer would come in a PRACK this engine never sees
         let Some(offer) = managed.remote.clone() else {
             return Err(MediaError::NoDescription);
         };
@@ -2509,31 +2043,23 @@ impl MediaEngine {
             }
             managed.rung_with_media = true;
         }
-        // no event tells this engine when a 183 has gone out the way
-        // `UaEvent::CallConfirmed` tells `answer_with` when a 2xx has, so
-        // this is the one call in this module that settles a call itself
-        // rather than waiting to be told to
+        // no event reports a 183 going out, so this is the one place that settles a call directly
         self.settle(call, now);
         Ok(())
     }
 
-    /// Answer a call that came in, with the answer to the offer it carried,
-    /// kept to what this call has already recorded as its catalogue, and
-    /// opened on this engine's default [`MediaConfig`].
+    /// Answer an incoming call from its recorded catalogue, opened with the default
+    /// [`MediaConfig`].
     ///
     /// # Errors
-    /// [`MediaError::NoSuchCall`] for a call this engine never saw arrive,
-    /// [`MediaError::Description`] when the answer cannot be built,
-    /// [`MediaError::SrtpRequired`] when this call requires SRTP and the
-    /// INVITE offered a stream that cannot carry it, and
-    /// [`MediaError::Signalling`] when the user agent refuses to send it.
     ///
-    /// An INVITE that carried no offer is answered with one of ours instead,
-    /// which is legal (§13.2.2.4) and half-supported here: the far end's
-    /// answer to it travels in the ACK, and the user agent does not report
-    /// what an ACK carried. Such a call is answered, is up, and reports
-    /// [`MediaEvent::Failed`] with [`MediaError::NoDescription`] rather than
-    /// starting audio it has no plan for.
+    /// [`MediaError::NoSuchCall`] for an unknown call, [`MediaError::Description`] when the answer
+    /// cannot be built, [`MediaError::SrtpRequired`] when SRTP is required and not offered,
+    /// [`MediaError::Signalling`] when the user agent refuses.
+    ///
+    /// An INVITE without an offer is answered with one of ours (RFC 3261 §13.2.2.4), but the far
+    /// end's answer comes in the ACK, which the user agent does not report. The call comes up and
+    /// reports [`MediaEvent::Failed`] with [`MediaError::NoDescription`].
     pub fn answer(
         &mut self,
         agent: &mut UserAgent,
@@ -2551,24 +2077,16 @@ impl MediaEngine {
         self.answer_with(agent, call, local, media, now)
     }
 
-    /// The same as [`MediaEngine::answer`], keeping `media`'s catalogue for
-    /// this call from here on and opening the session on `media`'s
-    /// configuration instead of this engine's default.
+    /// Like [`MediaEngine::answer`], with `media` instead of the engine defaults.
     ///
     /// # Errors
-    /// The same as [`MediaEngine::answer`], plus [`MediaError::SrtpRequired`]
-    /// when the catalogue is set to [`SrtpPolicy::Required`] and the INVITE
-    /// offered a stream that cannot be keyed. Nothing is sent in that case:
-    /// the call is still ringing, and rejecting it with a status code of the
-    /// application's choosing is the next move.
     ///
-    /// For a call [`MediaEngine::ring_with`] already described, `local` and
-    /// `media` are not read: there is no second negotiation, and reusing that
-    /// session and that description is the whole point. What the 200 OK
-    /// carries then is decided by how the 183 went out, not by anything
-    /// passed here — see [`MediaEngine::ring_with`]. A relay `media` carried
-    /// then was named by nothing that left, and comes back whole from
-    /// [`MediaEngine::poll_returned_relay`], whether the answer went or not.
+    /// As [`MediaEngine::answer`]. On [`MediaError::SrtpRequired`] nothing is sent and the call is
+    /// still ringing, so the application can reject it.
+    ///
+    /// For a call already described by [`MediaEngine::ring_with`], `local` and `media` are ignored:
+    /// the ring's session and description are reused (see there). A relay in `media` then comes
+    /// back from [`MediaEngine::poll_returned_relay`].
     pub fn answer_with(
         &mut self,
         agent: &mut UserAgent,
@@ -2583,8 +2101,8 @@ impl MediaEngine {
         answered
     }
 
-    /// [`MediaEngine::answer_with`], with the relay the call was handed in
-    /// `handed` for as long as the answer can still be refused.
+    /// [`MediaEngine::answer_with`], holding the handed relay while the answer can still be
+    /// refused.
     fn answer_handed(
         &mut self,
         agent: &mut UserAgent,
@@ -2596,11 +2114,8 @@ impl MediaEngine {
     ) -> Result<(), MediaError> {
         let managed = self.calls.get(&call).ok_or(MediaError::NoSuchCall)?;
         if managed.rung_with_media {
-            // the call was described when it rang, relay and all. A second
-            // relay handed in here was named by nothing that left, so it
-            // stays in `handed` and goes back to the application whole from
-            // `answer_with`, as a refused description's does: deleting it
-            // would spend an allocation the socket's next call can use
+            // already described at ring time; a second relay was never sent, so it stays in
+            // `handed` and goes back to the application
             return self.answer_after_ring(agent, call, now);
         }
         let CallMedia {
@@ -2622,9 +2137,7 @@ impl MediaEngine {
         if best_effort_refuses(&catalog, offered.as_ref()) {
             return Err(refuse_unkeyable(agent, call, now));
         }
-        // an INVITE with no offer leaves this end offering, so which side it
-        // is on is decided by what arrived rather than by which method was
-        // called
+        // with no offer this end is the offerer, whichever method was called
         let side = if offered.is_some() {
             Side::Answering
         } else {
@@ -2698,22 +2211,12 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// The 200 OK for a call [`MediaEngine::ring_with`] already described: no
-    /// new description is written, no new session opened — the session
-    /// `ring_with` opened is still the one running, on the same `o=` id and
-    /// version it opened with.
+    /// The 200 OK for a call [`MediaEngine::ring_with`] already described. The ring's session keeps
+    /// running with the same `o=` id and version.
     ///
-    /// What goes in the body is RFC 3262 §5 and RFC 6337 §3.1.1's rule, and
-    /// [`UserAgent::reliably`] is the one fact it turns on: the 183 sent
-    /// reliably already carried the real answer, and nothing after it may
-    /// repeat it (RFC 6337 §3.1.1, UAS behaviour #2); sent unreliably, that
-    /// description was only a preview, and the 2xx — the exchange's first
-    /// reliable non-failure response — still owes the far end the same
-    /// answer, unchanged (§3.1.1, UAS behaviour #1: every SDP in a response to
-    /// one INVITE has to be identical). Either way [`UserAgent::answer`]
-    /// itself still holds the 2xx for an unacknowledged reliable provisional
-    /// (RFC 3262 §5) — this passes it what to send once that gate opens, not
-    /// whether to.
+    /// RFC 3262 §5 and RFC 6337 §3.1.1 decide the body via [`UserAgent::reliably`]: after a
+    /// reliable 183 the 2xx carries no SDP; after an unreliable one it repeats the same answer.
+    /// [`UserAgent::answer`] still holds the 2xx until a reliable provisional is acknowledged.
     fn answer_after_ring(
         &mut self,
         agent: &mut UserAgent,
@@ -2733,51 +2236,26 @@ impl MediaEngine {
     }
 }
 
-// -- changing a call in progress ---------------------------------------------
-
 impl MediaEngine {
-    /// Offer a call again on `codecs`, in that order, instead of the list it
-    /// was placed or answered with (RFC 3264 §8.3.2).
+    /// Offer the call again with `codecs`, in that order (RFC 3264 §8.3.2).
     ///
-    /// Only the codecs change. Everything else is the description this end
-    /// last wrote for the call, carried across as it was: the media address,
-    /// the transport profile, the SRTP key or the DTLS fingerprint, the ICE
-    /// credentials and candidates, multiplexing. So the answer re-keys
-    /// nothing, restarts no handshake and no connectivity check, and moves
-    /// nothing the call did not ask to move — a key drawn afresh here would
-    /// be a re-key nobody asked for, and a fingerprint written afresh would
-    /// be one RFC 8842 §3.1 reads as a new DTLS association. It is also what
-    /// a hold does, which is the other re-offer this end sends.
+    /// Only the codecs change. Address, profile, SDES key or DTLS fingerprint, ICE and multiplexing
+    /// are copied from the last description, so nothing is re-keyed or restarted (a new fingerprint
+    /// would mean a new association, RFC 8842 §3.1). `a=setup` goes as `actpass` (§5.5); an answer
+    /// that switches role is refused with [`MediaError::DtlsRoleChanged`] and the stream keeps its
+    /// association.
     ///
-    /// The one line that is rewritten is `a=setup`, which goes as `actpass`
-    /// whatever role the call has (RFC 8842 §5.5): the last description may
-    /// have been an answer. An answer that keeps the association comes back
-    /// with the roles already in force (§5.3), and one that takes the other
-    /// role is refused by name — [`MediaError::DtlsRoleChanged`] — with the
-    /// stream left on the association it has.
-    ///
-    /// Which way the call flows is the user agent's to write
-    /// ([`UserAgent::change_formats`]): a call held here stays held through
-    /// the change, and [`UserAgent::resume`] takes it off hold on the new
-    /// list. Every dynamic payload type keeps the codec it has named on this
-    /// call, from either end, and a codec new to it gets a number nothing has
-    /// had — the MUST in §8.3.2 that an offer numbered from the catalogue
-    /// alone would break the moment a codec left the front of the list.
-    ///
-    /// The list is this call's own once the far end accepts it, and a
-    /// refusal leaves the call on the list it had, as RFC 3261 §14.1 leaves
-    /// the session. What the answer settled on arrives the way any
-    /// renegotiation's does: [`MediaEvent::Changed`], carrying the codec.
+    /// Direction is the user agent's ([`UserAgent::change_formats`]): a held call stays held.
+    /// Dynamic payload types keep their codec, and new codecs get unused numbers, as §8.3.2
+    /// requires. The list becomes the call's once accepted; a refusal leaves the old one (RFC 3261
+    /// §14.1). The result arrives as [`MediaEvent::Changed`].
     ///
     /// # Errors
-    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
-    /// [`MediaError::NoDescription`] before this end has described it;
-    /// [`MediaError::StreamRefused`] for a call whose stream was refused,
-    /// which a change of codecs does not bring back; what
-    /// [`CodecCatalog::with_codecs`] refuses; [`MediaError::NoPayloadType`];
-    /// and [`MediaError::Signalling`] when the user agent will not send it —
-    /// [`UaError::ChangeInProgress`] while another change is on its way,
-    /// chiefly.
+    ///
+    /// [`MediaError::NoSuchCall`]; [`MediaError::NoDescription`] before the call is described;
+    /// [`MediaError::StreamRefused`] for a refused stream; what [`CodecCatalog::with_codecs`]
+    /// refuses; [`MediaError::NoPayloadType`]; [`MediaError::Signalling`], mainly
+    /// [`UaError::ChangeInProgress`].
     pub fn change_codecs(
         &mut self,
         agent: &mut UserAgent,
@@ -2821,7 +2299,7 @@ impl MediaEngine {
         offer.origin.version = version;
 
         agent.change_formats(call, &offer.to_bytes(), now)?;
-        // bound from the moment it is written, whatever the far end says
+        // bound once written, whatever the answer
         payloads.note(&offer);
         if let Some(managed) = self.calls.get_mut(&call) {
             managed.payloads = payloads;
@@ -2830,41 +2308,23 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// Restart ICE on a call (RFC 8445 §9): offer it again with new ICE
-    /// credentials, so that both ends flush their checklists and check every
+    /// Restart ICE on a call (RFC 8445 §9) by offering new credentials, so both ends check every
     /// pair again.
     ///
-    /// What a call whose path has gone needs: consent lost or revoked
-    /// ([`MediaError::IcePathLost`]), since RFC 7675 §5.1 forbids the same
-    /// credentials on that pair again, or a network change the application
-    /// saw before the agent did, since only a restart may "change the
-    /// destinations of data streams" (§9).
+    /// Use it when the path is lost ([`MediaError::IcePathLost`]; RFC 7675 §5.1 forbids reusing the
+    /// credentials) or after a network change, since only a restart may change destinations (§9).
     ///
-    /// Everything but ICE is the description this end last wrote, carried
-    /// across the way [`MediaEngine::change_codecs`] carries it: the codecs,
-    /// the key or the fingerprint, multiplexing, and which way the call
-    /// flows, with `a=setup` offered again as `actpass`. The ICE lines are
-    /// written as for a first offer (RFC 8839 §4.4.1.1.1): new credentials,
-    /// the role and tiebreaker the call has, and the candidates its agent
-    /// still holds — a relay ICE gave back when it concluded on another pair
-    /// is not offered again.
-    ///
-    /// The running agent is not touched until the far end answers. The pair
-    /// it selected carries the audio meanwhile, and from the answer on as
-    /// well, until the restarted agents have checked their way to a new one
-    /// (RFC 8839 §4.4.3.1.1), reported as another [`MediaEvent::PathChosen`].
-    /// A refusal leaves ICE exactly as it was: "Should a subsequent offer
-    /// fail, ICE processing continues as if the subsequent offer had never
-    /// been made" (§4.4).
+    /// Everything else is copied from the last description as in [`MediaEngine::change_codecs`].
+    /// ICE lines are written as for a first offer (RFC 8839 §4.4.1.1.1) with the agent's current
+    /// candidates. The running agent is untouched until the answer; the old pair carries audio
+    /// until a new one is chosen (RFC 8839 §4.4.3.1.1, reported as [`MediaEvent::PathChosen`]). A
+    /// refusal leaves ICE as it was (§4.4).
     ///
     /// # Errors
-    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
-    /// [`MediaError::NoIce`] for one that runs no ICE agent;
-    /// [`MediaError::NoDescription`] before this end has described it;
-    /// [`MediaError::Ice`] should new credentials fail to draw; and
-    /// [`MediaError::Signalling`] when the user agent will not send it —
-    /// [`UaError::ChangeInProgress`] while another change is on its way,
-    /// chiefly.
+    ///
+    /// [`MediaError::NoSuchCall`]; [`MediaError::NoIce`] for a call without an ICE agent;
+    /// [`MediaError::NoDescription`]; [`MediaError::Ice`] if credentials fail to draw;
+    /// [`MediaError::Signalling`], mainly [`UaError::ChangeInProgress`].
     #[cfg(feature = "ice")]
     pub fn restart_ice(
         &mut self,
@@ -2895,9 +2355,8 @@ impl MediaEngine {
         offer.origin.version = version;
 
         agent.change_formats(call, &offer.to_bytes(), now)?;
-        // the far end checks under the new credentials from the moment it
-        // has answered, and its first checks can arrive before its answer
-        // does: the agent keeps them for the moment the restart is taken up
+        // checks under the new credentials may arrive before the answer; the agent keeps them until
+        // the restart is taken up
         if let Some(held) = self.sessions.get(&call) {
             share::lock(held)
                 .session
@@ -2909,53 +2368,26 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// Describe a call's media at the socket the application bound for it
-    /// after the network changed, and offer that to the far end (RFC 3264
-    /// §8.3.1).
+    /// Move a call's media to a new socket after a network change and offer that to the far end
+    /// (RFC 3264 §8.3.1).
     ///
-    /// What a call in progress needs once the address it was placed or
-    /// answered from is gone: [`UaEvent::CallAddressWanted`] says which
-    /// calls, the application binds a media socket on the new network and
-    /// hands its address over here. `public` is where that socket appears
-    /// from outside, as [`CallMedia::public_address`] takes it, when the
-    /// application has learned one for the new socket; `None` describes the
-    /// call by `local` itself.
+    /// [`UaEvent::CallAddressWanted`] names the calls; the application binds a new socket and
+    /// passes its address. `public` is its outside address, as in [`CallMedia::public_address`];
+    /// `None` uses `local`.
     ///
-    /// The offer is the description this end last wrote with only the
-    /// address moved: `c=` wherever it appears and the port on `m=`, with
-    /// the codecs, the direction and the fingerprint carried across the way
-    /// [`MediaEngine::change_codecs`] carries them. An SDES key is not: a
-    /// stream received at another address or port is offered a new master
-    /// key, one line under the tag and suite the call agreed (RFC 4568
-    /// §7.1.4), so both ends start a fresh context. The `o=` line
-    /// keeps its address, since §8 wants it identical but for the version.
-    /// A DTLS association outlives the move — a datagram transport lets one
-    /// span several 5-tuples (RFC 8842 §3.2) — so `a=setup` is offered
-    /// again as `actpass` and the fingerprint is the one the call already
-    /// has.
+    /// Only `c=` and the `m=` port change. An SDES stream gets a new master key under the agreed
+    /// tag and suite (RFC 4568 §7.1.4). The `o=` address stays (§8). A DTLS association survives
+    /// the move (RFC 8842 §3.2), so `a=setup` is `actpass` and the fingerprint is unchanged.
     ///
-    /// The re-INVITE carries the account's `Contact` as it is when this is
-    /// called, so [`UserAgent::rebind`] goes first: the far end addresses
-    /// the rest of the dialog to that target (RFC 3261 §12.2). The new
-    /// socket is this call's from here on, whatever the far end answers —
-    /// the old one names an address the network no longer has. Audio from
-    /// the far end arrives at the new socket once it has taken the offer,
-    /// and [`MediaEvent::Changed`] follows that answer like any other.
-    ///
-    /// A call whose session runs ICE is not moved this way: its candidates
-    /// were gathered on the old socket, and moving it is a restart gathered
-    /// on the new one. A call that offered ICE to a peer that answered
-    /// without any is an ordinary call, and the offer leaves the ICE lines
-    /// out.
+    /// Call [`UserAgent::rebind`] first so the re-INVITE carries the new `Contact` (RFC 3261
+    /// §12.2). The new socket is the call's from now on, whatever the answer. Calls running ICE
+    /// must be restarted instead.
     ///
     /// # Errors
-    /// [`MediaError::NoSuchCall`] for a call this engine does not manage;
-    /// [`MediaError::NoDescription`] before this end has described it;
-    /// [`MediaError::MovesWithIce`] for one that runs ICE; and
-    /// [`MediaError::Signalling`] when the user agent will not send it —
-    /// [`UaError::ChangeInProgress`] while another change is on its way,
-    /// chiefly, which leaves the call where it was, to be moved again once
-    /// that change is answered.
+    ///
+    /// [`MediaError::NoSuchCall`]; [`MediaError::NoDescription`]; [`MediaError::MovesWithIce`] for
+    /// a call running ICE; [`MediaError::Signalling`], mainly [`UaError::ChangeInProgress`], which
+    /// leaves the call to be moved again later.
     pub fn readdress(
         &mut self,
         agent: &mut UserAgent,
@@ -2987,9 +2419,7 @@ impl MediaEngine {
         if offered_ice {
             withdraw_ice(&mut offer);
         }
-        // RFC 4568 §7.1.4: an offer that moves the address or port a stream
-        // is received at carries a new master key, and so a new context with
-        // its rollover counter at zero, on both ends
+        // RFC 4568 §7.1.4: a moved stream gets a new master key, so both ends restart with ROC zero
         if moved {
             let _ = self.fresh_key_line(call, &mut offer);
         }
@@ -3022,16 +2452,10 @@ impl MediaEngine {
     }
 }
 
-// -- draining ----------------------------------------------------------------
-
 impl MediaEngine {
-    /// The next thing the application has to know, with media already
-    /// attached.
+    /// The next event for the application, with media already attached.
     ///
-    /// Drain to empty, as with any of the polls in this tree. Media events
-    /// come out after the signalling event that produced them, so an
-    /// application that acts on [`UaEvent::CallConfirmed`] and then on
-    /// [`MediaEvent::Started`] sees them in the order they happened.
+    /// Drain until `None`. Media events follow the signalling event that caused them.
     pub fn poll_event(&mut self, agent: &mut UserAgent, now: Instant) -> Option<Event> {
         self.claim_ports();
         if let Some((call, event)) = self.events.pop_front() {
@@ -3055,28 +2479,20 @@ impl MediaEngine {
         #[cfg(feature = "redaction")]
         self.log_signalling(&signalling, now);
         self.absorb(&signalling, agent, now);
-        // folded into a media event by `absorb`, above, rather than forwarded
-        // as this one: the next turn of this same loop returns what that just
-        // queued, since the media checks at the top of this function run
-        // before the signalling drain does
+        // `absorb` already turned this into a media event, which the next loop iteration returns
         if matches!(signalling, UaEvent::DtmfReceived { .. }) {
             return self.poll_event(agent, now);
         }
         Some(Event::Signalling(signalling))
     }
 
-    /// Time has passed: every session's stall watchdog gets a look.
-    ///
-    /// One session at a time, each for as long as a look takes, so a thread
-    /// in the middle of a frame on one call holds this up by that frame and
-    /// holds up no other call's.
+    /// Run every session's stall watchdog. Sessions are locked one at a time, so a busy audio
+    /// thread delays only its own call.
     pub fn handle_timeout(&mut self, now: Instant) {
         for held in self.sessions.values() {
             share::lock(held).session.handle_timeout(now);
         }
-        // and the agents of calls described with a relay that have no
-        // session yet: the keepalive towards the TURN server is on their
-        // clock, and what it sends comes out of `poll_transmit`
+        // and relayed agents still waiting for a session, whose TURN keepalives run on this clock
         #[cfg(feature = "ice")]
         for ice in self.gathered.values_mut() {
             ice.top_up();
@@ -3104,67 +2520,38 @@ impl MediaEngine {
         [sessions, waiting].into_iter().flatten().min()
     }
 
-    /// The RTCP goodbye of a call that has ended (RFC 3550 §6.6).
+    /// The RTCP BYE of an ended call (RFC 3550 §6.6).
     ///
-    /// Separate from [`MediaEngine::poll_rtcp`] because by the time there is
-    /// one to send there is no session left to ask: a call that ends is taken
-    /// out of the engine in the same breath as the event that reports it, and
-    /// a packet held in a session that no longer exists is a packet nobody can
-    /// reach. So it is copied out at that moment and waits here.
+    /// Separate from [`MediaEngine::poll_rtcp`] because the session is already gone, so the packet
+    /// is copied out when the call ends. The handle names the ended call so the application knows
+    /// which socket to use.
     ///
-    /// The handle it comes with names a call that has already ended. It is
-    /// there so an application that keeps its own sockets per call knows which
-    /// one to send from, not because anything else can still be done with it.
-    ///
-    /// One at a time, like every other poll here. A caller loops until it
-    /// answers `None`, and should do so after draining events — a goodbye that
-    /// is never polled is a far end left waiting out its own timeout.
-    ///
-    /// A call given a relay ([`CallMedia::relay`]) gives it back here too:
-    /// the Refresh with a lifetime of zero that deletes the allocation (RFC
-    /// 8656 §8), addressed to the TURN server, when the call ends — whether
-    /// or not its session ever opened, and unless another branch of its fork
-    /// still holds the relay — or as soon as the call is known not to use it.
+    /// Loop until `None` after draining events. A call with a relay ([`CallMedia::relay`]) also
+    /// queues here the Refresh with lifetime zero that deletes the allocation (RFC 8656 §8), unless
+    /// another fork branch still holds it.
     #[must_use]
     pub fn poll_farewell(&mut self) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.farewells.pop_front()
     }
 
-    /// A relay handed to a call ([`CallMedia::relay`]) whose description was
-    /// refused before there was a call to hold it, handed back whole and
-    /// still live on its server.
+    /// A relay from a refused description, returned live.
     ///
-    /// Nothing that named it left: the description that did was refused, so
-    /// no peer was offered it and nothing about it has to be undone. Given
-    /// to [`Relays::put_back`](crate::Relays::put_back) it is kept alive for
-    /// the socket it was allocated from ([`crate::Relay::local`]) and handed
-    /// to the next call there, as if it had never been taken. One at a time,
-    /// like every other poll here; ask after any of
-    /// [`MediaEngine::place_with`], [`MediaEngine::accept_transfer_with`],
-    /// [`MediaEngine::ring_with`] and [`MediaEngine::answer_with`] answers
-    /// with an error, and after [`MediaEngine::answer_with`] on a call
-    /// [`MediaEngine::ring_with`] already described, which reads no relay
-    /// because its description has already left. A relay nobody asks for is
-    /// refreshed by nothing, and lapses at its server in the lifetime it was
-    /// granted.
+    /// Nothing that named it was accepted, so [`Relays::put_back`](crate::Relays::put_back) can
+    /// keep it for the next call on [`crate::Relay::local`]. Ask after any `_with` call fails, and
+    /// after [`MediaEngine::answer_with`] on a rung call. A relay nobody collects lapses at its
+    /// server.
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn poll_returned_relay(&mut self) -> Option<crate::Relay> {
         self.returned.pop_front()
     }
 
-    /// What a call described with a relay, and still waiting for its session,
-    /// has to send: the Binding indications that keep the NAT binding
-    /// towards the TURN server open, and the refresh that keeps the
-    /// allocation, each with the socket to send it from.
+    /// Keepalives and refreshes for calls described with a relay and still waiting for a session,
+    /// with the socket to send from.
     ///
-    /// The same datagrams [`MediaEngine::poll_transmit`] hands out for such a
-    /// call, for an application that drives each session through its own
-    /// [`SessionShare`] and so never calls that — the C ABI is one — and has
-    /// no session yet to ask for this one. Once the session opens, the agent
-    /// is the session's and sends through it. One at a time; loop until
-    /// `None` after [`MediaEngine::handle_timeout`] and after
-    /// [`MediaEngine::receive_waiting`].
+    /// The same datagrams [`MediaEngine::poll_transmit`] returns, for applications that drive
+    /// sessions through [`SessionShare`] (like the C ABI). Loop until `None` after
+    /// [`MediaEngine::handle_timeout`] and [`MediaEngine::receive_waiting`].
     #[cfg(feature = "ice")]
     #[must_use]
     pub fn poll_waiting_transmit(&mut self) -> Option<(CallHandle, crate::RelayDatagram)> {
@@ -3184,17 +2571,12 @@ impl MediaEngine {
         None
     }
 
-    /// Hand in a datagram that arrived on `local` from `from` while a call
-    /// described there with a relay is still waiting for its session, and
-    /// say whether it was for that call's agent — the TURN server's answer
-    /// to a refresh above all, without which the allocation is lost to a
-    /// phone that rings for longer than its lifetime less a minute.
+    /// Feed a datagram from `from` on `local` to a relayed call still waiting for its session, and
+    /// say whether its agent took it. Without the refresh answers the allocation would expire
+    /// during a long ring.
     ///
-    /// Every other datagram on the socket is a session's, or a
-    /// [`Relays`](crate::Relays)' or a [`Mappings`](crate::Mappings)' before
-    /// any call was described there, and `false` leaves it for them. The
-    /// agent decides what is its own exactly as it does once the session is
-    /// open: from its TURN server, only answers to requests it sent.
+    /// `false` leaves it for a session, [`Relays`](crate::Relays) or [`Mappings`](crate::Mappings).
+    /// From the TURN server, the agent takes only answers to its own requests.
     #[cfg(feature = "ice")]
     pub fn receive_waiting(
         &mut self,
@@ -3218,61 +2600,26 @@ impl MediaEngine {
         false
     }
 
-    /// Hand in a datagram that arrived on `local`, the socket a call was
-    /// described on, from `from`, before the application reads that socket
-    /// through the call's own session, and say whether the call took it.
+    /// Feed a datagram from `from` on `local` (a socket a call was described on) before the
+    /// application reads through the call's session, and say whether a call took it.
     ///
-    /// For an application that reads a call's socket before it holds the
-    /// call's [`SessionShare`] — the C ABI's loop, which hands everything
-    /// arriving on a media socket to the stack until the call's media handle
-    /// exists, since a relay's refresh is answered there. The far end starts
-    /// its connectivity checks the moment it sends its answer, so the first
-    /// of them can reach this end's socket before the answer does, or between
-    /// the session opening and the application taking its share. Refused
-    /// there, they are gone: the far end sends a check again no sooner than
-    /// half a second later (RFC 8445 §14.3), and until one gets through, or
-    /// this end's own checks get round to the pair, the far end has no pair
-    /// proved to send its audio on. Kept, they are answered as RFC 8445 §7.3
-    /// asks of a check that arrives before the agent has the peer's
-    /// candidates.
+    /// For applications that read a call's socket before holding its [`SessionShare`], like the C
+    /// ABI. The far end starts checks when it sends its answer, so they can arrive early; dropped,
+    /// they are retried no sooner than 500 ms later (RFC 8445 §14.3). Kept, they are answered as
+    /// §7.3 describes.
     ///
-    /// It is also how the datagrams on a socket the branches of a forked
-    /// call share find their branch, sessions and all, for as long as the
-    /// branches last: one offer described them all on the one socket, and
-    /// only the datagram says which phone it came from (RFC 8839 §7.3). A
-    /// session claims a check naming its own peer's fragment, an answer to
-    /// its own check, and anything else from an address among its peer's
-    /// candidates, what the TURN server relays from such an address
-    /// included; one running no ICE claims what comes from the address its
-    /// description named.
+    /// It also routes datagrams to the branches of a forked call sharing the socket (RFC 8839
+    /// §7.3). In order, the first that takes it:
     ///
-    /// In this order, the first that takes it:
+    /// - a session there that claims it (if it is the only one with no waiting agent, it takes
+    ///   everything);
+    /// - a relayed agent still waiting for its session, as [`MediaEngine::receive_waiting`];
+    /// - the first session there;
+    /// - an ICE call without a session yet: an authenticated Binding request for its fragment is
+    ///   kept (newest sixteen per socket, at most 39.5 s) and handed to the agent when the session
+    ///   opens.
     ///
-    /// - the session of a call described there that claims it; with one
-    ///   session there and no agent waiting beside it, that session takes
-    ///   everything, audio and checks alike, exactly as through the share,
-    ///   and `false` is a datagram the session dropped;
-    /// - the agent of a call described there with a relay and still waiting
-    ///   for its session, as [`MediaEngine::receive_waiting`] — which answers
-    ///   the far end's checks itself, as well as its TURN server — for what
-    ///   it claims, for its TURN server's answers when no session holds the
-    ///   same relay, and for a check no session claims: a branch whose phone
-    ///   has not answered yet;
-    /// - the first session of a call described there, for anything nobody
-    ///   claims;
-    /// - a call described there using ICE that has no session yet: a Binding
-    ///   request whose `USERNAME` names this call's fragment and whose
-    ///   `MESSAGE-INTEGRITY` checks out under the password its description
-    ///   gave out is kept, the newest sixteen for the socket, and handed to
-    ///   the session's agent the moment the session opens, which answers it
-    ///   and checks back on the same pair. One kept longer than the far end's
-    ///   transaction for it lasts, 39.5 seconds, is dropped instead, and so is
-    ///   everything kept for a call that ends first. Anything else is not the
-    ///   call's.
-    ///
-    /// `false` leaves the datagram for whoever else the socket answers to —
-    /// a [`Mappings`](crate::Mappings) or a [`Relays`](crate::Relays)
-    /// transaction — and is otherwise a datagram nobody wanted.
+    /// `false` leaves it for [`Mappings`](crate::Mappings) or [`Relays`](crate::Relays).
     pub fn receive_early(
         &mut self,
         local: SocketAddr,
@@ -3314,26 +2661,13 @@ impl MediaEngine {
         }
     }
 
-    /// Which of the calls described on `local` a datagram from `from` is
-    /// for — a session, or an agent still waiting for its session — when
-    /// there may be more than one: the branches of a forked call, which one
-    /// offer described on one socket.
+    /// Which call on `local` a datagram from `from` is for, when a fork put several there.
     ///
-    /// "The connectivity checks which occur prior to transmission of media
-    /// carry username fragments which in turn are correlated to a specific
-    /// callee. Subsequent media packets that arrive on the same candidate
-    /// pair as the connectivity check will be associated with that same
-    /// callee" (RFC 8839 §7.3). So a session's ICE agent claims a check that
-    /// names its own peer's fragment, an answer to its own check, and
-    /// anything else from an address among its peer's candidates — what the
-    /// TURN server relays from such an address included — and a session
-    /// running no ICE claims what comes from the address its description
-    /// named. The TURN server's answers to the requests of the allocation
-    /// the branches share go to whichever of them holds it. A check no
-    /// session claims is a branch's that has not been answered yet, and goes
-    /// to an agent still waiting for its session, which answers it (RFC 8445
-    /// §7.3); anything else nobody claims goes where it always went, the
-    /// first session described there.
+    /// RFC 8839 §7.3 ties media to the branch whose checks used the same pair. A session claims
+    /// checks for its peer's fragment, answers to its own checks, and traffic from its peer's
+    /// candidates (relayed included); a non-ICE session claims its described address. TURN answers
+    /// go to the holder of the shared allocation. Unclaimed checks go to a waiting agent (RFC 8445
+    /// §7.3); anything else to the first session.
     #[cfg(feature = "ice")]
     fn branch_for(&self, local: SocketAddr, from: SocketAddr, data: &[u8]) -> Branch {
         use sipral_nat::ice::Claim;
@@ -3410,9 +2744,8 @@ impl MediaEngine {
         true
     }
 
-    /// Hand a session that has just opened the checks kept for its socket
-    /// before it did and still worth answering, when it runs ICE; the kept
-    /// checks go either way, since they were for this session or for nobody.
+    /// Give a just-opened ICE session the checks kept for its socket that are still fresh. The rest
+    /// are dropped.
     #[cfg(feature = "ice")]
     fn replay_early(&mut self, call: CallHandle, now: Instant) {
         let Some(address) = self.calls.get(&call).and_then(|managed| managed.address) else {
@@ -3440,24 +2773,12 @@ impl MediaEngine {
     #[allow(clippy::unused_self)]
     const fn replay_early(&mut self, _call: CallHandle, _now: Instant) {}
 
-    /// A control datagram that is due, the call to send it for, and where it
-    /// goes.
+    /// The next due RTCP datagram, with its call and destination.
     ///
-    /// One at a time, like every other poll here. A caller loops until it
-    /// answers `None`. Each call picks up after the call the last one
-    /// answered for, so one such drain looks at every session once, however
-    /// many reports are due in it; a report that comes due behind the drain
-    /// is found by the next one, which starts from the first call again.
-    ///
-    /// The octets are copied out rather than lent, because they are written
-    /// into the session's own buffer and the session is only held for as long
-    /// as this call runs. A report is due a few times a minute per call, so
-    /// the copy costs nothing the audio path would notice; a thread that
-    /// carries one call's audio can ask that call alone with
-    /// [`MediaSession::poll_rtcp`] through a [`SessionShare`] instead.
-    ///
-    /// A report that goes through a relay's TCP or TLS connection is set
-    /// aside for [`MediaEngine::poll_turn_stream`] instead.
+    /// Loop until `None`. Each call resumes after the last one, so one drain visits each session
+    /// once. The bytes are copied because the session is only locked during the call; a few reports
+    /// a minute cost nothing. An audio thread can use [`MediaSession::poll_rtcp`] instead. Reports
+    /// over a relay connection go to [`MediaEngine::poll_turn_stream`].
     #[must_use]
     pub fn poll_rtcp(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         #[cfg(feature = "ice")]
@@ -3489,10 +2810,8 @@ impl MediaEngine {
         None
     }
 
-    /// The next real-time text datagram any call has due, and where: sent
-    /// from that call's text socket ([`CallMedia::text`]), never its audio
-    /// one. A thread that carries one call's media asks that call alone with
-    /// [`MediaSession::poll_text`] instead.
+    /// The next due real-time text datagram, sent from the call's text socket
+    /// ([`CallMedia::text`]). An audio thread can use [`MediaSession::poll_text`] instead.
     #[must_use]
     pub fn poll_text(&mut self, now: Instant) -> Option<(CallHandle, SocketAddr, Vec<u8>)> {
         self.sessions.iter().find_map(|(call, held)| {
@@ -3505,11 +2824,8 @@ impl MediaEngine {
 
     /// The next event a session has to report.
     ///
-    /// Taken from the list of calls whose sessions raised one, so the
-    /// sessions locked are the ones on it and no others. A call that has
-    /// ended since it was raised, or whose events were drained another way
-    /// (`MediaSession::poll_event` through [`MediaEngine::session`]), is on
-    /// the list once more than it needs to be and costs one look.
+    /// Taken from the list of calls that raised one, so only those sessions are locked. A stale
+    /// entry costs one extra look.
     fn session_event(&mut self) -> Option<(CallHandle, MediaEvent)> {
         while let Some(call) = self.ready.take() {
             let Some(held) = self.sessions.get(&call) else {
@@ -3531,8 +2847,7 @@ impl MediaEngine {
         None
     }
 
-    /// Take a session that has just opened into the table, where its events
-    /// reach [`MediaEngine::poll_event`].
+    /// Put a newly opened session into the table.
     fn keep_session(&mut self, call: CallHandle, mut session: MediaSession) {
         session.report_to(call, Arc::clone(&self.ready));
         self.sessions.insert(call, share::hold(session));
@@ -3541,8 +2856,7 @@ impl MediaEngine {
     /// Act on what the user agent said.
     fn absorb(&mut self, event: &UaEvent, agent: &mut UserAgent, now: Instant) {
         self.absorb_call(event, agent, now);
-        // after the call's own media has taken the event in, so that a
-        // recording reads the session as the event left it
+        // after the call's own media, so the recording sees the updated session
         self.absorb_recording(event, agent, now);
     }
 
@@ -3557,16 +2871,14 @@ impl MediaEngine {
             } => self.arrived(*call, *account, request, agent),
             UaEvent::CallForked { call, sibling } => self.forked(*call, *sibling, agent, now),
             UaEvent::CallProgress { call, response, .. } => {
-                // a 183 with a description is early media: a network
-                // announcement the caller has to hear before anybody answers
+                // a 183 with SDP is early media the caller must hear
                 self.take_body(*call, Some(response), now);
             }
             UaEvent::CallConfirmed { call, response, .. } => {
                 self.take_body(*call, response.as_ref(), now);
                 self.hang_up_insecure(*call, agent, now);
-                // a 2xx is a call this end placed being answered, and who
-                // answered it is decided from here; a call this end answered
-                // confirms with an ACK and no response
+                // a 2xx answers an outgoing call; an incoming call confirms with an ACK and no
+                // response
                 if response.is_some() {
                     self.answered(*call);
                     self.rekey_after_fork(*call, agent, now);
@@ -3579,18 +2891,14 @@ impl MediaEngine {
                 remote,
             } => {
                 self.redescribed(*call, local.as_deref(), remote.as_deref(), now);
-                // the stream the plan above left running learns whether this
-                // end now holds the far end, which no direction attribute
-                // says alone: a `sendonly` this end answered to the far end's
-                // `recvonly` is not a hold, and sends the microphone
+                // tell the stream whether this end holds the far end; direction attributes alone
+                // cannot say
                 if let Some(held) = self.sessions.get(call) {
                     share::lock(held).session.set_holding(hold.local);
                 }
             }
             UaEvent::Reoffer { call, request } => self.answer_reoffer(*call, request, agent, now),
-            // §14.1: the session stands exactly as it was, so the list it
-            // stands on is the one it had. A 491 is going out again by
-            // itself, and the change is still on its way.
+            // RFC 3261 §14.1: the session stands as it was. A 491 retry is pending
             UaEvent::SessionChangeFailed {
                 call,
                 retry_in: None,
@@ -3598,9 +2906,7 @@ impl MediaEngine {
             } => {
                 if let Some(managed) = self.calls.get_mut(call) {
                     managed.pending = None;
-                    // and an ICE restart refused is one that never happened
-                    // (RFC 8839 §4.4): the agent goes on as it was, and keeps
-                    // nothing for credentials that will never be in force
+                    // a refused ICE restart never happened (RFC 8839 §4.4)
                     #[cfg(feature = "ice")]
                     if managed.restarting.take().is_some()
                         && let Some(held) = self.sessions.get(call)
@@ -3619,19 +2925,12 @@ impl MediaEngine {
         }
     }
 
-    /// RFC 4568 §7.3 for a call whose INVITE forked: every user agent the
-    /// offer reached knows the SDES key it carried, the ones that never
-    /// answered and the ones whose answer lost included, and RFC 3711 §9.1
-    /// forbids one master key to two sessions. Once a branch has answered
-    /// and been acknowledged, it is offered again with the description this
-    /// end last wrote and one crypto line: the tag and suite the call
-    /// agreed, with a key drawn fresh. The far end's answer keys this end's
-    /// sending context anew (`Rekey::between`, a new key), and the key in
-    /// the INVITE protects nothing from then on.
+    /// RFC 4568 §7.3 after a fork: every UA the offer reached knows its SDES key, and RFC 3711 §9.1
+    /// forbids one master key for two sessions. Once a branch is answered and acknowledged,
+    /// re-offer it with a fresh key under the agreed tag and suite.
     ///
-    /// Once per call, and only for a call this engine describes and keys by
-    /// SDES. A re-offer the user agent will not send now — another change
-    /// already on its way — leaves the call as it is, and says so in the log.
+    /// Once per call, SDES calls only. If another change is in progress the call is left alone and
+    /// that is logged.
     fn rekey_after_fork(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
         let Some(managed) = self.calls.get_mut(&call) else {
             return;
@@ -3680,10 +2979,8 @@ impl MediaEngine {
         let _ = sent;
     }
 
-    /// Replace the crypto lines of `offer`'s audio stream with one: the tag
-    /// and suite `call` runs under by SDES, with a key drawn fresh. `false`,
-    /// with `offer` untouched, for a call not keyed by SDES or with no live
-    /// audio stream.
+    /// Replace the audio crypto lines of `offer` with one fresh key under the call's tag and suite.
+    /// `false`, leaving `offer` untouched, if the call is not SDES-keyed.
     fn fresh_key_line(&mut self, call: CallHandle, offer: &mut SessionDescription) -> bool {
         let agreed = self.sessions.get(&call).and_then(|held| {
             match share::lock(held).session.plan().keying {
@@ -3718,38 +3015,30 @@ impl MediaEngine {
         true
     }
 
-    /// A call this end placed whose answer the call's SRTP policy refused:
-    /// acknowledged by now, since the 2xx that carried the answer is what
-    /// confirmed it, and hung up (RFC 3261 §13.2.2.4: a UAC that does not
-    /// want the dialog an acknowledged 2xx made sends a BYE), the `Reason`
-    /// saying 488 so the far end's logs say why (RFC 3326).
+    /// Hang up an outgoing call whose answer the SRTP policy refused, with `Reason` 488 (RFC 3261
+    /// §13.2.2.4, RFC 3326).
     fn hang_up_insecure(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
         let refused = self.calls.get_mut(&call).and_then(|managed| {
             core::mem::take(&mut managed.refused_keying).then(|| managed.catalog.srtp())
         });
         if let Some(policy) = refused {
-            // best effort ends a call only over keys both ends wrote and
-            // neither could use; every other policy over keys it required
+            // best effort only ends a call over keys both ends wrote and neither could use
             let text = if policy.on_plain_profile() {
                 "No usable SRTP key"
             } else {
                 "SRTP required"
             };
             let reason = Reason::sip(488, text);
-            // a call already ending needs no second goodbye
+            // already ending
             let _ = agent.hangup_for(call, &[reason], now);
         }
     }
 
-    /// A digit arrived by SIP INFO. Folded into the same
-    /// [`MediaEvent::DigitReceived`] the media reports RFC 4733 events with —
-    /// `crate::event`'s own module doc says why — rather than forwarded as
-    /// its own [`UaEvent`].
+    /// A digit arrived by SIP INFO. Reported as the same [`MediaEvent::DigitReceived`] as RFC 4733
+    /// digits (see `crate::event`).
     fn dtmf_received(&mut self, call: CallHandle, digit: char, held_ms: Option<u32>) {
-        // an INFO's digit always names one of the sixteen keys RFC 4733
-        // §3.2 does too, because `sipral_ua`'s own parser refused anything
-        // else before this ever arrived; the fallback exists so this reads
-        // an event code rather than reaching for one it cannot get
+        // the parser only accepts the sixteen RFC 4733 §3.2 keys; the fallback just avoids a panic
+        // path
         let event = Digit::from_char(digit).map_or(0, Digit::event);
         self.events.push_back((
             call,
@@ -3763,16 +3052,9 @@ impl MediaEngine {
     }
 }
 
-// -- what each event does ----------------------------------------------------
-
 impl MediaEngine {
-    /// A call came in: keep whatever offer it carried, and mint the numbers
-    /// its stream will start from.
-    ///
-    /// This engine's default catalogue and configuration are recorded for the
-    /// call now, before the application has had a chance to say anything
-    /// about it — [`MediaEngine::answer_with`] replaces them for this call
-    /// alone when it is asked to.
+    /// A call came in: keep its offer and draw its stream numbers. The default catalogue and
+    /// configuration are recorded now; [`MediaEngine::answer_with`] can replace them.
     fn arrived(
         &mut self,
         call: CallHandle,
@@ -3794,9 +3076,7 @@ impl MediaEngine {
                 version: 1,
                 catalog,
                 config: self.config.clone(),
-                // nothing has been written for this call yet: what it will
-                // say about DTLS-SRTP, and about ICE, is decided when it is
-                // rung or answered
+                // DTLS and ICE are decided at ring or answer time
                 dtls: None,
                 #[cfg(feature = "dtls")]
                 dtls_identity: None,
@@ -3808,28 +3088,18 @@ impl MediaEngine {
                 payloads: Payloads::default(),
                 pending: None,
                 refused_keying: false,
-                // decided when it is rung or answered, as the rest is
                 exposure: Exposure::default(),
-                // a text socket is the application's to give, when it rings
-                // or answers
                 text: None,
             },
         );
     }
 
-    /// A proxy forked the INVITE: the new branch was offered exactly what the
-    /// old one was, so it inherits the description and gets a stream of its
-    /// own to start from — the catalogue and configuration included, since a
-    /// fork is the same call reaching two destinations, not two calls that
-    /// happen to have started together.
+    /// A proxy forked the INVITE. The new branch inherits the description, catalogue and
+    /// configuration, with its own stream numbers.
     ///
-    /// The offer named the fork's relay to this branch as much as to the
-    /// first, so the branch takes it up at once, with an agent of its own
-    /// waiting for its session beside the first branch's
-    /// ([`MediaEngine::branch_agent`]): it keeps the allocation from going
-    /// back to the server while this phone rings though every other branch
-    /// may end or settle on a pair that needs no relay (RFC 8445 §8.3.1), and
-    /// its session opens holding it.
+    /// It also takes up the fork's relay at once with its own waiting agent
+    /// ([`MediaEngine::branch_agent`]), so the allocation survives while this phone rings (RFC 8445
+    /// §8.3.1).
     fn forked(
         &mut self,
         call: CallHandle,
@@ -3840,8 +3110,7 @@ impl MediaEngine {
         let Some(parent) = self.calls.get_mut(&call) else {
             return;
         };
-        // every branch the offer reached holds its key, so whichever of the
-        // two answers is offered one of its own once it has
+        // every branch holds the offered key, so the answering one is rekeyed later
         parent.exposure.forked = true;
         let parent = parent.clone();
         let (identity, session_id) = draw(agent);
@@ -3879,9 +3148,8 @@ impl MediaEngine {
         self.settle(call, now);
     }
 
-    /// The user agent rewrote the session: a hold, a resume, or a change it
-    /// answered on our behalf. Both descriptions come with it, because some of
-    /// them are the user agent's own writing.
+    /// The user agent rewrote the session: a hold, a resume, or a change it answered itself. Both
+    /// descriptions are passed because the user agent wrote some of them.
     fn redescribed(
         &mut self,
         call: CallHandle,
@@ -3892,17 +3160,13 @@ impl MediaEngine {
         let Some(managed) = self.calls.get_mut(&call) else {
             return;
         };
-        // a call the application describes runs its own audio: settling a
-        // plan for it here would open a second stream on it, with this
-        // engine's own numbers, beside the one the application is running
+        // the application runs this call's audio; settling here would start a second stream
         if managed.address.is_none() {
             return;
         }
         if let Some(described) = local.and_then(|bytes| parse(bytes).ok()) {
             managed.version = managed.version.max(described.origin.version);
-            // the change this end offered, accepted: the list it named is
-            // this call's own from here on, and the plan below is worked out
-            // against it
+            // our codec change was accepted; its list is the call's from now on
             if managed
                 .pending
                 .as_ref()
@@ -3911,9 +3175,7 @@ impl MediaEngine {
             {
                 managed.catalog = pending.catalog;
             }
-            // the ICE restart this end offered, accepted: the credentials it
-            // named are this call's from here on, and `settle` below hands
-            // them to the running agent with the peer's new ones
+            // our ICE restart was accepted; `settle` passes the new credentials to the agent
             #[cfg(feature = "ice")]
             if managed
                 .restarting
@@ -3960,15 +3222,11 @@ impl MediaEngine {
         same_key && !keying::key_carries_over(running.suite, taken.suite)
     }
 
-    /// The key the answer to a re-offer carries: the key of `in_force`
-    /// repeated where `offer` will be answered under the same suite, since
-    /// RFC 4568 §7.1.4 warns that changing it opens a window where the
-    /// offerer cannot process what this end sends; one drawn fresh, at the
-    /// width of the suite `offer` will be answered under, where there is
-    /// none to repeat or the suite changes — a key belongs to its suite
-    /// (§5.1.2: "the same crypto-suite MUST be used in the send and receive
-    /// direction", and §6.1 fixes its width). `None` where the stream will
-    /// not be keyed at all.
+    /// The key for the answer to a re-offer.
+    ///
+    /// Under the same suite, repeat the key in force: RFC 4568 §7.1.4 warns a new one leaves a
+    /// window where the offerer cannot decrypt. Otherwise draw one at the new suite's width
+    /// (§5.1.2, §6.1). `None` if the stream is not keyed.
     fn reoffer_keys(
         &mut self,
         catalog: &CodecCatalog,
@@ -3985,18 +3243,12 @@ impl MediaEngine {
         })
     }
 
-    /// Keys for one stream of a recording session's offer: the suites
-    /// `catalog` offers that protect at least as well as `call`, the suite
-    /// the recorded call runs, and the call's own suite alone when none of
-    /// them does.
+    /// Keys for one stream of a recording offer: the suites in `catalog` at least as strong as the
+    /// call's, or the call's own suite if none is.
     ///
-    /// RFC 7866 §12.2: the SRC "SHOULD" protect the recording at least as
-    /// well as the communication session it records, and a recording server
-    /// offered a weaker suite beside the call's is free to take it (RFC 4568
-    /// §5.1.2 leaves the answerer its own choice). Offering only suites at
-    /// least as strong leaves it no weaker one to take. A call whose suite
-    /// is not known yet — one waiting for its handshake — is offered what
-    /// `catalog` offers.
+    /// RFC 7866 §12.2 says the recording should be protected at least as well as the call, and the
+    /// server may pick any offered suite (RFC 4568 §5.1.2). A call waiting for its handshake has no
+    /// known suite yet and gets `catalog`'s.
     fn draw_recording_keys(
         &mut self,
         catalog: &CodecCatalog,
@@ -4019,11 +3271,8 @@ impl MediaEngine {
             .collect()
     }
 
-    /// One key per suite `catalog` offers, in that order, for a fresh offer
-    /// this end is about to write. Each width matches the suite it is drawn
-    /// for, and RFC 4568 §6.1's "MUST be unique ... with respect to other
-    /// master keys in the entire SDP message" holds because every draw
-    /// moves this engine's own counter on.
+    /// One key per suite in `catalog`, in order, for a fresh offer. Each draw advances the counter,
+    /// so keys are unique within the SDP (RFC 4568 §6.1).
     fn draw_offer_keys(&mut self, catalog: &CodecCatalog) -> Vec<(CryptoSuite, KeySalt)> {
         catalog
             .sdes_offered()
@@ -4032,20 +3281,13 @@ impl MediaEngine {
             .collect()
     }
 
-    /// The far end offered something the user agent has no policy for: a
-    /// codec change, or anything at all on a secured stream — a hold and a
-    /// session refresh among them, since their answers need this end's key or
-    /// its certificate and role, which the user agent does not hold. It has
-    /// one here: the same answer any offer gets, keyed the way the call
-    /// already is.
+    /// Answer a re-offer the user agent cannot: a codec change, or anything on a secured stream
+    /// (hold and session refresh included), since the answer needs keys or a certificate only this
+    /// engine holds.
     ///
-    /// Only on a call this engine describes. One the application answered
-    /// with a description of its own is left alone: the event goes on to the
-    /// application untouched, which holds the only description there is and
-    /// answers with `UserAgent::accept_reoffer`. Refusing it here instead
-    /// would answer 488 to every hold the far end puts on such a call — every
-    /// re-offer on a secured one is handed up — and leave the application's
-    /// own answer failing for want of a request to answer.
+    /// Only for calls this engine describes. For a call the application described, the event goes
+    /// to the application, which answers with `UserAgent::accept_reoffer`; refusing here would 488
+    /// every hold.
     fn answer_reoffer(
         &mut self,
         call: CallHandle,
@@ -4061,14 +3303,12 @@ impl MediaEngine {
             return;
         };
         let public = managed.public;
-        // §8.3.2 binds a number from the moment either end writes it, and an
-        // offer about to be refused was still written
+        // §8.3.2 binds numbers even in an offer that is refused
         if let Some(offer) = offered.as_ref() {
             managed.payloads.note(offer);
         }
         let Some(offer) = offered else {
-            // an offer this engine cannot answer is refused rather than left
-            // to be retransmitted until the call dies
+            // refuse rather than let the offer retransmit until the call dies
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         };
@@ -4076,39 +3316,27 @@ impl MediaEngine {
         let session_id = managed.session_id;
         let catalog = managed.catalog.clone();
         let text = managed.text;
-        // RFC 4568 §7.1.4 lets an answerer change its master key and warns in
-        // the same breath that "the offerer will not be able to process
-        // packets secured via this master key until the answer is received".
-        // A hold, a resume or a session refresh is no reason to open that
-        // window, so the answer repeats the key this end already sends under,
-        // and one is drawn only where there is none to repeat. That key is
-        // the running plan's: the description this end last wrote may be its
-        // offer, one line per suite, and the far end may have taken any line
+        // repeat the running key (RFC 4568 §7.1.4 warns a new one opens a decrypt gap). It comes
+        // from the running plan, since the far end may have taken any of our offered lines
         let in_force = self.sessions.get(&call).and_then(|held| {
             keying::key_in_force(share::lock(held).session.plan().keying.as_ref())
         });
-        // a live call that required SRTP and is re-offered a stream without
-        // it is where a silent downgrade would happen, so it is where the
-        // refusal has to be
+        // refuse here, or an SRTP-required call silently downgrades
         if let Some(error) = keying_refusal(&catalog, &offer) {
             self.events.push_back((call, MediaEvent::Failed(error)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
-        // the far end's own key carried into a suite that runs the cipher in
-        // another mode is one key under two transforms: refused with the
-        // session standing, as `Rekey::between` would refuse it after
+        // the far end's key under a suite with another cipher mode would be one key under two
+        // transforms
         if self.moves_key_across_modes(call, &catalog, &offer) {
             self.events
                 .push_back((call, MediaEvent::Failed(MediaError::UnusableKeying)));
             let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             return;
         }
-        // RFC 8842 §5.3: an answerer that will not start the new association
-        // an offer asks for refuses the offer, and the session stands (RFC
-        // 3261 §14.2). Answering it and then declining to follow is the
-        // other thing a stack could do, and it leaves the far end on an
-        // association this end never joined
+        // RFC 8842 §5.3: refuse an offer for a new association we will not start, and the session
+        // stands (RFC 3261 §14.2)
         #[cfg(feature = "dtls")]
         if let Err(error) = self.keeps_certificate(call, &offer) {
             self.events.push_back((call, MediaEvent::Failed(error)));
@@ -4141,13 +3369,9 @@ impl MediaEngine {
             keyed(dtls.as_ref()),
             text,
         ) {
-            // RFC 3261 §14.2: "If the new session description is not
-            // acceptable, the UAS can reject it by returning a 488", and the
-            // session stands exactly as it was. Answering with every stream
-            // refused would be accepting it instead — and a call whose one
-            // stream is refused carries no audio for the rest of its life,
-            // over a codec the far end merely proposed. An offer that took
-            // the stream away itself is still answered: that one asked for it
+            // RFC 3261 §14.2: reject with 488 and the session stands. Answering with every stream
+            // refused would kill the audio for good. An offer that removed the stream itself is
+            // still answered
             Ok(answer)
                 if offer.media.iter().any(|stream| !stream.is_rejected())
                     && answer.media.iter().all(MediaDescription::is_rejected) =>
@@ -4155,14 +3379,10 @@ impl MediaEngine {
                 let _ = agent.reject_reoffer(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
             }
             Ok(mut answer) => {
-                // RFC 8839 §4.4: an answer that left the attributes out is a
-                // peer reading that ICE has been withdrawn mid-session
+                // RFC 8839 §4.4: leaving the attributes out would read as ICE withdrawn
                 describe_ice(&mut answer, ice.as_ref(), Some(&offer));
-                // the plan this answer would settle, read the way `settle`
-                // will read it: a running stream cannot change the kind of
-                // keying it runs under, so a re-offer asking for that is
-                // refused here, with the session standing, rather than
-                // answered and then not followed
+                // a running stream cannot change its kind of keying, so refuse instead of answering
+                // and not following
                 if self.changes_keying(call, &answer, &offer) {
                     self.events
                         .push_back((call, MediaEvent::Failed(MediaError::KeyingChanged)));
@@ -4183,8 +3403,7 @@ impl MediaEngine {
                     managed.dtls = dtls.map(|(_, setup)| (Side::Answering, setup));
                     #[cfg(feature = "ice")]
                     self.answered_ice(call, ice);
-                    // the descriptions themselves arrive back as
-                    // UaEvent::SessionChanged, which is what settles the plan
+                    // the result comes back as UaEvent::SessionChanged, which settles the plan
                 }
             }
             Err(error) => {
@@ -4194,21 +3413,16 @@ impl MediaEngine {
         }
     }
 
-    /// The call is over: let the stream go, close any recording, say what
-    /// it cost, and publish the RFC 6035 report the account may have asked
-    /// for.
+    /// The call is over: release the stream, close any recording, report its cost, and publish the
+    /// RFC 6035 report if the account asked for one.
     fn release(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
-        // a call that ends while joined takes the pair down with it: the
-        // partner is told with `MediaEvent::Unjoined` because nothing else
-        // ever will be, and it is told before anything else about this call
-        // so it never reaches `MediaEngine::mix` with a partner already gone
+        // tell the partner first, so `MediaEngine::mix` never sees a partner that is gone
         if let Some(partner) = self.joins.remove(&call) {
             self.joins.remove(&partner);
             self.events.push_back((partner, MediaEvent::Unjoined));
         }
         let address = self.calls.remove(&call).and_then(|managed| managed.address);
-        // checks kept for a socket no call is described on any more were for
-        // the call that just ended, or for nobody
+        // early checks for this socket were for this call or nobody
         #[cfg(feature = "ice")]
         if let Some(address) = address
             && !self
@@ -4220,10 +3434,8 @@ impl MediaEngine {
         }
         #[cfg(not(feature = "ice"))]
         let _ = address;
-        // a call that ends before its session opened — cancelled while it
-        // rang, refused, never answered — still holds the relay it was
-        // described with, and the server would hold it for minutes more,
-        // unless another branch of its fork still holds it too
+        // a call that ended before its session opened still holds its relay, unless another fork
+        // branch does
         #[cfg(feature = "ice")]
         {
             self.let_go(call, now);
@@ -4233,31 +3445,23 @@ impl MediaEngine {
             return;
         };
         let mut slot = share::lock(&held);
-        // first, and under the lock: a share that was already waiting for it
-        // finds a call that has ended rather than a stream half taken apart,
-        // and cannot put a frame on the wire after the goodbye below
+        // mark ended first, under the lock, so a waiting share sees an ended call and cannot send
+        // after the BYE
         slot.ended = true;
         let session = &mut slot.session;
-        // a recording that is not closed here is a file with zeroes where its
-        // two lengths should be
+        // otherwise the WAVE length fields stay zero
         if let Err(error) = session.stop_recording()
             && !matches!(error, MediaError::NotRecording)
         {
             self.events.push_back((call, MediaEvent::Failed(error)));
         }
-        // RFC 3550 §6.6: "If a BYE packet is received ... the participant
-        // SHOULD be removed". Saying so is the last thing this stream owes the
-        // far end, and the only moment it can: the session is already out of
-        // the map and marked ended, so nothing an application does afterwards
-        // can reach it. It is freed when the last reference to it goes, which
-        // is at the end of this function unless a share is mid-frame on it.
+        // RFC 3550 §6.6. The session is already out of the map, so this is the last chance to send
+        // the BYE
         if let Some(datagram) = session.goodbye(now) {
             self.say_farewell(call, address, datagram);
         }
-        // and the same courtesy to the far end's DTLS stack. It comes after
-        // the BYE because a stream that never keyed has no BYE to send —
-        // `send_bye` refuses to write one in the clear — and this is then the
-        // only thing that tells the peer to stop retransmitting.
+        // DTLS close_notify after the BYE: an unkeyed stream sends no BYE, and this is what stops
+        // the peer retransmitting
         #[cfg(feature = "dtls")]
         {
             session.close_handshake();
@@ -4265,18 +3469,14 @@ impl MediaEngine {
                 self.say_farewell(call, address, datagram);
             }
         }
-        // and last, because the goodbyes above may have left through it: the
-        // relay goes back to its server (RFC 8656 §8) rather than holding a
-        // port and the account's quota there until its lifetime runs out —
-        // or, while another branch of the fork still holds it, stays theirs,
-        // and stops letting this branch's peer through
+        // last, since the goodbyes above may have used the relay. Return it (RFC 8656 §8) unless
+        // another fork branch still holds it
         #[cfg(feature = "ice")]
         {
             let said = session.release_relays(now);
             match address {
                 Some(local) => self.farewells_of(call, local, said),
-                // with no socket to name, what is for a relay's connection
-                // has no connection to go on, and the datagrams still leave
+                // with no socket the relay connection cannot be named; the datagrams still go
                 None => self.farewells.extend(
                     said.into_iter()
                         .filter(|(_, transport, _)| !transport.is_stream())
@@ -4284,12 +3484,7 @@ impl MediaEngine {
                 ),
             }
         }
-        // Best effort, and never fatal: a call that has already ended is
-        // not going to un-end because a collector could not be reached.
-        // `Ok(false)` is `send_quality_report`'s own silent no-op for an
-        // account that named no collector, which raises nothing here
-        // either — there was never an attempt for the application to hear
-        // about.
+        // best effort; `Ok(false)` means the account named no collector
         if let Some(metrics) = session.quality_report_metrics(now) {
             match agent.send_quality_report(call, &metrics, now) {
                 Ok(true) => self
@@ -4306,9 +3501,7 @@ impl MediaEngine {
     }
 }
 
-/// Set aside a datagram `call`'s session wrote for its relay's connection to
-/// the TURN server, from the socket the call was described on, for
-/// [`MediaEngine::poll_turn_stream`].
+/// Queue a datagram for the relay connection of `call` for [`MediaEngine::poll_turn_stream`].
 #[cfg(feature = "ice")]
 fn set_aside(
     streamed: &mut VecDeque<(CallHandle, crate::RelayDatagram)>,
@@ -4330,8 +3523,6 @@ fn set_aside(
     ));
 }
 
-// -- the plan ----------------------------------------------------------------
-
 impl MediaEngine {
     /// Work out what the two descriptions agreed and make the stream match it.
     fn settle(&mut self, call: CallHandle, now: Instant) {
@@ -4342,15 +3533,13 @@ impl MediaEngine {
             return;
         };
         let (Some(local), Some(remote)) = (managed.local.as_ref(), managed.remote.as_ref()) else {
-            // one half of the negotiation is missing, which before the answer
-            // arrives is the ordinary state of affairs
+            // one half is still missing, which is normal before the answer
             return;
         };
         let plan = match keyed_plan(&managed.catalog, local, remote) {
             Ok(plan) => plan,
             Err((error, refused)) => {
-                // the policy's own refusal: a call this end placed is hung
-                // up for it
+                // the policy refused it: hang up an outgoing call
                 if refused && let Some(managed) = self.calls.get_mut(&call) {
                     managed.refused_keying = true;
                 }
@@ -4373,9 +3562,8 @@ impl MediaEngine {
             _ => None,
         };
         let text = crate::text::plan(local, remote);
-        // D5: recorded here, at the point the negotiation is worked out, from
-        // the far end's own description and this call's own catalogue —
-        // never reconstructed later from state that may have moved on
+        // recorded now from the far end's description and this call's catalogue, never rebuilt
+        // later
         let candidates = remote
             .media
             .first()
@@ -4393,10 +3581,8 @@ impl MediaEngine {
         let running = self.sessions.get(&call).map(Arc::clone);
         if let Some(held) = running {
             let mut slot = share::lock(&held);
-            // a restart either end offered, now answered: the running agent
-            // takes up the credentials this end's half carried and the
-            // peer's new ones, and checks again, while the pair it had goes
-            // on carrying the audio
+            // a restart now answered: the agent takes the new credentials and checks again while
+            // the old pair carries audio
             #[cfg(feature = "ice")]
             if let Err(error) =
                 slot.session
@@ -4404,21 +3590,16 @@ impl MediaEngine {
             {
                 self.fail(call, error);
             }
-            // an answer that took the other role asks for a new association
-            // this end does not start, the way a moved certificate does, and
-            // is refused the same way: by name, before anything is adopted,
-            // so the stream keeps running on the association it has
+            // an answer taking the other DTLS role asks for a new association; refuse it before
+            // adopting anything
             #[cfg(feature = "dtls")]
             if let Err(error) = roles_hold(slot.session.dtls_role(), ours.as_deref(), &plan) {
                 drop(slot);
                 self.fail(call, error);
                 return;
             }
-            // the same codec on a session that is already running: a hold, a
-            // resume, or a peer that moved its address — but settle is also
-            // reached from events that carry no new information at all, an
-            // ACK with no body chief among them, and a plan identical to the
-            // one already running is not a change to report
+            // same codec on a running session: hold, resume, moved address, or nothing at all (an
+            // ACK without a body); identical plans are not reported
             if slot.session.codec() == codec {
                 let unchanged = *slot.session.plan() == plan;
                 let adopted = slot.session.adopt(&plan, candidates, annex_b, now);
@@ -4436,16 +3617,14 @@ impl MediaEngine {
                             direction: plan.direction,
                         },
                     )),
-                    // a fresh crypto line this build cannot open: the session
-                    // is still running on the keys it had, and the call is
-                    // told rather than left to wonder why nothing arrives
+                    // new crypto line this build cannot open: the old keys still run, and the call
+                    // is told
                     Err(error) => self.fail(call, error),
                 }
                 return;
             }
         }
-        // a different codec needs a different encoder, a different decoder
-        // and a different frame length, so it needs a different session
+        // a new codec needs a new session
         self.start(
             call,
             &plan,
@@ -4456,17 +3635,11 @@ impl MediaEngine {
         );
     }
 
-    /// Open the stream for a plan, or carry the one that is running onto a
-    /// codec the negotiation has moved to.
+    /// Open the stream for a plan, or move the running one to a new codec.
     ///
-    /// A session already on this call is re-formatted rather than replaced, so
-    /// that the stream, its SRTP contexts and everything the call has
-    /// accumulated survive a codec change. [`MediaSession::reformat`] says
-    /// what that is and why each piece of it matters.
-    ///
-    /// `agreed` is whether G.729's Annex B is in use, what RTCP feedback the
-    /// descriptions agreed, which the stream runs from its first report, and
-    /// what they agreed about real-time text.
+    /// A running session is reformatted rather than replaced, so its SRTP contexts and history
+    /// survive ([`MediaSession::reformat`]). `agreed` carries G.729 Annex B, RTCP feedback and
+    /// real-time text settings.
     fn start(
         &mut self,
         call: CallHandle,
@@ -4566,35 +3739,27 @@ impl MediaEngine {
         }
     }
 
-    /// Media could not be started. The call is untouched: whether to hang up
-    /// over it is a decision with a person on the other end.
+    /// Media could not be started. The call is left up: hanging up is the application's decision.
     fn fail(&mut self, call: CallHandle, error: MediaError) {
         self.events.push_back((call, MediaEvent::Failed(error)));
     }
 }
 
-// -- recording a call to a recording server (RFC 7866) -----------------------
-
 impl MediaEngine {
-    /// Record `call` to a recording server (SIPREC, RFC 7866): place a
-    /// recording session from the call's own account, and once the server
-    /// answers, copy the call's audio to it — this end's on one stream, the
-    /// far end's on the other (`crate::siprec` has the whole of it).
+    /// Record `call` to a SIPREC server (RFC 7866): place a recording session from the call's
+    /// account, and once answered copy this end's audio on one stream and the far end's on the
+    /// other (`crate::siprec`).
     ///
-    /// The handle that comes back is the recording session's own, an
-    /// ordinary call to the user agent: its answer, its refusal and its end
-    /// are [`UaEvent`]s like any call's, and hanging it up
-    /// ([`MediaEngine::stop_recording_to`]) stops the recording. The copies
-    /// come out of [`MediaSession::poll_recording`] on the recorded call, or
-    /// [`MediaEngine::poll_recording`] for every call at once. The recording
-    /// session ends by itself when the recorded call does, and follows a call
-    /// that replaces it.
+    /// The returned handle is the recording session, an ordinary call reported through
+    /// [`UaEvent`]s. [`MediaEngine::stop_recording_to`] hangs it up. Copies come from
+    /// [`MediaSession::poll_recording`] or [`MediaEngine::poll_recording`]. The recording ends with
+    /// the recorded call and follows a call that replaces it.
     ///
     /// # Errors
-    /// [`MediaError::NoDescription`] for a call whose audio is not running,
-    /// [`MediaError::AlreadyRecording`] for one already being recorded to a
-    /// server, [`MediaError::Signalling`] when the user agent refuses the
-    /// recording session or the call has no account to place it from.
+    ///
+    /// [`MediaError::NoDescription`] if the call's audio is not running,
+    /// [`MediaError::AlreadyRecording`], [`MediaError::Signalling`] if the user agent refuses or
+    /// the call has no account.
     pub fn record_to(
         &mut self,
         agent: &mut UserAgent,
@@ -4609,8 +3774,7 @@ impl MediaEngine {
             let held = self.sessions.get(&call).ok_or(MediaError::NoDescription)?;
             let slot = share::lock(held);
             let plan = slot.session.plan();
-            // the transform the call runs: the one a handshake keyed, or
-            // failing that the one its SDES line names
+            // the call's transform: from the handshake, else from its SDES line
             let suite = slot
                 .session
                 .encryption()
@@ -4630,9 +3794,7 @@ impl MediaEngine {
         let account = agent
             .call_account(call)
             .ok_or(MediaError::Signalling(UaError::NoSuchAccount))?;
-        // RFC 7866 §12.2: the recording carries what the call did, and a call
-        // kept from eavesdroppers is not copied past them in the clear unless
-        // the account said it may be
+        // RFC 7866 §12.2: an encrypted call is copied in clear only if the account allows it
         let in_clear = self
             .accounts
             .get(&account)
@@ -4661,8 +3823,7 @@ impl MediaEngine {
         if let Some((transport, remote)) = to.destination {
             outgoing = outgoing.to_address(transport, remote);
         }
-        // the recording's keys are held to RFC 4568 §8.3 as the call's own
-        // are: the server's link is a call like any other
+        // RFC 4568 §8.3 applies to the recording's keys too
         let keys_in_clear = sdes_in_clear(
             &self.account_catalog(account),
             &offer,
@@ -4714,13 +3875,12 @@ impl MediaEngine {
             .map(|(recording, _)| *recording)
     }
 
-    /// Stop recording `call` to its recording server: the copies stop at
-    /// once, and the recording session is hung up (RFC 7866 §6.1: it is a
-    /// SIP session like any other, and it ends like one).
+    /// Stop recording `call` to its server: copying stops and the recording session is hung up (RFC
+    /// 7866 §6.1).
     ///
     /// # Errors
-    /// [`MediaError::NotRecording`] for a call nothing records, and
-    /// [`MediaError::Signalling`] for a BYE that could not be sent.
+    ///
+    /// [`MediaError::NotRecording`], and [`MediaError::Signalling`] if the BYE could not be sent.
     pub fn stop_recording_to(
         &mut self,
         agent: &mut UserAgent,
@@ -4734,9 +3894,8 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// The next copy of any recorded call's audio, to send from the socket
-    /// it names: the recording session it is for, the socket, the recording
-    /// server's address for the stream, and the packet.
+    /// The next copy of recorded audio: the recording session, the socket to send from, the
+    /// server's address and the packet.
     #[must_use]
     pub fn poll_recording(&mut self) -> Option<(CallHandle, SocketAddr, SocketAddr, Vec<u8>)> {
         self.recordings.iter().find_map(|(recording, held)| {
@@ -4792,7 +3951,7 @@ impl MediaEngine {
             }
             UaEvent::CallEnded { call, .. } => {
                 if self.recordings.remove(call).is_some() {
-                    // the server hung up: nothing more is copied to it
+                    // the server hung up
                     return;
                 }
                 if let Some(recording) = self.recording_of(*call) {
@@ -4804,8 +3963,7 @@ impl MediaEngine {
         }
     }
 
-    /// The recording server answered the recording session, or answered a
-    /// change to it: point the copies where it said.
+    /// The server answered the recording session or a change to it: send the copies where it says.
     fn server_answered(&mut self, recording: CallHandle, answer: Option<&SessionDescription>) {
         let Some(held) = self.recordings.get_mut(&recording) else {
             return;
@@ -4815,8 +3973,7 @@ impl MediaEngine {
         };
         let mut destinations = crate::siprec::destinations(answer);
         if let Some(keys) = held.keys.as_ref() {
-            // a stream the server did not take as SRTP under a line this end
-            // offered is one this end sends nothing to
+            // a stream the server did not accept as SRTP gets nothing
             let keyed = crate::siprec::protection(answer, keys);
             for (destination, keyed) in destinations.iter_mut().zip(keyed) {
                 if keyed.is_none() {
@@ -4829,11 +3986,9 @@ impl MediaEngine {
         self.attach_tap(recording, true);
     }
 
-    /// Copy the recorded call's audio to where the server receives it, on
-    /// the session running now; one already copying is pointed there, and
-    /// copies taken off a call this one replaced carry on here. `answered`
-    /// when the server has just answered, which may have moved the line that
-    /// keys an SRTP stream.
+    /// Start copying the recorded call's audio to the server on the current session, redirecting an
+    /// existing copy and resuming copies from a replaced call. `answered` means the server just
+    /// answered, which may change the keying line.
     fn attach_tap(&mut self, recording: CallHandle, answered: bool) {
         let Some(held) = self.recordings.get_mut(&recording) else {
             return;
@@ -4845,10 +4000,8 @@ impl MediaEngine {
             return;
         };
         let mut slot = share::lock(session);
-        // a recording session that went in the clear, for a call that was
-        // not encrypted then, copies nothing of an encrypted call that
-        // replaced it unless the account said it may (RFC 7866 §12.2); the
-        // copies wait, numbered as they were, for audio they may carry
+        // RFC 7866 §12.2: a cleartext recording copies nothing of an encrypted replacement call
+        // unless the account allows it; copies wait with their numbering
         if held.keys.is_none() && !held.in_clear && slot.session.plan().keying.is_some() {
             if let Some(running) = slot.session.tap_to(None) {
                 held.parked = Some(running);
@@ -4899,9 +4052,8 @@ impl MediaEngine {
             .and_then(|session| share::lock(session).session.tap_to(None))
     }
 
-    /// A recorded call moved to another codec: offer the server its two
-    /// streams on it (RFC 7866 §7.1.1.1 has an SRC change a recorded stream
-    /// with a new offer), and copy the new codec from here on.
+    /// A recorded call changed codec: re-offer the server both streams (RFC 7866 §7.1.1.1) and copy
+    /// the new codec.
     fn recorded_codec(&mut self, call: CallHandle, agent: &mut UserAgent, now: Instant) {
         let Some(recording) = self.recording_of(call) else {
             return;
@@ -4920,7 +4072,7 @@ impl MediaEngine {
             return;
         }
         let offer = crate::siprec::offer(&codec, &held.to, held.session_id, held.keys.as_ref());
-        // `reoffer` moves the `o=` version on (RFC 3264 §8)
+        // `reoffer` bumps the `o=` version (RFC 3264 §8)
         if agent.reoffer(recording, &offer.to_bytes(), now).is_ok() {
             held.payload_type = codec.payload();
             if let Some(session) = self.sessions.get(&call)
@@ -4953,9 +4105,8 @@ impl MediaEngine {
         self.send_metadata(recording, agent, now);
     }
 
-    /// A call that replaced a recorded one takes the recording over (RFC
-    /// 3891): its far end is the recorded call's second party from here on,
-    /// the server is told, and the copies move to its audio once it runs.
+    /// A call that replaced a recorded one takes over the recording (RFC 3891): the server is told
+    /// and copies move to its audio.
     fn recording_follows(
         &mut self,
         replaced: CallHandle,
@@ -4975,7 +4126,7 @@ impl MediaEngine {
             held.recorded = call;
             held.parties.replace_far_end(id, far, name);
             held.owed = true;
-            // the copies carry on, numbered and keyed as they were
+            // the copies continue with the same numbering and keys
             held.parked = running;
         }
         self.attach_tap(recording, false);
@@ -4983,17 +4134,14 @@ impl MediaEngine {
         self.recorded_codec(call, agent, now);
     }
 
-    /// A change of codec the recording session could not offer when the
-    /// recorded call moved, because another change was running in it: offer
-    /// it now that that change is over.
+    /// Offer a codec change that was blocked by another change in the recording session.
     fn codec_owed(&mut self, recording: CallHandle, agent: &mut UserAgent, now: Instant) {
         if let Some(recorded) = self.recordings.get(&recording).map(|held| held.recorded) {
             self.recorded_codec(recorded, agent, now);
         }
     }
 
-    /// Send the server the metadata it is owed, now or once the change
-    /// running in the recording session is over.
+    /// Send the server pending metadata, now or after the running change.
     fn send_metadata(&mut self, recording: CallHandle, agent: &mut UserAgent, now: Instant) {
         let Some(held) = self.recordings.get_mut(&recording) else {
             return;
@@ -5010,8 +4158,7 @@ impl MediaEngine {
         );
     }
 
-    /// A session that has just opened for a call being recorded starts
-    /// copying at once: the call that replaced a recorded one, most often.
+    /// Start copying for a newly opened session of a recorded call, usually a replacing call.
     fn tap_new_session(&mut self, call: CallHandle) {
         if let Some(recording) = self.recording_of(call) {
             self.attach_tap(recording, false);
@@ -5019,9 +4166,7 @@ impl MediaEngine {
     }
 }
 
-/// This end's address of record and display name on `call`, and the far
-/// end's: the `From` of a call placed here and the `To` of one answered here
-/// are this end's.
+/// This end's and the far end's address of record and display name on `call`.
 fn call_ends(
     agent: &UserAgent,
     call: CallHandle,
@@ -5040,8 +4185,6 @@ fn call_ends(
     )
 }
 
-// -- a local conference of two calls -----------------------------------------
-
 impl MediaEngine {
     /// The call `call` is currently joined with, if any.
     #[must_use]
@@ -5049,14 +4192,12 @@ impl MediaEngine {
         self.joins.get(&call).copied()
     }
 
-    /// A local conference for this engine's calls: any number of them, each
-    /// on its own codec, with or without this end —
-    /// [`LocalConference`](crate::LocalConference) says what it does and how
-    /// it is driven. The engine keeps nothing of it; the serial numbers of
-    /// its Ogg recordings are drawn from this engine's own randomness, as a
-    /// call's are.
+    /// A local conference for this engine's calls, any number, each on its own codec, with or
+    /// without this end. See [`LocalConference`](crate::LocalConference). The engine keeps no state
+    /// for it.
     ///
     /// # Errors
+    ///
     /// Those of [`LocalConference::new`](crate::LocalConference::new).
     pub fn local_conference(
         &mut self,
@@ -5070,21 +4211,15 @@ impl MediaEngine {
         crate::LocalConference::new(config, u64::from_le_bytes(seed))
     }
 
-    /// Join two active calls into a local conference of three: from here on,
-    /// each call's far end hears the other's far end and this end's own
-    /// microphone, mixed — [`MediaEngine::mix`] is what drives one frame of
-    /// it, a call at a time, and [`mix_two`](crate::mix_two) says what
-    /// "joined" means and why the two calls have to match.
-    /// [`MediaEngine::leave`] ends the pairing, and a call that ends while
-    /// it is still in one takes the pairing down with it.
+    /// Join two active calls into a three-way local conference: each far end hears the other plus
+    /// this end's microphone. [`MediaEngine::mix`] drives each frame; [`mix_two`](crate::mix_two)
+    /// explains the matching rules. [`MediaEngine::leave`] ends it, and so does either call ending.
     ///
     /// # Errors
-    /// [`MediaError::SameCall`] for `a == b`; [`MediaError::NoSuchCall`] for
-    /// a call with no running session — placed or answered and negotiated,
-    /// the same requirement [`MediaEngine::session`] has;
-    /// [`MediaError::AlreadyJoined`] for a call already paired with another;
-    /// and [`MediaError::JoinIncompatible`] for two calls whose sessions do
-    /// not share a sample rate and a frame length.
+    ///
+    /// [`MediaError::SameCall`]; [`MediaError::NoSuchCall`] for a call without a running session;
+    /// [`MediaError::AlreadyJoined`]; [`MediaError::JoinIncompatible`] when sample rate or frame
+    /// length differ.
     pub fn join(&mut self, a: CallHandle, b: CallHandle) -> Result<(), MediaError> {
         if a == b {
             return Err(MediaError::SameCall);
@@ -5108,39 +4243,26 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// Take `call` back out of the pair it is in, and hand back which call
-    /// it was paired with.
-    ///
-    /// Nothing has to be told to either session: [`MediaEngine::mix`] read
-    /// and wrote both of them from the outside, on every frame it was asked
-    /// to, and stopping is only a matter of not calling it again — each call
-    /// carries on with whatever [`MediaSession::playback`] and
-    /// [`MediaSession::capture`] it is next given directly, exactly as an
-    /// unjoined call always has.
+    /// Take `call` out of its pair and return the partner. The sessions need no change; just stop
+    /// calling [`MediaEngine::mix`].
     ///
     /// # Errors
-    /// [`MediaError::NotJoined`] for a call that is not currently joined to
-    /// another.
+    ///
+    /// [`MediaError::NotJoined`].
     pub fn leave(&mut self, call: CallHandle) -> Result<CallHandle, MediaError> {
         let partner = self.joins.remove(&call).ok_or(MediaError::NotJoined)?;
         self.joins.remove(&partner);
         Ok(partner)
     }
 
-    /// One frame of the pair `call` is in: decode both far ends, mix what
-    /// each of the three parties is owed, and send the two frames the far
-    /// ends are owed. `mic` is this end's own frame and `local_out` is
-    /// filled with what this end's own loudspeaker is owed —
-    /// [`crate::join::mix_two`] has the arithmetic and the reasoning behind
-    /// it.
+    /// One frame of the pair `call` is in: decode both far ends, mix what each party should hear,
+    /// send the two far-end frames, and write this end's playback into `local_out`. See
+    /// [`crate::join::mix_two`].
     ///
     /// # Errors
-    /// [`MediaError::NotJoined`] for a call not currently paired;
-    /// [`MediaError::NoSuchCall`] should either session have gone, which
-    /// this engine's own call-ended handling already unjoins the moment it
-    /// happens, so this is reached only by a caller that kept driving a pair
-    /// past the [`MediaEvent::Unjoined`] that said so; and whatever
-    /// [`MediaSession::capture`] refuses on either leg.
+    ///
+    /// [`MediaError::NotJoined`]; [`MediaError::NoSuchCall`] if a session is gone (only after
+    /// ignoring [`MediaEvent::Unjoined`]); whatever [`MediaSession::capture`] refuses.
     pub fn mix(
         &mut self,
         call: CallHandle,
@@ -5155,11 +4277,8 @@ impl MediaEngine {
             .ok_or(MediaError::NotJoined)?;
         let held_call = self.sessions.get(&call).ok_or(MediaError::NoSuchCall)?;
         let held_partner = self.sessions.get(&partner).ok_or(MediaError::NoSuchCall)?;
-        // two distinct sessions, each behind its own lock: this cannot
-        // deadlock against another call into this engine, since `&mut self`
-        // already rules out a second one running at the same time, and
-        // nothing reached through a `SessionShare` in another thread ever
-        // holds more than one session's lock at once
+        // two locks at once cannot deadlock: `&mut self` excludes other engine calls, and share
+        // holders never take more than one session lock
         let mut slot_call = share::lock(held_call);
         let mut slot_partner = share::lock(held_partner);
         crate::join::mix_two(
@@ -5180,32 +4299,26 @@ fn live_stream(description: &SessionDescription) -> Option<&MediaDescription> {
         .find(|stream| stream.media == AUDIO && !stream.is_rejected())
 }
 
-/// The formats of the stream this facade carries, as a description lists
-/// them.
+/// The formats of the stream this facade carries.
 fn live_formats(description: &SessionDescription) -> Option<&Vec<String>> {
     live_stream(description).map(|stream| &stream.formats)
 }
 
-/// The borrowed form the description writers take, from the owned pair the
-/// engine keeps.
+/// Borrowed form of the owned DTLS pair, for the description writers.
 #[cfg(feature = "dtls")]
 fn keyed(lines: Option<&(String, String)>) -> Option<Keyed<'_>> {
     lines.map(|(fingerprint, setup)| Keyed { fingerprint, setup })
 }
 
-/// Without the feature nothing is ever keyed by a handshake, and the writers
-/// still name the type.
+/// Without the feature nothing is DTLS-keyed; the writers still name the type.
 #[cfg(not(feature = "dtls"))]
 #[allow(clippy::needless_pass_by_value)]
 const fn keyed(_lines: Option<&(String, String)>) -> Option<Keyed<'static>> {
     None
 }
 
-/// Which side of an offer/answer exchange this end is writing.
-///
-/// Known here and nowhere below, and it has to be: RFC 4145 §4.1 reads the
-/// pair of `a=setup` values as a table, and which row a value is on depends
-/// on whether it was written in the offer or in the answer.
+/// Which side of the offer/answer exchange this end is writing. RFC 4145 §4.1 reads `a=setup`
+/// values differently in offer and answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
     /// This end is writing the offer.
@@ -5224,11 +4337,7 @@ impl Side {
     }
 }
 
-/// The `a=setup` a description carries, at media level or, as RFC 4566
-/// §5.13 lets a media-level attribute override, at session level.
-///
-/// The first stream's, because that is the one the negotiation plans
-/// (`media_plan(.., 0)`) — whichever end wrote the description.
+/// The first stream's `a=setup`, or the session-level one (RFC 4566 §5.13).
 #[cfg(feature = "dtls")]
 fn setup_in(description: &SessionDescription) -> Option<String> {
     description
@@ -5240,18 +4349,14 @@ fn setup_in(description: &SessionDescription) -> Option<String> {
         .clone()
 }
 
-/// Whether a re-negotiated plan leaves the DTLS roles where the running
-/// association has them (RFC 8842 §3.1).
-///
-/// `running` is the role the association gave this end, `ours` the `a=setup`
-/// this end wrote on its side of the exchange just settled, and the far end's
-/// is in the plan. Nothing to compare — no association, or a plan not keyed
-/// by a handshake — is nothing to refuse.
+/// Whether a renegotiated plan keeps the running association's DTLS roles (RFC 8842 §3.1).
+/// `running` is this end's role, `ours` the `a=setup` this end just wrote. No association, or no
+/// DTLS, is accepted.
 ///
 /// # Errors
-/// [`MediaError::DtlsRoleChanged`] for a plan that gives this end the other
-/// role, and [`MediaError::DtlsRole`] for a pair of values RFC 4145 §4.1 does
-/// not allow together.
+///
+/// [`MediaError::DtlsRoleChanged`] for the other role, [`MediaError::DtlsRole`] for a pair RFC 4145
+/// §4.1 does not allow.
 #[cfg(feature = "dtls")]
 fn roles_hold(
     running: Option<sipral_dtls::Role>,
@@ -5274,11 +4379,8 @@ fn roles_hold(
     }
 }
 
-/// The `a=fingerprint` values a description names for its first stream, read
-/// the way the negotiation reads them: the stream's own lines, or the
-/// session's where the stream has none, since a media-level attribute
-/// replaces the session-level ones rather than adding to them (RFC 4566
-/// §5.13).
+/// The first stream's `a=fingerprint` values, or the session-level ones if the stream has none (RFC
+/// 4566 §5.13).
 #[cfg(feature = "dtls")]
 fn fingerprints_in(description: &SessionDescription) -> Vec<String> {
     let of = |attributes: &[Attribute]| -> Vec<String> {
@@ -5300,34 +4402,16 @@ fn fingerprints_in(description: &SessionDescription) -> Vec<String> {
     }
 }
 
-// -- writing descriptions -----------------------------------------------------
-//
-// Free functions rather than methods, because D6 made the catalogue a
-// property of the call rather than of the engine: what these write depends on
-// which catalogue a caller hands them, and a method on `MediaEngine` would
-// have made `self.catalog` too easy to reach for by habit where a call's own
-// belongs instead.
+// Free functions so the call's own catalogue is passed in, not `self.catalog` by habit.
 
-/// The offer `catalog` makes, for media arriving at `address`, keyed with
-/// `keys` where the catalogue offers SDES.
-/// Put a call's ICE attributes on a description that has just been written.
+/// Put a call's ICE attributes on a freshly written description.
 ///
-/// Media-level for the credentials and the candidates (RFC 8839 §5.1, §5.4,
-/// §5.6), session-level for the pacing (§5.5) — and both go on *after* the
-/// description is built rather than into the vocabulary that builds it,
-/// because [`SessionDescription::answer`] constructs a fresh description and
-/// carries only the timing across. An `a=ice-pacing` written before that call
-/// would not survive it.
+/// Credentials and candidates at media level (RFC 8839 §5.1, §5.4, §5.6), pacing at session level
+/// (§5.5). Added after building, because [`SessionDescription::answer`] builds a fresh description
+/// and would drop them. One stream only; see [`write_answer`].
 ///
-/// One stream, because this facade describes one: [`write_answer`] says why.
-///
-/// A lite end writes `a=ice-lite` at session level where a full one writes
-/// its pacing: RFC 8839 §4.2.1.4 requires the first of a lite implementation,
-/// and §4.3.1 forbids it the second. `answering` is the offer when the
-/// description is an answer, and an offer that did not mention ICE is
-/// answered without it — "the answerer MUST NOT include any ICE-related SDP
-/// attributes in the answer" (§4.3.2); the call then runs on `c=`/`m=`, as
-/// [`MediaEngine::ice_for`] decides for such a peer anyway.
+/// A lite end writes `a=ice-lite` instead of pacing (§4.2.1.4, §4.3.1). `answering` is the offer
+/// for an answer; an offer without ICE gets none back (§4.3.2).
 #[cfg(feature = "ice")]
 fn describe_ice(
     description: &mut SessionDescription,
@@ -5356,16 +4440,13 @@ fn describe_ice(
     if local.is_lite() {
         sipral_nat::ice::write_session(description);
     } else {
-        // the Ta this agent proposes, which `IceConfig::default` is built with
-        // and `crate::ice` does not move
+        // the Ta `IceConfig::default` uses
         sipral_nat::ice::write_pacing(description, sipral_nat::ice::DEFAULT_TA);
     }
 }
 
-/// Take every ICE line out of a description this end wrote, for
-/// [`describe_ice`] to write a restart's in their place: the stream's
-/// credentials, options and candidates, and the session's pacing and
-/// `a=ice-lite` (RFC 8839 §5).
+/// Remove every ICE line from a description this end wrote, so [`describe_ice`] can write a
+/// restart's (RFC 8839 §5).
 #[cfg(feature = "ice")]
 fn withdraw_ice(description: &mut SessionDescription) {
     const STREAM: [&str; 7] = [
@@ -5394,7 +4475,7 @@ fn withdraw_ice(description: &mut SessionDescription) {
     }
 }
 
-/// Without the feature there is no agent, so there is nothing to write.
+/// Without the feature there is nothing to write.
 #[cfg(not(feature = "ice"))]
 const fn describe_ice(
     _description: &mut SessionDescription,
@@ -5429,9 +4510,8 @@ fn write_offer(
     description
 }
 
-/// `SrtpPolicy::DtlsOrSdes`: the SDES offer, with the fingerprint and the
-/// role beside its crypto lines, so that a DTLS-SRTP peer answers one and an
-/// SDES-only peer the other. Every other policy's offer is left as written.
+/// `SrtpPolicy::DtlsOrSdes`: add the fingerprint and role beside the SDES crypto lines, so either
+/// kind of peer can answer. Other policies are left as written.
 #[cfg(feature = "dtls")]
 fn fall_back(
     mut stream: MediaDescription,
@@ -5455,7 +4535,7 @@ fn fall_back(
     stream
 }
 
-/// Without the feature there is no fingerprint to fall back from.
+/// Without the feature there is no fingerprint.
 #[cfg(not(feature = "dtls"))]
 const fn fall_back(
     stream: MediaDescription,
@@ -5465,23 +4545,18 @@ const fn fall_back(
     stream
 }
 
-/// Refuse an INVITE whose offer this call's SRTP policy will not carry
-/// audio on: 488 Not Acceptable Here (RFC 3261 §21.4.26), the answer to an
-/// offer whose terms this end cannot take. The error to return with it.
+/// Refuse an INVITE the SRTP policy cannot carry audio on, with 488 (RFC 3261 §21.4.26), and return
+/// the error.
 fn refuse_insecure(agent: &mut UserAgent, call: CallHandle, now: Instant) -> MediaError {
-    // a call already answered or gone has nothing left to refuse, and the
-    // error still says why it was not answered here
+    // already answered or gone; the error still explains
     let _ = agent.reject(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
     MediaError::SrtpRequired
 }
 
-/// RFC 4568 §8.3 for a description this end is about to send on a call
-/// whose signalling `secure` says how it travels (`None`: not known, and so
-/// not known to be encrypted): `Ok(true)` when it carries an SDES key in
-/// clear, which the call is then marked with; `Ok(false)` when it carries
-/// none, or travels encrypted; and [`MediaError::KeysWouldTravelInClear`]
-/// when it would carry one in clear and `catalog` takes SDES over encrypted
-/// signalling only.
+/// RFC 4568 §8.3 for a description about to be sent; `secure` is how the signalling travels
+/// (`None`: unknown, treated as clear). `Ok(true)` if it carries an SDES key in clear, `Ok(false)`
+/// if not, and [`MediaError::KeysWouldTravelInClear`] if `catalog` allows SDES only over encrypted
+/// signalling.
 fn sdes_in_clear(
     catalog: &CodecCatalog,
     description: &SessionDescription,
@@ -5503,33 +4578,27 @@ fn sdes_in_clear(
     }
 }
 
-/// Whether a call on `catalog` offers real-time text: only on plain RTP and
-/// without ICE, since the text stream is neither keyed nor given candidates
-/// (`crate::text`).
+/// Whether `catalog` offers real-time text: only on plain RTP without ICE (`crate::text`).
 fn text_offered(catalog: &CodecCatalog) -> bool {
     !catalog.srtp().offers() && !catalog.ice().offers()
 }
 
-/// Whether a call on `catalog` takes the text stream `offer` carries: the
-/// same, and only beside audio the offer did not key.
+/// Whether `catalog` accepts the text stream in `offer`: same rule, and only beside unkeyed audio.
 fn text_answered(catalog: &CodecCatalog, offer: &SessionDescription) -> bool {
     !any_secure_stream(offer) && !catalog.srtp().requires() && !catalog.ice().offers()
 }
 
-/// Whether this call will let a stream described like this carry audio.
+/// Whether this call lets such a stream carry audio.
 ///
-/// The one place [`SrtpPolicy::Offered`] and [`SrtpPolicy::Required`] differ:
-/// an offer that named no secure profile is answered plainly under the first
-/// and not answered at all under the second. An INVITE that carried no offer
-/// is answered with one of ours, which carries a key, so it passes either
-/// way.
+/// This is where [`SrtpPolicy::Offered`] and [`SrtpPolicy::Required`] differ: a plain offer is
+/// answered under the first and refused under the second. An INVITE without an offer is answered
+/// with our keyed offer and passes.
 fn keying_allows(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
     !catalog.srtp().requires() || offered.is_none_or(any_secure_stream)
 }
 
-/// Whether an offer is one [`SrtpPolicy::BestEffort`] refuses: its stream
-/// wrote `a=crypto` lines on the plain profile and none of them is one this
-/// call can take (`keying::best_effort_unkeyable`).
+/// Whether [`SrtpPolicy::BestEffort`] refuses the offer: it has `a=crypto` lines on the plain
+/// profile and none is usable (`keying::best_effort_unkeyable`).
 fn best_effort_refuses(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
     offered
         .and_then(|offer| offer.media.first())
@@ -5538,9 +4607,7 @@ fn best_effort_refuses(catalog: &CodecCatalog, offered: Option<&SessionDescripti
         })
 }
 
-/// Why a re-offer inside a live call is refused for its keys, if it is: a
-/// plain one under a policy that requires keys, or, under best effort, one
-/// whose keys this end cannot take, as a first offer would be.
+/// Why a re-offer in a live call is refused for its keys, if it is.
 fn keying_refusal(catalog: &CodecCatalog, offer: &SessionDescription) -> Option<MediaError> {
     if keying_allows(catalog, Some(offer)) {
         best_effort_refuses(catalog, Some(offer)).then_some(MediaError::UnusableKeying)
@@ -5549,32 +4616,23 @@ fn keying_refusal(catalog: &CodecCatalog, offer: &SessionDescription) -> Option<
     }
 }
 
-/// Refuse an INVITE whose offer wrote keys this call's best-effort policy
-/// cannot take: 488, as [`refuse_insecure`] refuses one with none, and the
-/// error that says which.
+/// Refuse an INVITE whose keys the best-effort policy cannot use, with 488 like
+/// [`refuse_insecure`].
 fn refuse_unkeyable(agent: &mut UserAgent, call: CallHandle, now: Instant) -> MediaError {
     let _ = agent.reject(call, StatusCode::NOT_ACCEPTABLE_HERE, now);
     MediaError::UnusableKeying
 }
 
-/// Whether the description this end is about to write will carry a key: it
-/// offers one, or it answers an offer that asked for one.
+/// Whether the next description will carry a key.
 fn will_key(catalog: &CodecCatalog, offered: Option<&SessionDescription>) -> bool {
     catalog.srtp().offers() || offered.is_some_and(any_secure_stream)
 }
 
-/// The suite this end's own SDES key is drawn for: the suite
-/// `keying::acceptable` would take from the peer's offer, the same suite
-/// `take_stream` accepts a few frames later, or this end's own offered suite
-/// when there is no peer description to read one from — an INVITE with no
-/// body leaves this end offering rather than answering, and a description
-/// with no crypto line at all leaves nothing for `acceptable` to read either,
-/// in which case the width is never used since `will_key` said no key is
-/// wanted (8.2.4).
+/// The suite this end's own SDES key is drawn for: what `keying::acceptable` would pick from the
+/// peer's offer, or our first offered suite when there is no offer. If there is no crypto line,
+/// `will_key` already said no key is needed (8.2.4).
 ///
-/// Computed here rather than threaded down from `take_stream` because the
-/// key has to exist before that function is reached: `write_answer` takes the
-/// key already drawn, not a suite to draw one from.
+/// Computed here because `write_answer` takes an already drawn key.
 fn suite_for_own_key(offered: Option<&SessionDescription>, catalog: &CodecCatalog) -> CryptoSuite {
     offered
         .and_then(|offer| offer.media.first())
@@ -5590,9 +4648,8 @@ fn any_secure_stream(description: &SessionDescription) -> bool {
         .any(|stream| !stream.is_rejected() && keying::is_secure(&stream.proto))
 }
 
-/// What the two descriptions agreed, held to the call's SRTP policy: the
-/// plan, or the error to end the call's media with and whether it is the
-/// policy's own refusal ([`MediaError::SrtpRequired`]).
+/// The plan the two descriptions agreed, checked against the SRTP policy, or the error and whether
+/// it is the policy's own refusal ([`MediaError::SrtpRequired`]).
 fn keyed_plan(
     catalog: &CodecCatalog,
     local: &SessionDescription,
@@ -5601,14 +4658,12 @@ fn keyed_plan(
     let plan = match local.media_plan(remote, 0) {
         Ok(Some(plan)) => plan,
         Ok(None) => return Err((MediaError::StreamRefused, false)),
-        // a secured stream the far end described with no key: under a
-        // policy that requires one, that is the policy's refusal
+        // no key on a secured stream under a key-requiring policy is the policy's refusal
         Err(SdpError::CryptoMissing { .. }) if catalog.srtp().requires() => {
             return Err((MediaError::SrtpRequired, true));
         }
-        // best effort, answered with a line naming a tag or a key this end
-        // never offered: keys both ends wrote that agree on nothing, which
-        // ends the call as a line that does not parse does, below
+        // best effort, answered with a tag or key never offered: fails like an unparsable line
+        // below
         Err(
             SdpError::CryptoNotOffered { .. }
             | SdpError::CryptoMissing { .. }
@@ -5622,10 +4677,8 @@ fn keyed_plan(
         let refused = error == MediaError::SrtpRequired;
         (error, refused)
     })?;
-    // `SrtpPolicy::BestEffort`: both ends wrote crypto lines and no key came
-    // of them — a line that does not parse, a suite or a tag this end never
-    // offered. The far end meant to encrypt and this end offered to, so a
-    // plain call here is one neither chose, and it ends instead
+    // best effort: both ends wrote crypto lines and no key resulted, so end the call rather than go
+    // plain
     if plan.keying.is_none()
         && catalog.srtp().on_plain_profile()
         && local.media.first().is_some_and(keying::wrote_crypto)
@@ -5639,14 +4692,11 @@ fn keyed_plan(
     Ok(plan)
 }
 
-/// Whether the keys a plan settled on are ones this call will run with.
+/// Whether the plan's keys are ones this call accepts.
 ///
-/// Two questions the plan cannot answer on its own. Whether an unkeyed stream
-/// is allowed at all is this call's policy and not the negotiation's, and
-/// whether the peer's line carries a session parameter that has to be
-/// honoured has to be read off the description, because `sipral-core`'s
-/// parser drops a parameter it does not recognise rather than invalidating
-/// the line RFC 4568 §6.3.7 says it must.
+/// The policy decides if an unkeyed stream is allowed. Session parameters are re-read from the
+/// description because the `sipral-core` parser drops unknown ones, while RFC 4568 §6.3.7 says they
+/// invalidate the line.
 fn keying_holds(
     catalog: &CodecCatalog,
     plan: &MediaPlan,
@@ -5654,12 +4704,8 @@ fn keying_holds(
 ) -> Result<(), MediaError> {
     match &plan.keying {
         None if catalog.srtp().requires() => Err(MediaError::SrtpRequired),
-        // a policy that named a way to key is not answered with the other
-        // way. `DtlsRequired` exists because the key must not travel in the
-        // body of a message, and an answer carrying `a=crypto` has put it
-        // there; `Required` is the mirror of it, and a peer that answered a
-        // `RTP/SAVP` offer with a fingerprint has answered something this
-        // call did not ask for.
+        // a policy that named one keying method is not answered with the other: `DtlsRequired`
+        // keeps keys out of the body, and `Required` did not ask for a fingerprint
         #[cfg(feature = "dtls")]
         Some(Keying::Sdes { .. }) if catalog.srtp() == SrtpPolicy::DtlsRequired => {
             Err(MediaError::SrtpRequired)
@@ -5668,12 +4714,8 @@ fn keying_holds(
         Some(Keying::Dtls { .. }) if catalog.srtp() == SrtpPolicy::Required => {
             Err(MediaError::SrtpRequired)
         }
-        // RFC 5764 §4.2: with RTP and RTCP on separate ports there are two
-        // DTLS-SRTP associations, one per port. This stack runs one, on the
-        // media port, so a call that did not agree to multiplex its control
-        // traffic is refused rather than opened with an SRTCP half nothing
-        // will ever key. The offer asks for `a=rtcp-mux` whenever the policy
-        // is a DTLS one, so this is a peer that took the attribute out.
+        // RFC 5764 §4.2: without rtcp-mux there would be two DTLS associations; this stack runs
+        // one, and the offer always asked for mux
         #[cfg(feature = "dtls")]
         Some(Keying::Dtls { .. }) if matches!(plan.rtcp, RtcpPlan::SeparatePort { .. }) => {
             Err(MediaError::DtlsNeedsRtcpMux)
@@ -5690,17 +4732,11 @@ fn keying_holds(
     }
 }
 
-/// The answer to an offer that arrived, kept to what `catalog` holds.
+/// Answer an offer that arrived, limited to `catalog`.
 ///
-/// One stream is taken and every other is refused, whatever it is. This
-/// end has one media address, and a second audio stream would need a
-/// second one; RFC 3264 §6 wants the refusal written as a port of zero in
-/// the same position rather than a stream left out, which is what
-/// [`StreamAnswer::Reject`] produces.
-///
-/// The one exception is real-time text: a call given a text socket
-/// ([`CallMedia::text`]) takes the first `m=text` stream on it, when
-/// [`text_answered`] allows, and says it runs no RTCP.
+/// One audio stream is taken and every other is refused with port zero in the same position (RFC
+/// 3264 §6, [`StreamAnswer::Reject`]). The exception is real-time text: with a text socket
+/// ([`CallMedia::text`]) the first `m=text` is taken when [`text_answered`] allows.
 fn write_answer(
     catalog: &CodecCatalog,
     offer: &SessionDescription,
@@ -5764,12 +4800,8 @@ fn take_stream(
     if !any_codec {
         return StreamAnswer::Reject;
     }
-    // an offer keyed by a handshake is answered by naming this end's own
-    // certificate and the role it will take, and never by a crypto line: the
-    // two are different key management protocols and a description carrying
-    // both has agreed to neither
-    // Under `SrtpPolicy::DtlsOrSdes` the answer follows the offer: a
-    // fingerprint is answered with ours, and crypto lines alone with SDES
+    // answer a DTLS offer with our certificate and role, never a crypto line. Under
+    // `SrtpPolicy::DtlsOrSdes` the answer follows the offer
     #[cfg(feature = "dtls")]
     let handshake = dtls.filter(|_| {
         keying::is_secure(&offered.proto)
@@ -5777,10 +4809,7 @@ fn take_stream(
     });
     #[cfg(not(feature = "dtls"))]
     let handshake: Option<Keyed<'_>> = None;
-    // RFC 4568 §7.1.2: a stream on the secure profile is answered by
-    // accepting exactly one of its crypto lines, or it is refused. There is
-    // no third answer, and a stream taken without a key would be one both
-    // ends believe is encrypted
+    // RFC 4568 §7.1.2: accept exactly one crypto line on a secure profile, or refuse the stream
     let crypto = if keying::is_secure(&offered.proto) && handshake.is_none() {
         match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
             (Some(line), Some(keys)) => match keying::answer_line(&line, keys.clone()) {
@@ -5790,12 +4819,8 @@ fn take_stream(
             _ => return StreamAnswer::Reject,
         }
     } else if catalog.srtp().on_plain_profile() {
-        // `SrtpPolicy::BestEffort`, answering its own kind of offer: a line
-        // on the plain profile this end can take keys the stream, and an
-        // offer with none is answered plainly. An offer whose lines this end
-        // cannot take, or a line it took with a key that does not fit,
-        // refuses the stream, as on the secure profile: answering it plainly
-        // would be a downgrade nobody asked for
+        // best effort: a usable line on the plain profile keys the stream, none means plain;
+        // unusable lines refuse the stream rather than downgrade
         match (keying::acceptable(offered, catalog.srtp_suites()), keys) {
             (Some(line), Some(keys)) => match keying::answer_line(&line, keys.clone()) {
                 Some(answered) => Some(answered),
@@ -5810,37 +4835,24 @@ fn take_stream(
     let names: Vec<&str> = formats.iter().map(String::as_str).collect();
     let mut accepted = AcceptedStream::in_offer_order(address.port(), offered, &names)
         .with_direction(Direction::SendRecv);
-    // a format whose parameters this end states rather than echoes —
-    // G.729's `annexb`, which follows the offer only as far as this
-    // catalogue allows — gets its own line, which the answer then writes in
-    // place of the offer's
+    // formats with parameters this end states (G.729 `annexb`) get their own fmtp line
     for line in formats
         .iter()
         .filter_map(|format| stated_fmtp(catalog, offered, format))
     {
         accepted = accepted.with_attribute(line);
     }
-    // RFC 5761 §5.1.1: multiplexing happens only where both ends asked for
-    // it, so the answer says so only if the offer did and this catalogue
-    // wants it — or if this answer is keyed by a handshake, since RFC 5764
-    // §4.2 would otherwise need a second one on the RTCP port
+    // RFC 5761 §5.1.1: mux only if offered and wanted, or if DTLS-keyed (RFC 5764 §4.2)
     let capabilities = catalog.capabilities();
     if (capabilities.rtcp_mux || handshake.is_some()) && offered.has_rtcp_mux() {
         accepted = accepted.with_attribute(Attribute::flag("rtcp-mux"));
     }
-    // RFC 3611 §5.2: "For 'sendrecv' offers, the answerer MAY include the
-    // 'rtcp-xr' attribute in its response, and specify any unilateral
-    // parameters in order to request that the offerer send the
-    // corresponding XR blocks. The offerer SHOULD send these blocks." The
-    // offer's own line only asks this end to send; without this one a call
-    // this end answered never hears what the far end measured of its audio,
-    // and its quality report has no `RemoteMetrics` set to write
+    // RFC 3611 §5.2: the answerer may add rtcp-xr so the offerer sends XR blocks; without it we
+    // never get the far end's metrics
     if capabilities.voip_metrics_xr {
         accepted = accepted.with_attribute(Attribute::with_value("rtcp-xr", "voip-metrics"));
     }
-    // RFC 4585 §4.2: an answerer keeps the feedback it will do and leaves
-    // the rest out. The profile itself is the offer's either way, since an
-    // answer does not change the transport of a stream it accepts
+    // RFC 4585 §4.2: keep only the feedback we do; the profile stays the offer's
     if catalog.feedback() {
         for line in crate::feedback::answer(offered, &formats) {
             accepted = accepted.with_attribute(line);
@@ -5858,9 +4870,8 @@ fn take_stream(
     StreamAnswer::Accept(accepted)
 }
 
-/// The `a=fmtp` line this end writes for one offered format in its answer,
-/// when the codec behind it has parameters this end states rather than
-/// echoes ([`CodecCatalog::answered_fmtp`]).
+/// The `a=fmtp` this end states for one offered format, if its codec has such parameters
+/// ([`CodecCatalog::answered_fmtp`]).
 fn stated_fmtp(
     catalog: &CodecCatalog,
     offered: &MediaDescription,
@@ -5873,10 +4884,8 @@ fn stated_fmtp(
     Some(Attribute::with_value("fmtp", &format!("{payload} {fmtp}")))
 }
 
-/// Whether this end's G.729 encoder runs Annex B's DTX on `plan`: the
-/// catalogue's own word first — a description this layer did not write, a
-/// re-offer the user agent answered by echoing it, can say yes where this
-/// end would have said no — and then both descriptions'.
+/// Whether our G.729 encoder runs Annex B DTX on `plan`: the catalogue first, then both
+/// descriptions. An echoed re-offer can say yes where we would say no.
 fn annex_b_in_use(
     catalog: &CodecCatalog,
     local: &SessionDescription,
@@ -5886,10 +4895,7 @@ fn annex_b_in_use(
     catalog.g729_annex_b() && annex_b_agreed(local, remote, plan)
 }
 
-/// Whether both descriptions of a G.729 stream allowed Annex B, which is
-/// what turns its encoder's DTX on: each end's `annexb` says what that end
-/// will take, and one that says `no` is not sent SID frames. `false` for
-/// every other codec.
+/// Whether both descriptions of a G.729 stream allow Annex B. `false` for other codecs.
 fn annex_b_agreed(
     local: &SessionDescription,
     remote: &SessionDescription,
@@ -5909,13 +4915,8 @@ fn annex_b_agreed(
     annex_b_allowed(said(local).as_deref()) && annex_b_allowed(said(remote).as_deref())
 }
 
-/// The formats of an offer `catalog` would keep, and whether any of them is a
-/// codec.
-///
-/// The numbers are the offer's own, which is the whole reason this is not
-/// a comparison against our own payload types: a dynamic type means
-/// whatever the offer's `a=rtpmap` called it, and a peer that numbers Opus
-/// 111 has said the same thing we say with 96.
+/// The offered formats `catalog` would keep, and whether any is a codec. Numbers are the offer's
+/// own, since a dynamic type means whatever its `a=rtpmap` says.
 fn keepable(catalog: &CodecCatalog, offered: &MediaDescription) -> (Vec<String>, bool) {
     let mut formats = Vec::with_capacity(offered.formats.len());
     let mut any_codec = false;
@@ -5945,8 +4946,7 @@ fn keepable(catalog: &CodecCatalog, offered: &MediaDescription) -> (Vec<String>,
     (formats, any_codec)
 }
 
-/// The session description in a message body, when it has one this stack can
-/// read.
+/// The session description in a message body, if readable.
 fn body_description(message: Option<&OwnedMessage>) -> Option<SessionDescription> {
     let message = message?;
     let raw = message.as_raw();
@@ -5957,26 +4957,16 @@ fn body_description(message: Option<&OwnedMessage>) -> Option<SessionDescription
     parse(body).ok()
 }
 
-/// The numbers one stream starts from, out of the same seeded token stream the
-/// branches, tags and `Call-ID`s come from.
+/// The starting numbers for one stream, from the user agent's token stream.
 ///
-/// One token is 128 bits of material that no other call gets, and these are
-/// four views of it. None of them needs to be independent of the others: an
-/// SSRC has to be unpredictable and unique, a starting sequence number and
-/// timestamp have to be unpredictable (RFC 3550 §5.1), and a session
-/// identifier has to be unique (RFC 4566 §5.2). A single unique token
-/// satisfies all four at once.
+/// One 128-bit token is unique per call. SSRC, sequence and timestamp need to be unpredictable (RFC
+/// 3550 §5.1) and the session id unique (RFC 4566 §5.2), so four views of one token are enough.
 fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
     let token = agent.endpoint().token();
     let identity = StreamIdentity {
         ssrc: u32::try_from(hex(&token, 0, 8)).unwrap_or(0),
-        // RFC 4568 §6.4 asks a secured stream to start below 2^15, so that a
-        // run of losses at the very start cannot leave the two ends
-        // disagreeing about the rollover counter — "unless all the first 2^15
-        // packets are lost". It costs one bit of a number that only has to be
-        // unpredictable, and it is spent on every stream rather than on the
-        // ones that turn out to be keyed, because this is drawn before
-        // anybody has negotiated anything
+        // RFC 4568 §6.4: start below 2^15 so early losses cannot desync the rollover counter.
+        // Applied to every stream, since keying is not known yet
         sequence: u16::try_from(hex(&token, 16, 4)).unwrap_or(0) & 0x7fff,
         timestamp: u32::try_from(hex(&token, 8, 8)).unwrap_or(0),
         seed: hex(&token, 20, 12),
@@ -5984,44 +4974,21 @@ fn draw(agent: &mut UserAgent) -> (StreamIdentity, u64) {
     (identity, hex(&token, 0, 16))
 }
 
-/// The widest key and salt any suite this stack offers or answers needs
-/// together: `Aes256Cm80`'s thirty-two-octet key and fourteen-octet salt
-/// (8.2.4). Held apart from `CryptoSuite::key_len() + salt_len()` so the
-/// block-count arithmetic below reads as what it is — two of the engine's
-/// thirty-two byte blocks always cover it — rather than a suite lookup on
-/// every draw.
+/// The widest key plus salt any suite needs: `Aes256Cm80`, 32 + 14 octets (8.2.4). Two 32-byte
+/// blocks always cover it.
 const MAX_KEY_SALT: usize = 46;
 
-/// The master key and salt for one description under `suite`, out of the
-/// engine's own seed.
+/// The master key and salt for one description under `suite`, from the engine's own seed.
 ///
-/// Its own and not the endpoint's, which is the whole point: the endpoint's
-/// seed is written in clear into every replay recording, so a recording made
-/// from a stack that shared one generator would carry the means to derive
-/// every key that stack had ever offered and every key it ever would.
+/// Not the endpoint's: its seed is written in clear into replay recordings.
 ///
-/// One or two blocks of `SHA-256(media seed || counter)` cover the width
-/// `suite` calls for — one for everything up to thirty-two octets, which is
-/// every suite but `Aes256Cm80`'s forty-six, and RFC 4568 §7.1.2's "the
-/// master key(s) in the answer MUST be different from those in the offer"
-/// holds because the counter behind each block never repeats. **What a poor
-/// media seed costs is the whole of the encryption**, and it costs it
-/// silently: SDES then protects the media against nobody while every message
-/// still looks right.
+/// One or two `SHA-256(media seed || counter)` blocks cover the suite width. The counter never
+/// repeats, so offer and answer keys differ (RFC 4568 §7.1.2). **A poor media seed silently costs
+/// all of the encryption.**
 ///
-/// The blocks, and the key and salt sliced from them, live in [`Zeroizing`]
-/// rather than a plain array (8.2.9). A buffer that is merely dropped is a
-/// buffer that stays on the stack for whatever runs next; `Zeroizing` wipes
-/// its bytes in its own `Drop`, which a later edit to this function cannot
-/// silently stop doing the way it could stop a `fill(0)` written by hand.
-///
-/// Every octet is copied out one at a time rather than sliced, because this
-/// is the one function in the tree where reading past the end must not be
-/// recoverable: a fallible slice with a zero-filled fallback would hand out a
-/// key of zeros, and the paragraph above is about exactly how quiet that
-/// failure is. `MAX_KEY_SALT` holds the width no suite here exceeds, so a
-/// later suite wider than that stops the build rather than silently handing
-/// out a truncated key.
+/// Buffers are [`Zeroizing`] (8.2.9) so they are wiped on drop. Bytes are copied one by one instead
+/// of sliced, so an out-of-range read cannot fall back to a zero key; the assertion above stops the
+/// build if a suite exceeds `MAX_KEY_SALT`.
 const _: () = assert!(
     MAX_KEY_SALT <= 64,
     "two of the engine's own blocks must cover the widest suite"
@@ -6064,10 +5031,8 @@ fn hex(token: &[u8], at: usize, len: usize) -> u64 {
         })
 }
 
-/// One hexadecimal character. A token is produced by this workspace and is
-/// hexadecimal by construction; anything else reads as zero rather than
-/// refusing, because a stream identifier that is one bit weaker than intended
-/// is a far smaller problem than a call that cannot start.
+/// One hex digit. Tokens are hex by construction; anything else reads as zero, since a slightly
+/// weaker identifier is better than a call that cannot start.
 const fn nibble(digit: u8) -> u8 {
     match digit {
         b'0'..=b'9' => digit - b'0',
@@ -6077,17 +5042,10 @@ const fn nibble(digit: u8) -> u8 {
     }
 }
 
-// -- the two guards a two-stack harness cannot reach -------------------------
-
-// -- the RTP port range ------------------------------------------------------
-
 impl MediaEngine {
-    /// Hand RTP ports out of `ports` from now on, or stop with `None`.
-    ///
-    /// The application owns every socket, so the range opens nothing: it is
-    /// the rule [`MediaEngine::reserve_rtp_port`] follows, and the one a
-    /// firewall in front of the deployment is written to. Reservations already
-    /// held are kept.
+    /// Hand out RTP ports from `ports` from now on, or stop with `None`. Opens nothing; it is the
+    /// rule [`MediaEngine::reserve_rtp_port`] follows and the firewall is written to. Existing
+    /// reservations are kept.
     pub const fn set_rtp_ports(&mut self, ports: Option<RtpPorts>) {
         self.rtp_ports = ports;
     }
@@ -6098,22 +5056,16 @@ impl MediaEngine {
         self.rtp_ports
     }
 
-    /// A free even port from the range for a call's RTP, with the odd port
-    /// above it kept for its RTCP; `None` when no range was set.
+    /// A free even port from the range for RTP, with the odd port above kept for RTCP; `None` if no
+    /// range is set.
     ///
-    /// Free means: not handed out already, and not the port a call this
-    /// engine holds describes its media at. The port is the caller's to bind
-    /// and to describe a call at, by [`MediaEngine::place`],
-    /// [`MediaEngine::ring`] or [`MediaEngine::answer`]; it stays reserved
-    /// for as long as that call describes its media there, and is free again
-    /// once the call ends or moves off it. One that no call ever took — the
-    /// bind failed, the call was refused — is handed back with
+    /// Free means not reserved and not used by a call. The caller binds it and passes it to place,
+    /// ring or answer; it stays reserved while a call uses it. Return an unused one with
     /// [`MediaEngine::release_rtp_port`].
     ///
     /// # Errors
-    /// [`PortsExhausted`] when every pair in the range is in use. Nothing is
-    /// reserved then, and the call that wanted a port cannot be given one
-    /// until another lets its go.
+    ///
+    /// [`PortsExhausted`] when every pair is in use. Nothing is reserved then.
     pub fn reserve_rtp_port(&mut self) -> Option<Result<u16, PortsExhausted>> {
         let range = self.rtp_ports?;
         self.claim_ports();
@@ -6137,8 +5089,7 @@ impl MediaEngine {
         Some(Err(PortsExhausted { range }))
     }
 
-    /// Hand back a port [`MediaEngine::reserve_rtp_port`] gave out and no
-    /// call is using, and say whether it was one.
+    /// Return a reserved port no call is using, and say whether it was one.
     pub fn release_rtp_port(&mut self, port: u16) -> bool {
         self.reserved_ports.remove(&port).is_some()
     }
@@ -6149,13 +5100,10 @@ impl MediaEngine {
         self.reserved_ports.len()
     }
 
-    /// Mark every reservation a call now describes its media at as taken,
-    /// and let go of every one a call took and no call describes any more.
+    /// Mark reservations a call now uses as taken, and release ones a call used and no longer does.
     ///
-    /// Run at the top of every [`MediaEngine::poll_event`] — before this
-    /// engine can learn that a call ended — so a call that took a port is
-    /// seen holding it before the event that ends it is read, and the port
-    /// comes back when it should rather than staying reserved for good.
+    /// Run at the top of [`MediaEngine::poll_event`], before the engine learns a call ended, so the
+    /// port is seen in use first and released later.
     fn claim_ports(&mut self) {
         if self.reserved_ports.is_empty() {
             return;
@@ -6176,16 +5124,11 @@ impl MediaEngine {
     }
 }
 
-// -- the log and the state snapshot -----------------------------------------
-
 #[cfg(feature = "redaction")]
 impl MediaEngine {
-    /// Write this engine's lines to `log` from now on: every event
-    /// [`MediaEngine::poll_event`] hands out, and every decision the
-    /// diagnostic record writes down, at the levels `crate::log` gives them.
-    ///
-    /// The engine only queues lines. Whoever drives it calls
-    /// [`crate::Log::flush`] once it holds nothing the sink could need.
+    /// Write this engine's log lines to `log`: every event from [`MediaEngine::poll_event`] and
+    /// every diagnostic decision, at the levels in `crate::log`. Lines are queued; the driver calls
+    /// [`crate::Log::flush`].
     pub fn set_log(&mut self, log: crate::Log) {
         self.log = Some(log);
     }
@@ -6292,9 +5235,7 @@ impl MediaEngine {
         }
     }
 
-    /// The verdict on a caller and why, never the numbers: what a log may
-    /// carry about a caller is the redactor's to decide, and it is not handed
-    /// these.
+    /// Log the caller verification verdict and reason, never the numbers.
     fn log_verification(
         &self,
         call: CallHandle,
@@ -6357,9 +5298,8 @@ impl MediaEngine {
         }
     }
 
-    /// Every decision the diagnostic record has written since the last time
-    /// this looked, one debug line each — `docs/14-diagnostics.md`'s reason
-    /// code and the sizes and addresses it turned on.
+    /// Log every new diagnostic decision as one debug line with its reason code
+    /// (`docs/14-diagnostics.md`).
     fn log_decisions(&mut self, agent: &mut UserAgent, now: Instant) {
         let Some(log) = self.log.clone() else {
             return;
@@ -6390,13 +5330,12 @@ impl MediaEngine {
             }
             seen.insert(key, written);
         }
-        // a record the endpoint evicted is forgotten here too
+        // forget records the endpoint evicted
         self.logged = seen;
     }
 
-    /// What this engine and `agent` are holding right now, for a crash
-    /// report: see [`crate::EngineState`]. Never waits: a session another
-    /// thread is inside is reported as busy.
+    /// What this engine and `agent` hold right now, for a crash report ([`crate::EngineState`]).
+    /// Never waits: a locked session is reported as busy.
     #[must_use]
     pub fn state(&self, agent: &UserAgent, now: Instant) -> crate::EngineState {
         use crate::state::{AccountState, CallSnapshot, MediaState, StreamState};
@@ -6451,9 +5390,8 @@ fn number(handle: impl core::fmt::Debug) -> String {
         .collect()
 }
 
-/// The name of an enum variant, from its `Debug` form, and nothing it
-/// carries: an event's fields can hold whole messages, and a debug line
-/// names what happened without them.
+/// An enum variant's name from its `Debug` form, without its fields (which may hold whole
+/// messages).
 #[cfg(feature = "redaction")]
 fn variant(value: &impl core::fmt::Debug) -> String {
     let written = format!("{value:?}");
@@ -6502,13 +5440,9 @@ fn decision_line(call_id: Option<&[u8]>, decision: &sipral_core::diag::Decision)
 
 #[cfg(test)]
 mod keying_guards {
-    //! [`keying_allows`] and [`keying_holds`] are both about a description
-    //! this end would never write, so `crates/sipral/src/tests.rs`'s pair of
-    //! real stacks can only get at one of the four branches: the other end of
-    //! that harness is this same engine, and it does not write a `RTP/SAVP`
-    //! line with a session parameter nobody knows, or answer a plain offer to
-    //! a call that required keys. They are exercised here instead, against
-    //! descriptions written by hand the way a peer would write them.
+    //! [`keying_allows`] and [`keying_holds`] judge descriptions this stack never writes, so the
+    //! two-stack tests in `tests.rs` cannot reach most branches. These tests use hand-written peer
+    //! descriptions.
 
     use sipral_core::sdp::{
         CryptoPolicy, CryptoSuite, Direction, KeySalt, Keying, MediaPlan, NegotiatedCodec,
@@ -6549,13 +5483,8 @@ mod keying_guards {
         }
     }
 
-    /// RFC 5764 §4.2: with RTP and RTCP on separate ports there are two
-    /// DTLS-SRTP associations, one per port, and this stack runs one. An
-    /// offer under a DTLS policy always asks for `a=rtcp-mux`, so a plan that
-    /// comes back without it is a peer that took the attribute out — and
-    /// opening the stream anyway would leave its SRTCP half keyed by nothing,
-    /// which reads from the outside as a call whose reports simply never
-    /// arrive.
+    /// RFC 5764 §4.2: one DTLS association needs rtcp-mux. A plan without it under a DTLS policy is
+    /// refused, or SRTCP would never be keyed.
     #[cfg(feature = "dtls")]
     #[test]
     fn a_dtls_call_whose_peer_took_the_multiplexing_out_is_refused_by_name() {
@@ -6585,15 +5514,11 @@ mod keying_guards {
             Err(MediaError::DtlsNeedsRtcpMux)
         );
 
-        // and a call with no RTCP at all is not a call with RTCP somewhere
-        // else: one association covers everything there is
+        // a call with no RTCP needs no second association
         assert!(keying_holds(&catalog, &plan(keyed()), &theirs).is_ok());
     }
 
-    /// The other half of the same rule: a policy that named one way to key is
-    /// not answered with the other. Both refusals exist because the key
-    /// travelling in a body is exactly what `DtlsRequired` was chosen to
-    /// avoid, and a fingerprint is exactly what `Required` did not ask for.
+    /// A policy that named one keying method is not answered with the other.
     #[cfg(feature = "dtls")]
     #[test]
     fn a_policy_that_named_one_way_to_key_refuses_the_other() {
@@ -6665,10 +5590,8 @@ mod keying_guards {
         assert!(keying_holds(&CodecCatalog::new(), &plan(None), &plain).is_ok());
     }
 
-    /// The peer's own line is read a second time because `sipral-core` drops
-    /// a session parameter it does not recognise instead of invalidating the
-    /// line, and §6.3.7 says an unknown one that is not prefixed with a dash
-    /// makes the whole attribute invalid.
+    /// The peer's line is re-read because `sipral-core` drops unknown session parameters, while RFC
+    /// 4568 §6.3.7 says they invalidate the line.
     #[test]
     fn a_peer_line_carrying_a_parameter_nobody_read_does_not_open_a_stream() {
         let keyed = Some(Keying::Sdes {
@@ -6694,14 +5617,10 @@ mod keying_guards {
     }
 }
 
-// -- what an answer states rather than echoes --------------------------------
-
 #[cfg(test)]
 mod answer_parameters {
-    //! An offer of G.729 from a peer that is not this stack: every form a
-    //! real one writes it in, including the one with no parameters at all,
-    //! which the two-stack harness never produces because this end's own
-    //! offers always say `annexb` one way or the other.
+    //! G.729 offers as other stacks write them, including with no parameters, which our own offers
+    //! never produce.
 
     use std::net::SocketAddr;
 
@@ -6731,10 +5650,8 @@ mod answer_parameters {
         .expect("the offer is answered")
     }
 
-    /// RFC 4856 §2.1.9 reads G.729 with no `annexb` as G.729 with Annex B.
-    /// The answer follows the offer — `yes` where it said yes or nothing,
-    /// `no` where it said no — on one line of its own, and says `no` to
-    /// every offer when the catalogue has Annex B off.
+    /// RFC 4856 §2.1.9: no `annexb` means Annex B. The answer follows the offer on its own line,
+    /// and says `no` when the catalogue has Annex B off.
     #[test]
     fn an_answer_that_keeps_g729_follows_the_offer_on_annex_b() {
         let catalog = CodecCatalog::with_order(&["G729", "PCMU"]).expect("an order");
@@ -6764,8 +5681,7 @@ mod answer_parameters {
         }
     }
 
-    /// And a catalogue without G.729 answers as it always did: the format
-    /// is not kept, so there is nothing to say about it.
+    /// A catalogue without G.729 does not keep the format.
     #[test]
     fn an_answer_that_drops_g729_says_nothing_about_it() {
         let answer = answered(
@@ -6777,11 +5693,8 @@ mod answer_parameters {
         assert_eq!(media.fmtp(18), None);
     }
 
-    /// Whether this end's encoder runs Annex B, from the two descriptions a
-    /// negotiation ends with: only where each allowed it — a description with
-    /// no `annexb` allows it (RFC 4856 §2.1.9), whichever end wrote it — and
-    /// never with the catalogue's Annex B off, even where both descriptions
-    /// say yes, as a re-offer the user agent answered by echoing it can.
+    /// Annex B runs only where both descriptions allow it (RFC 4856 §2.1.9) and never with the
+    /// catalogue's Annex B off.
     #[test]
     fn the_encoder_runs_annex_b_only_where_both_descriptions_and_the_catalogue_allow_it() {
         let on = CodecCatalog::with_order(&["G729", "PCMU"]).expect("an order");
@@ -6815,7 +5728,7 @@ mod answer_parameters {
             );
         }
 
-        // and nothing of it for another codec, whatever a line for 18 says
+        // no Annex B for other codecs
         let pcmu = |fmtp: &str| described(&format!("m=audio 40002 RTP/AVP 0\r\n{fmtp}"));
         let (ours, theirs) = (pcmu(yes), pcmu(yes));
         let plan = ours
@@ -6826,22 +5739,11 @@ mod answer_parameters {
     }
 }
 
-// -- D3's counters are fed from both of poll_event's Media branches ---------
-
 #[cfg(test)]
 mod counter_wiring {
-    //! `poll_event` hands out a media event from two places: the queue
-    //! `self.events` fills (a call starting, changing or ending) and
-    //! [`MediaEngine::session_event`], which takes from the sessions that
-    //! raised one what each has queued on its own (a stall, a resume, a
-    //! recording that stopped). `crates/sipral/src/counters.rs` is thorough about what
-    //! `Counters::observe_media` does with a [`MediaEvent`] once it has one;
-    //! what only a test through this module can show is that both places
-    //! that hand one out actually call it. This is the one that goes through
-    //! `session_event`, built without a SIP exchange because the negotiation
-    //! is not what is under test — the plan is written by hand and the
-    //! session opened directly, the way `crates/sipral/src/tests.rs`'s own
-    //! harness does it with two real stacks instead of one hand-written plan.
+    //! `poll_event` returns media events from `self.events` and from
+    //! [`MediaEngine::session_event`]. This checks the second path also feeds the counters, with a
+    //! hand-built session instead of a SIP exchange.
 
     use std::net::SocketAddr;
     use std::time::{Duration, Instant};
@@ -6873,14 +5775,13 @@ mod counter_wiring {
         "203.0.113.9:40010".parse().expect("an address")
     }
 
-    /// A call this engine has never negotiated anything for, with a session
-    /// inserted directly: enough to reach [`MediaEngine::session_event`]
-    /// without an offer, an answer or a second stack.
+    /// A call with a session inserted directly, to reach [`MediaEngine::session_event`] without
+    /// negotiation.
     fn call_with_a_stalling_session(
         engine: &mut MediaEngine,
         now: Instant,
     ) -> (UserAgent, CallHandle) {
-        // room for the thousand calls the cost of a poll is measured over
+        // room for the thousand calls of the cost test
         let mut config = EndpointConfig::default();
         config.max_dialogs = 2_000;
         let mut agent = UserAgent::new(config, [5; 32]).expect("a user agent");
@@ -6909,8 +5810,7 @@ mod counter_wiring {
                 now,
             )
             .expect("the INVITE can be built now that a transport is bound");
-        // short enough that the test does not need to fake a ten-second
-        // clock jump to reach it
+        // short enough that no ten-second clock jump is needed
         open_session(
             engine,
             call,
@@ -6920,8 +5820,7 @@ mod counter_wiring {
         (agent, call)
     }
 
-    /// Open a session for `call` by hand and give it to the engine, with a
-    /// stall watchdog of `stall_after`, or none.
+    /// Open a session for `call` by hand, with an optional stall watchdog.
     fn open_session(
         engine: &mut MediaEngine,
         call: CallHandle,
@@ -6975,13 +5874,9 @@ mod counter_wiring {
         engine.keep_session(call, session);
     }
 
-    /// `MediaEngine::drop` marks every session ended before it lets its own
-    /// reference go. Dropping the map alone already answers `Ended` once
-    /// nothing else keeps a session alive, so that much would pass whether or
-    /// not the flag were ever set; this is the one case the flag actually
-    /// decides — a share that reaches the lock while something else (here,
-    /// this test's own clone, standing in for a thread already inside
-    /// `SessionShare::with`) still holds the session up.
+    /// `MediaEngine::drop` must mark sessions ended: this test holds an extra reference, standing
+    /// in for a thread inside `SessionShare::with`, so only the flag can tell the share the call is
+    /// over.
     #[test]
     fn a_share_outlives_the_engine_that_minted_it_even_while_something_else_keeps_the_session_alive()
      {
@@ -7012,11 +5907,7 @@ mod counter_wiring {
         drop(kept_alive);
     }
 
-    /// `MediaEngine::release` — the call-ended path, as opposed to the whole
-    /// engine going away — marks the same flag for the same reason: a share
-    /// already on its way to the lock when a call ends must find out rather
-    /// than touch a session mid-teardown, even though something else (again,
-    /// this test's own clone) is still keeping that session allocated.
+    /// The same for `MediaEngine::release` when one call ends.
     #[test]
     fn releasing_a_call_ends_its_share_even_while_something_else_keeps_the_session_alive() {
         let now = Instant::now();
@@ -7046,15 +5937,8 @@ mod counter_wiring {
         drop(kept_alive);
     }
 
-    /// `poll_event` used to lock every session in turn to ask whether it had
-    /// something to say, so a stack holding thousands of calls paid for all
-    /// of them on every event it handed out, signalling ones included. It
-    /// now reads the list of calls whose sessions raised an event: here a
-    /// thousand sessions are held, one of them stalls, and draining the
-    /// engine locks that one session and no other.
-    /// An engine holding `sessions` sessions, the first of them with a stall
-    /// watchdog of 50 ms and every other with `rtcp`, and the signalling
-    /// events of setting them up drained.
+    /// An engine with `sessions` sessions; the first has a 50 ms stall watchdog, the rest use
+    /// `rtcp`. Setup events are drained.
     fn many_sessions(
         sessions: usize,
         rtcp: RtcpPlan,
@@ -7084,8 +5968,7 @@ mod counter_wiring {
                 .expect("the INVITE can be built");
             open_session(&mut engine, call, (None, rtcp), now);
         }
-        // the INVITEs themselves are signalling, drained here so that what
-        // is counted afterwards is media alone
+        // drain the INVITEs so only media is counted
         while engine.poll_event(&mut agent, now).is_some() {}
         assert_eq!(engine.sessions.len(), sessions);
         (engine, agent, stalling)
@@ -7121,17 +6004,12 @@ mod counter_wiring {
             "draining one event from one session of {SESSIONS} locked more than that session"
         );
 
-        // and with nothing raised, asking again locks none at all
+        // nothing raised, nothing locked
         assert!(engine.poll_event(&mut agent, later).is_none());
         assert_eq!(engine.sessions_polled - before, 1);
     }
 
-    /// `poll_rtcp` used to start from the first session on every call, so
-    /// draining k due reports out of n sessions looked at up to k·n of them:
-    /// ten thousand calls, each reporting every five seconds, cost the
-    /// signalling thread more than the five milliseconds between its sweeps
-    /// on the lab machine. A drain now picks up where the last report came
-    /// from, and looks at each session once.
+    /// A `poll_rtcp` drain visits each session once, resuming where the last report came from.
     #[test]
     fn a_drain_of_rtcp_looks_at_each_session_once() {
         const SESSIONS: usize = 500;
@@ -7142,7 +6020,7 @@ mod counter_wiring {
         };
         let (mut engine, _agent, _) = many_sessions(SESSIONS, rtcp, now);
 
-        // past every session's first report, however §6.3 drew it
+        // past every first report
         let later = now + Duration::from_secs(10);
         let before = engine.rtcp_looked;
         let mut reports = 0;
@@ -7156,16 +6034,13 @@ mod counter_wiring {
             engine.rtcp_looked - before
         );
 
-        // and the next drain starts from the first call again: nothing is
-        // due, and every session is looked at once to say so
+        // a fresh drain starts from the first call and looks at each session once
         let before = engine.rtcp_looked;
         assert!(engine.poll_rtcp(later).is_none());
         assert_eq!(engine.rtcp_looked - before, SESSIONS);
     }
 
-    /// Events a session queues while the engine is taking one of them out
-    /// still come out, in order: the call goes back at the head of the list
-    /// for as long as it has more, and is raised afresh once it had none.
+    /// Events queued while one is being taken still come out in order.
     #[test]
     fn a_session_with_several_events_is_drained_in_order_and_raised_again_later() {
         let now = Instant::now();
@@ -7264,9 +6139,7 @@ mod key_source_tests {
 
     #[test]
     fn the_media_key_follows_the_media_seed_and_nothing_else() {
-        // The whole of the fix, in three lines: two stacks given the same
-        // signalling entropy — whose draws go on the wire in clear —
-        // must not be derivable from it to the same media keys.
+        // two stacks with the same signalling entropy must not derive the same media keys
         let mut one = KeySource::new([1; 32]);
         let mut other = KeySource::new([2; 32]);
         let mut same_again = KeySource::new([1; 32]);
@@ -7284,9 +6157,7 @@ mod key_source_tests {
         );
     }
 
-    /// G2: the engine draws its keys from a forward-secure source, so the
-    /// key it hands out first is the forward-secure stream's and not the
-    /// plain one's: what the engine holds after a call cannot draw it again.
+    /// G2: the engine's first key comes from the forward-secure stream.
     #[test]
     fn the_engine_draws_from_a_forward_secure_source() {
         let now = std::time::Instant::now();
@@ -7306,9 +6177,8 @@ mod key_source_tests {
 
     #[test]
     fn no_two_keys_from_one_seed_are_the_same() {
-        // RFC 4568 section 7.1.2: "the master key(s) in the answer MUST be
-        // different from those in the offer". The counter is what provides
-        // that, and it provides it for the salt too.
+        // RFC 4568 §7.1.2: offer and answer keys must differ; the counter guarantees it, salt
+        // included
         let mut keys = KeySource::new([0; 32]);
         let mut seen = Vec::new();
         for _ in 0..64 {
@@ -7319,9 +6189,8 @@ mod key_source_tests {
         }
     }
 
-    /// Every suite this end can answer with draws a key and salt of its own
-    /// width, and two different suites drawn from the same point in the
-    /// stream do not share the octets each takes as its key (8.2.4).
+    /// Each suite draws key and salt of its own width, and two suites from the same point do not
+    /// share key octets (8.2.4).
     #[test]
     fn every_suite_draws_its_own_width() {
         for suite in CryptoSuite::STRENGTH {
@@ -7332,15 +6201,9 @@ mod key_source_tests {
         }
     }
 
-    /// The block(s) `draw_key_for` reads and the key and salt sliced out of
-    /// them (8.2.9, generalised in 8.2.4) hold the SRTP master key and salt,
-    /// so all three have to be the type that wipes itself on drop rather than
-    /// a plain array left to be merely dropped, or a `Vec` that leaves its
-    /// last copy in freed memory. A wipe is not observable from safe Rust and
-    /// Miri cannot be pointed at this, so what is asserted is the one thing
-    /// that is visible: which type the function declares its buffers as. The
-    /// needles are assembled at runtime, so the test cannot pass by matching
-    /// its own assertion — the same check `sipral-core` runs on `A1` in
+    /// The key buffers in `draw_key_for` must be `Zeroizing` (8.2.9, 8.2.4). A wipe is not
+    /// observable from safe Rust, so the test checks the declared types in the source. Needles are
+    /// built at runtime so the test cannot match itself; `sipral-core` does the same in
     /// `auth::digest::tests::the_password_is_never_built_in_a_buffer_that_is_not_wiped`.
     #[test]
     fn the_media_key_and_salt_are_never_built_in_a_buffer_that_is_not_wiped() {

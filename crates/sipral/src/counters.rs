@@ -3,56 +3,33 @@
 
 //! A flat set of counters, cheap enough to sample on a timer.
 //!
-//! D3's complaint is that "is this deployment healthy" gets answered by
-//! grepping a log file for a phrase somebody remembers roughly. What is here
-//! instead is a handful of numbers an operator reads by asking rather than by
-//! searching: how many registrations were attempted, how many of those
-//! succeeded, and — the part that actually earns its keep — how the rest
-//! failed, split by [`RegistrationFailure`] rather than folded into one
-//! number nobody can act on. The same split for [`CallEndReason`]. And three
-//! numbers this crate is the first place able to say at all, because they
-//! live where signalling and media meet: how many gaps the stall watchdog
-//! caught, how many times a call's jitter buffer had to shrink or stretch to
-//! stay in sequence, and how many requests would not fit a datagram and found
-//! no stream to the destination to go on instead.
+//! D3: instead of grepping logs to judge health, an operator reads a few numbers: registrations
+//! attempted and succeeded, failures split by [`RegistrationFailure`], call endings split by
+//! [`CallEndReason`], and three numbers only this layer can see: media gaps caught by the stall
+//! watchdog, jitter buffer adjustments, and requests too large for a datagram with no stream to
+//! send them on.
 //!
-//! # Counters and gauges are not the same shape
+//! # Counters and gauges
 //!
-//! [`Counter`] only grows. [`Gauge`] moves both ways. The distinction is not
-//! decoration: a counter answers "how many since I last looked", a gauge
-//! answers "how many right now", and a type that let the two be added
-//! together would make both answers wrong. Subtracting one [`Counters`]
-//! reading from a later one is how the first question gets asked twice and
-//! turned into a number — every counter becomes how much it grew, every
-//! gauge stays what it currently reads.
+//! [`Counter`] only grows; [`Gauge`] moves both ways. Subtracting an earlier [`Counters`] reading
+//! from a later one gives each counter's growth and each gauge's current value.
 //!
-//! # Where the numbers come from, and where one of them does not
+//! # Sources
 //!
-//! Nowhere but the events [`crate::MediaEngine::poll_event`] already drains.
-//! Reading [`Counters`] is one struct copy — nothing here walks the call
-//! table or the session map to produce a reading, and nothing here opens a
-//! second path to the layers below to learn something the event stream does
-//! not already say.
+//! Only the events [`crate::MediaEngine::poll_event`] already drains. Reading is a struct copy;
+//! nothing walks the call table.
 //!
-//! Retransmissions are the deliberate absence. `sipral-core` keeps a
-//! per-transaction retransmission count privately, inside the transaction
-//! state machine that paces timer A, and never raises it as an event; there
-//! is nothing passing through [`crate::MediaEngine::poll_event`] to count.
-//! Adding one here would mean reading that state through a path this crate
-//! does not have rather than one it does, which is exactly the second path
-//! this module exists to avoid. `docs/17-observability.md` says the same
-//! thing where an operator reading the counter list will look for it.
+//! Retransmissions are deliberately absent: `sipral-core` keeps them inside its transaction state
+//! machines and raises no event, and reading them would need a second path into the lower layers.
+//! `docs/17-observability.md` says so too.
 
 use sipral_core::endpoint::Event as CoreEvent;
 use sipral_ua::{CallEndReason, RegistrationFailure, UaEvent};
 
 use crate::event::MediaEvent;
 
-/// A count that only grows.
-///
-/// Distinguished from [`Gauge`] in the type, so that a reading of one can
-/// never be mistaken for the other: an operator subtracts two of these across
-/// a sampling interval and asks "how many happened", never "did it go down".
+/// A count that only grows. A distinct type from [`Gauge`], so readings are subtracted ("how many
+/// happened"), never compared for decrease.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counter(u64);
 
@@ -75,19 +52,14 @@ impl Counter {
 impl core::ops::Sub for Counter {
     type Output = Self;
 
-    /// How many happened between an earlier reading and this one.
-    ///
-    /// Saturating rather than panicking on two readings taken in the wrong
-    /// order: a counter that only grows still owes a caller that mixed up
-    /// its snapshots an honest answer, and zero is that answer, not a panic
-    /// telemetry code should never be able to cause.
+    /// How many happened between an earlier reading and this one. Saturates to zero if the readings
+    /// are swapped, rather than panicking.
     fn sub(self, earlier: Self) -> Self {
         Self(self.0.saturating_sub(earlier.0))
     }
 }
 
-/// A count that moves both ways: what is true right now, not what has
-/// happened since this engine was created.
+/// A count that moves both ways: the current value, not a running total.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Gauge(u64);
 
@@ -107,12 +79,8 @@ impl Gauge {
     }
 }
 
-/// Why a registration attempt failed, tallied the same four ways
-/// [`RegistrationFailure`] can say it did.
-///
-/// A count of failures alone says a deployment is unwell; this says which
-/// kind of unwell, which is the difference between paging somebody and
-/// telling them what to look at first.
+/// Registration failures, split the four ways [`RegistrationFailure`] reports them, so an operator
+/// knows where to look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RegistrationFailureCounts {
@@ -133,9 +101,8 @@ impl RegistrationFailureCounts {
             RegistrationFailure::BadCredentials => self.bad_credentials.tick(),
             RegistrationFailure::Unreachable => self.unreachable.tick(),
             RegistrationFailure::Redirected => self.redirected.tick(),
-            // RegistrationFailure is non_exhaustive: a reason a future minor
-            // adds is counted nowhere sooner than it is counted under the
-            // wrong name
+            // `RegistrationFailure` is non_exhaustive: an unknown future reason is better uncounted
+            // than counted under the wrong name
             _ => {}
         }
     }
@@ -197,7 +164,7 @@ impl CallDispositionCounts {
             CallEndReason::ForkLost => self.fork_lost.tick(),
             CallEndReason::Abandoned => self.abandoned.tick(),
             CallEndReason::Expired => self.expired.tick(),
-            // CallEndReason is non_exhaustive, for the same reason as above
+            // non_exhaustive, as above
             _ => {}
         }
     }
@@ -233,21 +200,14 @@ impl core::ops::Sub for CallDispositionCounts {
     }
 }
 
-/// D3's flat set of health counters, kept by one [`crate::MediaEngine`] since
-/// it was created.
+/// D3's health counters for one [`crate::MediaEngine`], since it was created.
 ///
-/// Reading it is one struct copy: nothing here walks the call table or the
-/// session map, so sampling it on a timer and shipping it as telemetry costs
-/// nothing an application was not already spending on the poll loop it runs
-/// anyway. Subtracting an earlier reading from a later one (`later - earlier`)
-/// turns every counter into how much it grew across the interval and leaves
-/// every gauge exactly where it reads now.
+/// Reading is a struct copy, cheap enough to sample on a timer for telemetry. `later - earlier`
+/// gives each counter's growth over the interval and each gauge's current value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Counters {
-    /// A REGISTER went out — [`UaEvent::Registering`], counted once per
-    /// attempt including a retry, because a retry is a REGISTER that goes out
-    /// exactly the way the first one did.
+    /// REGISTER requests sent ([`UaEvent::Registering`]), retries included.
     pub registrations_attempted: Counter,
     /// The registrar granted a binding.
     pub registrations_succeeded: Counter,
@@ -255,49 +215,35 @@ pub struct Counters {
     pub registrations_failed: RegistrationFailureCounts,
     /// How every call that has ended, ended.
     pub calls_ended: CallDispositionCounts,
-    /// How many times [`MediaEvent::Stalled`] fired: inbound audio stopped
-    /// for longer than the configured threshold while signalling stayed
-    /// healthy. B5's watchdog, counted rather than only reported live.
+    /// Times [`MediaEvent::Stalled`] fired: inbound audio stopped longer than the threshold while
+    /// signalling was fine (B5).
     pub media_gaps: Counter,
-    /// How many times a call's jitter buffer had to shrink or stretch the
-    /// stream to keep its delay where it was aiming —
-    /// [`sipral_rtp::Quality`]'s `shrunk` and `stretched`, folded in as each
-    /// call ends. Not loss by itself: the buffer adapting is what keeps loss
-    /// from becoming audible, and a deployment where this climbs is one whose
-    /// network is getting worse before a caller can describe why.
+    /// Times a call's jitter buffer shrank or stretched the stream to hold its target delay
+    /// ([`sipral_rtp::Quality`]'s `shrunk` and `stretched`, added at call end). Not loss:
+    /// adaptation hides loss, so a rising count shows a worsening network before callers notice.
     pub jitter_buffer_events: Counter,
-    /// How many times a request would not fit a datagram and there was no
-    /// stream to the destination to put it on, so the stack asked for one —
-    /// RFC 3261 §18.1.1, B1's own failure story counted rather than only
-    /// logged.
+    /// Times a request did not fit a datagram and no stream to the destination existed, so the
+    /// stack asked for one (RFC 3261 §18.1.1, B1).
     ///
-    /// Named for what it counts rather than for what it is about. A request
-    /// promoted onto a connection that already existed does **not** raise it,
-    /// because nothing is asked for and no event goes out; those live in the
-    /// diagnostic record as `transport.promoted.size`
-    /// (`docs/14-diagnostics.md`). An operator reading this as "how often does
-    /// promotion happen" would read it low and conclude the path is fine.
+    /// A request moved onto an existing connection does **not** count here, since nothing is
+    /// requested; those appear in the diagnostic record as `transport.promoted.size`
+    /// (`docs/14-diagnostics.md`). Do not read this as "how often promotion happens".
     pub stream_transport_wanted: Counter,
     /// Calls with media running right now.
     pub active_calls: Gauge,
 }
 
 impl Counters {
-    /// Take in what the user agent said.
-    ///
-    /// Called from [`crate::MediaEngine::poll_event`] on every signalling
-    /// event it drains, which is the one place this crate already sees all
-    /// of them.
+    /// Take in a signalling event. Called from [`crate::MediaEngine::poll_event`] for every one it
+    /// drains.
     pub(crate) fn observe_signalling(&mut self, event: &UaEvent) {
         match event {
             UaEvent::Registering { .. } => self.registrations_attempted.tick(),
             UaEvent::Registered { .. } => self.registrations_succeeded.tick(),
             UaEvent::RegistrationFailed { reason, .. } => self.registrations_failed.tick(*reason),
             UaEvent::CallEnded { reason, .. } => self.calls_ended.tick(*reason),
-            // B1: a message would not fit a datagram and there was no stream
-            // to the destination to put it on, so the endpoint asked for one.
-            // sipral-ua has no policy for the event and passes it through
-            // whole; counting it here does not need one either.
+            // B1: a message did not fit a datagram and there was no stream, so the endpoint asked
+            // for one; sipral-ua passes it through unhandled
             UaEvent::Unclaimed(CoreEvent::TransportWanted { .. }) => {
                 self.stream_transport_wanted.tick();
             }
@@ -305,10 +251,7 @@ impl Counters {
         }
     }
 
-    /// Take in what one call's media said.
-    ///
-    /// Called from [`crate::MediaEngine::poll_event`] on every media event it
-    /// drains, for the same reason as [`Counters::observe_signalling`].
+    /// Take in a media event, from the same place as [`Counters::observe_signalling`].
     pub(crate) fn observe_media(&mut self, event: &MediaEvent) {
         match event {
             MediaEvent::Started { .. } => self.active_calls.increment(),
@@ -329,8 +272,7 @@ impl Counters {
 impl core::ops::Sub for Counters {
     type Output = Self;
 
-    /// What changed between an earlier reading and this one: every counter
-    /// as how much it grew, every gauge as what it reads now.
+    /// The difference from an earlier reading: counters as growth, gauges as current value.
     fn sub(self, earlier: Self) -> Self {
         Self {
             registrations_attempted: self.registrations_attempted - earlier.registrations_attempted,
@@ -373,8 +315,7 @@ mod tests {
         "192.0.2.50:5060".parse().expect("an address")
     }
 
-    /// A user agent with a transport already bound, which is what
-    /// [`UserAgent::call`] needs in order to know where an INVITE goes.
+    /// A user agent with a bound transport, which [`UserAgent::call`] needs to route an INVITE.
     fn agent(now: Instant) -> UserAgent {
         let mut agent =
             UserAgent::new(sipral_ua::EndpointConfig::default(), [11; 32]).expect("a user agent");
@@ -438,7 +379,7 @@ mod tests {
         let mut later = Counter::default();
         later.tick_by(3);
         assert_eq!((later - earlier).get(), 3);
-        // taken the wrong way round: an honest zero, not a panic
+        // readings swapped: zero, not a panic
         assert_eq!((earlier - later).get(), 0);
     }
 
@@ -539,10 +480,8 @@ Content-Length: 0\r\n\r\n",
         assert_eq!(counters.registrations_failed.unreachable.get(), 1);
         assert_eq!(counters.registrations_failed.total(), 1);
 
-        // Refreshing and Unregistered are neither an attempt nor a
-        // disposition of their own — the binding they describe was already
-        // counted when it was won, so counting them again would be counting
-        // the same registration twice
+        // Refreshing and Unregistered are neither attempts nor outcomes; the binding was counted
+        // when won
         counters.observe_signalling(&UaEvent::Refreshing { account });
         counters.observe_signalling(&UaEvent::Unregistered { account });
         assert_eq!(counters.registrations_attempted.get(), 1);
@@ -609,8 +548,8 @@ Content-Length: 0\r\n\r\n",
 
     #[test]
     fn a_codec_change_under_a_live_call_does_not_move_the_gauge() {
-        // Changed replaces a session that already counted; it must not be
-        // counted a second time or the gauge drifts upward on every re-offer
+        // Changed replaces an already counted session; counting it would make the gauge drift up on
+        // every re-offer
         let mut counters = Counters::default();
         counters.observe_media(&MediaEvent::Started {
             codec: Codec::G722,

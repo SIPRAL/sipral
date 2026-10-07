@@ -1,53 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! DTLS-SRTP: the handshake that keys a call, on the call's own media path.
+//! DTLS-SRTP: the handshake that keys a call, run on the call's own media path.
 //!
-//! `sipral-dtls` has RFC 5764's handshake and `sipral-rtp` has RFC 3711's
-//! stream, and until this module neither had ever met the other: an offer
-//! could carry `a=fingerprint`, a peer's could be read back, and a plan keyed
-//! that way was then refused rather than opened, because nothing in the tree
-//! could produce a key on the media path. This is the joint.
+//! `sipral-dtls` has the RFC 5764 handshake and `sipral-rtp` the RFC 3711 stream; this module
+//! connects them.
 //!
 //! # What crosses the boundary
 //!
-//! Three things, and they are the three the layers below cannot have:
-//!
-//! - **An identity.** A P-256 key and a self-signed certificate, made once per
-//!   [`MediaEngine`](crate::MediaEngine) and named in every offer it writes by
-//!   the fingerprint of that certificate. [`Identity`].
-//! - **A role.** Which end sends the ClientHello, which RFC 5763 §5 takes from
-//!   the `a=setup` of the offer and of the answer together — so the facade has
-//!   to remember what it wrote as well as read what arrived. [`Role`].
-//! - **A driver.** The connection is sans-I/O like everything else here: it
-//!   takes datagrams, gives datagrams back, and asks to be woken. [`Handshake`]
-//!   is what a [`MediaSession`](crate::MediaSession) drives it through.
+//! - **An identity** ([`Identity`]): a P-256 key and self-signed certificate, one per
+//!   [`MediaEngine`](crate::MediaEngine), named in every offer by its fingerprint.
+//! - **A role** ([`Role`]): which end sends the ClientHello. RFC 5763 §5 derives it from the
+//!   `a=setup` of both offer and answer, so the facade remembers what it wrote.
+//! - **A driver** ([`Handshake`]): sans-I/O, driven by a [`MediaSession`](crate::MediaSession).
 //!
 //! # Where the randomness comes from
 //!
-//! The media engine's own [`KeySource`], which is the stream every SRTP master
-//! key is already drawn from and is deliberately not the endpoint's: the
-//! endpoint's seed is written in clear into every replay recording, and a
-//! recording that carried the means to derive a call's certificate key would
-//! carry the means to impersonate the stack that made it.
-//!
-//! What a poor media seed costs here is the same thing it costs SDES — the
-//! whole of the encryption — and it costs it just as quietly.
+//! The media engine's [`KeySource`], which also produces the SRTP keys, and not the endpoint's: the
+//! endpoint seed is written in clear into replay recordings, and a recording must not carry the
+//! means to rebuild the certificate key. A poor media seed silently costs all of the encryption, as
+//! with SDES.
 //!
 //! # What this module refuses
 //!
-//! A handshake that cannot be authenticated. `peer_fingerprints` is required
-//! to be non-empty by `sipral-dtls` itself, and a description that named
-//! `UDP/TLS/RTP/SAVP` without an `a=fingerprint` never becomes a
-//! [`Keying::Dtls`](sipral_core::sdp::Keying::Dtls) in the first place, so
-//! there is no path here that opens a stream against a certificate nobody
-//! vouched for.
+//! An unauthenticated handshake: `sipral-dtls` requires peer fingerprints, and `UDP/TLS/RTP/SAVP`
+//! without `a=fingerprint` never becomes [`Keying::Dtls`](sipral_core::sdp::Keying::Dtls).
 //!
-//! An SRTP profile there are no keys for. `sipral-dtls` offers only the two
-//! AES-128 counter-mode profiles and refuses the NULL ones outright (RFC 8827
-//! §6.5 forbids negotiating encryption away); [`suite_of`] is the other half
-//! of that, and a profile it does not know stops the stream rather than
-//! opening it on terms nobody agreed.
+//! An SRTP profile without keys. `sipral-dtls` refuses the NULL profiles (RFC 8827 §6.5 forbids
+//! negotiating encryption away), and [`suite_of`] stops the stream on any profile it does not know.
 
 use std::collections::VecDeque;
 use std::mem;
@@ -66,55 +46,34 @@ use zeroize::Zeroizing;
 
 use crate::error::MediaError;
 
-/// How long a certificate this stack makes says it is good for, each way
-/// from the moment it was made.
+/// Validity of a certificate this stack makes, each way from its creation.
 ///
-/// Thirty days, which is nothing to do with trust: a DTLS-SRTP certificate is
-/// checked against the fingerprint in this very call's signalling and against
-/// nothing else (RFC 8122 §5.1), so no clock anywhere decides whether it is
-/// the right one. The period exists because RFC 5280 §4.1.2.5 requires one to
-/// be written. It runs backwards as well as forwards because the two ends of
-/// a call do not agree on the time, and a peer that does check the period —
-/// Asterisk with `dtls_verify` set to more than the fingerprint is the one
-/// that does — would otherwise refuse a certificate made a minute ago by a
-/// stack whose clock is a minute behind its own.
+/// Not about trust: the certificate is checked only against the fingerprint in the signalling (RFC
+/// 8122 §5.1). RFC 5280 §4.1.2.5 requires a period. It also runs backwards because clocks differ,
+/// and a peer that checks the period (Asterisk with a strict `dtls_verify`) would otherwise refuse
+/// a certificate from a stack whose clock is behind.
 const CERTIFICATE_LIFETIME: u64 = 30 * 24 * 60 * 60;
 
-/// How long before a certificate runs out that a fresh one is made.
-///
-/// A day, which is longer than any call: a certificate minted at the start of
-/// a call must still be good at the end of it, and re-minting mid-call would
-/// change the fingerprint this stack already put in an offer.
+/// How long before expiry a fresh certificate is made. A day, longer than any call, so the
+/// fingerprint in an offer never changes mid-call.
 const RENEW_WITHIN: u64 = 24 * 60 * 60;
 
-/// The `a=setup` an offer from this stack carries.
-///
-/// `actpass` is what RFC 5763 §5 requires of an offerer — "The endpoint MUST
-/// use the setup attribute defined in \[RFC4145\]. The endpoint that is the
-/// offerer MUST use the setup attribute value of setup:actpass" — and it is
-/// also the one that lets the answerer be the client, which saves the
-/// handshake a round trip.
+/// The `a=setup` in our offers. RFC 5763 §5 requires `actpass` from an offerer ("The endpoint that
+/// is the offerer MUST use the setup attribute value of setup:actpass"); it also lets the answerer
+/// be the client, saving a round trip.
 pub(crate) const OFFERED_SETUP: Setup = Setup::ActPass;
 
-/// The most expensive policy a handshake here could settle on, for a stream
-/// sizing its buffers before it knows which one it got.
+/// The most expensive policy a handshake can settle on, for sizing buffers before the result is
+/// known.
 ///
-/// Four profiles are keyable (`connection::KEYABLE`), and the two AEAD ones'
-/// sixteen-octet tag is wider than either AES-CM profile's, so one of them —
-/// which of the two makes no difference, their tags are the same width — is
-/// the upper bound. See
-/// [`RtpSession::awaiting`](sipral_rtp::RtpSession::awaiting).
+/// Of the four keyable profiles (`connection::KEYABLE`), the AEAD ones have the widest tag (16
+/// octets, same for both). See [`RtpSession::awaiting`](sipral_rtp::RtpSession::awaiting).
 pub(crate) const MOST: Policy = Policy::new(Suite::AeadAes256Gcm);
 
-/// Random octets for the handshake, out of the media engine's key stream.
+/// Random octets for the handshake from the engine's key stream.
 ///
-/// One 32-octet block at a time, handed out in order and never twice: the
-/// counter behind [`KeySource`] does not repeat, so neither does anything
-/// drawn here. A block is held only until it is spent: each octet is wiped
-/// from it as it is handed out, and what is left of it when the source goes
-/// is wiped then. Those octets become a private key and the nonces of its
-/// signatures, and a copy left behind in freed memory would be as good as
-/// the key.
+/// One 32-octet block at a time, never repeated. Each octet is wiped as it is handed out and the
+/// rest when the source drops, since these become the private key and signature nonces.
 struct Source<'a> {
     keys: &'a mut KeySource,
     block: Zeroizing<[u8; 32]>,
@@ -123,8 +82,7 @@ struct Source<'a> {
 
 impl<'a> Source<'a> {
     fn new(keys: &'a mut KeySource) -> Self {
-        // `used` at the width of a block means the first fill draws one,
-        // rather than handing out a block of zeros nobody asked for
+        // a full `used` makes the first fill draw a block instead of handing out zeros
         Self {
             keys,
             block: Zeroizing::new([0; 32]),
@@ -148,51 +106,35 @@ impl Random for Source<'_> {
 
 /// This stack's DTLS identity: one key, one certificate, one fingerprint.
 ///
-/// One per [`MediaEngine`](crate::MediaEngine) and not one per call. A
-/// certificate here authenticates nothing but "the far end of this handshake
-/// is the end the signalling described", and the signalling is what carries
-/// the fingerprint, so a fresh certificate per call would buy unlinkability
-/// against an observer who is already watching the `a=fingerprint` go past in
-/// the same SDP. What it would cost is a P-256 key pair and a signature on
-/// every call setup, on a device whose battery the call is already the
-/// expensive part of.
+/// One per [`MediaEngine`](crate::MediaEngine), not per call. The certificate only proves "this is
+/// the end the signalling described", and an observer already sees the fingerprint in the SDP, so
+/// per-call certificates would cost a P-256 key and signature per call for nothing.
 ///
-/// Neither `Clone` nor `Copy`: the private key is the whole of the identity.
+/// Neither `Clone` nor `Copy`: the private key is the identity.
 #[derive(Debug)]
 pub struct Identity {
     key: EcdsaKey,
     certificate: Certificate,
-    /// The value of the `a=fingerprint` this end writes, kept rather than
-    /// recomputed: it goes into every offer and every answer, and hashing a
-    /// certificate that has not changed to get the same string back is work
-    /// for nothing.
+    /// The `a=fingerprint` value, cached for every offer and answer.
     fingerprint: String,
-    /// When the certificate stops saying it is valid, in seconds since 1970.
-    ///
-    /// Kept so that a process which outlives its own certificate — a desk
-    /// phone or an agent runs for months, and `MediaEngine` is made once —
-    /// mints a fresh one rather than offering an expired one for ever. See
-    /// [`Identity::is_stale`].
+    /// Expiry, in Unix seconds. A desk phone or agent runs for months with one `MediaEngine`, so it
+    /// must renew instead of offering an expired certificate; see [`Identity::is_stale`].
     not_after: u64,
 }
 
 impl Identity {
-    /// Make one, drawing from the engine's key stream.
-    ///
-    /// `unix_seconds` is the wall clock, which the validity period needs and
-    /// which nothing in this tree reads for itself.
+    /// Make one from the engine's key stream. `unix_seconds` is the wall clock for the validity
+    /// period.
     ///
     /// # Errors
-    /// [`MediaError::DtlsIdentity`] when the key or the certificate cannot be
-    /// made — which with a sound key source does not happen, and with an
-    /// unsound one is exactly the failure worth reporting rather than
-    /// papering over.
+    ///
+    /// [`MediaError::DtlsIdentity`] when the key or certificate cannot be made, which does not
+    /// happen with a sound key source.
     pub(crate) fn new(keys: &mut KeySource, unix_seconds: u64) -> Result<Self, MediaError> {
         let mut source = Source::new(keys);
         let key = EcdsaKey::generate(&mut source).map_err(|_| MediaError::DtlsIdentity)?;
-        // the common name identifies nobody and is checked by nobody (RFC
-        // 8122 §5.1 puts the whole of the identity in the fingerprint), so it
-        // says what the certificate is for and carries no name at all
+        // nobody checks the common name (RFC 8122 §5.1 puts identity in the fingerprint), so it
+        // names the purpose, not a party
         let not_after = unix_seconds.saturating_add(CERTIFICATE_LIFETIME);
         let params = CertificateParams {
             common_name: "Sipral DTLS-SRTP",
@@ -210,11 +152,8 @@ impl Identity {
         })
     }
 
-    /// Whether this certificate is close enough to running out that the next
-    /// call should be offered a fresh one.
-    ///
-    /// The wall clock comes from the caller here as it does everywhere else;
-    /// nothing in this tree reads one for itself.
+    /// Whether this certificate is close enough to expiry that the next call should get a fresh
+    /// one.
     pub(crate) const fn is_stale(&self, unix_seconds: u64) -> bool {
         unix_seconds.saturating_add(RENEW_WITHIN) >= self.not_after
     }
@@ -227,18 +166,12 @@ impl Identity {
     }
 }
 
-/// How long a whole handshake is given before the call is told it will not
-/// happen, given the retransmission schedule the client end runs.
+/// How long a whole handshake may take before the call is told it failed.
 ///
-/// DTLS's own limit is one-sided and this is why the facade needs one at all.
-/// A client's flights are retransmitted on the schedule of RFC 6347 §4.2.4.1
-/// and given up after `attempts` of them; a server that has received no
-/// ClientHello has no flight to retransmit, so its timer is never armed and
-/// `Connection::poll_timeout` answers `None` while the state is still
-/// `Handshaking` — it would wait for the length of the call. Both ends of a
-/// call have to reach the same answer in about the same time, so the budget
-/// is the client's own schedule added up: every wait it would take, and then
-/// the last one it would spend waiting for the answer that never came.
+/// DTLS's own limit is one-sided: a client retransmits on the RFC 6347 §4.2.4.1 schedule and gives
+/// up after `attempts`, but a server that never got a ClientHello has no timer at all, and
+/// `Connection::poll_timeout` returns `None` while still `Handshaking`. So both ends use the
+/// client's schedule added up: every wait, plus the final wait for an answer.
 fn budget(schedule: Retransmission) -> Duration {
     let mut total = Duration::ZERO;
     let mut wait = schedule.initial;
@@ -253,61 +186,46 @@ fn budget(schedule: Retransmission) -> Duration {
 #[derive(Debug)]
 pub(crate) struct Handshake {
     connection: Connection,
-    /// What `poll_transmit` has produced and the caller has not taken. Owned
-    /// octets, because `sipral-dtls` allocates each datagram and there is no
-    /// buffer of the session's to borrow one from.
+    /// Records produced and not yet taken. Owned, since `sipral-dtls` allocates each.
     ///
-    /// Where they go is not kept here. The session addresses each record: to
-    /// the address the far end's own records came from while RTP has no latch
-    /// of its own — which is the whole handshake, since RTP can only latch on
-    /// a packet it has keys to authenticate — and to the signalled address
-    /// before the far end has said anything. See
+    /// The session addresses them: to where the far end's records came from while RTP has no latch
+    /// (the whole handshake), else to the signalled address. See
     /// [`MediaSession::poll_transmit`](crate::MediaSession::poll_transmit).
     outbound: VecDeque<Vec<u8>>,
-    /// The keys, once the handshake exported them, waiting to be collected by
-    /// the session that will install them.
+    /// The exported keys, waiting for the session to install them.
     keyed: Option<Result<Exported, MediaError>>,
-    /// Whether the handshake has already reported that it failed, so that a
-    /// connection that keeps being driven does not report it again.
+    /// Whether failure was already reported, so it is reported once.
     reported: bool,
-    /// When this handshake gives up, whatever the connection's own timer
-    /// says. See [`budget`].
+    /// When this handshake gives up regardless of the connection's timer; see [`budget`].
     expires: Instant,
-    /// Whether the budget above has run out, which the connection itself has
-    /// no way of knowing.
+    /// Whether the budget ran out, which the connection cannot know.
     expired: bool,
-    /// What a new association on the same call is started with
-    /// ([`Handshake::renewal`]): the certificate this end presents, the
-    /// fingerprints the far end's has to match, and this handshake's own
-    /// randomness.
+    /// What a new association on the same call starts with ([`Handshake::renewal`]): our
+    /// certificate, the far end's fingerprints, and this handshake's randomness.
     identity: Arc<Identity>,
     peers: Vec<Fingerprint>,
-    /// The protection profiles this call offers or accepts, most preferred
-    /// first: the call's own suites ([`profiles`]), kept for a new
-    /// association to be held to the same.
+    /// The protection profiles this call offers or accepts, best first ([`profiles`]), kept so a
+    /// new association uses the same.
     profiles: Vec<SrtpProtectionProfile>,
     keys: KeySource,
 }
 
-/// What a finished handshake exported, per direction, before it is made into
-/// a stream's contexts.
+/// What a finished handshake exported, per direction.
 ///
-/// Kept apart rather than made into a [`Security`] on the spot, because a
-/// stream keyed once opens its contexts from it and a stream already running
-/// replaces each direction's (RFC 6347 §4.2.8, a new association) the way a
-/// re-key does, with the old receive context kept for the packets already in
-/// flight under it.
+/// Not turned into a [`Security`] immediately: a first keying opens contexts from it, while a
+/// running stream replaces each direction like a re-key (RFC 6347 §4.2.8), keeping the old receive
+/// context for packets in flight.
 pub(crate) struct Exported {
     pub(crate) suite: Suite,
     pub(crate) policy: Policy,
-    /// What protects what this end sends.
+    /// Protects what this end sends.
     pub(crate) local: Master,
-    /// What opens what arrives.
+    /// Opens what arrives.
     pub(crate) remote: Master,
 }
 
 impl Exported {
-    /// The contexts a stream that was waiting for its keys opens with.
+    /// The contexts for a stream that was waiting for its keys.
     pub(crate) fn into_security(self) -> Security {
         Security::new(self.policy, self.local, self.policy, self.remote)
     }
@@ -315,7 +233,7 @@ impl Exported {
 
 impl core::fmt::Debug for Exported {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // two master keys and their salts: the suite is all a log may see
+        // master keys and salts stay out of logs; only the suite is shown
         f.debug_struct("Exported")
             .field("suite", &self.suite)
             .finish_non_exhaustive()
@@ -323,22 +241,17 @@ impl core::fmt::Debug for Exported {
 }
 
 impl Handshake {
-    /// Start the handshake a settled plan calls for, or `None` where the plan
-    /// calls for none.
+    /// Start the handshake a settled plan calls for, or `None` if it calls for none.
     ///
-    /// `party` is which side of the offer/answer exchange this end was and
-    /// `ours` is the `a=setup` it wrote; `keying` is what the negotiation read
-    /// off the peer's description. `None` comes back for a peer that answered
-    /// `holdconn` — "no connection for the time being" — which is a plan with
-    /// no handshake in it rather than a failure.
+    /// `party` is our side of the offer/answer, `ours` the `a=setup` we wrote, `keying` what the
+    /// peer's description said. `None` also for a peer that answered `holdconn` ("no connection for
+    /// the time being"), which is not a failure.
     ///
     /// # Errors
-    /// [`MediaError::DtlsRole`] for a pair of `a=setup` values RFC 4145 §4.1
-    /// does not allow together, or a value that is not one of the four;
-    /// [`MediaError::DtlsFingerprint`] for an `a=fingerprint` that cannot be
-    /// read or names a hash this build does not have; and
-    /// [`MediaError::DtlsHandshake`] for a configuration no handshake can
-    /// come of.
+    ///
+    /// [`MediaError::DtlsRole`] for an `a=setup` pair RFC 4145 §4.1 does not allow or an unknown
+    /// value; [`MediaError::DtlsFingerprint`] for an unreadable fingerprint or unknown hash;
+    /// [`MediaError::DtlsHandshake`] for a configuration no handshake can come of.
     pub(crate) fn start(
         identity: &Arc<Identity>,
         keying: &Keying,
@@ -366,10 +279,8 @@ impl Handshake {
         let Some(role) = dtls_role(party, offer, answer).map_err(|_| MediaError::DtlsRole)? else {
             return Ok(None);
         };
-        // every line that parses, and a failure only when none does: a peer
-        // that wrote one fingerprint under a hash this build has and one
-        // under a hash it does not has still said something checkable, and
-        // RFC 8122 §5 is why it wrote both
+        // keep every line that parses and fail only if none does: RFC 8122 §5 has peers write
+        // several hashes, and one we know is enough
         let peers: Vec<Fingerprint> = fingerprints
             .iter()
             .filter_map(|written| Fingerprint::parse(written).ok())
@@ -389,13 +300,11 @@ impl Handshake {
         .map(Some)
     }
 
-    /// A handshake in `role`, presenting `identity` and requiring a peer
-    /// certificate `peers` names, drawing its randomness from `keys`.
+    /// A handshake in `role`, presenting `identity` and requiring a peer certificate listed in
+    /// `peers`, with randomness from `keys`.
     ///
-    /// The randomness is the handshake's own from here on: a stream seeded
-    /// once from the engine's, so that a new association the session starts
-    /// by itself (see [`Handshake::renewal`]) draws from somewhere that never
-    /// hands out a block the engine does.
+    /// The randomness becomes the handshake's own stream, so a renewal the session starts (see
+    /// [`Handshake::renewal`]) never reuses an engine block.
     fn begin(
         identity: Arc<Identity>,
         peers: Vec<Fingerprint>,
@@ -430,30 +339,23 @@ impl Handshake {
             profiles,
             keys,
         };
-        // a client's ClientHello is already waiting, and a server's outbox is
-        // empty; draining here means the caller never has to know which
+        // a client's ClientHello is ready and a server has nothing; draining hides the difference
+        // from the caller
         handshake.drain();
         Ok(handshake)
     }
 
-    /// A new association on the same call, in the same role, with the same
-    /// certificates on both sides: RFC 6347 §4.2.8.
+    /// A new association on the same call, same role and certificates (RFC 6347 §4.2.8).
     ///
-    /// "In cases where a server believes it has an existing association on a
-    /// given host/port quartet and it receives an epoch=0 ClientHello, it
-    /// SHOULD proceed with a new handshake but MUST NOT destroy the existing
-    /// association until the client has demonstrated reachability either by
-    /// completing a cookie exchange or by completing a complete handshake
-    /// including delivering a verifiable Finished message." Some peers start
-    /// one on every re-negotiation — Asterisk does, on a hold and again on the
-    /// resume — and a server that ignored the ClientHello left the far end
-    /// waiting on a handshake that never came and the call silent. The session
-    /// runs the two side by side and keeps the old keys until this one has
-    /// produced new ones; see `MediaSession::receive`.
+    /// The server "SHOULD proceed with a new handshake but MUST NOT destroy the existing
+    /// association" until the client completes it. Asterisk starts one on every hold and resume;
+    /// ignoring it leaves the call silent. The session runs both and keeps the old keys until this
+    /// one produces new ones; see `MediaSession::receive`.
     ///
     /// # Errors
-    /// [`MediaError::DtlsHandshake`] for a configuration no handshake can come
-    /// of, which the one this was made from already came of.
+    ///
+    /// [`MediaError::DtlsHandshake`] for a configuration no handshake can come of, which cannot
+    /// happen for one the original already used.
     pub(crate) fn renewal(&mut self, now: Instant) -> Result<Self, MediaError> {
         let seed = Zeroizing::new(self.keys.block());
         Self::begin(
@@ -466,8 +368,8 @@ impl Handshake {
         )
     }
 
-    /// Whether this handshake has finished and produced keys: the only state
-    /// a new association can replace (RFC 6347 §4.2.8).
+    /// Whether this handshake produced keys, the only state a new association can replace (RFC 6347
+    /// §4.2.8).
     pub(crate) fn is_keyed(&self) -> bool {
         matches!(self.connection.state(), State::Connected)
     }
@@ -478,13 +380,10 @@ impl Handshake {
         self.drain();
     }
 
-    /// When the handshake must be woken again: the connection's own
-    /// retransmission deadline, or the budget, whichever comes first.
+    /// When to wake the handshake: the connection's retransmission deadline or the budget,
+    /// whichever is first.
     ///
-    /// Never `None` while the handshake is running, which is the point. A
-    /// server waiting for a ClientHello has no retransmission deadline at
-    /// all, and a caller that asked the connection directly would be told
-    /// there is nothing to wake for.
+    /// Never `None` while running. A server waiting for a ClientHello has no deadline of its own.
     pub(crate) fn poll_timeout(&self) -> Option<Instant> {
         if self.finished() {
             return None;
@@ -508,47 +407,35 @@ impl Handshake {
         self.drain();
     }
 
-    /// The next record to put on the media socket. Where it goes is the
-    /// session's to say; see [`Handshake::outbound`].
+    /// The next record to send. The session picks the destination; see [`Handshake::outbound`].
     pub(crate) fn take_outbound(&mut self) -> Option<Vec<u8>> {
         self.outbound.pop_front()
     }
 
-    /// The keys, once, or the reason there will not be any, once.
-    ///
-    /// `None` while the handshake is still running, and `None` for ever after
-    /// either answer has been taken: a session installs keys once and reports
-    /// a failure once.
+    /// The keys, or the reason there are none, each returned once. `None` while running and after
+    /// it was taken.
     pub(crate) fn take_outcome(&mut self) -> Option<Result<Exported, MediaError>> {
         self.keyed.take()
     }
 
-    /// Which end of the association this one is, fixed when the handshake
-    /// was started and for as long as the association lasts.
+    /// This end's role in the association, fixed for its lifetime.
     pub(crate) const fn role(&self) -> Role {
         self.connection.role()
     }
 
-    /// Whether this handshake is done with, either way — including having
-    /// spent its budget, which the connection itself has no way of knowing.
+    /// Whether the handshake is over either way, including a spent budget.
     pub(crate) fn finished(&self) -> bool {
         self.expired || !matches!(self.connection.state(), State::Handshaking)
     }
 
-    /// Say goodbye on the way out.
-    ///
-    /// RFC 6347 §4.2.8 has `close_notify` end a connection properly, and a
-    /// peer that gets one stops retransmitting a flight into a call that has
-    /// already hung up. The records it produces are drained like any others;
-    /// whether the caller gets to send them before the socket closes is the
-    /// caller's affair, and nothing here waits for an answer.
+    /// Send `close_notify` (RFC 6347 §4.2.8) so the peer stops retransmitting into a call that has
+    /// hung up. The records are drained as usual; nothing waits for an answer.
     pub(crate) fn close(&mut self) {
         self.connection.close();
         self.drain();
     }
 
-    /// Move everything the connection has produced into this type: the
-    /// records to send, and the one outcome worth reporting upwards.
+    /// Move the connection's output here: records to send and the one outcome to report.
     fn drain(&mut self) {
         while let Some(record) = self.connection.poll_transmit() {
             self.outbound.push_back(record);
@@ -573,34 +460,26 @@ impl Handshake {
                         self.keyed = Some(Err(MediaError::DtlsClosed));
                     }
                 }
-                // RFC 5764 §4.1 carries the media in SRTP, outside DTLS, so
-                // this stack sends none and has nothing to do with any a peer
-                // sends. Dropping it is not a refusal of the handshake: the
-                // keys are what the connection is for, and they are unaffected
+                // media travels as SRTP outside DTLS (RFC 5764 §4.1), so application data is
+                // ignored; it does not affect the keys
                 Event::ApplicationData(_) => {}
             }
         }
     }
 }
 
-/// The pair of SRTP contexts a completed handshake opens the stream with.
+/// The SRTP contexts a completed handshake opens the stream with.
 ///
-/// RFC 5764 §4.2 exports one key and salt per direction and `sipral-dtls`
-/// arranges them for the end that asked, so "local" protects what this end
-/// sends and "remote" opens what arrives — the same split RFC 4568 §7.1.1
-/// gives SDES, reached a different way.
+/// RFC 5764 §4.2 exports a key and salt per direction; `sipral-dtls` orders them so "local"
+/// protects what we send and "remote" opens what arrives, as RFC 4568 §7.1.1 does for SDES.
 ///
 /// # Errors
-/// [`MediaError::DtlsProfile`] for a protection profile this build has no
-/// transform for. `sipral-dtls` negotiates only the two it offers, so this is
-/// the arm that a future profile added on one side of the boundary and not the
-/// other would land in, loudly, rather than silently opening a stream with the
-/// wrong transform.
+///
+/// [`MediaError::DtlsProfile`] for a profile this build has no transform for. Only reachable if a
+/// profile is added on one side of the boundary and not the other, and then it fails loudly.
 fn security_of(keying: &SrtpKeying) -> Result<Exported, MediaError> {
     let suite = suite_of(keying.profile())?;
-    // RFC 5764 §4.1.2 fixes the key derivation rate at zero and agrees no
-    // MKI, which is what `Policy::new` already sets: a single derivation and
-    // no identifier
+    // RFC 5764 §4.1.2: key derivation rate zero and no MKI, which `Policy::new` already sets
     Ok(Exported {
         suite,
         policy: Policy::new(suite),
@@ -609,15 +488,12 @@ fn security_of(keying: &SrtpKeying) -> Result<Exported, MediaError> {
     })
 }
 
-/// Whether a datagram is the first flight of a new association: a plaintext
-/// epoch-0 handshake record whose message is a ClientHello with the first
-/// message sequence number (RFC 6347 §4.1, §4.2.2).
+/// Whether a datagram is the first flight of a new association: a plaintext epoch-0 handshake
+/// record holding a ClientHello with message sequence zero (RFC 6347 §4.1, §4.2.2).
 ///
-/// Read off the header alone, because this is asked of a record the running
-/// connection would otherwise take and ignore. The record header is thirteen
-/// octets — type, version, a sixteen-bit epoch, a forty-eight-bit sequence,
-/// a length — and the handshake header after it opens with the message type
-/// and, four octets on, the message sequence.
+/// Read from the headers only, because the running connection would otherwise swallow it. The
+/// record header is 13 octets (type, version, 16-bit epoch, 48-bit sequence, length); the handshake
+/// header starts with the message type and has the message sequence four octets later.
 pub(crate) fn begins_an_association(datagram: &[u8]) -> bool {
     const CLIENT_HELLO: u8 = 1;
     datagram.first() == Some(&22)
@@ -626,16 +502,13 @@ pub(crate) fn begins_an_association(datagram: &[u8]) -> bool {
         && datagram.get(17..19) == Some(&[0, 0][..])
 }
 
-/// The protection profiles a call with `suites` offers and accepts, in that
-/// order: the four there are keys for, strongest first, when it named none
-/// — the two AEAD profiles of RFC 7714 §14.2, then the two AES-CM ones of
-/// RFC 5764 §4.1.2 — and otherwise the ones among its suites that a
-/// profile exists for, in its order.
+/// The protection profiles a call with `suites` offers and accepts, in order. With no suites named:
+/// the four keyable ones, strongest first (the two AEAD profiles of RFC 7714 §14.2, then the two
+/// AES-CM of RFC 5764 §4.1.2). Otherwise those of its suites that have a profile, in its order.
 ///
 /// # Errors
-/// [`MediaError::DtlsProfile`] when `suites` names none of those four: a
-/// call that allowed only suites SDES alone can carry has nothing to offer a
-/// handshake.
+///
+/// [`MediaError::DtlsProfile`] when `suites` has none of the four, so only SDES could carry them.
 pub(crate) fn profiles(suites: Option<&[Suite]>) -> Result<Vec<SrtpProtectionProfile>, MediaError> {
     const STRONGEST_FIRST: [Suite; 4] = [
         Suite::AeadAes256Gcm,
@@ -660,13 +533,8 @@ pub(crate) fn profiles(suites: Option<&[Suite]>) -> Result<Vec<SrtpProtectionPro
     Ok(profiles)
 }
 
-/// The transform a DTLS-SRTP protection profile names, on the media side of
-/// the boundary.
-///
-/// Two enumerations of the same transforms, for the same reason the SDES side
-/// has two: the crate that runs a handshake and the crate that encrypts
-/// packets do not depend on each other, and neither should have to learn the
-/// other's spelling.
+/// The media-side suite for a DTLS-SRTP protection profile. Two enumerations exist because the
+/// handshake crate and the SRTP crate do not depend on each other.
 fn suite_of(profile: SrtpProtectionProfile) -> Result<Suite, MediaError> {
     match profile {
         SrtpProtectionProfile::AES128_CM_HMAC_SHA1_80 => Ok(Suite::AesCm80),
@@ -677,24 +545,19 @@ fn suite_of(profile: SrtpProtectionProfile) -> Result<Suite, MediaError> {
     }
 }
 
-/// What this end writes for `a=setup`, given which party it is and, for an
-/// answerer, what the offer said.
+/// Our `a=setup` given our party and, for an answerer, the offer's value.
 ///
-/// An offerer writes `actpass` (RFC 5763 §5). An answerer writes the value
-/// RFC 4145 §4.1's table leaves it, which for the `actpass` every conforming
-/// offer carries is `active` — the end that sends the ClientHello, so its
-/// first flight can leave with the answer rather than wait for the answer to
-/// arrive.
+/// An offerer writes `actpass` (RFC 5763 §5). An answerer writes what RFC 4145 §4.1 leaves it:
+/// `active` against `actpass`, so its ClientHello can leave with the answer.
 ///
 /// # Errors
-/// [`MediaError::DtlsRole`] for an offer whose `a=setup` is not one of the
-/// four values RFC 4145 §4 defines.
+///
+/// [`MediaError::DtlsRole`] for an offer value outside the four of RFC 4145 §4.
 pub(crate) fn setup_to_write(party: Party, theirs: Option<&str>) -> Result<Setup, MediaError> {
     match party {
         Party::Offerer => Ok(OFFERED_SETUP),
         Party::Answerer => {
-            // §4.1: "active" is the default in an offer that wrote no
-            // attribute at all, and the answer follows from that the same way
+            // §4.1: an offer without the attribute means "active"
             let offered = match theirs {
                 Some(written) => Setup::parse(written).map_err(|_| MediaError::DtlsRole)?,
                 None => Setup::Active,
@@ -706,11 +569,9 @@ pub(crate) fn setup_to_write(party: Party, theirs: Option<&str>) -> Result<Setup
 
 /// Whether two lists of `a=fingerprint` values name the same certificate.
 ///
-/// Compared as sets. RFC 8842 §3.1 asks for a new association when
-/// fingerprints are "modified, added, or removed", and a peer that writes its
-/// lines — one per hash function, RFC 8122 §5 — in another order, or repeats
-/// one, has done none of those. Without regard to case as well, because the
-/// hexadecimal is the same number however it is written.
+/// Compared as sets, case-insensitively. RFC 8842 §3.1 wants a new association when fingerprints
+/// are "modified, added, or removed"; reordering or repeating lines (one per hash, RFC 8122 §5) is
+/// none of those.
 pub(crate) fn same_fingerprints(had: &[String], now: &[String]) -> bool {
     let set = |values: &[String]| {
         let mut normal: Vec<String> = values
@@ -724,21 +585,17 @@ pub(crate) fn same_fingerprints(had: &[String], now: &[String]) -> bool {
     set(had) == set(now)
 }
 
-/// What this end answers a re-offer with, on a call whose association has
-/// already given it `role` (RFC 8842 §5.3).
+/// Our answer to a re-offer on a call whose association gave us `role` (RFC 8842 §5.3: the answer
+/// "does not change the previously negotiated DTLS roles").
 ///
-/// "The answerer MUST insert an SDP 'setup' attribute with an attribute value
-/// that does not change the previously negotiated DTLS roles." Against the
-/// `actpass` §5.5 asks every subsequent offer for, that is simply the role in
-/// force. Against the concrete value an older peer still writes (§5.3 asks
-/// that it be understood), RFC 4145 §4.1 leaves one answer, and when that
-/// answer is the other role the offer is asking for a new association.
+/// Against `actpass` (§5.5) that is simply the current role. Against a concrete value from an older
+/// peer, RFC 4145 §4.1 allows one answer; if that is the other role, the offer asks for a new
+/// association.
 ///
 /// # Errors
-/// [`MediaError::DtlsRoleChanged`] for an offer whose value leaves this end
-/// only the role it does not have — including one that wrote no value at
-/// all, which §4.1 reads as `active` — and [`MediaError::DtlsRole`] for a
-/// value that is not one of the four.
+///
+/// [`MediaError::DtlsRoleChanged`] when the offer leaves us only the other role, including no value
+/// at all (§4.1 reads it as `active`); [`MediaError::DtlsRole`] for an unknown value.
 pub(crate) fn setup_to_keep(role: Role, theirs: Option<&str>) -> Result<Setup, MediaError> {
     let offered = match theirs {
         Some(written) => Setup::parse(written).map_err(|_| MediaError::DtlsRole)?,
@@ -749,8 +606,7 @@ pub(crate) fn setup_to_keep(role: Role, theirs: Option<&str>) -> Result<Setup, M
         Role::Server => Setup::Passive,
     };
     match offered {
-        // "no connection for the time being": nothing to take a role in, and
-        // §4.1 has one answer to it
+        // "no connection for the time being": no role to take
         Setup::HoldConn => Ok(Setup::HoldConn),
         Setup::ActPass => Ok(ours),
         concrete if Setup::answer_to(concrete) == ours => Ok(ours),
@@ -758,21 +614,18 @@ pub(crate) fn setup_to_keep(role: Role, theirs: Option<&str>) -> Result<Setup, M
     }
 }
 
-/// The role a re-negotiation gives this end, from the `a=setup` it wrote and
-/// the one the far end wrote, or `None` where it gives none to compare.
+/// The role a renegotiation gives this end, from the `a=setup` we wrote and theirs, or `None` when
+/// there is nothing to compare.
 ///
-/// Read without asking which of the two was the offer, because this end's
-/// own writing already says so: it writes `actpass` only into an offer (RFC
-/// 8842 §5.5) and a concrete role only into an answer, or into an offer it is
-/// repeating unchanged. A concrete value here is the role, whichever side it
-/// was written on. `actpass` leaves the role to the answer — `active` there
-/// makes this end the server, `passive` or nothing at all (RFC 4145 §4.1's
-/// default for an answer) the client. `holdconn` on either side takes no
-/// role, and there is nothing to compare.
+/// No need to know which was the offer: we write `actpass` only in offers (RFC 8842 §5.5) and a
+/// concrete role only in answers or unchanged repeats. A concrete value of ours is the role. With
+/// our `actpass`, their `active` makes us server, `passive` or nothing (RFC 4145 §4.1's answer
+/// default) makes us client. `holdconn` on either side gives no role.
 ///
 /// # Errors
-/// [`MediaError::DtlsRole`] for a pair §4.1 does not allow together: the
-/// same concrete role on both sides, or `actpass` answered with `actpass`.
+///
+/// [`MediaError::DtlsRole`] for a pair §4.1 forbids: the same concrete role on both sides, or
+/// `actpass` answered with `actpass`.
 pub(crate) fn role_after(ours: Setup, theirs: Option<Setup>) -> Result<Option<Role>, MediaError> {
     match (ours, theirs) {
         (Setup::HoldConn, _) | (_, Some(Setup::HoldConn)) => Ok(None),
@@ -805,9 +658,7 @@ mod tests {
 
     use crate::error::MediaError;
 
-    /// A wall clock in the middle of the period any certificate this module
-    /// writes is good for; the number itself says nothing, because nothing
-    /// checks it.
+    /// A wall clock inside every test certificate's validity period; nothing checks it.
     const NOW_UNIX: u64 = 1_790_000_000;
 
     fn identity(seed: u8) -> (Arc<Identity>, KeySource) {
@@ -818,9 +669,8 @@ mod tests {
 
     #[test]
     fn the_key_stream_hands_out_every_octet_once_and_in_order() {
-        // the same seed, drawn in one go and drawn in pieces, is the same
-        // stream: a handshake that drew a key and then a serial number must
-        // not have been handed the same block twice
+        // the same seed drawn at once or in pieces must give the same stream, never the same block
+        // twice
         let mut whole = KeySource::new([9; 32]);
         let mut in_pieces = KeySource::new([9; 32]);
         let mut all = [0_u8; 96];
@@ -851,7 +701,7 @@ mod tests {
         source.fill(&mut drawn[10..]);
         assert!(source.block[..8].iter().all(|&octet| octet == 0));
         assert!(drawn.iter().any(|&octet| octet != 0));
-        // and what is left goes with the source
+        // and the remainder is wiped with the source
         let _: &Zeroizing<[u8; 32]> = &source.block;
     }
 
@@ -869,8 +719,7 @@ mod tests {
 
     #[test]
     fn the_same_seed_makes_the_same_certificate_every_time() {
-        // which is what makes a handshake reproducible in a test, and is also
-        // the exact reason the media seed must be real entropy in production
+        // reproducible in tests, which is exactly why production needs real entropy
         let (one, _) = identity(7);
         let (again, _) = identity(7);
         assert_eq!(one.fingerprint(), again.fingerprint());
@@ -938,17 +787,15 @@ mod tests {
 
     #[test]
     fn a_re_offer_is_answered_with_the_role_the_association_already_has() {
-        // RFC 8842 §5.3, against the actpass §5.5 asks every re-offer for:
-        // the role in force, which a fresh answer to actpass would not be for
-        // a server — `setup_to_write` answers it `active` every time
+        // RFC 8842 §5.3 against the actpass of §5.5: keep the current role, which `setup_to_write`
+        // would not do for a server (it always answers `active`)
         for (role, kept) in [
             (Role::Client, Setup::Active),
             (Role::Server, Setup::Passive),
         ] {
             assert_eq!(setup_to_keep(role, Some("actpass")), Ok(kept), "{role:?}");
         }
-        // an older peer's concrete value, where RFC 4145 §4.1 leaves exactly
-        // the role in force
+        // an older peer's concrete value, where §4.1 leaves exactly the current role
         assert_eq!(
             setup_to_keep(Role::Client, Some("passive")),
             Ok(Setup::Active)
@@ -1052,13 +899,10 @@ mod tests {
         );
     }
 
-    /// The two ends of one call, driven against each other with nothing but
-    /// the datagrams they produce — which is the whole of what a socket would
-    /// have carried.
+    /// Drive both ends of a call against each other with only their datagrams.
     ///
-    /// Named `dialling`/`answering` rather than `caller`/`callee` for the
-    /// reason `interop/harness/src/local.rs` gives: the two read too much
-    /// alike for `clippy::similar_names`, which this workspace denies.
+    /// Named `dialling`/`answering` because `caller`/`callee` trips `clippy::similar_names` (see
+    /// `interop/harness/src/local.rs`).
     fn shake_hands(
         dialling: &mut Handshake,
         answering: &mut Handshake,
@@ -1079,8 +923,7 @@ mod tests {
                 break;
             }
             if !moved {
-                // nothing crossed, so the only thing that can move either end
-                // is the retransmission timer
+                // nothing crossed, so only the retransmission timer can move either end
                 at += Duration::from_millis(1100);
                 dialling.on_timeout(at);
                 answering.on_timeout(at);
@@ -1154,10 +997,9 @@ mod tests {
         profiles(None).expect("four profiles")
     }
 
-    /// The suite a handshake between an offerer holding `dialling` and an
-    /// answerer holding `answering` settles on. The answerer is the client
-    /// here, so its order is the one offered and the offerer, the server,
-    /// chooses among it in its own (RFC 5764 §4.1.1).
+    /// The suite a handshake settles on between an offerer with `dialling` and an answerer with
+    /// `answering`. The answerer is the client and offers its order; the server chooses in its own
+    /// (RFC 5764 §4.1.1).
     fn settled_on(
         dialling: Vec<SrtpProtectionProfile>,
         answering: Vec<SrtpProtectionProfile>,
@@ -1213,10 +1055,9 @@ mod tests {
         suite
     }
 
-    /// 8.10: the GCM profiles are the account's to allow and to order. The
-    /// default puts them first; a call that names only AES-CM gets AES-CM
-    /// from a peer that would have preferred GCM, and the server's own order
-    /// decides among what the client offered.
+    /// 8.10: the account allows and orders the GCM profiles. They come first by default; a call
+    /// naming only AES-CM gets AES-CM, and the server's order decides among what the client
+    /// offered.
     #[test]
     fn the_profiles_a_call_names_are_the_ones_its_handshake_offers_in_its_order() {
         assert_eq!(settled_on(every(), every()), Suite::AeadAes256Gcm);
@@ -1244,10 +1085,8 @@ mod tests {
 
     #[test]
     fn a_peer_that_signalled_sha_384_or_sha_512_is_held_to_it() {
-        // RFC 8122 §5.1: the certificate is checked against the fingerprints
-        // under the most preferred hash the peer offered, and SHA-512 is
-        // preferred over SHA-256 here, so a wrong SHA-256 line beside a
-        // right SHA-512 one is not looked at
+        // RFC 8122 §5.1: only the most preferred hash is checked, SHA-512 over SHA-256, so a wrong
+        // SHA-256 line beside a right SHA-512 one is ignored
         let now = Instant::now();
         let (dialling_identity, mut dialling_keys) = identity(31);
         let (answering_identity, mut answering_keys) = identity(32);
@@ -1299,10 +1138,8 @@ mod tests {
 
     #[test]
     fn a_peer_whose_certificate_is_not_the_one_the_signalling_named_gets_no_keys() {
-        // RFC 8122 §5.1: "if the fingerprint does not match ... the endpoint
-        // MUST NOT establish the TLS connection". This is the whole of the
-        // authentication, so it is the whole of what a man in the middle has
-        // to beat
+        // RFC 8122 §5.1: a fingerprint mismatch "MUST NOT establish the TLS connection". This is
+        // the whole authentication
         let now = Instant::now();
         let (dialling_identity, mut dialling_keys) = identity(21);
         let (answering_identity, mut answering_keys) = identity(22);
@@ -1371,10 +1208,8 @@ mod tests {
 
     #[test]
     fn two_ends_that_both_claim_the_same_role_are_refused_rather_than_left_waiting() {
-        // RFC 4145 §4.1 has no row for an answer of actpass, and the failure
-        // it would otherwise cause is the quiet one: two servers waiting for
-        // a ClientHello neither will send, for the whole of the handshake
-        // timeout
+        // RFC 4145 §4.1 has no row for an actpass answer; otherwise two servers would wait silently
+        // for the whole timeout
         let now = Instant::now();
         let (own, mut keys) = identity(41);
         let seen = Keying::Dtls {
@@ -1504,10 +1339,8 @@ mod tests {
 
     #[test]
     fn a_server_that_is_never_spoken_to_gives_up_when_a_client_would_have() {
-        // the failure this budget exists for. A DTLS server has no flight to
-        // retransmit, so `Connection::poll_timeout` answers `None` for ever
-        // while the state is still `Handshaking`, and a call driven by that
-        // alone would wait for as long as somebody stayed on the line
+        // what the budget is for: a DTLS server has no flight to retransmit, so
+        // `Connection::poll_timeout` would return `None` forever
         let now = Instant::now();
         let (own, mut keys) = identity(81);
         let seen = Keying::Dtls {
@@ -1557,13 +1390,12 @@ mod tests {
 
     #[test]
     fn the_budget_is_the_schedule_a_client_would_have_spent() {
-        // 1 + 2 + 4 + 8 + 16 + 32 seconds of retransmissions and a last wait
-        // of sixty, which is what RFC 6347 §4.2.4.1's defaults add up to
+        // 1+2+4+8+16+32 s of retransmissions plus a final 60 s wait, the RFC 6347 §4.2.4.1 defaults
         assert_eq!(
             budget(Retransmission::default()),
             Duration::from_secs(1 + 2 + 4 + 8 + 16 + 32 + 60)
         );
-        // and it follows the settings rather than being written down twice
+        // and it follows the settings
         let brisk = Retransmission {
             initial: Duration::from_millis(500),
             max: Duration::from_secs(4),

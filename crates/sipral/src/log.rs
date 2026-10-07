@@ -1,54 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The engine's log: lines with a level, handed to a sink the application
-//! installs, off until it does.
+//! The engine's log: leveled lines handed to a sink the application installs; off until it does.
 //!
-//! A diagnostic record (`docs/14-diagnostics.md`) says what the stack decided
-//! about one call; this says what the whole engine is doing, as it does it,
-//! for the application's own log file. Four properties hold it up, and each
-//! is tested:
+//! A diagnostic record (`docs/14-diagnostics.md`) explains one call's decisions; this log narrates
+//! the whole engine for the application's log file. Each property below is tested:
 //!
-//! - **Off by default, cheap when off.** A [`Log`] has no sink and no level
-//!   until [`Log::enable`]; asking whether a level is on is one atomic load,
-//!   and nothing is formatted for a level that is off.
-//! - **A flood cannot stall the stack.** Lines are admitted through a token
-//!   bucket — [`BURST`] at once, [`PER_SECOND`] a second after that, on the
-//!   caller's own clock — and held in a queue of at most [`QUEUE_CEILING`]
-//!   lines. What the bucket or the queue turns away is counted, never waited
-//!   for, and the next line delivered says how many went before it
-//!   ([`LogRecord::suppressed`]). A sink that is slow slows the thread that
-//!   flushes, by at most one bucket's worth of calls, and nothing else.
-//! - **The sink is never called with a lock held that it could re-enter.**
-//!   Producing a line only queues it; [`Log::flush`] takes the queue out
-//!   under the log's own lock, lets that lock go, and only then calls the
-//!   sink, one line at a time. The engine never flushes — it is driven from
-//!   inside its owner's locks, `sipral-ffi`'s stack lock among them — so the
-//!   owner flushes once it holds nothing: the C ABI after every entry point
-//!   has let the stack go. One flush delivers at a time, so lines arrive in
-//!   order and on one thread; a flush that finds another delivering leaves
-//!   its lines to it.
-//! - **No line carries a secret.** Every line is run through the redaction
-//!   `docs/14-diagnostics.md` describes before it is queued:
-//!   [`sipral_diag::redact_text`] over prose, which pseudonymises a URI's
-//!   user part and every IP literal and drops credentials outright, and
-//!   [`sipral_diag::redact_message`] over a whole SIP message at
-//!   [`LogLevel::Trace`], which also drops `Authorization` and SDES keys. The
-//!   pseudonyms are keyed with a secret the application hands to
-//!   [`Log::new`], so they correlate within one log and reveal nothing
-//!   outside it — or, made with [`Log::from_salt`], keyed with a salt the
-//!   application keeps for the installation, so the same address gets the
-//!   same pseudonym in every run and two runs' logs can be laid side by
-//!   side.
-//! - **A diagnostic trace, only when asked for.** [`Log::set_diagnostic`]
-//!   turns on the one mode that writes SIP messages whole — users, names
-//!   and addresses as they were sent — for an operator comparing two runs.
-//!   Even then [`sipral_diag::strip_secrets`] takes every `Authorization`
-//!   and `Proxy-Authorization` value and every SDP key (`a=crypto`, `k=`,
-//!   `a=key-mgmt`) and every URI's password out of each message first,
-//!   bytes the parser refuses included, and prose lines lose their
-//!   credentials and URI passwords the same way. It is
-//!   off by default and is never turned on by anything but that call.
+//! - **Off by default, cheap when off.** No sink and no level until [`Log::enable`]; a level check
+//!   is one atomic load, and nothing is formatted for a disabled level.
+//! - **A flood cannot stall the stack.** A token bucket admits [`BURST`] lines at once, then
+//!   [`PER_SECOND`], on the caller's clock, into a queue of at most [`QUEUE_CEILING`]. Rejected
+//!   lines are counted, never waited for, and the next delivered line reports them
+//!   ([`LogRecord::suppressed`]). A slow sink slows only the flushing thread.
+//! - **The sink never runs under a lock it could re-enter.** Producing only queues; [`Log::flush`]
+//!   takes the queue under the log's lock, releases it, then calls the sink line by line. The
+//!   engine never flushes, since it runs inside its owner's locks (`sipral-ffi`'s stack lock among
+//!   them); the owner flushes when it holds nothing, which the C ABI does after every entry point.
+//!   One flush delivers at a time, so lines arrive in order on one thread; a concurrent flush
+//!   leaves its lines to the active one.
+//! - **No line carries a secret.** Every line is redacted before queueing:
+//!   [`sipral_diag::redact_text`] on prose (pseudonymises URI user parts and IP literals, drops
+//!   credentials) and [`sipral_diag::redact_message`] on SIP messages at [`LogLevel::Trace`] (also
+//!   drops `Authorization` and SDES keys). Pseudonyms are keyed by a secret passed to [`Log::new`],
+//!   so they correlate within one log only, or with [`Log::from_salt`] by an installation salt, so
+//!   they match across runs.
+//! - **Diagnostic trace only on request.** [`Log::set_diagnostic`] writes SIP messages whole, with
+//!   real users and addresses, for comparing runs. Even then [`sipral_diag::strip_secrets`] removes
+//!   `Authorization` and `Proxy-Authorization` values, SDP keys (`a=crypto`, `k=`, `a=key-mgmt`)
+//!   and URI passwords from every message, unparseable ones included, and prose loses credentials
+//!   the same way. Off by default; only that call turns it on.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -60,25 +40,21 @@ use std::time::Instant;
 use sipral_diag::{Mode, Redactor, redact_message, redact_text, strip_secrets, strip_secrets_text};
 use zeroize::Zeroizing;
 
-/// How many lines the bucket lets through at once, before the rate below
-/// applies.
+/// Lines the bucket lets through at once before the per-second rate applies.
 pub const BURST: u32 = 200;
 
 /// How many lines a second the bucket earns back.
 pub const PER_SECOND: u32 = 100;
 
-/// How many admitted lines wait for [`Log::flush`] at most. One past it is
-/// counted as suppressed rather than queued.
+/// The most admitted lines waiting for [`Log::flush`]; beyond that a line counts as suppressed.
 pub const QUEUE_CEILING: usize = 1024;
 
-/// How many values one redactor remembers before it is replaced by a fresh
-/// one. Its pseudonyms are a keyed hash, so a fresh redactor under the same
-/// key writes the same ones; the replacement only bounds the memory a
-/// long-running log keeps.
+/// Values one redactor remembers before being replaced. Pseudonyms are a keyed hash, so a fresh
+/// redactor gives the same ones; this only bounds memory.
 const REDACTOR_REUSE: u32 = 4096;
 
-/// The shortest salt [`Log::from_salt`] takes: 128 bits, so that a pseudonym
-/// cannot be reversed by trying every salt as well as every address.
+/// The shortest salt [`Log::from_salt`] accepts: 128 bits, so pseudonyms cannot be reversed by
+/// brute-forcing salt and address together.
 pub const MIN_SALT: usize = 16;
 
 /// A salt shorter than [`MIN_SALT`] bytes, refused.
@@ -100,22 +76,18 @@ impl fmt::Display for SaltTooShort {
 
 impl std::error::Error for SaltTooShort {}
 
-/// The pseudonym key an installation's salt stands for: the key
-/// [`Log::from_salt`] keys its pseudonyms with, and the one a state snapshot
-/// ([`crate::EngineState`]) is redacted under to agree with it.
+/// The pseudonym key for an installation salt: what [`Log::from_salt`] uses and what a state
+/// snapshot ([`crate::EngineState`]) is redacted under so the two agree.
 ///
-/// The salt is the application's to draw once, from the platform's
-/// generator, and to keep with the installation's other settings: the same
-/// salt gives the same key, so the same address or user gets the same
-/// pseudonym in every run, and two runs' traces compare line by line. It is
-/// a secret like any key — whoever holds it can test a guessed address
-/// against a pseudonym — and it must not be a seed that is written anywhere
-/// in clear.
+/// Draw the salt once from the platform generator and keep it with the installation's settings: the
+/// same salt gives the same pseudonyms in every run, so traces compare line by line. It is a secret
+/// (it lets someone test a guessed address against a pseudonym) and must not be a seed written
+/// anywhere in clear.
 ///
-/// The key comes back in a buffer that wipes itself when dropped, sized once
-/// so that no copy of the salt is left behind by a buffer growing.
+/// The key is returned in a self-wiping buffer, sized once so no copy is left by growth.
 ///
 /// # Errors
+///
 /// [`SaltTooShort`] for a salt under [`MIN_SALT`] bytes.
 pub fn pseudonym_key(salt: &[u8]) -> Result<PseudonymKey, SaltTooShort> {
     if salt.len() < MIN_SALT {
@@ -133,19 +105,15 @@ pub type PseudonymKey = Zeroizing<Vec<u8>>;
 /// What [`pseudonym_key`] appends to an installation's salt.
 const SALTED_LABEL: &[u8] = b"sipral log and state pseudonyms";
 
-/// The label [`derived_pseudonym_key`] derives under. Its own, so that the
-/// key it gives is unrelated to anything else made from the same secret.
+/// The label for [`derived_pseudonym_key`], unique so the key is unrelated to anything else derived
+/// from the same secret.
 const DERIVED_LABEL: &[u8] = b"sipral log and state pseudonym key, derived";
 
-/// A pseudonym key derived from a secret the application already keeps for
-/// another purpose, for a log given no salt of its own: HMAC-SHA256 keyed
-/// with `secret`, over a label of the log's own.
+/// A pseudonym key derived from a secret the application already has, for a log without its own
+/// salt: HMAC-SHA256 keyed with `secret` over a fixed label.
 ///
-/// One way: the key, and every pseudonym made with it, says nothing about
-/// `secret`. That is the point of deriving rather than reusing it. A media
-/// seed every SRTP master key is drawn from must not also be the key a
-/// log's pseudonyms are made with, held in the log's memory for as long as
-/// the log lives and fed values an attacker can choose.
+/// One-way, so neither the key nor any pseudonym reveals `secret`. The SRTP media seed must never
+/// be the pseudonym key itself, held in log memory and fed attacker-chosen values.
 #[must_use]
 pub fn derived_pseudonym_key(secret: &[u8]) -> PseudonymKey {
     Zeroizing::new(sipral_diag::derive_key(secret, DERIVED_LABEL).to_vec())
@@ -157,16 +125,15 @@ pub fn derived_pseudonym_key(secret: &[u8]) -> PseudonymKey {
 pub enum LogLevel {
     /// Something failed and the application is likely to see the effect.
     Error = 1,
-    /// Something went wrong that the stack worked around, or that is about
-    /// to matter: a registration refused, audio that stopped arriving.
+    /// Something went wrong that the stack worked around or that is about to matter: a refused
+    /// registration, audio that stopped.
     Warn = 2,
-    /// What an operator wants in a log file: a registration granted, a call
-    /// arriving, confirmed or ending, media starting.
+    /// What an operator wants in a log file: registrations granted, calls arriving, confirmed or
+    /// ending, media starting.
     Info = 3,
-    /// Every event the engine hands out, and every decision the diagnostic
-    /// record writes down.
+    /// Every engine event and every diagnostic decision.
     Debug = 4,
-    /// Every SIP message, in full and redacted.
+    /// Every SIP message, in full, redacted.
     Trace = 5,
 }
 
@@ -208,13 +175,13 @@ impl fmt::Display for LogLevel {
 pub struct LogRecord<'a> {
     /// How loud it is.
     pub level: LogLevel,
-    /// Which part of the engine wrote it: `registration`, `call`, `media`,
-    /// `decision`, `sip`, `api`, and so on. A short fixed word, never data.
+    /// Which part of the engine wrote it (`registration`, `call`, `media`, `decision`, `sip`,
+    /// `api`, ...). A fixed word, never data.
     pub target: &'a str,
     /// The line, already redacted.
     pub message: &'a str,
-    /// How many lines were turned away — by the rate limit or a full queue —
-    /// since the line before this one was delivered. Zero almost always.
+    /// Lines dropped by the rate limit or a full queue since the previous delivered line. Almost
+    /// always zero.
     pub suppressed: u64,
 }
 
@@ -230,18 +197,16 @@ pub enum Travel {
     Sent,
 }
 
-/// The engine's log. Cheap to clone: every clone is the same log.
+/// The engine's log. Clones share the same log.
 ///
-/// Created off, and handed to whatever produces lines —
-/// [`crate::MediaEngine::set_log`] for the engine's own — and to whatever
-/// drives the engine, which calls [`Log::flush`] once it holds no lock the
-/// sink could need.
+/// Created off and handed to producers ([`crate::MediaEngine::set_log`] for the engine) and to the
+/// driver, which calls [`Log::flush`] once it holds no lock the sink could need.
 #[derive(Clone)]
 pub struct Log(Arc<Shared>);
 
 struct Shared {
-    /// The most detailed level delivered, or zero for off. Read without the
-    /// lock, so a producer asks for nothing and formats nothing when off.
+    /// Most detailed level delivered, zero when off. Read without the lock, so a disabled log costs
+    /// nothing.
     level: AtomicU8,
     inner: Mutex<Inner>,
 }
@@ -255,8 +220,8 @@ struct Inner {
     pending_suppressed: u64,
     /// Turned away over the log's whole life.
     suppressed_ever: u64,
-    /// The pseudonym key, kept to key each fresh redactor with; wiped, like
-    /// the copy inside the redactor's [`Mode`], when the log goes.
+    /// The pseudonym key for new redactors; wiped on drop, like the copy inside the redactor's
+    /// [`Mode`].
     key: PseudonymKey,
     redactor: Redactor,
     redactor_uses: u32,
@@ -286,8 +251,8 @@ impl Bucket {
         }
     }
 
-    /// Whether a line may pass at `now`, taking its token if so. A clock
-    /// that went backwards earns nothing and costs nothing.
+    /// Whether a line may pass at `now`, taking a token if so. A clock going backwards earns and
+    /// costs nothing.
     fn admit(&mut self, now: Instant) -> bool {
         if let Some(then) = self.at {
             let earned = now.saturating_duration_since(then).as_secs_f64() * f64::from(PER_SECOND);
@@ -305,7 +270,7 @@ impl Bucket {
 
 impl fmt::Debug for Log {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // the pseudonym key is in here, and a derived Debug would print it
+        // a derived Debug would print the pseudonym key
         f.debug_struct("Log")
             .field("level", &self.level())
             .finish_non_exhaustive()
@@ -313,14 +278,12 @@ impl fmt::Debug for Log {
 }
 
 impl Log {
-    /// A log that is off, pseudonymising under `key`.
+    /// A disabled log that pseudonymises under `key`.
     ///
-    /// `key` is a secret: draw it once from the platform's generator, and do
-    /// not reuse a seed that is written anywhere in clear — the signalling
-    /// seed goes into every replay recording, and an IP pseudonym keyed with
-    /// it could be reversed by trying every address. The same key gives the
-    /// same pseudonym for the same value for the life of the log, so one
-    /// call's lines can be followed through the file.
+    /// `key` is a secret: draw it once from the platform generator, and never reuse a seed written
+    /// in clear (the signalling seed is in every replay recording, and IP pseudonyms under it could
+    /// be reversed by trying addresses). One key gives stable pseudonyms for the log's lifetime, so
+    /// a call can be followed through the file.
     #[must_use]
     pub fn new(key: &[u8]) -> Self {
         Self(Arc::new(Shared {
@@ -340,30 +303,24 @@ impl Log {
         }))
     }
 
-    /// A log that is off, pseudonymising under the key `salt` stands for
-    /// ([`pseudonym_key`]): the same pseudonyms in every run of an
-    /// installation that keeps its salt.
+    /// A disabled log using the key `salt` stands for ([`pseudonym_key`]), so pseudonyms match
+    /// across runs that keep the salt.
     ///
     /// # Errors
+    ///
     /// [`SaltTooShort`] for a salt under [`MIN_SALT`] bytes.
     pub fn from_salt(salt: &[u8]) -> Result<Self, SaltTooShort> {
         Ok(Self::new(&pseudonym_key(salt)?))
     }
 
-    /// Write SIP messages whole — or go back to redacting them.
+    /// Write SIP messages whole, or go back to redacting them.
     ///
-    /// Off by default, and meant to stay off outside a diagnosis: with it
-    /// on, a trace line at [`LogLevel::Trace`] carries every user, display
-    /// name, number and address exactly as it went on the wire, and the peer
-    /// it went to, so that two runs can be compared where pseudonyms would
-    /// hide the difference. What never appears, in either mode, is a
-    /// credential or a key: [`sipral_diag::strip_secrets`] takes every
-    /// `Authorization` and `Proxy-Authorization` value, every `a=crypto`
-    /// `inline:` key, every `k=` key, every `a=key-mgmt` payload and every
-    /// URI's password out of each message first — a message the parser
-    /// refuses included, which is then written stripped rather than
-    /// withheld — and prose lines lose their credentials and URI passwords
-    /// with [`sipral_diag::strip_secrets_text`], without pseudonyms either.
+    /// Off by default and meant only for diagnosis: [`LogLevel::Trace`] lines then carry users,
+    /// display names, numbers, addresses and the peer exactly as sent. Secrets never appear in
+    /// either mode: [`sipral_diag::strip_secrets`] removes `Authorization` and
+    /// `Proxy-Authorization` values, `a=crypto` `inline:` keys, `k=` keys, `a=key-mgmt` payloads
+    /// and URI passwords from every message (unparseable ones are written stripped, not withheld),
+    /// and [`sipral_diag::strip_secrets_text`] does the same for prose, without pseudonyms.
     pub fn set_diagnostic(&self, on: bool) {
         self.inner().diagnostic = on;
     }
@@ -374,16 +331,15 @@ impl Log {
         self.inner().diagnostic
     }
 
-    /// Deliver every line at `level` and louder to `sink`, replacing any sink
-    /// already installed. Lines already queued go to the new sink.
+    /// Deliver lines at `level` and louder to `sink`, replacing any previous sink. Already queued
+    /// lines go to the new one.
     pub fn enable(&self, level: LogLevel, sink: LogSink) {
         let mut inner = self.inner();
         inner.sink = Some(sink);
         self.0.level.store(level as u8, Ordering::Release);
     }
 
-    /// Change how much is delivered, keeping the sink. Nothing happens on a
-    /// log with no sink: there is nowhere for the lines to go.
+    /// Change the level, keeping the sink. No effect without a sink.
     pub fn set_level(&self, level: LogLevel) {
         let inner = self.inner();
         if inner.sink.is_some() {
@@ -391,8 +347,8 @@ impl Log {
         }
     }
 
-    /// Turn the log off: nothing more is produced, the sink is let go, and
-    /// what was queued is dropped undelivered.
+    /// Turn the log off: nothing more is produced, the sink is released, and queued lines are
+    /// dropped.
     pub fn disable(&self) {
         let mut inner = self.inner();
         self.0.level.store(0, Ordering::Release);
@@ -413,17 +369,15 @@ impl Log {
         level as u8 <= self.0.level.load(Ordering::Acquire)
     }
 
-    /// How many lines the rate limit and the queue ceiling have turned away
-    /// over this log's life.
+    /// Lines dropped by the rate limit and queue ceiling over the log's life.
     #[must_use]
     pub fn suppressed(&self) -> u64 {
         self.inner().suppressed_ever
     }
 
-    /// A line of prose, redacted with [`sipral_diag::redact_text`] before it
-    /// is queued. `message` is only called when `level` is on and the rate
-    /// limit lets the line through, so a line that is not delivered costs
-    /// neither the formatting nor the redaction.
+    /// A prose line, redacted with [`sipral_diag::redact_text`] before queueing. `message` is
+    /// called only if the level is on and the rate limit admits the line, so a dropped line costs
+    /// no formatting or redaction.
     pub fn line(
         &self,
         level: LogLevel,
@@ -440,21 +394,19 @@ impl Log {
         });
     }
 
-    /// A whole SIP message at [`LogLevel::Trace`], redacted with
-    /// [`sipral_diag::redact_message`]: credentials and SDES keys dropped,
-    /// every user part, display name and IP literal pseudonymised. Bytes the
-    /// parser cannot read are not written at all — only their size — since
-    /// nothing could promise every identifier in them was found.
+    /// A whole SIP message at [`LogLevel::Trace`], redacted with [`sipral_diag::redact_message`]:
+    /// credentials and SDES keys dropped, user parts, display names and IP literals pseudonymised.
+    /// Unparseable bytes are logged by size only, since nothing guarantees every identifier in them
+    /// was found.
     ///
-    /// With the diagnostic trace on ([`Log::set_diagnostic`]), the message
-    /// and the peer are written as they are, with only the secrets taken out.
+    /// With [`Log::set_diagnostic`] on, the message and peer are written as they are, minus
+    /// secrets.
     pub fn sip_message(&self, travel: Travel, peer: SocketAddr, bytes: &[u8], now: Instant) {
         self.message(travel, Some(peer), bytes, now);
     }
 
-    /// [`Log::sip_message`], for a message that arrived on, or went out on,
-    /// a connection whose far end was never named to this stack: the line
-    /// says "on a connection" where the peer would be.
+    /// [`Log::sip_message`] for a message on a connection whose far end this stack was never told;
+    /// the line says "on a connection" instead of a peer.
     pub fn sip_message_on_a_connection(&self, travel: Travel, bytes: &[u8], now: Instant) {
         self.message(travel, None, bytes, now);
     }
@@ -530,14 +482,12 @@ impl Log {
         });
     }
 
-    /// Hand what is queued to the sink, and say how many lines that was.
+    /// Deliver the queue to the sink and return how many lines that was.
     ///
-    /// Call it holding no lock the sink could need — in particular, never
-    /// from inside anything that holds the engine. Only what was queued when
-    /// this began is delivered, so a sink that logs through this same log
-    /// cannot keep a thread in here; a flush that finds another delivering
-    /// returns zero at once, and what was queued after that one began waits
-    /// in the queue for the next flush.
+    /// Call it holding no lock the sink could need, never from inside anything holding the engine.
+    /// Only lines queued at the start are delivered, so a sink that logs to this log cannot trap
+    /// the thread. A flush that finds another delivering returns zero at once; later lines wait for
+    /// the next flush.
     #[must_use = "the count is what a caller that wants to know whether anything went reads"]
     pub fn flush(&self) -> usize {
         let (sink, mut batch) = {
@@ -552,9 +502,8 @@ impl Log {
             inner.delivering = true;
             (sink, std::mem::take(&mut inner.queue))
         };
-        // a sink that panics unwinds through here, and the flag has to come
-        // down with it: left up, every later flush would find somebody
-        // "delivering" and the log would go quiet for the rest of its life
+        // a panicking sink unwinds through here and must lower the flag, or every later flush would
+        // think someone is delivering and the log would go silent
         let _done = Delivering(self);
         let mut delivered = 0;
         while let Some(line) = batch.pop_front() {
@@ -570,14 +519,12 @@ impl Log {
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
-        // a panic in a producer leaves a queue and a few counters, whole
-        // between statements
+        // a panicking producer leaves the queue and counters consistent
         self.0.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// A flush in progress on one log, which ends when this is dropped: at the
-/// end of the batch, or while a panicking sink unwinds.
+/// A flush in progress on one log; ends when dropped, at the end of the batch or during unwinding.
 struct Delivering<'a>(&'a Log);
 
 impl Drop for Delivering<'_> {
@@ -671,8 +618,7 @@ mod tests {
         assert_eq!(last.3, (flood - BURST as usize) as u64);
         assert_eq!(log.suppressed(), last.3);
         drop(lines);
-        // the second after that earned another second's worth, on top of
-        // what the line above left, and nothing more
+        // one more second earns one second's worth on top of what was left
         let later = after + Duration::from_secs(1);
         for _ in 0..PER_SECOND * 3 {
             log.line(LogLevel::Debug, "flood", later, String::new);
@@ -702,8 +648,7 @@ mod tests {
         log.enable(
             LogLevel::Info,
             Arc::new(move |_record: &LogRecord<'_>| {
-                // each of these takes the log's own lock: a sink called with
-                // it held would deadlock here rather than return
+                // each call takes the log's lock: a sink called under it would deadlock here
                 inner.line(LogLevel::Info, "again", Instant::now(), || {
                     "inside".to_owned()
                 });
@@ -822,10 +767,8 @@ v=0\r\nc=IN IP4 198.51.100.4\r\na=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:QUJD\r
         );
     }
 
-    /// Every credential and key a message can carry, in the spellings a peer
-    /// may use: the field names in any case and with space before the colon,
-    /// a value folded onto a second line, bare LF line ends, two keys on one
-    /// `a=crypto` line, `k=` and MIKEY.
+    /// Every credential and key a message can carry, in the spellings peers use: any case, space
+    /// before the colon, folded values, bare LF, two keys on one `a=crypto` line, `k=` and MIKEY.
     fn secret_bearing() -> Vec<(Vec<u8>, &'static [&'static str])> {
         const DIGEST: &[&str] = &["0badc0ffee", "d1gest-n0nce-kept?", "feedface", "5ecretpw"];
         const SDES: &[&str] = &["Rmlyc3RLZXk", "U2Vjb25kS2V5", "S0VZ", "MIKEYDATA"];
@@ -980,8 +923,7 @@ Content-Length: {}\r\n\r\n{sdp}",
 
     #[test]
     fn one_salt_gives_the_same_pseudonyms_in_every_run() {
-        // the trial: loopback's pseudonym changed on every start, so two runs
-        // could not be compared
+        // the trial run: loopback's pseudonym changed every start, so runs could not be compared
         let run = |salt: &[u8]| {
             let log = Log::from_salt(salt).unwrap();
             let seen = listening(&log, LogLevel::Info);
@@ -1006,9 +948,8 @@ Content-Length: {}\r\n\r\n{sdp}",
         );
     }
 
-    /// A key derived from a secret is one way and the secret's own: it holds
-    /// none of the secret's bytes, another secret gives another key, and the
-    /// log keeps it, like the salted one, in a buffer that wipes itself.
+    /// A derived key is one-way and specific to its secret: it contains none of the secret's bytes,
+    /// another secret gives another key, and it sits in a self-wiping buffer.
     #[test]
     fn a_derived_pseudonym_key_holds_nothing_of_its_secret() {
         let secret = [0xa7_u8; 32];

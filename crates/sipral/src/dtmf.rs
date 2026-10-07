@@ -1,81 +1,53 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Dialling into a call that is already up: the keys, and the schedule
-//! `sipral-rtp` has to be driven on to put them on the wire.
+//! Dialling into a call that is up: the keys, and when to drive `sipral-rtp` to send them.
 //!
-//! `sipral-rtp` already writes a named telephone event and already knows what
-//! RFC 4733 does to the sequence number and the timestamp when one goes out.
-//! What it does not have, because it never sees a frame boundary, is *when* to
-//! send the next one. That is here: a queue of digits, and one packet per
-//! captured frame, which §2.5.1.2 names as the natural choice — "a natural
-//! interval is the spacing between non-event audio packets".
+//! `sipral-rtp` writes RFC 4733 events and handles their sequence numbers and timestamps, but never
+//! sees frame boundaries. Here is the queue and the pacing: one packet per captured frame, the
+//! interval §2.5.1.2 suggests ("the spacing between non-event audio packets").
 //!
-//! A digit replaces the audio for as long as it lasts. That is not a
-//! simplification, it is the shape of the payload format: §2.1 has events use
-//! the audio stream's own sequence numbers and timestamps, and
-//! `RtpSession::send_event` moves the audio clock across the event on the
-//! strength of it. Sending the microphone as well would put two things on one
-//! clock.
+//! A digit replaces the audio while it lasts: events share the audio stream's sequence numbers and
+//! timestamps (§2.1), and `RtpSession::send_event` moves the audio clock across the event.
 //!
 //! # Why there is a queue
 //!
-//! Somebody entering an extension presses four keys faster than four digits
-//! can be sent, and all four have to arrive. So a key pressed while another is
-//! going out waits its turn instead of being refused, and the pause between
-//! them is held without the application timing anything.
+//! People type an extension faster than digits can be sent, and every key must arrive. A key
+//! pressed during another waits its turn, and the gap between them is kept without the application
+//! timing anything.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use sipral_rtp::{EventSender, Outgoing};
 
-/// The shortest digit legacy equipment will recognise.
-///
-/// RFC 4733 §2.5.2.1, quoting ITU-T Q.24 Table A-1: the switching equipment
-/// surveyed "expects a minimum recognizable signal duration of 40 ms, a
-/// minimum pause between signals of 40 ms". Anything shorter is a digit that
-/// will be sent and not heard, so it is refused where it is asked for.
+/// The shortest digit legacy equipment recognises. RFC 4733 §2.5.2.1, quoting ITU-T Q.24 Table A-1:
+/// equipment "expects a minimum recognizable signal duration of 40 ms, a minimum pause between
+/// signals of 40 ms". Shorter digits are refused.
 pub const SHORTEST_DIGIT: Duration = Duration::from_millis(40);
 
-/// How long a digit lasts unless the application says otherwise.
-///
-/// The one default RTP, both INFO bodies and the C ABI's own `duration_ms`
-/// all fall back to — `sipral_ua::dtmf::DEFAULT_DTMF_MS`, defined once so
-/// that no form of DTMF holds a key longer than another when the application
-/// does not name a length (8.3.11-bis). Comfortably above the floor, because
-/// the floor is what the equipment in that survey managed rather than what a
-/// voice response system at the far end of a lossy path will reliably pick
-/// out.
+/// Default digit length, shared by RTP, both INFO bodies and the C ABI's `duration_ms`
+/// (`sipral_ua::dtmf::DEFAULT_DTMF_MS`, 8.3.11-bis). Well above the minimum, so an IVR over a lossy
+/// path still detects it.
 pub const DEFAULT_DIGIT: Duration = Duration::from_millis(sipral_ua::dtmf::DEFAULT_DTMF_MS as u64);
 
-/// The longest digit any form sends: `sipral_ua::dtmf::MAX_DTMF_MS`, the
-/// ceiling a digit sent or received by INFO is held to, so that no form of
-/// DTMF takes a length another refuses (8.3.11).
+/// The longest digit any form sends: `sipral_ua::dtmf::MAX_DTMF_MS`, the INFO limit too, so all
+/// forms accept the same lengths (8.3.11).
 pub const LONGEST_DIGIT: Duration = Duration::from_millis(10_000);
 
-/// The pause held between one digit and the next, from the same table.
+/// The pause between digits, from the same table.
 pub const DIGIT_GAP: Duration = Duration::from_millis(60);
 
-/// How loud a digit is sent, in dBm0 below full scale (RFC 4733 §2.3.4).
-///
-/// Ten is the conventional level for a generated digit: quiet enough not to be
-/// clipped anywhere along the path, loud enough that a detector at the far end
-/// is not deciding against the noise floor.
+/// Digit level in dBm0 below full scale (RFC 4733 §2.3.4). 10 is conventional: no clipping along
+/// the path, well above the noise floor.
 pub(crate) const VOLUME: u8 = 10;
 
-/// The most digits that may be waiting.
-///
-/// A bound rather than a queue that grows: an application dialling from a
-/// paste, or a key held down, must not be able to make one call's memory
-/// unbounded. Thirty-two is longer than any real number with its prefixes.
+/// The most digits that may wait. Bounded so a pasted string or a held key cannot grow memory; 32
+/// covers any real number with prefixes.
 pub(crate) const WAITING: usize = 32;
 
-/// One key of a telephone keypad.
-///
-/// The sixteen RFC 4733 §3.2 gives event codes 0 to 15: the twelve on a
-/// telephone, and the four extra columns of the original signalling scheme
-/// that some private exchanges still use.
+/// One telephone keypad key: the sixteen RFC 4733 §3.2 events 0 to 15, i.e. the twelve usual keys
+/// and the four extra column keys some PBXs still use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Digit {
     /// `0` to `9`.
@@ -89,10 +61,7 @@ pub enum Digit {
 }
 
 impl Digit {
-    /// The key a character names, or `None` for a character no keypad has.
-    ///
-    /// Lower case letters count as their upper case: a dial string from a user
-    /// interface is whatever was typed.
+    /// The key a character names, or `None`. Lower case letters count as upper case.
     #[must_use]
     pub const fn from_char(key: char) -> Option<Self> {
         match key {
@@ -144,10 +113,9 @@ pub(crate) enum Due {
     Event {
         /// What to put on the wire.
         outgoing: Outgoing,
-        /// Whether this is one of §2.5.1.4's two repeats of the closing
-        /// packet. Those report a duration already reported, so they move the
-        /// audio clock by nothing and the frame of real time they take has to
-        /// be accounted for as silence instead.
+        /// Whether this is one of the two repeats of the end packet (§2.5.1.4). They repeat a
+        /// duration already sent, so they move the audio clock by nothing and their frame counts as
+        /// silence.
         repeat: bool,
     },
 }
@@ -203,28 +171,21 @@ impl Dialling {
         self.waiting.len()
     }
 
-    /// Throw away what is queued and stop what is going out.
-    ///
-    /// The digit in flight does not get its closing packet: a call whose media
-    /// is being taken away has nowhere to send one.
+    /// Drop the queue and stop the current digit. It gets no end packet, since the media is going
+    /// away.
     pub(crate) fn clear(&mut self) {
         self.waiting.clear();
         self.sending = None;
         self.gap = 0;
     }
 
-    /// Carry the digits this end still owes across a change of clock rate.
+    /// Carry pending digits across a clock rate change.
     ///
-    /// Everything counted here is counted in the stream's own ticks, and a
-    /// codec change moves what a tick is worth. Left alone, a digit queued as
-    /// a fifth of a second at eight kilohertz would last a tenth at sixteen,
-    /// and the far end would hear a keypress too short to register — the one
-    /// failure nobody reports as a bug, because the caller simply presses
-    /// again.
+    /// Counts are in stream ticks, which a codec change rescales. Otherwise a 200 ms digit at 8 kHz
+    /// would last 100 ms at 16 kHz, too short to register, and the user would just press again.
     ///
-    /// `elapsed` is deliberately not rescaled. It is the duration already
-    /// reported on the wire, and RFC 4733 §2.5.1.2 has that field only ever
-    /// grow; a rescale downwards would walk it backwards mid-event.
+    /// `elapsed` is not rescaled: it is the duration already on the wire, which RFC 4733 §2.5.1.2
+    /// only lets grow.
     pub(crate) fn reformat(&mut self, was: u32, now: u32) {
         self.gap_ticks = rescale(self.gap_ticks, was, now);
         self.gap = rescale(self.gap, was, now);
@@ -236,11 +197,8 @@ impl Dialling {
         }
     }
 
-    /// What this frame carries, given that `frame` ticks pass in it.
-    ///
-    /// `start` is called only for a digit that is beginning, because the
-    /// event's timestamp is the audio stream's at that instant and asking any
-    /// earlier would name the wrong one.
+    /// What this frame carries, given `frame` ticks pass in it. `start` is called only when a digit
+    /// begins, because the event timestamp is the audio stream's at that moment.
     pub(crate) fn next<F>(&mut self, frame: u32, start: F) -> Due
     where
         F: FnOnce(u8) -> EventSender,
@@ -313,12 +271,8 @@ impl Dialling {
     }
 }
 
-/// The same span of time, counted in a different clock's ticks.
-///
-/// Widened to sixty-four bits first: a second of a sixteen-kilohertz digit
-/// rescaled from eight would overflow nothing, but a queue full of long
-/// digits multiplied before dividing is exactly where a thirty-two bit
-/// product stops being one.
+/// The same span in another clock's ticks. Computed in 64 bits so multiplying before dividing
+/// cannot overflow.
 fn rescale(ticks: u32, was: u32, now: u32) -> u32 {
     if was == 0 || was == now {
         return ticks;
@@ -344,8 +298,8 @@ mod tests {
         EventSender::new(event, 10, BEGAN)
     }
 
-    /// The digit, whether the packet closes the event, and the duration it
-    /// reports — which is the whole of what a receiver reads.
+    /// The digit, whether the packet ends the event, and the reported duration: all a receiver
+    /// reads.
     fn reported(due: Due) -> Option<(u8, bool, u16, u32, bool)> {
         match due {
             Due::Audio => None,
@@ -402,8 +356,7 @@ mod tests {
         assert!(DEFAULT_DIGIT > SHORTEST_DIGIT);
     }
 
-    /// The two lengths an error here names are the bounds the user agent
-    /// validates every form against, not a second pair that could drift.
+    /// The bounds in the error are the user agent's own, not a copy that could drift.
     #[test]
     fn the_bounds_named_here_are_the_ones_every_form_is_held_to() {
         assert_eq!(
@@ -416,10 +369,9 @@ mod tests {
         );
     }
 
-    /// A hundred milliseconds at eight kilohertz is 800 ticks and a frame is
-    /// 160, so four updates and then the closing packet, whose duration is the
-    /// whole digit. Every packet carries the timestamp the event began at
-    /// (§2.5.1.2) and only the first has the marker (§2.5.1.2 again).
+    /// 100 ms at 8 kHz is 800 ticks with 160-tick frames: four updates, then the end packet with
+    /// the full duration. All carry the event's start timestamp, and only the first has the marker
+    /// (§2.5.1.2).
     #[test]
     fn a_digit_is_updated_every_frame_and_ends_on_the_frame_it_runs_out() {
         let mut dialling = Dialling::new(480);
@@ -442,12 +394,9 @@ mod tests {
         );
     }
 
-    /// A digit no longer than one frame still gets its closing packet: an
-    /// event with none is one the far end never learns has finished. Its one
-    /// packet is both the first and the last, so it carries the marker and the
-    /// E bit at once, and §2.5.1.4's two repeats of it are the same packet
-    /// again — which a receiver reconciles by the timestamp, not by the
-    /// marker, since §2.2.1 makes the timestamp what identifies an event.
+    /// A one-frame digit still gets an end packet, or the far end never learns it finished. That
+    /// packet has both marker and E bit, and its two repeats (§2.5.1.4) are identical; receivers
+    /// match them by timestamp (§2.2.1).
     #[test]
     fn a_digit_shorter_than_a_frame_still_ends_properly() {
         let mut dialling = Dialling::new(480);
@@ -461,8 +410,7 @@ mod tests {
         assert_eq!(dialling.next(160, start), Due::Audio);
     }
 
-    /// Three transmissions of the closing packet and no more, which is what
-    /// §2.5.1.4 asks for.
+    /// The end packet goes out three times, as §2.5.1.4 asks.
     #[test]
     fn the_closing_packet_goes_three_times_and_stops() {
         let mut dialling = Dialling::new(0);
@@ -483,7 +431,7 @@ mod tests {
 
         let seen: Vec<_> = (0..16).map(|_| dialling.next(160, start)).collect();
         let events: Vec<u8> = seen.iter().filter_map(event_of).collect();
-        // two frames of digit, then the closing packet's two repeats, each way
+        // two digit frames, then the end packet's two repeats, for each digit
         assert_eq!(events, vec![1, 1, 1, 1, 2, 2, 2, 2]);
 
         let first_two = seen.iter().position(|due| event_of(due) == Some(2));

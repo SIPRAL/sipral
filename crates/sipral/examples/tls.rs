@@ -1,34 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! `call.rs`, over TLS instead of a plain UDP socket.
+//! `call.rs` over TLS instead of plain UDP.
 //!
-//! Same IVR, same script, same "no account, no configuration" shape — only
-//! the transport underneath the signalling changes. `sipral-core` never
-//! opens a TLS connection and never will (`docs/01-architecture.md`, "who
-//! owns the sockets, the resolver and TLS"): `TransportProtocol::Tls`
-//! describes a transport the caller has already secured, bytes go in as
-//! `Input::StreamData` fragments rather than whole `Input::Datagram`s, and
-//! `sipral_core::msg::StreamFramer` — reached from inside the endpoint, not
-//! from here — finds the messages in them on `Content-Length` (§18.3). This
-//! file is that application half: a TCP connection wrapped in a TLS client
-//! [`rustls`] runs entirely on its own, checked against the platform's trust
-//! store the way a real deployment would check a real registrar's
-//! certificate.
+//! Same IVR, same script, no account or configuration; only the signalling transport changes.
+//! `sipral-core` never opens TLS (`docs/01-architecture.md`, "who owns the sockets, the resolver
+//! and TLS"): `TransportProtocol::Tls` describes a transport the caller already secured, bytes go
+//! in as `Input::StreamData` fragments, and the endpoint's `sipral_core::msg::StreamFramer` splits
+//! messages on `Content-Length` (§18.3). This file is the application half: a TCP connection
+//! wrapped in a [`rustls`] client, verified against the platform trust store as a real deployment
+//! would.
 //!
-//! `rustls` is this example's own dependency and nobody else's — behind the
-//! `example-tls` feature, off by default, reached by nothing else this crate
-//! ships. Run it with
+//! `rustls` is this example's own dependency, behind the off-by-default `example-tls` feature. Run
 //!
 //! ```text
 //! cargo run --example tls --features example-tls
 //! ```
 //!
-//! and, exactly like `call.rs`, add `--wav out.wav` on a machine with no
-//! audio device. `--pin <sha-256 fingerprint>` trusts the server's
-//! certificate by its fingerprint instead of by the platform's trust store —
-//! what a PBX serving a certificate it signed itself needs
-//! ([`sipral::CertificatePin`], `docs/22-tls.md`).
+//! and, like `call.rs`, add `--wav out.wav` without an audio device. `--pin <sha-256 fingerprint>`
+//! trusts the server certificate by fingerprint instead of the trust store, for a PBX with a
+//! self-signed certificate ([`sipral::CertificatePin`], `docs/22-tls.md`).
 
 #[path = "common/entropy.rs"]
 mod entropy;
@@ -58,25 +49,22 @@ use sipral_io_coreaudio::{Stream, StreamConfig, StreamFormat};
 use media_socket::MediaSocket;
 use tls_transport::{TlsTransport, Trust};
 
-/// sip2sip.info's own test extension, the same one `call.rs` dials — see its
-/// own module doc for what it does.
+/// sip2sip.info's test extension, the one `call.rs` dials.
 const TARGET: &str = "sip:thetestcall@sip2sip.info";
 const HOST: &str = "sip2sip.info";
-/// RFC 3261 §19.1's default `sips` port; also what sip2sip.info listens with
-/// TLS on.
+/// RFC 3261 §19.1's default `sips` port, where sip2sip.info listens with TLS.
 const TLS_PORT: u16 = 5061;
 
 const GREETING: Duration = Duration::from_millis(1_500);
-/// The same script as `call.rs`, and timed the same way for the same reason:
-/// the digits wait for the IVR to finish asking for them.
+/// As in `call.rs`: the digits wait for the IVR's prompt to finish.
 const SCRIPT: &[(Duration, &str)] = &[(GREETING, "2"), (Duration::from_millis(8_000), "1234#")];
 const CEILING: Duration = Duration::from_secs(25);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wav_path = wav_path_from_args();
 
-    // the domain's `_sips._tcp` record; the certificate is still checked
-    // against the domain itself, which is what RFC 5922 §4 has a client do
+    // the domain's `_sips._tcp` record; the certificate is still checked against the domain itself
+    // (RFC 5922 §4)
     let remote: SocketAddr = srv::resolve(HOST, "_sips._tcp", TLS_PORT)?;
     let now = Instant::now();
     let unix_seconds = SystemTime::now()
@@ -135,9 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The call itself, once it is placed — identical in shape to `call.rs`'s own
-/// [`converse`], because nothing about running the call differs once the SIP
-/// bytes are already flowing; only how they got there does.
+/// The placed call, as in `call.rs`'s [`converse`]: once SIP bytes flow, nothing differs.
 fn converse(
     endpoint: &mut Endpoint,
     call: CallHandle,
@@ -287,11 +273,8 @@ fn wav_path_or_default(explicit: Option<String>) -> Option<String> {
     }
 }
 
-// -- the SIP and media endpoint on top of the TLS transport -------------------
-
-/// A user agent and a media engine, with the TLS connection above for SIP and
-/// a plain UDP socket per call for RTP — `sips:` secures the signalling, not
-/// the media, and nothing here asks it to.
+/// A user agent and media engine with the TLS connection for SIP and a UDP socket per call for RTP:
+/// `sips:` secures signalling, not media.
 struct Endpoint {
     agent: UserAgent,
     engine: MediaEngine,
@@ -347,13 +330,9 @@ impl Endpoint {
         }
     }
 
-    /// Read whatever the TLS connection has, and feed it in as the byte
-    /// stream it is (`Input::StreamData`) rather than as a whole datagram —
-    /// the one difference this endpoint has from `common/udp_endpoint.rs`'s.
-    /// A connection the peer closed is reported as `Input::StreamClosed`, the
-    /// same way a real transport would, so `sipral-core` fails whatever was
-    /// waiting on it instead of a caller here quietly polling a dead socket
-    /// until its own ceiling gives up on it.
+    /// Read what the TLS connection has and feed it as a byte stream (`Input::StreamData`), the one
+    /// difference from `common/udp_endpoint.rs`. A closed connection is reported as
+    /// `Input::StreamClosed`, so `sipral-core` fails whatever waited on it.
     fn read_stream(&mut self, now: Instant) -> bool {
         let Self {
             sip,
@@ -427,12 +406,12 @@ impl Endpoint {
     }
 }
 
-/// Bind an RTP socket, place `outgoing` on it, and remember the socket under
-/// the call handle placing it mints — the same reordering
-/// `common/udp_endpoint.rs::place` exists for, and for the same reason.
+/// Bind an RTP socket, place `outgoing` on it, and store the socket under the new call handle, as
+/// `common/udp_endpoint.rs::place` does.
 ///
 /// # Errors
-/// Whatever binding the RTP socket or placing the call returns.
+///
+/// Whatever binding or placing returns.
 fn place(
     endpoint: &mut Endpoint,
     account: sipral::AccountId,
@@ -451,8 +430,7 @@ fn place(
 
 #[cfg(test)]
 mod tests {
-    // this test's own shortcuts; the no-panic discipline above is for what
-    // ships
+    // test shortcuts; the no-panic rules are for shipped code
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use std::io::{self, Read as _, Write as _};
@@ -465,13 +443,10 @@ mod tests {
 
     use super::*;
 
-    /// `sip2sip.info`'s own reachability from a given machine says nothing
-    /// about whether this file's transport is right; this does, against a
-    /// server on loopback with a certificate minted for the test alone
-    /// (never committed, never reused) and forgotten the moment it ends: a
-    /// TLS handshake completes, and a SIP-shaped byte stream both directions
-    /// write survives it whole — through [`TlsTransport`] exactly as
-    /// `Endpoint` drives it, not around it.
+    /// Reaching `sip2sip.info` says nothing about this transport's correctness; this test does,
+    /// against a loopback server with a throwaway certificate (never committed): the TLS handshake
+    /// completes and a SIP-shaped byte stream survives both ways, through [`TlsTransport`] exactly
+    /// as `Endpoint` drives it.
     #[test]
     fn handshake_and_stream_survive_the_round_trip() {
         let signed = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
@@ -530,10 +505,9 @@ mod tests {
         );
     }
 
-    /// A server on loopback with a self-signed certificate for `name`, valid
-    /// between the two years, answering one request; its certificate in DER
-    /// and its address. What it read, or why the handshake failed, comes
-    /// back from the thread.
+    /// A loopback server with a self-signed certificate for `name`, valid between the two years,
+    /// answering one request. Returns its DER certificate and address; the thread returns what it
+    /// read or why the handshake failed.
     fn pbx(
         name: &str,
         from: i32,
@@ -598,9 +572,8 @@ mod tests {
         Ok(received)
     }
 
-    /// The PBX's own certificate, trusted by its fingerprint alone: a name
-    /// that does not match and no root that vouches for it, and the
-    /// connection carries SIP both ways.
+    /// A self-signed PBX certificate trusted by fingerprint alone (no matching name, no root)
+    /// carries SIP both ways.
     #[test]
     fn a_pinned_self_signed_certificate_is_trusted_by_its_fingerprint_alone() {
         let (der, remote, server) = pbx("factory-default.invalid", 2024, 2099);
@@ -626,8 +599,8 @@ mod tests {
         );
     }
 
-    /// The certificate lapsed years ago, and it is still the pinned one: the
-    /// connection goes, as `sipral::CertificatePin` decides.
+    /// An expired certificate that is the pinned one is still accepted, as `sipral::CertificatePin`
+    /// decides.
     #[test]
     fn an_expired_pinned_certificate_still_connects() {
         let (der, remote, server) = pbx("localhost", 2018, 2020);

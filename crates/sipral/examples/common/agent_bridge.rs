@@ -1,41 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! A call from the PBX, bridged to a voice agent that answers SIP itself:
-//! the logic `agent-bridge.rs` runs over its sockets and
-//! `tests/agent_bridge.rs` runs over loopback, written once.
+//! A PBX call bridged to a voice agent that speaks SIP itself: the logic `agent-bridge.rs` runs on
+//! real sockets and `tests/agent_bridge.rs` on loopback.
 //!
-//! Each caller gets a second call, to the agent, and the two are joined in a
-//! local conference without this end in it — two members, each on its own
-//! codec and rate, one audio stream each. The caller hears the PBX ring
-//! until the agent answers, and is answered only then. A digit is forwarded
-//! from the events rather than through the mix, because the conference
-//! mixes audio and a telephone event is not audio. Either side hanging up
-//! ends the other.
+//! Each caller gets a second call, to the agent, and the two are joined in a local conference
+//! without this end: two members, each on its own codec and rate. The caller hears the PBX ring and
+//! is answered only when the agent answers. Digits are forwarded from events, not through the mix,
+//! since telephone events are not audio. Either side hanging up ends the other.
 //!
-//! **What the call came to.** The PBX hears how the agent's part ended as
-//! an [`Outcome`]: on the BYE that ends the caller's call, in an
-//! `X-Sipral-Outcome` field ([`OutcomeMode::Header`]), or — for a PBX that
-//! reads no field off a BYE — as a REFER of the caller's call to an address
-//! configured for that outcome ([`OutcomeMode::Refer`]). The outcome is
-//! the one a REFER from the agent named, `expired` when the agent's call
-//! outlived [`Policy::max_agent`], one named in the `Reason` text of the
-//! agent's BYE, and `resolved` otherwise.
+//! **Outcome.** The PBX learns how the agent's part ended as an [`Outcome`]: in an
+//! `X-Sipral-Outcome` field on the BYE ([`OutcomeMode::Header`]), or, for a PBX that reads no BYE
+//! fields, as a REFER of the caller's call to an address configured per outcome
+//! ([`OutcomeMode::Refer`]). The outcome is the one named in an agent REFER, `expired` if the
+//! agent's call outlived [`Policy::max_agent`], one named in the `Reason` text of the agent's BYE,
+//! or `resolved`.
 //!
-//! **A REFER from the agent** goes to [`Policy::decide`], which answers
-//! with an [`Action`]. [`decide`] is the default: a user part that names an
-//! outcome other than `human` ends the call with that outcome, and any
-//! other target is a transfer to that user at the PBX. A transfer is a
-//! REFER of the caller's call to the PBX ([`TransferMode::Refer`]), so that
-//! the PBX places the new call and owns all of it; or, with
-//! [`TransferMode::Bridge`], a call this bridge places on the line itself
-//! and bridges in the agent's place.
+//! **REFER from the agent** goes to [`Policy::decide`], which returns an [`Action`]. The default,
+//! [`decide`]: a user part naming an outcome other than `human` ends the call with it; any other
+//! target is a transfer to that user at the PBX. A transfer either REFERs the caller's call to the
+//! PBX ([`TransferMode::Refer`]), so the PBX owns the new call, or with [`TransferMode::Bridge`]
+//! this bridge places the call itself and swaps it in for the agent.
 //!
-//! The agent's REFER is not taken with `accept_transfer`: that places a call
-//! from the account the agent's call belongs to, whose `Contact` and
-//! transport point at the agent. It is left open while the transfer runs,
-//! refused with the transfer's own failure if it fails, and ends with the
-//! agent's call once it succeeds.
+//! The agent's REFER is not accepted with `accept_transfer`, which would place the call from the
+//! agent's account (whose `Contact` and transport point at the agent). It stays open during the
+//! transfer, is refused with the transfer's failure if it fails, and ends with the agent's call on
+//! success.
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
@@ -57,9 +47,9 @@ pub(crate) const TICK: Duration = Duration::from_millis(20);
 /// The most ticks one turn makes up after a stall: 100 ms.
 const CATCH_UP: u32 = 5;
 
-/// How long a REFER of the caller's call may go without a word from the
-/// PBX. A REFER refused outright is not reported by the stack — only the
-/// NOTIFYs of one it took are — so silence this long is read as a refusal.
+/// How long a REFER of the caller's call may go without word from the PBX. The stack reports no
+/// outright refusal of a REFER (only NOTIFYs of an accepted one), so this much silence counts as a
+/// refusal.
 pub(crate) const REFER_PATIENCE: Duration = Duration::from_secs(10);
 
 /// The field an outcome rides in on the BYE to the PBX.
@@ -318,8 +308,7 @@ impl Bridge {
             }) => {
                 self.ended(endpoint, *call, *status, causes, now);
             }
-            // a digit heard in the audio is already in the mix the other
-            // side hears; sending it again would play it twice
+            // an in-band digit is already in the mix; forwarding it would play it twice
             Event::Media {
                 call,
                 event:

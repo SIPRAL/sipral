@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The seeds a `UserAgent` and a `MediaEngine` are built with, drawn from the
-//! operating system.
+//! The seeds for a `UserAgent` and a `MediaEngine`, drawn from the OS.
 //!
-//! Neither reads randomness of its own: the application hands each a seed,
-//! and everything unpredictable the stack makes comes out of it — tags,
-//! branches and Call-IDs from the signalling one, SSRCs, SDES keys and DTLS
-//! randomness from the media one. So a seed has to be as unpredictable as
-//! those need to be, and a fresh one per run: a constant would send the same
-//! Call-ID every time, which a server that remembers the last attempt reads
-//! as a retransmission of it and answers with nothing at all. The two are
-//! drawn separately, as `MediaEngine::new` asks, so that a recording of the
-//! signalling never carries what the media keys were drawn from.
+//! Neither reads randomness itself; every unpredictable value comes from its seed: tags, branches
+//! and Call-IDs from the signalling seed, SSRCs, SDES keys and DTLS randomness from the media seed.
+//! A seed must be fresh per run: a constant repeats the Call-ID, which a server reads as a
+//! retransmission and ignores. The two are drawn separately, as `MediaEngine::new` requires, so a
+//! signalling recording never contains the media key source.
 
 use std::io;
 

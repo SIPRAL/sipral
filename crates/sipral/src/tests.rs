@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Two stacks calling each other, with no network under either of them.
+//! Two stacks calling each other with no network under either.
 //!
-//! The point of the whole tree being sans-I/O is that this is possible: two
-//! user agents, two media engines, and a function that hands what one of them
-//! wanted to write to the other as something that arrived. A call is placed,
-//! answered, spoken through, held, resumed and hung up, and the clock only
-//! moves because the test moves it.
+//! Because everything is sans-I/O, two user agents and two media engines can be wired by a function
+//! that hands one side's output to the other as input. A call is placed, answered, spoken through,
+//! held, resumed and hung up, and the clock moves only when the test moves it.
 //!
-//! What is being tested here is the join, so the assertions are about the
-//! things that only exist because the two halves have been connected: that a
-//! call which was answered has audio on it, that the codec it settled on is
-//! the one the offer preferred, that a tone put in one end comes out of the
-//! other, that the recording has both directions in it, and that a stream
-//! which stops is reported rather than sat on.
+//! The assertions are about the join: an answered call has audio, the codec is the one the offer
+//! preferred, a tone sent at one end comes out at the other, the recording has both directions, and
+//! a stopped stream is reported.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -332,13 +327,10 @@ impl Pair {
         self.callee.call().expect("the callee heard the INVITE")
     }
 
-    /// One frame from the caller to the callee, keeping the datagram that
-    /// crossed as well as the frame that came out of it.
+    /// One frame from caller to callee, keeping the datagram that crossed and the frame it became.
     ///
-    /// The copy is not tidiness: an arriving datagram is verified and
-    /// decrypted where it lies, so delivering the buffer that was captured
-    /// would hand a test back the plaintext it is trying to prove is not on
-    /// the wire.
+    /// The copy matters: an arriving datagram is decrypted in place, so delivering the captured
+    /// buffer would show the test the plaintext it is trying to prove is not on the wire.
     pub(crate) fn speak(
         &mut self,
         call: CallHandle,
@@ -448,13 +440,12 @@ impl Pair {
         self.now += TICK;
     }
 
-    /// Run the DTLS-SRTP handshake between the two ends, over the media path
-    /// and over nothing else, and say how many records crossed.
+    /// Run the DTLS-SRTP handshake between the ends over the media path only, and return how many
+    /// records crossed.
     ///
-    /// The shape a real driver has to have: drain `poll_transmit` to empty,
-    /// deliver, drive the clock to whatever `poll_timeout` asked for, drain
-    /// again. A driver that skips any of those three is a driver whose calls
-    /// come up silent, which is what this reproduces if it is got wrong.
+    /// A real driver must drain `poll_transmit` to empty, deliver, advance the clock to
+    /// `poll_timeout`, and drain again; skipping any step gives silent calls, which this
+    /// reproduces.
     #[cfg(feature = "dtls")]
     pub(crate) fn shake_hands(&mut self, call: CallHandle, remote: CallHandle) -> usize {
         let mut crossed = 0;
@@ -568,8 +559,6 @@ pub(crate) fn loudness(samples: &[i16]) -> i64 {
     total / i64::try_from(samples.len()).unwrap_or(1).max(1)
 }
 
-// -- the join ----------------------------------------------------------------
-
 /// The whole point of the crate in one test: a call that is answered has audio
 /// on it, and neither application wrote a line of SDP.
 #[test]
@@ -612,20 +601,14 @@ fn wire_message_body(datagram: &[u8]) -> Vec<u8> {
     message.body().to_vec()
 }
 
-/// 8.4.9: an incoming call may be rung with media before it is answered, and
-/// [`MediaEngine::answer`] on one that was must not negotiate a second time —
-/// same session, same `o=` id and version.
+/// 8.4.9: an incoming call rung with media and then answered with [`MediaEngine::answer`] is not
+/// negotiated twice: same session, same `o=` id and version.
 ///
-/// Every INVITE this build sends carries `Supported: 100rel`
-/// (`sipral-core`'s endpoint adds it unconditionally), so a call this
-/// harness's own caller places always makes the callee's 183 a reliable one —
-/// [`Pair::ring`] cannot produce the other half of RFC 3262 §5 / RFC 6337
-/// §3.1.1's rule, an early answer sent unreliably; a hand-written INVITE can,
-/// and `crates/sipral-ffi/src/call.rs`'s tests cover it. What this proves
-/// instead is the reliable half from both sides of one exchange: the far end
-/// PRACKs the 183 the way this stack's own caller always would, and the 200
-/// OK that follows carries nothing, because RFC 6337 §3.1.1's UAS rule #2 is
-/// that nothing sent reliably is repeated.
+/// Every INVITE this build sends carries `Supported: 100rel`, so this harness always gets a
+/// reliable 183 and cannot produce RFC 3262 §5 / RFC 6337 §3.1.1's unreliable case (a hand-written
+/// INVITE in `crates/sipral-ffi/src/call.rs` covers that). This proves the reliable case end to
+/// end: the far end PRACKs the 183, and the 200 OK carries no SDP, because RFC 6337 §3.1.1 UAS rule
+/// #2 forbids repeating a reliably sent answer.
 #[test]
 fn ringing_with_media_then_answering_reuses_the_session_and_the_description() {
     let mut pair = Pair::new(CodecCatalog::new());
@@ -695,14 +678,9 @@ fn ringing_with_media_then_answering_reuses_the_session_and_the_description() {
     );
 }
 
-/// The ACK that confirms a call rung with media carries no description of its
-/// own — the ordinary case, since RFC 6337 §3.1.1 already forbids repeating
-/// one sent reliably — and `settle` used to read that as a change anyway,
-/// because it compared nothing before deciding the running session had moved.
-/// Neither side's plan has moved: the far end's `CallConfirmed` and this
-/// end's `IncomingAck` both settle on exactly the same local and remote
-/// descriptions the 183 already wrote. A hold placed afterward is a real
-/// change and must still be reported.
+/// The ACK confirming a call rung with media carries no SDP, as RFC 6337 §3.1.1 requires. Neither
+/// side's plan moved, so neither `CallConfirmed` nor `IncomingAck` may report a change; a later
+/// hold is a real change and must be. Guards against `settle` reporting a change without comparing.
 #[test]
 fn the_ack_after_ringing_with_media_reports_no_change_but_a_real_one_still_is() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
@@ -727,8 +705,7 @@ fn the_ack_after_ringing_with_media_reports_no_change_but_a_real_one_still_is() 
         .answer(&mut pair.callee.agent, remote, callee_media(), pair.now)
         .expect("the 200 OK goes");
     pair.callee.drain(pair.now, false);
-    // carries the 200 OK to the caller, the caller's ACK back to the callee,
-    // and drains both sides — the exchange that used to manufacture a change
+    // carries the 200 OK and the ACK and drains both sides
     pair.settle();
 
     let call = pair.caller.call().expect("the caller knows the call");
@@ -1403,11 +1380,9 @@ fn a_wall_clock_given_later_dates_the_reports_of_calls_already_running() {
     );
 }
 
-/// RFC 3264 §6.1 lets an answer renumber a dynamic payload type, and §5.1
-/// has each end send with the numbers the other listed: Alice offers L16 as
-/// 97 and named events as 101, Bob answers them as 99 and 100. Each sends on
-/// the other's numbers, and takes in and hears what arrives on its own —
-/// audio and keys alike — where the planner used to find no codec at all.
+/// RFC 3264 §6.1 lets an answer renumber dynamic payload types, and §5.1 has each end send with the
+/// other's numbers: Alice offers L16 as 97 and events as 101, Bob answers 99 and 100. Each sends on
+/// the other's numbers and receives audio and keys on its own.
 #[test]
 fn a_codec_and_keys_the_answer_renumbered_cross_on_each_ends_own_numbers() {
     let now = Instant::now();
@@ -1477,11 +1452,9 @@ fn a_codec_and_keys_the_answer_renumbered_cross_on_each_ends_own_numbers() {
     );
 }
 
-/// The lesson the interop harness's own media join used to encode by hand: a
-/// real PBX that answers with one G.711 law and sends the other. Dropping the
-/// far end's audio at the RTP layer would look like silence rather than like
-/// a fault, so the sibling law is accepted and decoded with the law it
-/// actually names.
+/// A real PBX answers with one G.711 law and sends the other. Dropping that audio at the RTP layer
+/// would look like silence rather than a fault, so the sibling law is accepted and decoded with the
+/// law its payload type names.
 #[test]
 fn a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
@@ -1827,8 +1800,6 @@ fn a_call_still_connects_against_a_peer_that_keeps_only_a_law() {
     );
 }
 
-// -- SDES ---------------------------------------------------------------------
-
 /// One call's worth of a caller talking: the last datagram that crossed, the
 /// frame it turned into at the far end, and what the two descriptions said.
 struct Spoken {
@@ -1911,8 +1882,6 @@ fn spoken(catalog: CodecCatalog) -> Spoken {
         played,
     }
 }
-
-// -- DTLS-SRTP ----------------------------------------------------------------
 
 /// One frame of the same tone every other test here uses.
 #[cfg(feature = "dtls")]
@@ -2956,11 +2925,9 @@ fn with_body(datagram: &[u8], content_type: &str, body: &str) -> Vec<u8> {
     out
 }
 
-/// 8.3.11-ter(d): a peer that said `Duration=0` held the key for no time at
-/// all, and a peer sending `application/dtmf` never says how long it held one
-/// — two different facts the layer below this one keeps apart
-/// (`sipral_ua::dtmf::DtmfInfo::held_ms` is `Some(0)` for one and `None` for
-/// the other), and this facade used to fold back into one zero.
+/// 8.3.11-ter(d): `Duration=0` means the key was held for no time, while `application/dtmf` never
+/// states a length. The layer below keeps them apart (`sipral_ua::dtmf::DtmfInfo::held_ms` is
+/// `Some(0)` versus `None`), and this facade must not fold them into one zero.
 #[test]
 fn a_duration_of_zero_and_no_duration_at_all_report_different_held_values() {
     let catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
@@ -3672,8 +3639,6 @@ fn the_first_rtcp_report_is_scheduled_from_this_calls_own_seed() {
     );
 }
 
-// -- the watchdog ------------------------------------------------------------
-
 /// B5: inbound audio that stops while signalling stays perfectly happy is the
 /// failure this whole watchdog exists for.
 #[test]
@@ -3966,8 +3931,6 @@ fn a_party_this_end_holds_hears_what_the_application_sends_when_it_says_so() {
     );
 }
 
-// -- recording ---------------------------------------------------------------
-
 /// A5: both directions, one file, started and stopped in the middle of a live
 /// call.
 #[test]
@@ -4218,8 +4181,6 @@ fn a_call_that_ends_closes_the_recording_it_was_making() {
     );
     assert!(length > 0, "nothing was recorded at all");
 }
-
-// -- the session on its own --------------------------------------------------
 
 /// Two descriptions, one plan, two sessions: the same wiring the engine does,
 /// without a user agent, so that a failure here is about the media and nothing
@@ -4689,13 +4650,9 @@ fn a_g729_answer_that_says_annexb_yes_still_carries_the_call_through_losses() {
     assert_eq!(concealed, 4, "each of the four lost packets is concealed");
 }
 
-/// A payload type nobody negotiated, and that is not the sibling G.711 law
-/// either, is dropped rather than decoded through the wrong table, which is
-/// loud distortion rather than quiet. The sibling law itself is
-/// `a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard`,
-/// which this test used to cover before that lesson was learned: an offer of
-/// nothing but A-law's payload type, 8, is exactly what a peer answering with
-/// mu-law and sending A-law would put on the wire, and that is now accepted.
+/// A payload type nobody negotiated, other than the sibling G.711 law, is dropped rather than
+/// decoded through the wrong table. The sibling law is covered by
+/// `a_peer_that_negotiated_one_g711_law_and_sends_the_other_is_still_heard`.
 #[test]
 fn a_payload_type_that_was_not_negotiated_is_refused() {
     let now = Instant::now();
@@ -5202,8 +5159,6 @@ fn a_g729_pause_that_ends_inside_a_packet_moves_its_timestamp() {
     );
 }
 
-// -- a re-negotiation that moves the keys ------------------------------------
-
 /// An `RTP/SAVP` description with one PCMU stream, the suite and the key
 /// given.
 fn savp(host: &str, port: u16, suite: &str, key: &str) -> String {
@@ -5553,8 +5508,6 @@ fn a_far_end_re_offering_its_key_under_another_mode_is_refused() {
     );
 }
 
-// -- a re-negotiation that moves the codec -----------------------------------
-
 fn re_offer_onto(pair: &mut Pair, remote: CallHandle, payload: u8, rtpmap: &str) {
     let offer = format!(
         "v=0\r\no=- 9 9 IN IP4 192.0.2.2\r\ns=-\r\nc=IN IP4 192.0.2.2\r\nt=0 0\r\n\
@@ -5874,12 +5827,10 @@ fn a_codec_change_that_moves_the_rate_keeps_the_processor_too() {
     session.capture(&frame, Instant::now()).expect("it encodes");
 }
 
-/// A guard rather than a proof, and worth saying which: audio crossed a codec
-/// change before this repair too, because both ends restarted together and
-/// neither noticed. That is exactly why the defect survived — the damage was
-/// to the packet index under an unchanged key, which nothing audible reports.
-/// This is here so that carrying the stream on does not break what replacing
-/// it happened to get right.
+/// A guard, not a proof: audio crossed a codec change even when the stream was replaced, because
+/// both ends restarted together. The real damage was to the packet index under an unchanged key,
+/// which nothing audible shows. This keeps carrying the stream from breaking what replacing it got
+/// right.
 #[test]
 fn audio_still_crosses_after_a_codec_change() {
     let catalog = CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("an order");
@@ -5941,19 +5892,14 @@ fn audio_still_crosses_after_a_codec_change() {
     );
 }
 
-/// The defect this whole change exists for, stated where it can be seen.
+/// The defect `reformat` fixes, made visible.
 ///
-/// A codec change used to open a session on the identity the *call* opened
-/// with, so the sequence number rewound to where it started while the master
-/// key stayed exactly as it was. The SRTP packet index is `2^16 · ROC + SEQ`,
-/// so every packet after the change re-used a keystream already spent — the
-/// two-time pad RFC 3711 §9.1 calls catastrophic, and invisible in a capture.
+/// Opening a new session on a codec change rewound the sequence number to the call's start while
+/// the master key stayed. The SRTP index is `2^16 · ROC + SEQ`, so later packets reused spent
+/// keystream: the two-time pad RFC 3711 §9.1 calls catastrophic, invisible in a capture.
 ///
-/// The live assertion is the sequence number: break the carry and this test
-/// goes red. The replay assertion after it is a guard rather than a proof —
-/// nothing touches the receive context when the keys have not moved, and it
-/// is there so that a later `reformat` which rebuilt that context would be
-/// caught here rather than in a capture.
+/// The sequence number assertion is the live check. The replay assertion after it is a guard: if a
+/// later `reformat` rebuilt the receive context without a key change, it would be caught here.
 #[test]
 fn a_codec_change_on_a_secured_call_does_not_re_open_the_packet_index() {
     let now = Instant::now();
@@ -6375,8 +6321,6 @@ fn carries_bye(compound: &[u8]) -> bool {
     false
 }
 
-// -- 8.2.4: a recording carries no key ---------------------------------------
-
 /// The base64 an `a=crypto` line in a SIP message's body carries, however
 /// many session parameters trail it.
 ///
@@ -6570,8 +6514,6 @@ fn two_engines_sharing_an_endpoint_seed_still_negotiate_different_keys() {
          negotiate the same key"
     );
 }
-
-// -- ICE ---------------------------------------------------------------------
 
 /// A pair whose two ends both offer ICE, connected.
 #[cfg(feature = "ice")]
@@ -6780,15 +6722,11 @@ fn far_end_packet(sequence: u16) -> Vec<u8> {
     packet
 }
 
-/// Before either end has chosen a pair, the far end sends on whichever pair
-/// its own checks found valid first and moves to a better one as they find
-/// it (RFC 8445 §12.1): through this end's relay, say — where every packet
-/// arrives from the TURN server — and then straight from its own relayed
-/// address. This end receives on any pair (§12.2). RTP's latch closed on the
-/// first of the two used to refuse every packet from the second as foreign
-/// until the selection reopened it, up to `nomination_wait` later: the lab's
-/// relayed call through the C ABI lost a second of the callee's audio that
-/// way, every call.
+/// Before selection, the far end sends on whichever pair its checks validated first and moves to
+/// better ones (RFC 8445 §12.1): through this end's relay, say, then from its own relayed address.
+/// This end must accept any pair (§12.2). A latch closed on the first source would refuse the
+/// second until selection, up to `nomination_wait` later; the lab's relayed call through the C ABI
+/// lost a second of callee audio that way.
 #[cfg(feature = "ice")]
 #[test]
 fn before_a_pair_is_chosen_the_far_end_is_heard_on_whichever_pair_it_moves_to() {
@@ -6910,9 +6848,8 @@ fn a_lite_caller_answers_a_check_that_arrived_before_the_answer() {
 #[cfg(feature = "ice")]
 #[test]
 fn a_peer_that_does_not_do_ice_still_gets_its_audio() {
-    // the regression the whole fallback exists to prevent: an Asterisk with
-    // `ice_support=no` — its default — used to be a call that worked, and
-    // turning ICE on must not turn it into a call with no audio
+    // the regression the fallback prevents: an Asterisk with its default `ice_support=no` must keep
+    // working when ICE is turned on
     let (mut pair, call, remote) = one_sided_ice_call(crate::IcePolicy::Offered);
     assert!(
         pair.caller
@@ -10460,8 +10397,6 @@ fn a_call_that_lost_consent_stops_sending_rather_than_falling_back() {
     );
 }
 
-// -- a codec change this end asks for ----------------------------------------
-
 /// Ask the caller's engine to move `call` onto `codecs`, and hand back the
 /// re-offer exactly as it went on the wire, once both ends have finished the
 /// exchange it started.
@@ -10924,8 +10859,6 @@ fn a_codec_change_names_a_codec_this_build_has_or_goes_nowhere() {
     assert_eq!(ended, Err(MediaError::NoSuchCall));
 }
 
-// -- re-offers on a call that is held or secured ---------------------------------
-
 /// What the two ends last described, as the latest session change reported
 /// it — this end's half first.
 fn last_described(stack: &Stack) -> Option<(SessionDescription, SessionDescription)> {
@@ -11001,9 +10934,8 @@ fn tone_after(pair: &mut Pair, call: CallHandle, remote: CallHandle) -> i64 {
 #[cfg(feature = "dtls")]
 #[test]
 fn a_hold_from_either_end_of_a_dtls_call_is_answered_and_keeps_the_association() {
-    // the answer used to be the user agent's, and it carried neither the
-    // certificate nor the role: the end that asked for the hold read a
-    // secured stream with no key on it, and the hold never reached its media
+    // the answer must carry the certificate and role; without them the holding end saw a secured
+    // stream with no key and the hold never reached its media
     for caller_holds in [true, false] {
         let label = if caller_holds { "caller" } else { "callee" };
         let (mut pair, call, remote) = dtls_call();
@@ -11260,10 +11192,9 @@ fn answered_with(stack: &Stack, key: &str, label: &str) {
 
 #[test]
 fn a_far_end_that_took_the_second_crypto_line_holds_resumes_and_refreshes_with_media_both_ways() {
-    // the answer to a far-end re-offer used to repeat the key of the first
-    // line this end ever offered, AEAD_AES_256_GCM's forty-four octets, under
-    // the AES_CM_128_HMAC_SHA1_80 tag the far end had taken: a line neither
-    // end can read (RFC 4568 §6.1), and the media of both ends failed
+    // guards against answering a far-end re-offer with the key of our first offered line (44 octets
+    // of AEAD_AES_256_GCM) under the AES_CM_128_HMAC_SHA1_80 tag the far end took: a line neither
+    // end can read (RFC 4568 §6.1)
     let (mut pair, call, remote) = sdes_call_on_the_second_line();
     let offered = one_stream(&pair.callee.offer_received().expect("the first offer"));
     let in_force = crypto_tagged(&offered, 2)
@@ -11379,10 +11310,8 @@ fn this_end_re_offers_a_call_whose_far_end_took_the_second_crypto_line_and_media
 
 #[test]
 fn a_re_offer_that_moves_to_another_suite_is_answered_with_a_new_key_of_that_suites_width() {
-    // the answer used to repeat the key in force whatever suite it went
-    // under: thirty octets of AES_CM_128_HMAC_SHA1_80 written under
-    // AEAD_AES_256_GCM, which takes forty-four (RFC 7714 §14.1), and a line
-    // no end can read
+    // guards against repeating the key in force under a different suite: 30 octets of
+    // AES_CM_128_HMAC_SHA1_80 under AEAD_AES_256_GCM, which needs 44 (RFC 7714 §14.1)
     let answering = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
         .with_srtp(SrtpPolicy::Offered);
@@ -11639,11 +11568,9 @@ fn a_re_offer_that_writes_the_same_certificate_differently_is_not_a_new_one() {
 
 #[test]
 fn a_call_the_application_describes_answers_its_own_re_offers() {
-    // the application answered with a description of its own, so it is the
-    // only one that can answer a re-offer on the call: the engine used to
-    // refuse every one of them 488 first — every hold, once holds on a
-    // secured call were handed up — and to open a stream of its own on the
-    // call after a plain one
+    // the application answered with its own description, so only it can answer re-offers: the
+    // engine must not refuse them with 488 (every hold, on a secured call) or open its own stream
+    // after a plain one
     for secured in [false, true] {
         let mut catalog = CodecCatalog::with_order(&["PCMU"]).expect("an order");
         if secured {
@@ -11724,15 +11651,11 @@ t=0 0\r\nm=audio 40002 {proto} 0\r\na=rtpmap:0 PCMU/8000\r\n{crypto}a={direction
     }
 }
 
-// -- the DTLS latch, and what a running stream may not change -------------------
-
 #[cfg(feature = "dtls")]
 #[test]
 fn one_octet_from_a_stranger_does_not_take_a_calls_handshake() {
-    // the latch used to close on the first datagram whose first octet was 22,
-    // from anywhere: one packet from somebody who read the port out of the
-    // description, and the real far end's records were dropped until the
-    // handshake gave up
+    // guards against the latch closing on any datagram starting with 22 from anywhere: one packet
+    // from someone who read the port in the SDP would block the real far end's records
     let (mut pair, call, remote) = dtls_call();
     let stranger: SocketAddr = "203.0.113.9:40000".parse().expect("an address");
     let taken = {
@@ -11756,8 +11679,8 @@ fn one_octet_from_a_stranger_does_not_take_a_calls_handshake() {
 #[cfg(feature = "dtls")]
 #[test]
 fn a_far_end_whose_port_the_path_moved_is_answered_where_its_records_come_from() {
-    // no RTP latch can close before there are keys, so the answer to a
-    // ClientHello used to go to the signalled port whatever port it came from
+    // no RTP latch exists before keys, so the ClientHello answer must follow the port the far end
+    // actually used, not the signalled one
     let (mut pair, call, remote) = dtls_call();
     let moved: SocketAddr = "192.0.2.2:50002".parse().expect("an address");
     let mut destinations = Vec::new();
@@ -11952,9 +11875,8 @@ AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
 #[cfg(feature = "dtls")]
 #[test]
 fn a_certificate_renewed_while_a_call_rings_is_not_the_one_its_handshake_presents() {
-    // the engine renews its certificate a day before it runs out. One renewed
-    // between a call's offer and its answer used to hand the handshake the new
-    // certificate, whose hash was not the fingerprint the far end was given
+    // the engine renews its certificate a day before expiry. A renewal between offer and answer
+    // must not give the handshake a certificate whose hash differs from the fingerprint sent
     let catalog = CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
         .with_srtp(SrtpPolicy::DtlsOffered);
@@ -12136,8 +12058,6 @@ fn a_new_association_that_is_never_finished_leaves_the_call_on_the_one_it_had() 
     let after = tone_after(&mut pair, call, remote);
     assert!(after > 4_000, "the call did not stay on its keys: {after}");
 }
-
-// -- a local conference of two calls -----------------------------------------
 
 pub(crate) fn carol_sip() -> SocketAddr {
     "192.0.2.3:5060".parse().expect("an address")
@@ -12588,8 +12508,6 @@ fn a_joined_calls_recording_keeps_a_far_end_it_never_dialled() {
     );
 }
 
-// -- behind a NAT: what a STUN server said, in the Contact and the offer ------
-
 /// Where the lab's STUN server is, as far as these tests are concerned.
 #[cfg(feature = "stun")]
 fn stun_server() -> SocketAddr {
@@ -12946,8 +12864,6 @@ fn a_call_answered_after_the_account_moved_behind_a_nat_writes_the_public_contac
     );
 }
 
-// -- an earpiece on a clock of its own ----------------------------------------
-
 /// What an earpiece heard of the lab's cadenced tone through the facade, as
 /// `interop/harness` counts it.
 #[derive(Debug, Default)]
@@ -13087,12 +13003,10 @@ fn an_earpiece_on_any_clock_a_device_runs_never_runs_dry() {
     }
 }
 
-/// An earpiece half as fast again as the far end is no device's clock but
-/// a stream opened at the wrong rate. Through the facade it plays what it
-/// can with no more than a tenth of a second in hand, and every frame it
-/// played as nothing is counted, frame for frame, as an under-run the
-/// call's loss rate takes in: the call says it is in trouble, where it
-/// used to hold a third of a second of delay and say nothing.
+/// An earpiece 1.5 times the far end's rate is a stream opened at the wrong rate. The facade plays
+/// what it can with at most 100 ms buffered and counts every frame played as nothing as an
+/// under-run in the loss rate, so the call reports trouble instead of silently holding a third of a
+/// second of delay.
 #[test]
 fn an_earpiece_past_any_real_clock_is_held_to_its_budget_and_says_so() {
     for per_callback in [1, 2] {
@@ -13171,8 +13085,6 @@ fn a_calls_record_and_recording_are_handed_over_redacted() {
     assert!(!contains(&redacted, b"alice"));
     assert!(!contains(&redacted, caller_address.as_bytes()));
 }
-
-// -- a call that moves to another network ------------------------------------
 
 /// Where the caller is once its network has changed under a call.
 fn moved_sip() -> SocketAddr {
@@ -13539,8 +13451,6 @@ fn a_move_refused_for_a_change_in_progress_leaves_the_call_where_it_was() {
     assert!(!pair.caller.engine.describes(moved_media()));
 }
 
-// -- the log, the state snapshot and the RTP port range ----------------------
-
 /// Everything a log delivered, as level, target and line.
 #[cfg(feature = "redaction")]
 type Lines = Arc<Mutex<Vec<(crate::LogLevel, String, String)>>>;
@@ -13720,8 +13630,6 @@ fn a_port_a_call_took_comes_back_when_the_call_ends() {
     );
 }
 
-// -- RTCP feedback (RFC 4585, RFC 5506) ---------------------------------------
-
 fn feedback_catalog() -> CodecCatalog {
     CodecCatalog::with_order(&["PCMU"])
         .expect("an order")
@@ -13870,8 +13778,6 @@ fn a_lost_packet_is_asked_for_and_the_sender_counts_it() {
     assert_eq!(heard.nacks_received, 1, "{heard:?}");
     assert_eq!(heard.packets_asked_for, 1);
 }
-
-// -- real-time text (RFC 4103) ------------------------------------------------
 
 fn caller_text() -> SocketAddr {
     "192.0.2.1:41000".parse().expect("an address")
@@ -14142,8 +14048,6 @@ fn a_call_that_keys_its_audio_offers_no_text() {
         "typed text is not sent in the clear beside encrypted audio"
     );
 }
-
-// -- recording to a recording server (RFC 7866) -------------------------------
 
 const TCP: TransportId = TransportId(2);
 
@@ -15102,8 +15006,6 @@ fn rtp_parts(datagram: &[u8]) -> (sipral_rtp::RtpHeader, Vec<u8>) {
     let packet = sipral_rtp::RtpPacket::parse(datagram).expect("an RTP packet");
     (packet.header(), packet.payload().to_vec())
 }
-
-// -- RFC 3261 §18.1.1 on a challenged call -----------------------------------
 
 /// The value of one header field of a message on the wire.
 fn wire_header(message: &[u8], name: sipral_core::msg::HeaderName<'_>) -> String {

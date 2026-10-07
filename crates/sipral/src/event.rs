@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One stream of news, about a call rather than about a layer.
+//! One stream of events, organised by call rather than by layer.
 //!
-//! An application driving this crate has two sources of events — what the user
-//! agent says about signalling and what the pipeline says about audio — and
-//! two drains is one too many: the second one is the one somebody forgets, and
-//! what gets forgotten is always the media, because a call that rings and
-//! answers looks like it is working.
-//!
-//! So there is one drain, and a media event names the call it is about. What
-//! the user agent said travels through untouched — this crate has no policy
-//! about registration or transfer and does not pretend to — with one
-//! exception: a digit that arrived by SIP INFO is [`sipral_ua::UaEvent`]'s
-//! own, but it is not forwarded as [`Event::Signalling`]. RFC 4733's digit
-//! already has an event of its own here, and a second one for the other way
-//! a digit crosses the wire would be the split every application then has to
-//! undo. So it is folded into the same [`MediaEvent::DigitReceived`] instead,
-//! told apart by [`DigitSource`].
+//! Two drains (signalling and media) would invite applications to forget one, and it is always
+//! media, because a call that rings and answers looks fine. So there is one drain, and media events
+//! name their call. User agent events pass through untouched, with one exception: a digit received
+//! by SIP INFO is not forwarded as [`Event::Signalling`] but folded into the same
+//! [`MediaEvent::DigitReceived`] RFC 4733 digits use, told apart by [`DigitSource`].
 
 use std::time::Duration;
 
@@ -49,60 +39,48 @@ pub enum Event {
     },
 }
 
-/// Which of the three ways this stack accepts a digit carried the one
-/// [`MediaEvent::DigitReceived`] reports.
+/// Which of the three digit transports carried a [`MediaEvent::DigitReceived`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DigitSource {
     /// RFC 4733: a named telephone event in the RTP stream.
     Rtp,
-    /// RFC 3261's INFO method (RFC 6086), carrying `application/dtmf-relay`
-    /// or `application/dtmf` — see `docs/04-ua.md` for the two conventions.
+    /// SIP INFO (RFC 6086) with `application/dtmf-relay` or `application/dtmf`; see
+    /// `docs/04-ua.md`.
     Info,
-    /// The two tones themselves, heard in the far end's audio (ITU-T Q.23),
-    /// as [`DtmfDetection`](crate::DtmfDetection) says when to listen.
+    /// The tones themselves, detected in the far-end audio (ITU-T Q.23), as
+    /// [`DtmfDetection`](crate::DtmfDetection) configures.
     InBand,
 }
 
 /// What one call's audio is doing.
-// `Ended` carries the call's whole statistics by value, since `StreamStatistics`
-// is `Copy` and an end-of-call record should not be a pointer to chase; it is
-// raised once per call, so boxing it to even the variants up would save
-// nothing that matters and cost the `Copy`
+// `Ended` carries the full statistics by value (`StreamStatistics` is `Copy`); raised once per
+// call, so boxing would gain nothing and lose `Copy`
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum MediaEvent {
     /// Audio is running: the negotiation settled, an RTP session is open, and
-    /// [`MediaEngine::session`](crate::MediaEngine::session) will hand it
-    /// over.
+    /// [`MediaEngine::session`](crate::MediaEngine::session) will return it.
     Started {
-        /// What was agreed. A4's reporting half: this is the answer to "what
-        /// is this call actually using".
+        /// What was agreed (A4: what this call is actually using).
         codec: Codec,
         /// Which way it may flow, as seen from here.
         direction: Direction,
     },
-    /// The session changed under a live call: a hold, a resume, a peer that
-    /// moved its media address, or a re-negotiation onto another codec.
+    /// The session changed during the call: hold, resume, a peer that moved its media address, or a
+    /// new codec.
     Changed {
         /// What is agreed now.
         codec: Codec,
-        /// Which way it may flow now. `SendOnly` or `Inactive` is what a hold
-        /// looks like from here.
+        /// The direction now. `SendOnly` or `Inactive` is how a hold looks from here.
         direction: Direction,
     },
-    /// Nothing has arrived for longer than the configured threshold, while
-    /// signalling is perfectly happy.
+    /// No audio has arrived for longer than the configured threshold, although signalling is fine
+    /// (B5).
     ///
-    /// This is B5, and it is here because every application otherwise builds
-    /// the same watchdog and every one of them discovers the need the same
-    /// way: from a complaint about a call where both people went quiet and
-    /// neither hung up.
-    ///
-    /// A G.729 far end in a pause it announced with an Annex B SID frame
-    /// sends no audio on purpose, for as long as its background stays the
-    /// same; while its RTCP reports keep arriving that pause is not a stall.
+    /// A G.729 far end in an announced Annex B pause sends no audio on purpose; while its RTCP
+    /// reports keep arriving, that is not a stall.
     Stalled {
         /// How long the stream has been silent.
         silent_for: Duration,
@@ -112,52 +90,35 @@ pub enum MediaEvent {
         /// How long the gap turned out to be.
         silent_for: Duration,
     },
-    /// The call is over and this is what its media cost.
+    /// The call is over, with its media totals.
     ///
-    /// The last word on the stream: the handle is released when this is
-    /// emitted, so anything an end-of-call record needs is in here rather than
-    /// behind a lookup that would now fail.
+    /// The last event for the stream: the handle is released now, so everything an end-of-call
+    /// record needs is included.
     Ended(StreamStatistics),
-    /// The account this call belongs to asked for an RFC 6035 voice
-    /// quality report and the attempt to publish it has now been made,
-    /// once, on call end.
+    /// The account asked for an RFC 6035 voice quality report and one publish attempt was made at
+    /// call end.
     ///
-    /// Emitted only when there was a collector to publish to at all
-    /// (`Account::quality_report_uri` — see `sipral_ua`); a call whose
-    /// account named none raises nothing here, since nothing was ever
-    /// attempted for the application to hear about. Whether it is worth
-    /// telling anyone `ok` is `false` is the application's call: this
-    /// crate never retries either way.
+    /// Only raised if the account named a collector (`Account::quality_report_uri` in `sipral_ua`).
+    /// Never retried.
     QualityReportSent {
-        /// Whether the PUBLISH left this end. Not whether a collector
-        /// accepted it — this stack does not wait for that answer.
+        /// Whether the PUBLISH was sent. Not whether a collector accepted it; this stack does not
+        /// wait for that.
         ok: bool,
     },
-    /// The far end pressed a key, or sent some other named telephone event
-    /// (RFC 4733).
+    /// The far end pressed a key or sent another RFC 4733 named event.
     ///
-    /// One per keypress, not one per packet: RFC 4733 sends a digit as a run
-    /// of updates and then repeats the closing packet three times (§2.5.1.4),
-    /// and reporting each of them would turn one key into five. The event is
-    /// identified by the RTP timestamp it carries (§2.2.1), which is what
-    /// makes collapsing them possible at all.
+    /// One event per keypress: RFC 4733 sends a run of updates and repeats the end packet three
+    /// times (§2.5.1.4), all identified by the same RTP timestamp (§2.2.1), so they are collapsed.
     DigitReceived {
-        /// The key, where the event names one. Event codes at and above 16
-        /// are real events that no keypad has a key for. Always `Some` when
-        /// `source` is [`DigitSource::Info`] or [`DigitSource::InBand`]: an
-        /// INFO never names anything but a keypad character, and a pair of
-        /// tones is one of the sixteen keys.
+        /// The key, where the event names one; codes 16 and above have no key. Always `Some` for
+        /// [`DigitSource::Info`] and [`DigitSource::InBand`].
         digit: Option<char>,
-        /// The event code itself (§3.2), or the one that character names
-        /// when `source` is [`DigitSource::Info`] or [`DigitSource::InBand`]
-        /// rather than an event RFC 4733 actually carried.
+        /// The event code (§3.2), or for [`DigitSource::Info`] and [`DigitSource::InBand`] the code
+        /// the character maps to.
         event: u8,
-        /// How long the far end held it. `None` when nothing said: RFC
-        /// 4733 always carries a duration, and so does a digit heard in the
-        /// audio, but `application/dtmf`'s INFO never does, and that is not
-        /// the same fact as `Duration=0` on the other form, which is
-        /// `Some(Duration::ZERO)` — a peer that held a key for no time at all
-        /// still said so (8.3.11-ter).
+        /// How long the key was held. `None` when not stated: RFC 4733 and in-band digits always
+        /// have a duration, `application/dtmf` INFO never does. `Duration=0` from the other INFO
+        /// form is `Some(Duration::ZERO)` (8.3.11-ter).
         held: Option<Duration>,
         /// Which of the ways this stack accepts a digit reported this one.
         source: DigitSource,
@@ -165,41 +126,26 @@ pub enum MediaEvent {
     /// What the far end's network played, or who answered: listened for on
     /// a call given a [`ProgressDetection`](crate::ProgressDetection).
     Progress(CallProgress),
-    /// The handshake that keys this call finished, and audio can move.
+    /// The DTLS handshake keying this call finished, and audio can flow.
     ///
-    /// Only DTLS-SRTP produces this, and it is the moment the call becomes
-    /// what it agreed to be: between
-    /// [`MediaEvent::Started`](MediaEvent::Started) and this one, the stream
-    /// exists, has an address and a codec, and carries nothing in either
-    /// direction. An application that draws a padlock draws it here, and
-    /// [`MediaSession::is_encrypted`](crate::MediaSession::is_encrypted)
-    /// answers the same question at any other moment.
-    ///
-    /// A call keyed by SDES never emits it, because such a call is keyed
-    /// before its session is opened at all.
+    /// Between [`MediaEvent::Started`](MediaEvent::Started) and this event the stream exists but
+    /// carries nothing either way. Show a padlock here;
+    /// [`MediaSession::is_encrypted`](crate::MediaSession::is_encrypted) answers at any other time.
+    /// SDES calls never raise it, since they are keyed before the session opens.
     #[cfg(feature = "dtls")]
     Secured {
-        /// The transform the handshake agreed on, which RFC 5764 §4.1.2 has
-        /// it choose rather than the signalling.
+        /// The transform the handshake agreed; with DTLS the handshake chooses it, not the
+        /// signalling (RFC 5764 §4.1.2).
         suite: Suite,
-        /// Where the far end's handshake records came from, which is the
-        /// address its media will be believed from too. `None` only for a
-        /// handshake in which this end sent every record and the far end
-        /// answered from nowhere, which no completed handshake can be.
+        /// Where the far end's handshake records came from, which is also where its media is
+        /// accepted from. `None` cannot happen for a completed handshake.
         peer: Option<SocketAddr>,
     },
-    /// ICE chose the path this call's media will take (RFC 8445 §8.1.1).
+    /// ICE chose the path this call's media takes (RFC 8445 §8.1.1).
     ///
-    /// The moment the checks stop and the audio starts, and the answer to
-    /// "why is this call going to an address the signalling never named" —
-    /// which, for a call behind a NAT, is the ordinary outcome rather than a
-    /// fault. It arrives again if a nomination of higher priority replaces
-    /// the pair part-way through the call; each one names the pair in force
-    /// from that moment.
-    ///
-    /// A call not using ICE never emits it, and that is most calls: the
-    /// policy is off by default, and a peer that described no ICE leaves the
-    /// stream on the address its signalling named.
+    /// Explains why media goes to an address the signalling never named, which is normal behind a
+    /// NAT. Raised again if a higher-priority nomination replaces the pair; each names the pair in
+    /// force from then. Calls without ICE never raise it.
     #[cfg(feature = "ice")]
     PathChosen {
         /// This end of the pair: the socket the media goes out of.
@@ -207,53 +153,36 @@ pub enum MediaEvent {
         /// The far end of it, which is where the media goes.
         remote: SocketAddr,
     },
-    /// Media could not be started or could not be kept: an answer naming a
-    /// codec this build has no decoder for, a description that could not be
-    /// read.
+    /// Media could not start or continue: an undecodable codec in the answer, an unreadable
+    /// description.
     ///
-    /// The call itself is untouched. Whether to hang it up is a decision with
-    /// a person on the other end of it, so it is the application's.
+    /// The call is left up; hanging up is the application's decision.
     Failed(MediaError),
-    /// A recording stopped on its own, part-way through.
-    ///
-    /// The disk filled, the file was removed underneath, the volume went away.
-    /// B3's rule holds here too: it is an event, never an abort, and the call
-    /// carries on without it.
+    /// A recording stopped on its own: disk full, file removed, volume gone. An event, never an
+    /// abort (B3); the call continues.
     RecordingStopped {
         /// Why the sink refused.
         reason: MediaError,
         /// How much audio reached the file before it did.
         written: Duration,
     },
-    /// The call this one was joined to has ended, taking the pair down with
-    /// it.
+    /// The call this one was joined to ended, ending the pair.
     ///
-    /// [`MediaEngine::join`](crate::MediaEngine::join) paired the two calls
-    /// and neither one ever called
-    /// [`MediaEngine::leave`](crate::MediaEngine::leave) — the partner's own
-    /// call simply ended first, the same way any call does, and this is the
-    /// half of that this call has to be told: the pairing does not outlive
-    /// either side of it. This call's own session is untouched and carries
-    /// on exactly as an unjoined call always has, on whatever
+    /// The pairing from [`MediaEngine::join`](crate::MediaEngine::join) does not outlive either
+    /// call. This call's session is untouched and continues with whatever
     /// [`MediaSession::playback`](crate::MediaSession::playback) and
-    /// [`MediaSession::capture`](crate::MediaSession::capture) it is next
-    /// given directly.
+    /// [`MediaSession::capture`](crate::MediaSession::capture) it is given directly.
     Unjoined,
-    /// The far end typed something on the call's real-time text stream (RFC
-    /// 4103), in the order it typed it.
+    /// The far end typed on the real-time text stream (RFC 4103), in order.
     ///
-    /// Raised as blocks arrive and are put back in order, so one keystroke or
-    /// a whole burst may come in one event. A lost block that no redundant
-    /// copy could recover is marked where it was, and the text carries on
-    /// after it.
+    /// Raised as blocks arrive and are reordered, so one event may hold one keystroke or a burst.
+    /// An unrecoverable lost block is marked and the text continues.
     TextReceived {
-        /// What was typed: characters as they are, an erasure of the last
-        /// character as BACKSPACE (U+0008), a new line as LINE SEPARATOR
-        /// (U+2028), an alert as BELL (U+0007), and REPLACEMENT CHARACTER
-        /// (U+FFFD) where text was lost (RFC 4103 §5.3).
+        /// The text: characters as typed, BACKSPACE (U+0008) for an erasure, LINE SEPARATOR
+        /// (U+2028) for a new line, BELL (U+0007) for an alert, and REPLACEMENT CHARACTER (U+FFFD)
+        /// where text was lost (RFC 4103 §5.3).
         text: String,
-        /// How many blocks of text were lost: the REPLACEMENT CHARACTERs in
-        /// `text`, one per block (RFC 4103 §5.3).
+        /// Lost blocks: the number of REPLACEMENT CHARACTERs in `text` (RFC 4103 §5.3).
         missing: u32,
     },
 }

@@ -1,28 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Lining up what was played against what is being captured.
+//! Lining up what was played with what is being captured.
 //!
-//! [`sipral_media::processor::Processor`] takes two frames covering the same
-//! span of time: the microphone's, and the far end's audio as it left the
-//! loudspeaker while that microphone was open. Only the second is hard to
-//! produce. It was handed out by [`MediaSession::playback`] some milliseconds
-//! ago — through a device ring, a driver, and whatever the hardware adds — and
-//! the echo in the microphone is *that* frame, not the one about to be played
-//! next. Handing a canceller the wrong frame is not a weaker cancellation, it
-//! is none: the two signals do not correlate at all, and an adaptive filter
-//! given uncorrelated input diverges.
+//! [`sipral_media::processor::Processor`] takes two frames covering the same time span: the
+//! microphone's, and the far-end audio that left the loudspeaker while the microphone was open. The
+//! second was handed out by [`MediaSession::playback`] some milliseconds earlier, through device
+//! buffers and drivers. A canceller given the wrong frame does not just cancel less: the signals do
+//! not correlate and the adaptive filter diverges.
 //!
-//! So this keeps the recent past of the loudspeaker and hands back the slice
-//! that lines up. How far back to look is the render-to-capture delay of the
-//! device, which only the platform knows and which neither platform reports
-//! the same way — WASAPI answers it per stream, CoreAudio has to be asked four
-//! properties per direction — so it arrives from above rather than being
-//! guessed here. The `sipral-io-*` crates are what assemble it.
+//! So this keeps the loudspeaker's recent history and returns the aligned slice. The look-back is
+//! the device's render-to-capture delay, which only the platform knows (WASAPI per stream,
+//! CoreAudio from four properties per direction); the `sipral-io-*` crates supply it.
 //!
-//! Everything is allocated when a processor is attached and not before. A
-//! build with nothing attached, which includes every headless one, carries no
-//! history and copies no frames.
+//! Nothing is allocated until a processor is attached, so headless builds carry no history.
 //!
 //! [`MediaSession::playback`]: crate::MediaSession::playback
 
@@ -32,12 +23,9 @@ use sipral_media::processor::Processor;
 
 /// The longest render-to-capture delay history is kept for.
 ///
-/// Half a second is far beyond any device that works, and the margin is wider
-/// than it first looks: a laptop's own speakers and microphone report a little
-/// over a hundred milliseconds together once its voice-processing unit has
-/// them open. The
-/// limit exists so that a wrong number arriving from a platform is refused
-/// rather than turned into megabytes of ring per call.
+/// Far beyond any working device (a laptop's own speakers and microphone report a little over 100
+/// ms with voice processing on). It exists so a wrong platform value is refused instead of becoming
+/// megabytes of ring per call.
 pub const MAX_RENDER_DELAY: Duration = Duration::from_millis(500);
 
 /// A processor, the loudspeaker history it needs, and the frames it works in.
@@ -46,9 +34,8 @@ pub(crate) struct Echo {
     ring: Vec<i16>,
     /// Where the next rendered sample goes.
     write: usize,
-    /// How much of the ring has been written since it was last cleared, so
-    /// that the start of a call correlates against silence rather than
-    /// against whatever the allocation held.
+    /// How much of the ring has been written since it was cleared, so the start of a call
+    /// correlates against silence, not leftover memory.
     filled: usize,
     delay: usize,
     near_end: Vec<i16>,
@@ -78,10 +65,8 @@ impl Echo {
         }
     }
 
-    /// Look `delay` back from now on.
-    ///
-    /// The history already held stays: it is the same loudspeaker, and only
-    /// the opinion about how long it takes to reach the microphone changed.
+    /// Look back `delay` from now on. The history stays: same loudspeaker, only the delay estimate
+    /// changed.
     pub(crate) fn set_delay(&mut self, rate: u32, delay: Duration) {
         self.delay = samples_in(rate, delay);
     }
@@ -98,12 +83,10 @@ impl Echo {
         }
     }
 
-    /// Run the processor over one captured frame and give back what it left.
+    /// Run the processor on one captured frame and return the result.
     ///
-    /// The frame comes back borrowed from this structure's own buffer rather
-    /// than written through the caller's slice, because the caller's is the
-    /// application's capture buffer and a stack that edits it in place is a
-    /// stack that changes what the application recorded, metered or drew.
+    /// Returned from this structure's buffer rather than written into the caller's, which is the
+    /// application's capture buffer and may be recorded, metered or drawn.
     pub(crate) fn process(&mut self, samples: &[i16]) -> &[i16] {
         let count = samples.len().min(self.near_end.len());
         let near = self.near_end.get_mut(..count).unwrap_or_default();
@@ -114,13 +97,9 @@ impl Echo {
         self.near_end.get(..count).unwrap_or_default()
     }
 
-    /// Take back the application's own object, so a stream that changed
-    /// codec can be given rings of the new size around the same processor.
-    ///
-    /// The application handed this over once and has no way to hand it over
-    /// again — a re-negotiation is not something it is told about before it
-    /// happens — so losing it here would silence echo cancellation for the
-    /// rest of the call and tell nobody.
+    /// Return the application's processor so a stream that changed codec can wrap it in rings of
+    /// the new size. The application cannot hand it over again, so losing it would silently end
+    /// echo cancellation.
     pub(crate) fn into_processor(self) -> Box<dyn Processor> {
         self.processor
     }
@@ -135,8 +114,7 @@ impl Echo {
 }
 
 impl core::fmt::Debug for Echo {
-    /// Written out because a `Box<dyn Processor>` has nothing to print and
-    /// the ring has too much.
+    /// Written by hand: a `Box<dyn Processor>` prints nothing useful and the ring too much.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Echo")
             .field("delay_samples", &self.delay)
@@ -145,14 +123,11 @@ impl core::fmt::Debug for Echo {
     }
 }
 
-/// Fill `out` with the loudspeaker frame that lines up with a capture
-/// happening now.
+/// Fill `out` with the loudspeaker frame aligned with a capture now.
 ///
-/// The last sample of `out` is the one written `delay + 1` places behind the
-/// head, so a delay of zero pairs a capture with the frame handed out by the
-/// [`playback`](crate::MediaSession::playback) immediately before it. What is
-/// not there yet — the first frames of a call — is silence, which is what it
-/// really was.
+/// The last sample of `out` is `delay + 1` behind the head, so delay zero pairs a capture with the
+/// frame from the immediately preceding [`playback`](crate::MediaSession::playback). Anything not
+/// yet written (start of a call) is silence, which it was.
 fn align(ring: &[i16], write: usize, filled: usize, delay: usize, out: &mut [i16]) {
     let capacity = ring.len();
     let frame = out.len();
@@ -181,8 +156,7 @@ mod tests {
     use sipral_media::processor::Processor;
     use std::time::Duration;
 
-    /// Hands back whatever reference it was given, so a test can assert on
-    /// the alignment rather than on a canceller's arithmetic.
+    /// Returns whatever reference it got, so tests check alignment rather than cancellation.
     struct Mirror {
         seen: Vec<i16>,
         resets: usize,
@@ -223,7 +197,7 @@ mod tests {
     #[test]
     fn a_delay_of_one_frame_pairs_with_the_frame_before_that() {
         let rate = 8_000;
-        // four samples at eight kilohertz is half a millisecond
+        // four samples at 8 kHz is half a millisecond
         let mut echo = Echo::new(
             Box::new(Mirror {
                 seen: vec![],
@@ -255,7 +229,7 @@ mod tests {
             *slot = i16::try_from(index).unwrap_or(0);
         }
         let mut far = [1_i16; 4];
-        // eight samples written, and a delay that reaches back twenty
+        // eight samples written, delay reaching back twenty
         align(&ring, 8, 8, 20, &mut far);
         assert_eq!(far, [0; 4]);
     }
@@ -272,7 +246,7 @@ mod tests {
             Duration::ZERO,
         );
         let capacity = echo.ring.len();
-        // several times round, so the head is nowhere near where it started
+        // several laps, so the head is far from its start
         for round in 0..(capacity * 3) {
             let value = i16::try_from(round % 1_000).unwrap_or(0);
             echo.rendered(&[value, value]);

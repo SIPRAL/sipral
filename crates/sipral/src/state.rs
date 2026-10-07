@@ -1,27 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What the engine is holding, all at once, for a crash report.
+//! What the engine holds at one moment, for a crash report.
 //!
-//! A log says what happened; a crash report wants to know what was going on
-//! at the moment it was written: which accounts were registered, which calls
-//! were up and in what state, which media was flowing where, and the health
-//! counters. [`crate::MediaEngine::state`] takes that as an [`EngineState`],
-//! and [`EngineState::render`] writes it as text a report can carry, with
-//! two promises:
+//! A log says what happened; a crash report needs the current state: registered accounts, calls and
+//! their states, media flows, health counters. [`crate::MediaEngine::state`] captures it as an
+//! [`EngineState`], and [`EngineState::render`] writes text that is:
 //!
-//! - **Bounded.** At most [`LISTED`] rows per section, the rest counted
-//!   rather than listed, and the whole text cut at the byte limit the caller
-//!   gives, on a character boundary, with a line saying so.
-//! - **Redacted.** Every user part, number and IP literal goes through
-//!   [`sipral_diag::redact_text`] before the text is handed back, so the
-//!   report can be attached to a ticket without being read first — the rule
-//!   `docs/14-diagnostics.md` holds a diagnostic record to.
+//! - **Bounded**: at most [`LISTED`] rows per section, the rest counted, and the text cut at the
+//!   caller's byte limit on a character boundary, with a marker line.
+//! - **Redacted**: user parts, numbers and IP literals go through [`sipral_diag::redact_text`], so
+//!   the report can be attached to a ticket unread, as `docs/14-diagnostics.md` requires of
+//!   diagnostic records.
 //!
-//! Taking it never waits: a call's session that another thread is in the
-//! middle of a frame on is reported as busy rather than waited for, so a
-//! snapshot taken from a crash handler's thread cannot hang on the thread
-//! that crashed.
+//! It never waits: a session busy on another thread is reported as busy, so a crash handler cannot
+//! hang on the thread that crashed.
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -115,12 +108,10 @@ impl EngineState {
         }
     }
 
-    /// The snapshot as text for a crash report, redacted with `redactor` and
-    /// at most `limit` bytes long.
+    /// The snapshot as crash-report text, redacted with `redactor`, at most `limit` bytes.
     ///
-    /// `extra` is appended before the text is redacted and bounded: a layer
-    /// above this one — the C ABI's transports and last errors — adds its own
-    /// sections there and gets the same two promises for them.
+    /// `extra` is appended before redaction and bounding, so a higher layer (the C ABI's transports
+    /// and last errors) gets the same guarantees for its sections.
     #[must_use]
     pub fn render(&self, extra: &str, redactor: &mut Redactor, limit: usize) -> String {
         let mut text = String::new();

@@ -3,68 +3,46 @@
 
 //! Recording a call: both directions, one file, playable as it stands.
 //!
-//! Recording is neither protocol nor device, and putting it in either is how
-//! it ends up half-implemented in both. It is a tap on the media path — the
-//! frame that was decoded for the earpiece and the frame that went to the far
-//! end — so it lives beside the pipeline that produces those two frames and
-//! nowhere else.
+//! A tap on the media path (the decoded far-end frame and the frame sent), so it lives beside the
+//! pipeline.
 //!
 //! # What is written
 //!
-//! [`RecordingOptions`] chooses, and every choice is independent of the
-//! codec the call is on: the file is written at its own rate, which is the
-//! call's own unless another is named, and the two directions are converted
-//! to it on the way in. That is also why a recording carries on through a
-//! re-negotiation that moves the call to a codec at another rate — the file
-//! does not move with it.
+//! [`RecordingOptions`] chooses, independently of the codec. The file has its own rate (the call's
+//! by default) and both directions are converted to it, so a recording survives a codec change to
+//! another rate.
 //!
-//! - [`RecordingFormat::Wav`]: sixteen-bit PCM in RIFF/WAVE, the format every
-//!   player on every platform opens, growing into RF64 past four gibibytes.
-//! - `RecordingFormat::OggOpus`, where the `opus` feature is on: Opus in Ogg
-//!   (RFC 7845), about a tenth of the size, with the encoder's own delay as
-//!   the pre-skip and the stream's serial number drawn from the call's own
-//!   randomness, so that two recordings chained into one file stay two
-//!   streams.
+//! - [`RecordingFormat::Wav`]: 16-bit PCM in RIFF/WAVE, becoming RF64 past 4 GiB.
+//! - `RecordingFormat::OggOpus`, with the `opus` feature: Ogg Opus (RFC 7845), about a tenth the
+//!   size, with the encoder delay as pre-skip and a serial number from the call's randomness so
+//!   chained recordings stay separate streams.
 //!
-//! [`RecordingLayout::Mixed`] is one channel, the conversation as a listener
-//! heard it; [`RecordingLayout::Stereo`] is two, **this end on the left and
-//! the far end on the right**, which is what an analysis tool or a
-//! transcription that attributes speech to a speaker wants.
+//! [`RecordingLayout::Mixed`] is one channel, as a listener heard it; [`RecordingLayout::Stereo`]
+//! is **this end on the left, the far end on the right**, for analysis or speaker-attributed
+//! transcription.
 //!
 //! # Where a recording ends
 //!
-//! Stopped, the call ending, the stack being destroyed, or the recorder
-//! being dropped for any other reason: all four finish the file the same
-//! way — the WAVE header written with the real lengths, the last Ogg page
-//! marked as the end of the stream and trimmed to the audio.
+//! Stopping, call end, stack destruction or dropping the recorder all finish the file the same way:
+//! real lengths in the WAVE header, or the last Ogg page marked as end of stream and trimmed to the
+//! audio.
 //!
-//! What cannot be finished is a process that dies. For that there is the
-//! checkpoint ([`RecordingOptions::checkpoint`], five seconds unless told
-//! otherwise): a WAVE file's header is rewritten with the lengths reached so
-//! far, and an Ogg stream's page is written out, so a crash leaves a file
-//! that plays up to the last checkpoint. The WAVE file then holds the audio
-//! after that point too, past the length its header states, where a player
-//! does not look and an editor finds it; the Ogg stream simply ends at its
-//! last whole page, without the page that marks the end.
+//! A crashed process cannot finish, so every [`RecordingOptions::checkpoint`] (5 s by default) the
+//! WAVE header is rewritten with the lengths so far and the current Ogg page is flushed. A crash
+//! then leaves a file playable up to the last checkpoint; WAVE audio past it is still in the file
+//! beyond the stated length, and an Ogg stream ends at its last whole page without an end marker.
 //!
-//! # Why the two directions are halved in a mixed file
+//! # Why a mixed file halves each direction
 //!
-//! Two people talking at once, each at full scale, is louder than full scale.
-//! Mixing at unity and letting the sum saturate distorts exactly the moments a
-//! recording is usually kept for, and there is no way to undo it afterwards.
-//! Halving each leg first means the sum reaches full scale only where both
-//! directions are at full scale at the same instant, and never passes it; the
-//! six decibels it costs are six decibels any player can put back.
+//! Two full-scale talkers sum past full scale, and clipping would distort exactly the moments
+//! people keep recordings for. Halving each leg keeps the sum in range; the 6 dB lost is easy to
+//! restore.
 //!
-//! # Keeping the two directions level with each other
+//! # Keeping the directions aligned
 //!
-//! Nothing guarantees that the application hands over a captured frame for
-//! every played one. A muted microphone, a call on hold, a device that stalled
-//! — any of them leaves one side arriving and the other not, and a mixer that
-//! simply waited would stop writing and put the rest of the conversation at
-//! the wrong time. So a direction that gets a second frame before the other
-//! has produced its first is written against silence, and the file stays on
-//! the call's own timeline.
+//! The application may not deliver a captured frame for every played one (muted mic, hold, stalled
+//! device). If one direction delivers a second frame before the other delivers any, it is written
+//! against silence, so the file stays on the call's timeline.
 
 use std::io::{Seek, Write};
 use std::time::Duration;
@@ -81,10 +59,8 @@ use crate::error::MediaError;
 
 /// Where a recording goes.
 ///
-/// Write and seek, because the lengths in a WAVE header are only known when
-/// the recording ends. `File` satisfies it, and so does `Cursor<Vec<u8>>`,
-/// which is what the tests here record into. Nothing in this crate opens
-/// either.
+/// Needs `Seek` because WAVE header lengths are only known at the end. `File` and `Cursor<Vec<u8>>`
+/// both work; this crate opens neither.
 pub trait RecordingSink: Write + Seek + Send {}
 
 impl<T: Write + Seek + Send> RecordingSink for T {}
@@ -103,13 +79,9 @@ pub enum RecordingFormat {
 }
 
 impl RecordingFormat {
-    /// Ogg Opus, where this build has the encoder, and `None` where the
-    /// `opus` feature is off.
-    ///
-    /// Asked of the value rather than of a `cfg`, for the reason
-    /// [`Codec::is_opus`](crate::Codec::is_opus) is: a crate above this one
-    /// cannot read this crate's features, and one that guessed from its own
-    /// would offer a format this build cannot write.
+    /// Ogg Opus where this build has the encoder, `None` without the `opus` feature. A method
+    /// rather than a `cfg` because other crates cannot read this crate's features (as for
+    /// [`Codec::is_opus`](crate::Codec::is_opus)).
     #[must_use]
     pub const fn ogg_opus() -> Option<Self> {
         #[cfg(feature = "opus")]
@@ -141,18 +113,14 @@ pub struct RecordingOptions {
     pub format: RecordingFormat,
     /// One channel or two.
     pub layout: RecordingLayout,
-    /// The rate the file is written at, in hertz, or `None` for the rate
-    /// the call's codec hears at when the recording starts — or, for Ogg
-    /// Opus on a call at a rate Opus does not take, 48 kHz. WAV takes any
-    /// rate from 8 to 48 kHz; Ogg Opus takes Opus's five: 8, 12, 16, 24 and
-    /// 48 kHz.
+    /// File sample rate in hertz, or `None` for the call codec's rate at start (48 kHz for Ogg Opus
+    /// if Opus does not take the call's rate). WAV takes 8 to 48 kHz; Ogg Opus takes 8, 12, 16, 24
+    /// or 48 kHz.
     pub sample_rate: Option<u32>,
-    /// The bitrate an Ogg Opus recording is encoded at, in bits a second
-    /// for all its channels together, or `None` for the one libopus picks
-    /// for the rate. Ignored for WAV.
+    /// Ogg Opus bitrate in bits per second for all channels, or `None` for libopus's choice.
+    /// Ignored for WAV.
     pub bitrate: Option<u32>,
-    /// How often what has been written is made to survive a crash; zero
-    /// only at the end. See the module documentation.
+    /// How often the file is made crash-safe; zero means only at the end. See the module docs.
     pub checkpoint: Duration,
 }
 
@@ -170,13 +138,12 @@ impl Default for RecordingOptions {
 }
 
 impl RecordingOptions {
-    /// The rate a call at `call_rate` would be recorded at under these
-    /// options.
+    /// The file rate for a call at `call_rate` under these options.
     ///
     /// # Errors
-    /// [`MediaError::RecordingRate`] for a rate the format cannot be written
-    /// at, and [`MediaError::RecordingBitrate`] for a bitrate Opus is not
-    /// defined at.
+    ///
+    /// [`MediaError::RecordingRate`] for a rate the format cannot write,
+    /// [`MediaError::RecordingBitrate`] for a bitrate Opus does not support.
     pub fn rate_for(&self, call_rate: u32) -> Result<u32, MediaError> {
         match self.format {
             RecordingFormat::Wav => {
@@ -230,8 +197,7 @@ enum Writer {
     Opus(Box<OpusFile>),
 }
 
-/// An Ogg Opus stream, and the encoder feeding it twenty milliseconds at a
-/// time.
+/// An Ogg Opus stream and its encoder, fed 20 ms at a time.
 #[cfg(feature = "opus")]
 struct OpusFile {
     writer: ogg_opus::Writer<Box<dyn RecordingSink>>,
@@ -239,10 +205,9 @@ struct OpusFile {
     /// Interleaved samples waiting for a whole frame.
     queued: Vec<i16>,
     packet: Vec<u8>,
-    /// Samples per channel handed over so far, which is what the last page
-    /// is trimmed to.
+    /// Samples per channel handed over, which the last page is trimmed to.
     taken: u64,
-    /// And those encoded, the silence that flushes the encoder included.
+    /// Samples encoded, including the flushing silence.
     encoded: u64,
     rate: u32,
     channels: usize,
@@ -324,14 +289,12 @@ impl OpusFile {
         self.writer.flush().map_err(ogg_failed)
     }
 
-    /// Encode what is left, and then silence until the encoder has given up
-    /// the last of the audio, and end the stream at the audio's real length.
+    /// Encode the rest, then silence until the encoder has emitted all real audio, and end the
+    /// stream at the audio's true length.
     ///
-    /// The encoder runs its lookahead behind its input, so the last
-    /// `lookahead` samples handed over come out only once that much more has
-    /// gone in: a stream ended at the last whole frame would be short of its
-    /// own end by the pre-skip, and the last page could not be trimmed to it
-    /// (RFC 7845 §4.4 counts the pre-skip into the final granule position).
+    /// The encoder lags its input by `lookahead` samples, so without the extra silence the stream
+    /// would be short by the pre-skip and the last page could not be trimmed (RFC 7845 §4.4 counts
+    /// the pre-skip in the final granule position).
     fn finish(mut self) -> Result<(), MediaError> {
         let whole = self.encoder.frame_samples() * self.channels;
         let target = self
@@ -372,24 +335,21 @@ pub(crate) struct Recorder {
     rate: u32,
     /// The rate frames arrive at: the call's codec's.
     heard_at: u32,
-    /// The frame from one direction that is waiting for its opposite number.
-    /// Only one at a time: a second one means the other direction has stopped
-    /// producing, and waiting any longer would bend the timeline.
+    /// One direction's frame waiting for the other's. Only one: a second means the other direction
+    /// stopped, and waiting longer would bend the timeline.
     pending: Option<Leg>,
-    /// The samples of that frame, in a buffer kept from frame to frame so
-    /// that a recording allocates as it starts rather than per frame.
+    /// Reusable buffer for that frame, so recording allocates only at start.
     waiting: Vec<i16>,
-    /// Each direction from the call's rate to the file's, when they differ.
-    /// Two, fed the same lengths, so they give the same lengths back.
+    /// Converters from the call rate to the file rate for each direction, when they differ. Fed the
+    /// same lengths, so they return the same lengths.
     convert: Option<(Resampler, Resampler)>,
     silence: Vec<i16>,
-    /// This end's frame while the call is on hold: silence, kept apart from
-    /// the one a missing direction is written against.
+    /// This end's silent frame while on hold, separate from the one a missing direction is written
+    /// against.
     held: Vec<i16>,
     local: Vec<i16>,
     remote: Vec<i16>,
-    /// The sum or the interleaving, reused so that a recording allocates as
-    /// it starts rather than per frame.
+    /// Reusable output buffer (sum or interleave).
     out: Vec<i16>,
     writer: Option<Writer>,
     /// Samples per channel written so far, at the file's rate.
@@ -400,12 +360,12 @@ pub(crate) struct Recorder {
 }
 
 impl Recorder {
-    /// Start a recording of a call at `heard_at` hertz, writing the header
-    /// straight away. `serial` is the Ogg stream's serial number.
+    /// Start recording a call at `heard_at` hertz and write the header now. `serial` is the Ogg
+    /// serial number.
     ///
     /// # Errors
-    /// Those of [`RecordingOptions::rate_for`], and whatever the sink says:
-    /// a recording that cannot start says so here, and the call carries on.
+    ///
+    /// Those of [`RecordingOptions::rate_for`], and sink errors. The call continues either way.
     pub(crate) fn start(
         sink: Box<dyn RecordingSink>,
         options: &RecordingOptions,
@@ -462,10 +422,10 @@ impl Recorder {
         self.offer(Leg::Captured, samples)
     }
 
-    /// A frame of `length` samples of this end's while the call is on
-    /// hold, either way: written as silence, in its place.
+    /// A frame of `length` samples from this end during hold, written as silence.
     ///
     /// # Errors
+    ///
     /// Whatever the sink says.
     pub(crate) fn captured_on_hold(&mut self, length: usize) -> Result<(), MediaError> {
         let mut held = core::mem::take(&mut self.held);
@@ -484,14 +444,13 @@ impl Recorder {
         self.offer(Leg::Played, samples)
     }
 
-    /// A whole mix that is already one channel — a conference's — written
-    /// as it is.
+    /// A one-channel mix (a conference's) written as it is.
     ///
-    /// Handed over as both directions of a mixed recording, each of which
-    /// the mix halves: the two halves are the mix again, to the rounding of
-    /// one step, converted to the file's rate on the way as any frame is.
+    /// Passed as both directions of a mixed recording, which halves each, so the sum is the mix
+    /// again within one step of rounding; it is converted to the file rate like any frame.
     ///
     /// # Errors
+    ///
     /// Whatever the sink says.
     pub(crate) fn mix(&mut self, samples: &[i16]) -> Result<(), MediaError> {
         self.write_pair(samples, samples)
@@ -504,11 +463,11 @@ impl Recorder {
         )
     }
 
-    /// The call moved to a codec that hears at `heard_at`: what one
-    /// direction is holding is written at the old rate, and from here on
-    /// both are converted from the new one. The file does not change.
+    /// The call moved to a codec at `heard_at`: flush the waiting frame at the old rate, convert
+    /// from the new one from now on. The file is unchanged.
     ///
     /// # Errors
+    ///
     /// Whatever the sink says.
     pub(crate) fn reformat(&mut self, heard_at: u32) -> Result<(), MediaError> {
         if heard_at == self.heard_at {
@@ -520,12 +479,12 @@ impl Recorder {
         Ok(())
     }
 
-    /// Close the recording: flush what one direction is still holding,
-    /// finish the file, and let the sink go.
+    /// Close the recording: flush the waiting frame, finish the file, release the sink.
     ///
     /// # Errors
-    /// Whatever the sink says. A file that could not be finished holds the
-    /// audio up to the last checkpoint that could be written.
+    ///
+    /// Whatever the sink says. An unfinished file holds the audio up to its last successful
+    /// checkpoint.
     pub(crate) fn finish(mut self) -> Result<(), MediaError> {
         self.close()
     }
@@ -542,8 +501,7 @@ impl Recorder {
     }
 
     fn flush_pending(&mut self) -> Result<(), MediaError> {
-        // lifted out for the length of the write, which borrows the rest of
-        // the recorder
+        // taken out because the write borrows the rest of the recorder
         let frame = core::mem::take(&mut self.waiting);
         let flushed = match self.pending.take() {
             Some(Leg::Captured) => self.write_pair(&frame, &[]),
@@ -554,9 +512,8 @@ impl Recorder {
         flushed
     }
 
-    /// Take one direction's frame, and write a pair as soon as there is
-    /// something to pair it with — or as soon as it is clear there will not
-    /// be.
+    /// Take one direction's frame and write a pair once there is a partner, or once it is clear
+    /// there will be none.
     fn offer(&mut self, leg: Leg, samples: &[i16]) -> Result<(), MediaError> {
         let mut frame = core::mem::take(&mut self.waiting);
         let offered = match self.pending.take() {
@@ -565,8 +522,7 @@ impl Recorder {
                 Leg::Played => self.write_pair(&frame, samples),
             },
             Some(held) => {
-                // the same direction twice: the other one has stopped
-                // producing, so this frame's opposite number is silence
+                // same direction twice: the other stopped, so pair with silence
                 let written = match held {
                     Leg::Captured => self.write_pair(&frame, &[]),
                     Leg::Played => self.write_pair(&[], &frame),
@@ -585,9 +541,8 @@ impl Recorder {
         offered
     }
 
-    /// One frame of each direction, either of them possibly missing, at the
-    /// call's rate: converted to the file's, then summed or interleaved, and
-    /// written.
+    /// One frame per direction (either may be missing) at the call rate: convert, sum or
+    /// interleave, write.
     fn write_pair(&mut self, captured: &[i16], played: &[i16]) -> Result<(), MediaError> {
         let length = captured.len().max(played.len());
         self.silence.resize(length, 0);
@@ -656,17 +611,14 @@ impl Recorder {
     }
 }
 
-/// A recorder dropped without being finished — the session it belonged to
-/// going away however it went — still finishes its file: a playable file is
-/// never a repair job.
+/// A recorder dropped unfinished still finishes its file.
 impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.close();
     }
 }
 
-/// Keep `samples` as the frame of `leg` waiting for its opposite number, in
-/// the buffer `frame` already holds.
+/// Store `samples` as `leg`'s waiting frame in the existing buffer.
 fn wait_with(pending: &mut Option<Leg>, frame: &mut Vec<i16>, leg: Leg, samples: &[i16]) {
     frame.clear();
     frame.extend_from_slice(samples);
@@ -684,8 +636,7 @@ fn converters(from: u32, to: u32) -> Result<Option<(Resampler, Resampler)>, Medi
 }
 
 impl core::fmt::Debug for Recorder {
-    /// The sink is a trait object with nothing to say about itself, and the
-    /// buffers are a call's worth of audio.
+    /// The sink has nothing to print and the buffers are a call's worth of audio.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Recorder")
             .field("layout", &self.layout)
@@ -704,11 +655,8 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    /// A sink the test can still read after the recorder has been handed it.
-    ///
-    /// The recorder owns its sink — a file is not something to keep a second
-    /// handle on — so a test that wants the bytes back keeps the buffer behind
-    /// a lock and gives the recorder a handle to it.
+    /// A sink the test can read after giving it away. The recorder owns its sink, so the test
+    /// shares the buffer through a lock.
     #[derive(Clone, Debug, Default)]
     pub(crate) struct Buffer(Arc<Mutex<Cursor<Vec<u8>>>>);
 
@@ -748,8 +696,8 @@ pub(crate) mod tests {
         value
     }
 
-    /// Where the `fmt ` chunk's fields and the data chunk's length sit in the
-    /// header `sipral-media` writes: after a `JUNK` chunk kept for RF64.
+    /// Offsets of the `fmt ` fields and data length in `sipral-media`'s header, after the `JUNK`
+    /// chunk reserved for RF64.
     pub(crate) const CHANNELS_AT: usize = 58;
     pub(crate) const RATE_AT: usize = 60;
     pub(crate) const DATA_LENGTH_AT: usize = 76;
@@ -790,8 +738,7 @@ pub(crate) mod tests {
         assert_eq!(wav.len(), HEADER_LEN + 640);
     }
 
-    /// Both directions in one file, and the loudest thing the two of them can
-    /// produce between them landing on full scale rather than past it.
+    /// Both directions in one file; the loudest possible sum lands at full scale, not past it.
     #[test]
     fn the_two_directions_are_mixed_and_do_not_pass_full_scale() {
         let wav = finish(&RecordingOptions::default(), 8_000, |recorder| {
@@ -830,9 +777,7 @@ pub(crate) mod tests {
         assert_eq!(samples_of(&wav), [9, -5, 9, -5, 9, -5]);
     }
 
-    /// One direction that stops producing must not stop the file: the
-    /// conversation stays on its own timeline, with silence where the missing
-    /// side would have been.
+    /// A direction that stops does not stop the file: silence fills its side and timing holds.
     #[test]
     fn a_direction_that_stops_does_not_stop_the_recording() {
         let options = RecordingOptions {
@@ -858,8 +803,8 @@ pub(crate) mod tests {
         assert_eq!(usize::try_from(field(&wav, 4, 4)).unwrap(), HEADER_LEN - 8);
     }
 
-    /// The file's rate is its own: a call at 8 kHz recorded at 16 kHz has
-    /// twice as many samples, and a tone in it keeps its pitch.
+    /// The file rate is independent: 8 kHz recorded at 16 kHz has twice the samples and the same
+    /// pitch.
     #[test]
     fn a_rate_other_than_the_calls_is_converted_to() {
         let options = RecordingOptions {
@@ -867,8 +812,7 @@ pub(crate) mod tests {
             layout: RecordingLayout::Stereo,
             ..RecordingOptions::default()
         };
-        // 500 Hz is a whole number of cycles in a frame at 8 kHz, so frames
-        // repeat it seamlessly; at most 8000 either side of zero
+        // 500 Hz fits whole cycles in an 8 kHz frame, so frames join seamlessly; peak 8000
         #[allow(clippy::cast_possible_truncation)]
         let tone: Vec<i16> = (0..160_u32)
             .map(|n| {
@@ -885,8 +829,7 @@ pub(crate) mod tests {
         assert_eq!(field(&wav, RATE_AT, 4), 16_000);
         let samples = samples_of(&wav);
         let frames = samples.len() / 2;
-        // a second of audio, less the converter's own delay: what it still
-        // holds when the file ends
+        // one second minus the converter delay still inside it at the end
         let delay = sipral_media::resample::Resampler::new(8_000, 16_000)
             .unwrap()
             .latency_samples();
@@ -907,8 +850,7 @@ pub(crate) mod tests {
         assert!(samples.iter().skip(1).step_by(2).all(|&right| right == 0));
     }
 
-    /// A call that moves to a codec at another rate goes on into the same
-    /// file, converted: the file's rate does not move with the codec.
+    /// A codec change to another rate continues in the same file, converted.
     #[test]
     fn a_codec_change_that_moves_the_rate_carries_on_into_the_same_file() {
         let wav = finish(&RecordingOptions::default(), 8_000, |recorder| {
@@ -931,8 +873,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The checkpoint: a file whose process died mid-recording opens with
-    /// what was written up to the last one.
+    /// After a crash the file opens with everything up to the last checkpoint.
     #[test]
     fn a_file_abandoned_mid_recording_states_what_it_held_at_the_last_checkpoint() {
         let buffer = Buffer::new();
@@ -945,7 +886,7 @@ pub(crate) mod tests {
             recorder.captured(&[1; 160]).unwrap();
             recorder.played(&[1; 160]).unwrap();
         }
-        // what a crash leaves is what the sink holds now, before any finish
+        // a crash leaves what the sink holds now, unfinished
         let abandoned = buffer.contents();
         assert_eq!(
             field(&abandoned, DATA_LENGTH_AT, 4),
@@ -1015,15 +956,14 @@ pub(crate) mod tests {
 
         fn speech(n: u32, rate: u32) -> i16 {
             let t = f64::from(n) / f64::from(rate);
-            // at most 6000 either side of zero
+            // peak 6000
             #[allow(clippy::cast_possible_truncation)]
             let sample = (6_000.0 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()).round() as i16;
             sample
         }
 
-        /// The stream is what RFC 7845 asks, with the pre-skip the encoder
-        /// really has, the serial the call drew, and a last page trimmed to
-        /// exactly the audio that was recorded.
+        /// The stream follows RFC 7845: the encoder's real pre-skip, the call's serial, and a last
+        /// page trimmed to exactly the recorded audio.
         #[test]
         fn an_ogg_opus_recording_carries_the_real_pre_skip_and_ends_at_the_audio() {
             let buffer = Buffer::new();
@@ -1034,7 +974,7 @@ pub(crate) mod tests {
                 0xdead_beef,
             )
             .unwrap();
-            // 1.03 seconds: not a whole number of twenty-millisecond packets
+            // 1.03 s: not a whole number of 20 ms packets
             for frame in 0..103_u32 {
                 let voice: Vec<i16> = (0..160).map(|n| speech(frame * 160 + n, 16_000)).collect();
                 recorder.captured(&voice).unwrap();
@@ -1075,14 +1015,13 @@ pub(crate) mod tests {
             for packet in &packets[2..] {
                 assert_eq!(decoder.decode(&packet.data, &mut pcm).unwrap(), 320);
             }
-            // 1.03 s and the encoder's delay behind it, in whole packets
+            // 1.03 s plus encoder delay, in whole packets
             let lookahead = reference.lookahead().unwrap() as usize;
             assert_eq!(packets.len() - 2, (16_480 + lookahead).div_ceil(320));
         }
 
-        /// A recording that ends on a whole packet still holds its last
-        /// samples: the encoder is flushed past its delay, so the last page
-        /// can be trimmed to exactly the audio.
+        /// A recording ending on a packet boundary keeps its last samples: the encoder is flushed
+        /// past its delay.
         #[test]
         fn a_recording_that_ends_on_a_whole_packet_keeps_its_last_samples() {
             let buffer = Buffer::new();
@@ -1105,8 +1044,7 @@ pub(crate) mod tests {
             assert_eq!(packets.last().unwrap().granule, Some(pre_skip + 10 * 960));
         }
 
-        /// A crash leaves the pages written so far, each whole: a checkpoint
-        /// writes the page being filled.
+        /// A crash leaves whole pages: a checkpoint writes out the page being filled.
         #[test]
         fn an_abandoned_ogg_opus_recording_holds_whole_pages_up_to_the_last_checkpoint() {
             let buffer = Buffer::new();
@@ -1122,8 +1060,7 @@ pub(crate) mod tests {
                 recorder.played(&voice).unwrap();
             }
             let abandoned = buffer.contents();
-            // whole pages to the last octet, none of them the end of the
-            // stream, and the last one reaching past the last checkpoint
+            // whole pages, none marked end of stream, the last past the last checkpoint
             let mut rest = abandoned.as_slice();
             let mut last_granule = 0;
             while !rest.is_empty() {
@@ -1134,9 +1071,8 @@ pub(crate) mod tests {
                 }
                 rest = &rest[length..];
             }
-            // 600 ms were handed over, the last of them with a checkpoint,
-            // which wrote out everything encoded by then but the one packet
-            // held back for trimming the end
+            // 600 ms handed over with a final checkpoint, which wrote all but the packet held back
+            // for end trimming
             assert!(last_granule >= 580 * 48, "the pages reach {last_granule}");
             std::mem::forget(recorder);
         }

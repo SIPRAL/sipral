@@ -3,24 +3,17 @@
 
 //! A call's diagnostics, redacted before they leave the organisation.
 //!
-//! `docs/14-diagnostics.md` has two artefacts a support incident is worked
-//! from: the D1 record — what the stack decided about a call, as JSON — and
-//! the D2 recording — every message that arrived, replayable, and exported
-//! as pcapng for the tools a NOC already has. Both carry personal data: the
-//! record the addresses a call was carried between, the recording that and
-//! every user part, display name and phone number the messages name.
+//! `docs/14-diagnostics.md` defines the D1 record (the stack's decisions about a call, as JSON) and
+//! the D2 recording (every message received, replayable, exportable as pcapng). Both contain
+//! personal data: addresses, user parts, display names, phone numbers.
 //!
-//! These two functions hand either one over with that data taken out by
-//! `sipral-diag`'s redaction, under a [`Redactor`] the application builds
-//! once per export: [`RedactionMode::Hash`] with the organisation's own key,
-//! so the same address or user always becomes the same pseudonym and a
-//! report stays correlatable to whoever holds the key, or
-//! [`RedactionMode::Delete`] for placeholders that mean nothing outside the
-//! one export. Credentials and SDES keys are dropped in either mode.
+//! These functions export either with that data removed by `sipral-diag` under a [`Redactor`] built
+//! once per export: [`RedactionMode::Hash`] with the organisation's key gives stable pseudonyms the
+//! key holder can correlate; [`RedactionMode::Delete`] gives placeholders meaningful only within
+//! the export. Credentials and SDES keys are always dropped.
 //!
-//! One redactor for both halves of a report, the record first and then the
-//! recording, gives an address the same pseudonym in the two, so the
-//! decision that names a far end and the packets from it still line up.
+//! Use one redactor for both halves of a report, record first, so an address gets the same
+//! pseudonym in each.
 
 use sipral_core::dialog::CallId;
 pub use sipral_diag::{
@@ -30,13 +23,10 @@ use std::time::Instant;
 
 use sipral_ua::{CallHandle, Recording, UserAgent};
 
-/// One call's D1 record, redacted, as the JSON `docs/14-diagnostics.md`
-/// describes.
+/// One call's D1 record, redacted, as the JSON `docs/14-diagnostics.md` describes.
 ///
-/// `None` when the call is not known to `agent` any more, or has no record:
-/// one that never sent or received a message has had nothing decided about
-/// it. Read it while the call is still held, as with
-/// [`UserAgent::call_identity`], which is how the record is found.
+/// `None` if `agent` no longer knows the call, or it has no record (no message was ever sent or
+/// received). Read it while the call is still held, like [`UserAgent::call_identity`].
 #[must_use]
 pub fn redacted_call_record(
     agent: &mut UserAgent,
@@ -50,14 +40,13 @@ pub fn redacted_call_record(
     Some(sipral_diag::redact_record(record, redactor))
 }
 
-/// A D2 recording — what [`UserAgent::stop_recording`] hands back — as a
-/// pcapng file with every message redacted, and every packet's own
-/// addresses with it.
+/// A D2 recording (from [`UserAgent::stop_recording`]) as pcapng, with every message and packet
+/// address redacted.
 ///
 /// # Errors
-/// [`RedactError`] when a message in the recording is not one the parser
-/// can read. Nothing is returned then, rather than a file with a message in
-/// it nobody redacted.
+///
+/// [`RedactError`] when a message cannot be parsed. Nothing is returned then, rather than a file
+/// with an unredacted message.
 pub fn redacted_recording(
     recording: &Recording,
     redactor: Redactor,
@@ -65,21 +54,19 @@ pub fn redacted_recording(
     sipral_diag::export(recording, Some(redactor))
 }
 
-/// A D2 recording replayed into `target`, as one pcapng file with both
-/// directions of the session in it, every message redacted.
+/// A D2 recording replayed into `target`, as one pcapng with both directions, every message
+/// redacted.
 ///
-/// A recording holds only what arrived; [`redacted_recording`] exports
-/// that. This feeds it back into a live layer built with
-/// [`Recording::seed`] and the configuration the recorded stack ran with,
-/// and places every message the layer writes in answer beside what arrived,
-/// marked outbound — so the NOC reads the call the way a capture taken at
-/// this end would show it. What the application did on its own comes back
-/// to [`Replayed::cue`], under the name the recording gave it, for the
-/// caller to do again; see `sipral_diag::export_replayed`.
+/// A recording holds only what arrived ([`redacted_recording`] exports that). This replays it into
+/// a live layer built from [`Recording::seed`] and the recorded configuration, and adds every
+/// message the layer writes as outbound, so the NOC sees the call as a local capture would.
+/// Application actions come back to [`Replayed::cue`] under their recorded names for the caller to
+/// repeat; see `sipral_diag::export_replayed`.
 ///
 /// # Errors
-/// [`ExportError::Replay`] when `target` refuses a frame, and
-/// [`ExportError::Redact`] when a message cannot be read to be redacted.
+///
+/// [`ExportError::Replay`] when `target` refuses a frame, [`ExportError::Redact`] when a message
+/// cannot be parsed for redaction.
 pub fn replayed_capture<T: Replayed>(
     recording: &Recording,
     target: &mut T,

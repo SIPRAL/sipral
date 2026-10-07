@@ -1,39 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What a call does about SRTP: what it offers, what it will answer, and what
-//! the negotiation's outcome opens the stream with.
+//! What a call does about SRTP: what it offers, what it answers, and how the negotiated keying
+//! opens the stream.
 //!
-//! `sipral-rtp` has RFC 3711 and `sipral-core` has RFC 4568's `a=crypto`, and
-//! neither had ever met the other. An offer named `RTP/AVP`, an answer was
-//! never read for keys, and every call this stack placed went out in the
-//! clear although both halves of the encryption were written and tested. This
-//! is the joint: one policy per call, one master key drawn per description,
-//! and one function that turns [`MediaPlan::keying`] into the [`Security`] a
-//! session is opened with.
+//! `sipral-rtp` has RFC 3711 and `sipral-core` the RFC 4568 `a=crypto` line; this module connects
+//! them: one policy per call, one master key per description, and [`opening`], which turns
+//! [`MediaPlan::keying`] into the [`Security`] a session opens with.
 //!
-//! # Two ways to a key, and one of them is not finished when the call is
+//! # Two ways to a key
 //!
-//! SDES puts the key in the body, so a plan keyed that way opens a stream
-//! that is protected from its first packet. DTLS-SRTP puts it in a handshake
-//! on the media path, so a plan keyed *that* way opens a stream that has
-//! agreed to be protected and cannot be yet — which is why [`opening`] has
-//! three answers where a pair of keys would have been two.
+//! SDES puts the key in the body, so the stream is protected from its first packet. DTLS-SRTP gets
+//! it from a handshake on the media path, so the stream has agreed to protection but is not keyed
+//! yet; that is why [`opening`] has three outcomes. Without the `dtls` feature such a plan is
+//! refused, not opened in the clear, and [`Capabilities`](crate::Capabilities) reports it before a
+//! call is placed.
 //!
-//! Without the `dtls` feature there is no handshake, no certificate and
-//! nothing that could produce a key on the media path; a plan that arrives
-//! keyed that way is refused rather than opened unprotected, and
-//! [`Capabilities`](crate::Capabilities) says so before a call is placed
-//! rather than after one has failed.
+//! # What is refused
 //!
-//! # What is refused rather than half-honoured
-//!
-//! One master key to a line, and RFC 4568 §6.3's defaults: everything
-//! encrypted, everything authenticated, one key derivation. A line asking for
-//! anything else is not answered and a plan carrying anything else does not
-//! open a session, because a stream opened with the wrong derivation rate
-//! produces packets the far end drops, and that looks like a network fault
-//! for as long as somebody is prepared to keep looking.
+//! One master key per line and RFC 4568 §6.3's defaults (everything encrypted and authenticated,
+//! one key derivation). Anything else is not answered: a wrong derivation rate produces packets the
+//! far end silently drops, which looks like a network fault.
 
 use sipral_core::sdp::{
     Crypto, CryptoPolicy, CryptoSuite, KeySalt, Keying, MediaDescription, MediaPlan,
@@ -42,144 +29,88 @@ use sipral_rtp::srtp::{Master, Mki, Policy, Security, Suite};
 
 use crate::error::MediaError;
 
-/// The suites this end offers, one line each, tagged in this order starting
-/// from 1 — RFC 4568 §4 only asks that a tag be unique among a media line's
-/// own crypto attributes. Strongest first (8.2.4): `AEAD_AES_256_GCM`, then
-/// `AES_CM_128_HMAC_SHA1_80` — RFC 7714's stronger suite named ahead of the
-/// one suite every implementation has, so an answerer that itself prefers
-/// strength (§5.1.2 leaves the answerer's own policy free; it binds only the
-/// offerer's own *order*) settles on it, and a peer with nothing but the
-/// original suite still finds that, last in the list. Each carries a master
-/// key of its own (§6.1: every key "MUST be unique ... with respect to other
-/// master keys in the entire SDP message").
+/// The suites this end offers, one line each, tagged from 1 in this order (RFC 4568 §4 only needs
+/// tags unique per media line).
 ///
-/// Two and not all four the stack runs, because every line is in the
-/// INVITE, and so in the INVITE that answers a server's digest challenge:
-/// with `AEAD_AES_128_GCM` and `AES_256_CM_HMAC_SHA1_80` as well, that
-/// request passes RFC 3261 §18.1.1's 1300 octets and needs a stream a phone
-/// registered over UDP alone does not have, and the call is never placed —
-/// the lab's Asterisk showed it. The other five suites are still accepted
-/// when a peer offers them (`from_name` reads all seven).
+/// Strongest first (8.2.4): `AEAD_AES_256_GCM`, then `AES_CM_128_HMAC_SHA1_80`, which every
+/// implementation has. An answerer preferring strength picks the first (§5.1.2 leaves its own
+/// policy free); an older peer still finds the second. Each has its own master key (§6.1: unique
+/// "with respect to other master keys in the entire SDP message").
+///
+/// Only two, because with all four the INVITE that answers a digest challenge exceeds RFC 3261
+/// §18.1.1's 1300 octets and needs TCP, which a phone registered over UDP lacks, so the call is
+/// never placed (seen on the lab Asterisk). All seven suites are still accepted when offered
+/// (`from_name`).
 pub(crate) const OFFERED: [CryptoSuite; 2] = [CryptoSuite::AeadAes256Gcm, CryptoSuite::AesCm80];
 
 /// What a call does about SRTP.
 ///
-/// This lives on [`CodecCatalog`](crate::CodecCatalog) rather than on
-/// [`MediaConfig`](crate::MediaConfig) because it decides what goes into an
-/// offer, and the catalogue is where the rest of that lives; a
-/// [`MediaConfig`](crate::MediaConfig) value is a choice about behaviour that
-/// no negotiation can move.
-///
-/// Not to be confused with [`SrtpSupport`](sipral_core::sdp::SrtpSupport),
-/// which is the description a single offer carries. This is the policy a call
-/// holds, and the two answers it gives — one for the offer this end writes,
-/// one for the offer that arrives — are not the same answer.
+/// On [`CodecCatalog`](crate::CodecCatalog), not [`MediaConfig`](crate::MediaConfig), because it
+/// shapes the offer. Not the same as [`SrtpSupport`](sipral_core::sdp::SrtpSupport), which
+/// describes one offer: this policy answers differently for the offer we write and the offer we
+/// receive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SrtpPolicy {
-    /// Do not offer it. An offer that arrives on the secure profile is still
-    /// answered with keys.
+    /// Do not offer SRTP. An incoming offer on the secure profile is still answered with keys.
     ///
-    /// The default, and the reason is the same one `docs/06-nat.md` gives for
-    /// ICE: a mechanism that only helps against a peer that supports it is
-    /// negotiated, never assumed. An offer on `RTP/SAVP` to a PBX that does
-    /// not do SRTP has its stream refused, and the PBX this stack is tested
-    /// against is such a PBX — so the call that was meant to be encrypted is
-    /// a call with no audio in it.
-    ///
-    /// The default is about what this end *writes*. It says nothing about
-    /// what this end will take: a peer that has already asked for encryption
-    /// gets it, because refusing there would turn a working secure call into
-    /// a silent one for no gain.
+    /// The default because, as with ICE in `docs/06-nat.md`, it is negotiated, not assumed:
+    /// `RTP/SAVP` to a PBX without SRTP gets the stream refused and the call has no audio. It only
+    /// governs what this end writes; refusing a peer that asked for encryption would gain nothing.
     #[default]
     NotOffered,
-    /// Offer SDES on `RTP/SAVP`, and answer a plain offer plainly.
-    ///
-    /// What a caller who would rather have a plain call than none asks for.
+    /// Offer SDES on `RTP/SAVP`, and answer a plain offer plainly. For callers who prefer a plain
+    /// call to none.
     Offered,
-    /// Offer SDES on plain `RTP/AVP`: the call is encrypted when the answer
-    /// takes one of the `a=crypto` lines, and plain when it takes none — the
-    /// "SRTP optional" of desk phones.
+    /// Offer SDES on plain `RTP/AVP`: encrypted if the answer takes an `a=crypto` line, plain if
+    /// not. The "SRTP optional" of desk phones.
     ///
-    /// [`SrtpPolicy::Offered`] names `RTP/SAVP`, and a server that does not
-    /// do SRTP rejects a stream on a profile it does not know (RFC 4568
-    /// §7.4) — with 488, and the call has no audio. On `RTP/AVP` the same
-    /// server takes the stream and ignores the lines it does not
-    /// understand, while one that does SDES answers a line and keys the
-    /// call. RFC 4568 writes the attribute for the secure profiles, so this
-    /// is interoperability rather than a standard, and it is what the
-    /// application chooses where its server may or may not encrypt.
+    /// A server without SRTP rejects `RTP/SAVP` with 488 (RFC 4568 §7.4), but on `RTP/AVP` it
+    /// ignores the unknown lines, while an SDES-capable one answers a line. RFC 4568 defines the
+    /// attribute only for secure profiles, so this is an interoperability practice, not a standard.
     ///
-    /// Answering, an offer on the secure profile is answered with keys as
-    /// under [`SrtpPolicy::Offered`], an offer on `RTP/AVP` carrying a line
-    /// this end takes is answered with one — the other half of the same
-    /// arrangement — and an offer carrying none is answered plainly. A call
-    /// that started keyed is never re-negotiated into the clear, nor a plain
-    /// one into keys: a re-offer that asks for either is refused, as on
-    /// every call.
+    /// Answering: a secure offer is answered with keys as under [`SrtpPolicy::Offered`], a plain
+    /// offer with a usable line is answered with one, and a plain offer without lines is answered
+    /// plainly. A re-offer that would switch between keyed and plain is refused, as on every call.
     BestEffort,
-    /// Offer SDES, and let no stream on this call carry audio unencrypted.
+    /// Offer SDES and carry no unencrypted audio on this call.
     ///
-    /// A plain INVITE is not answered ([`MediaError::SrtpRequired`] comes
-    /// back from [`MediaEngine::answer`](crate::MediaEngine::answer), so the
-    /// application can reject the call with a status code of its choosing),
-    /// and a plain re-offer inside a live call is refused rather than
-    /// accepted. That second one is the whole reason this is a separate
-    /// setting: a stack that offers SDES and then answers a mid-call plain
-    /// re-offer in the clear has fallen back silently, which is the worst of
-    /// the outcomes available.
+    /// A plain INVITE is not answered: [`MediaEngine::answer`](crate::MediaEngine::answer) returns
+    /// [`MediaError::SrtpRequired`] so the application can reject with its own status. A plain
+    /// re-offer in a live call is refused; that silent mid-call downgrade is the reason this
+    /// setting exists.
     ///
-    /// It does not change what an offer this end writes: both this and
-    /// [`SrtpPolicy::Offered`] write `RTP/SAVP` with one `a=crypto` line, and
-    /// a peer that refuses that stream leaves the call with no audio either
-    /// way. This stack does not follow a refusal with a plain re-offer.
+    /// The offer is the same as under [`SrtpPolicy::Offered`]; a peer refusing it leaves the call
+    /// without audio, and no plain re-offer follows.
     Required,
-    /// Offer DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764), and answer a plain
-    /// offer plainly.
+    /// Offer DTLS-SRTP on `UDP/TLS/RTP/SAVP` (RFC 5764), and answer a plain offer plainly.
     ///
-    /// What [`SrtpPolicy::Offered`] is for SDES, with the difference that
-    /// matters: the key never travels in the body, so this is the one policy
-    /// here that is sound over a SIP transport somebody else can read. RFC
-    /// 4568 §7 says the same thing the other way round about SDES.
-    ///
-    /// The cost is a round trip of silence at the start of every call while
-    /// the handshake runs, and a PBX that does not do DTLS-SRTP refuses the
-    /// stream outright rather than falling back.
+    /// The key never travels in the body, so this is the one policy that is sound over readable SIP
+    /// (RFC 4568 §7 says the reverse about SDES). Costs a round trip of silence per call while the
+    /// handshake runs; a PBX without DTLS-SRTP refuses the stream.
     #[cfg(feature = "dtls")]
     DtlsOffered,
-    /// Offer DTLS-SRTP, and let no stream on this call carry audio any other
-    /// way.
-    ///
-    /// [`SrtpPolicy::Required`]'s refusals, and one more: a peer that answers
-    /// with `a=crypto` has answered with keys that travelled in the body of a
-    /// message this policy exists to avoid trusting, so that answer is
-    /// refused too.
+    /// Offer DTLS-SRTP and carry audio no other way: [`SrtpPolicy::Required`]'s refusals, plus
+    /// refusing an `a=crypto` answer, since its keys travelled in a message body.
     #[cfg(feature = "dtls")]
     DtlsRequired,
-    /// Offer DTLS-SRTP with SDES beside it for a peer that has no DTLS, and
-    /// let no stream on this call carry audio unencrypted.
+    /// Offer DTLS-SRTP with SDES as fallback, and carry no unencrypted audio.
     ///
-    /// The offer is one stream on `RTP/SAVP` carrying both `a=fingerprint`
-    /// and `a=setup` and the `a=crypto` lines: a peer that does DTLS-SRTP
-    /// answers with its own fingerprint and the call is keyed by the
-    /// handshake, and a peer that knows only SDES ignores the fingerprint
-    /// and answers a crypto line, as RFC 4568 has it answer any. `RTP/SAVP`
-    /// rather than `UDP/TLS/RTP/SAVP` (RFC 5764 §8), because the SDES-only
-    /// peer this fallback exists for refuses a stream on a profile it does
-    /// not know, and a DTLS-SRTP peer reads the fingerprint either way.
+    /// One `RTP/SAVP` stream with `a=fingerprint`, `a=setup` and `a=crypto`: a DTLS peer answers
+    /// its fingerprint, an SDES-only peer answers a crypto line. `RTP/SAVP` rather than
+    /// `UDP/TLS/RTP/SAVP` (RFC 5764 §8) because SDES-only peers refuse an unknown profile, while
+    /// DTLS peers read the fingerprint either way.
     ///
-    /// Answering, an offer carrying a fingerprint is answered with this
-    /// end's own and keyed by the handshake, one carrying only crypto lines
-    /// with SDES, and a plain one is refused as under
-    /// [`SrtpPolicy::Required`]. What the key costs over a transport somebody
-    /// else can read is RFC 4568 §7's, for the calls that fall back.
+    /// Answering: a fingerprint offer gets ours and a handshake, crypto lines alone get SDES, a
+    /// plain offer is refused as under [`SrtpPolicy::Required`]. Calls that fall back carry RFC
+    /// 4568 §7's risk over readable transports.
     #[cfg(feature = "dtls")]
     DtlsOrSdes,
 }
 
 impl SrtpPolicy {
-    /// Whether an offer written under this policy carries keying at all —
-    /// `a=crypto` for SDES, `a=fingerprint` and `a=setup` for DTLS-SRTP.
+    /// Whether an offer under this policy carries keying: `a=crypto` for SDES, `a=fingerprint` and
+    /// `a=setup` for DTLS-SRTP.
     #[must_use]
     pub(crate) const fn offers(self) -> bool {
         match self {
@@ -198,12 +129,8 @@ impl SrtpPolicy {
         matches!(self, Self::BestEffort)
     }
 
-    /// Whether a call under this policy would rather have no audio than
-    /// unencrypted audio.
-    ///
-    /// A predicate and not an equality test, because the one thing a fourth
-    /// and fifth variant must not do is walk past a guard that was written
-    /// as `== Required`.
+    /// Whether a call under this policy prefers no audio to unencrypted audio. A predicate, so new
+    /// variants cannot slip past a guard written as `== Required`.
     #[must_use]
     pub(crate) const fn requires(self) -> bool {
         match self {
@@ -216,12 +143,8 @@ impl SrtpPolicy {
         }
     }
 
-    /// Whether this policy asks for the keys to come from a handshake on the
-    /// media path rather than from the body of a message.
-    ///
-    /// Never true in a build without the `dtls` feature, which has no variant
-    /// that could make it so — the method stays so that the one caller does
-    /// not have to be written twice.
+    /// Whether keys come from a media-path handshake instead of a message body. Always false
+    /// without `dtls`.
     #[must_use]
     #[cfg_attr(not(feature = "dtls"), allow(dead_code))]
     pub(crate) const fn wants_dtls(self) -> bool {
@@ -245,16 +168,12 @@ impl SrtpPolicy {
         }
     }
 
-    /// Whether this policy is at least as strict as `other`: whatever
-    /// `other` refuses, this refuses too. A call placed on an account may
-    /// name its own policy, and one that would carry audio the account's
-    /// would not is refused as the account's security policy (8.10).
+    /// Whether this policy refuses everything `other` refuses. A call may name its own policy, but
+    /// one looser than its account's is refused (8.10).
     ///
-    /// [`SrtpPolicy::DtlsRequired`] refuses one thing more than the other
-    /// policies that require encryption: keys that travelled in the body of
-    /// a message. So nothing but itself is at least as strict as it —
-    /// [`SrtpPolicy::Required`] takes an SDES answer, and
-    /// [`SrtpPolicy::DtlsOrSdes`] falls back to one.
+    /// [`SrtpPolicy::DtlsRequired`] also refuses keys sent in a body, so only itself is at least as
+    /// strict as it: [`SrtpPolicy::Required`] takes an SDES answer and [`SrtpPolicy::DtlsOrSdes`]
+    /// falls back to one.
     #[must_use]
     pub const fn at_least(self, other: Self) -> bool {
         match other {
@@ -265,20 +184,16 @@ impl SrtpPolicy {
     }
 }
 
-/// Whether an SDES key may travel in signalling that is not encrypted.
+/// Whether an SDES key may travel in unencrypted signalling.
 ///
-/// RFC 4568 §8.3 requires the message carrying an `inline:` key to be
-/// encrypted on its way — TLS for SIP — and a key that crossed UDP or TCP was
-/// readable on every hop that carried the message: the stream is encrypted
-/// against a passive listener on the media path and not against one on the
-/// signalling path. Many PBXs offer SDES over UDP only, so the default takes
-/// those calls and says so; a deployment that would rather not have them
-/// says [`SdesSignalling::SecureOnly`].
+/// RFC 4568 §8.3 requires the message carrying an `inline:` key to be encrypted (TLS for SIP). Over
+/// UDP or TCP the key is readable on every hop, so the media is safe only from listeners on the
+/// media path. Many PBXs offer SDES over UDP only, so the default allows it and reports it;
+/// [`SdesSignalling::SecureOnly`] refuses.
 ///
-/// Secure means the call's signalling runs on TLS or secure WebSocket
-/// ([`UserAgent::call_signalling_secure`](sipral_ua::UserAgent::call_signalling_secure)).
-/// A `sips:` target counts only through that: the endpoint refuses to send
-/// one any other way.
+/// Secure means TLS or secure WebSocket
+/// ([`UserAgent::call_signalling_secure`](sipral_ua::UserAgent::call_signalling_secure)); a `sips:`
+/// target counts only through that.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SdesSignalling {
@@ -288,28 +203,20 @@ pub enum SdesSignalling {
     /// `Some(true)`) and the engine's log says so at warning level.
     #[default]
     AnyTransport,
-    /// SDES only over encrypted signalling. A call whose description would
-    /// carry an `a=crypto` key — this end's offer or its answer to one — over
-    /// signalling that is not encrypted is refused before anything leaves,
-    /// with [`MediaError::KeysWouldTravelInClear`]: a call placed returns it
-    /// and sends nothing, a call answered returns it and the application
-    /// rejects the call with a status of its choosing (488 is RFC 3261's for
-    /// an offer whose terms cannot be taken). DTLS-SRTP, whose key never
-    /// travels in signalling, is not affected; under
-    /// `SrtpPolicy::DtlsOrSdes` the SDES lines are what is refused, so a
-    /// deployment wanting DTLS-SRTP over plain signalling names
+    /// SDES only over encrypted signalling. A description that would carry an `a=crypto` key (offer
+    /// or answer) over unencrypted signalling is refused before anything is sent, with
+    /// [`MediaError::KeysWouldTravelInClear`]: placing returns it and sends nothing; answering
+    /// returns it so the application can reject (488 per RFC 3261). DTLS-SRTP is unaffected; under
+    /// `SrtpPolicy::DtlsOrSdes` the SDES lines are refused, so for DTLS over plain signalling use
     /// `DtlsOffered` or `DtlsRequired`.
     SecureOnly,
 }
 
-/// What one account's calls do about SRTP, laid over the engine's own
-/// catalogue ([`MediaEngine::set_account_srtp`](crate::MediaEngine::set_account_srtp)):
-/// the SRTP policy per account.
+/// One account's SRTP settings, applied over the engine catalogue
+/// ([`MediaEngine::set_account_srtp`](crate::MediaEngine::set_account_srtp)).
 ///
-/// Either half left `None` keeps what the engine's catalogue says; a call
-/// placed with a catalogue of its own
-/// ([`MediaEngine::place_with`](crate::MediaEngine::place_with)) says the
-/// rest for itself.
+/// A `None` half keeps the engine's value. A call placed with its own catalogue
+/// ([`MediaEngine::place_with`](crate::MediaEngine::place_with)) decides the rest itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountSrtp {
     /// The account's policy.
@@ -317,18 +224,13 @@ pub struct AccountSrtp {
     /// The account's suites, most preferred first — see
     /// [`CodecCatalog::with_srtp_suites`](crate::CodecCatalog::with_srtp_suites).
     pub suites: Option<Vec<Suite>>,
-    /// Whether an encrypted call of this account may be recorded to a
-    /// recording server ([`MediaEngine::record_to`](crate::MediaEngine::record_to))
-    /// in the clear. Off unless said: the copies of an encrypted call are
-    /// offered to the server as SRTP, keyed in the recording session's own
-    /// offer (RFC 4568), and a stream the server will not take that way gets
-    /// nothing (RFC 7866 §12.2). On, they go as plain RTP, as an unencrypted
-    /// call's always do.
+    /// Whether an encrypted call of this account may be recorded
+    /// ([`MediaEngine::record_to`](crate::MediaEngine::record_to)) in the clear. Off by default:
+    /// copies are offered as SRTP keyed in the recording session's offer (RFC 4568), and a stream
+    /// the server will not take that way gets nothing (RFC 7866 §12.2). On, they go as plain RTP.
     pub recording_in_clear: bool,
-    /// Whether the account's SDES keys may travel in signalling that is not
-    /// encrypted ([`SdesSignalling`]); `None` keeps the engine's catalogue's
-    /// answer. The recording sessions of the account's calls are held to it
-    /// too.
+    /// Whether the account's SDES keys may travel in unencrypted signalling ([`SdesSignalling`]);
+    /// `None` keeps the engine's. Applies to its recording sessions too.
     pub sdes_signalling: Option<SdesSignalling>,
 }
 
@@ -355,20 +257,15 @@ impl AccountSrtp {
     }
 }
 
-/// The `a=crypto` lines this end offers, one per suite in the order given,
-/// tagged from 1, each carrying the key drawn for it.
+/// The `a=crypto` lines this end offers, one per suite in order, tagged from 1.
 ///
-/// `keys` is one key per offered suite, each already the width that suite's
-/// own `key_len`/`salt_len` calls for — [`crate::engine`]'s `draw_key_for`
-/// draws them that way — in the order they are offered in, so the tag, the
-/// suite name and the key line up without this function having to ask which
-/// is which.
+/// Each key in `keys` already has its suite's width (`draw_key_for` in [`crate::engine`]), in offer
+/// order, so tag, suite and key line up.
 pub(crate) fn offer_lines(keys: Vec<(CryptoSuite, KeySalt)>) -> Vec<Crypto> {
     keys.into_iter()
         .enumerate()
         .map(|(index, (suite, key))| {
-            // tags start at 1; a catalogue names at most the seven suites
-            // there are, so this always fits
+            // tags start at 1; at most seven suites, so it fits
             let tag = u32::try_from(index).unwrap_or(0) + 1;
             CryptoPolicy::new(tag, suite, key).to_crypto()
         })
@@ -384,31 +281,22 @@ pub(crate) fn sdes_suites(suites: Option<&[Suite]>) -> Vec<CryptoSuite> {
     )
 }
 
-/// The line an answer carries: the tag and suite of the accepted offer
-/// (§5.1.2), and this end's own key rather than the offerer's, because
-/// §7.1.2 makes reusing the offerer's key across both directions the one
-/// thing an answerer must not do.
+/// The answer's line: the accepted tag and suite (§5.1.2) with our own key, since §7.1.2 forbids
+/// reusing the offerer's.
 ///
-/// `None` for a key that is not the width the accepted suite calls for:
-/// §6.1 has the reader of such a line treat it as invalid, so writing one
-/// answers with a key the far end cannot take and leaves both directions of
-/// the stream without one. The stream is refused instead.
+/// `None` if the key is not the suite's width: §6.1 makes such a line invalid and the stream would
+/// have no keys, so it is refused instead.
 pub(crate) fn answer_line(accepted: &CryptoPolicy, keys: KeySalt) -> Option<Crypto> {
     let fits = keys.key().len() == accepted.suite.key_len()
         && keys.salt().len() == accepted.suite.salt_len();
     fits.then(|| CryptoPolicy::new(accepted.tag, accepted.suite, keys).to_crypto())
 }
 
-/// How a stream is keyed, as a kind rather than as keys: in the clear, by
-/// SDES keys out of the descriptions, or by a DTLS-SRTP handshake on the
-/// media path.
+/// How a stream is keyed, as a kind: clear, SDES from the descriptions, or a DTLS-SRTP handshake.
 ///
-/// What a running stream cannot turn into another of. Each is a different
-/// state of `RtpSession` — no context, a context from the description, a
-/// context still being waited for — and a stream that has sent under one has
-/// no way to carry on under another; a re-negotiation that asks for it is
-/// refused rather than adopted, since adopting the plan would leave the
-/// stream running the old kind while the far end runs the new.
+/// A running stream cannot switch kind; each is a different `RtpSession` state. A renegotiation
+/// asking for it is refused, since adopting it would leave us on the old kind while the far end
+/// runs the new.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shape {
     Clear,
@@ -427,14 +315,10 @@ impl Shape {
     }
 }
 
-/// The suite and key a running stream sends under, read off the keying its
-/// plan settled on, or `None` for a stream not keyed by SDES.
+/// The suite and key a running stream sends under, from its plan, or `None` if not SDES-keyed.
 ///
-/// The plan and not this end's own description, because the description
-/// does not say which of its lines was agreed: an offer this end wrote
-/// carries one line per offered suite, and the far end may have taken any
-/// of them. The plan holds the one line both ends agreed on, by tag (RFC
-/// 4568 §5.1.3).
+/// Read from the plan because our offer carries one line per suite and the far end may have taken
+/// any; the plan has the agreed one by tag (RFC 4568 §5.1.3).
 pub(crate) fn key_in_force(keying: Option<&Keying>) -> Option<(CryptoSuite, KeySalt)> {
     let Some(Keying::Sdes { local, .. }) = keying else {
         return None;
@@ -443,14 +327,10 @@ pub(crate) fn key_in_force(keying: Option<&Keying>) -> Option<(CryptoSuite, KeyS
     Some((local.suite, inline.keys.clone()))
 }
 
-/// Whether a master key used under `was` may go on being used under `now`:
-/// only where the block cipher runs in the same mode under both — counter
-/// mode for the four `AES_CM` suites, f8 for `F8_128_HMAC_SHA1_80`, GCM for
-/// the two AEAD suites — so that a change of suite is a change of tag length
-/// and nothing else. RFC 3711 §8.1 keys a cryptographic context per
-/// transform, and one key under two modes of AES is a key two transforms
-/// share (RFC 4568 §7.1.2: keys "appropriate for the selected crypto
-/// algorithm").
+/// Whether a master key used under `was` may continue under `now`: only if the cipher mode is the
+/// same (counter mode for the four `AES_CM` suites, f8, or GCM for the two AEAD ones), so only the
+/// tag length changes. RFC 3711 §8.1 keys one context per transform, and RFC 4568 §7.1.2 wants keys
+/// "appropriate for the selected crypto algorithm".
 pub(crate) fn key_carries_over(was: CryptoSuite, now: CryptoSuite) -> bool {
     fn mode(suite: CryptoSuite) -> u8 {
         match suite {
@@ -462,17 +342,12 @@ pub(crate) fn key_carries_over(was: CryptoSuite, now: CryptoSuite) -> bool {
     mode(was) == mode(now)
 }
 
-/// The offered line this end will answer: "the first valid supported crypto
-/// attribute in the list" (§5.1.2), which is the offerer's own order of
-/// preference.
+/// The offered line this end answers: "the first valid supported crypto attribute in the list"
+/// (§5.1.2), in the offerer's order.
 ///
-/// `None` where §7.1.2's other branch applies — no line is acceptable, and
-/// the stream is refused rather than taken on terms nobody agreed.
-///
-/// `allowed` is the catalogue's own list of suites, when it named one: a
-/// line under any other suite is passed over as unsupported, which is what
-/// an account that set its suites asked for. `None` takes every suite this
-/// build runs.
+/// `None` when none is acceptable; the stream is then refused (§7.1.2). `allowed` is the
+/// catalogue's suite list if set; other suites are skipped. `None` accepts every suite this build
+/// runs.
 pub(crate) fn acceptable(
     offered: &MediaDescription,
     allowed: Option<&[Suite]>,
@@ -484,49 +359,35 @@ pub(crate) fn acceptable(
     })
 }
 
-/// Whether a stream is described on one of the secure profiles, which is what
-/// makes a key required rather than optional.
-///
-/// `sipral-core` decides the same thing for its own negotiation and keeps the
-/// answer to itself, so this is the facade's own reading of the same rule.
+/// Whether a stream uses a secure profile, which makes a key required. `sipral-core` decides this
+/// internally, so the facade repeats the rule.
 pub(crate) fn is_secure(proto: &str) -> bool {
     proto
         .split('/')
         .any(|token| token.eq_ignore_ascii_case("SAVP") || token.eq_ignore_ascii_case("SAVPF"))
 }
 
-/// Whether the peer's own line at `tag` is one this build can be held to.
+/// Whether the peer's line at `tag` is one this build can honour.
 ///
-/// Read off the description rather than off the plan, because the two
-/// questions §6.3.7 asks — is every session parameter known, and is every
-/// known one something we do — cannot both be asked of a
-/// [`CryptoPolicy`](sipral_core::sdp::CryptoPolicy): the parser drops a
-/// parameter it does not recognise instead of invalidating the line, so by
-/// the time the plan exists the evidence is gone.
+/// Read from the description because §6.3.7 asks whether every session parameter is known, and the
+/// parser drops unknown ones before the plan exists.
 pub(crate) fn peer_line_holds(stream: &MediaDescription, tag: u32) -> bool {
     crypto_lines(stream)
         .filter(|line| line.tag == tag)
         .any(|line| understood(&line) && line.policy().is_some_and(|policy| usable(&policy)))
 }
 
-/// How a session is opened, once the negotiation has settled.
-///
-/// Three and not two, because DTLS-SRTP agrees in the signalling that a
-/// stream is protected and produces the keys a round trip later: a stream in
-/// [`Opening::Awaiting`] is neither in the clear nor able to carry anything.
-// moved once, from the negotiation into the session being opened, and never
-// stored: the keys were already this wide as the `Option<Security>` this
-// replaced, and boxing them here would allocate on every secured call to even
-// up a value that has nowhere to sit.
+/// How a session opens once the negotiation settled. Three variants because DTLS-SRTP agrees on
+/// protection before it has keys: [`Opening::Awaiting`] carries nothing until then.
+// used once and never stored; boxing would allocate on every secured call for nothing
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum Opening {
-    /// Never meant to be secured, which is most of them.
+    /// Not secured; the common case.
     Clear,
-    /// Secured, and keyed: SDES, whose keys were in the body.
+    /// Secured and keyed by SDES.
     Keyed(Security),
-    /// Secured, and waiting for the handshake that keys it. The policy is the
-    /// most expensive the handshake could settle on; see
+    /// Secured, waiting for the handshake. The policy is the most expensive possible; see
     /// [`RtpSession::awaiting`](sipral_rtp::RtpSession::awaiting).
     #[cfg(feature = "dtls")]
     Awaiting(Policy),
@@ -546,8 +407,8 @@ pub(crate) fn opening(plan: &MediaPlan) -> Result<Opening, MediaError> {
         #[cfg(not(feature = "dtls"))]
         Some(Keying::Dtls { .. }) => Err(MediaError::NoDtlsSrtp),
         Some(Keying::Sdes { local, remote }) => {
-            // ours protects what goes out and theirs opens what arrives:
-            // §7.1.1 has each end key its own transmission and nothing else
+            // ours protects outgoing, theirs opens incoming: each end keys its own transmission
+            // (§7.1.1)
             let (sending, sending_key) = context(local)?;
             let (receiving, receiving_key) = context(remote)?;
             Ok(Opening::Keyed(Security::new(
@@ -560,14 +421,12 @@ pub(crate) fn opening(plan: &MediaPlan) -> Result<Opening, MediaError> {
     }
 }
 
-/// One direction's transform and master key.
-///
-/// [`security`] builds both halves at once for a session being opened; a
-/// session already running re-keys one direction at a time, so this is reached
-/// on its own from `MediaSession::adopt`.
+/// One direction's transform and master key. [`security`] builds both; a running session re-keys
+/// one direction at a time from `MediaSession::adopt`.
 ///
 /// # Errors
-/// As [`security`], for the one direction.
+///
+/// As [`security`], for one direction.
 pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), MediaError> {
     let inline = negotiated
         .keys
@@ -580,8 +439,7 @@ pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), Med
             Some(Mki::new(mki.value, usize::from(mki.length)).ok_or(MediaError::UnusableKeying)?)
         }
     };
-    // the lifetime the key's owner wrote (§6.1) is held to as well, in the
-    // direction that key protects
+    // the key lifetime its owner wrote (§6.1) applies in the direction that key protects
     let policy = Policy {
         mki: identifier,
         lifetime: inline.lifetime,
@@ -592,15 +450,10 @@ pub(crate) fn context(negotiated: &CryptoPolicy) -> Result<(Policy, Master), Med
 
 /// Whether a line names keys and terms this build can open a stream with.
 ///
-/// One master key, because one context opens one key and a peer that keyed
-/// half its stream with the second one would have that half dropped as
-/// forged. Otherwise RFC 4568 §6.3's defaults: `UNENCRYPTED_SRTP` and
-/// `UNENCRYPTED_SRTCP` ask for a secure profile carrying cleartext, §6.4.1
-/// calls `UNAUTHENTICATED_SRTP` "NOT RECOMMENDED" in its own words, and a key
-/// derivation rate is a parameter an answer would then have to echo back for
-/// the offerer to believe it was honoured. `WSH` is allowed through and
-/// ignored: §6.3.6 makes it "only ... a hint to the receiver of the SDP that
-/// MAY choose to ignore the value provided".
+/// One master key only, since a peer using a second would have that traffic dropped as forged.
+/// Otherwise RFC 4568 §6.3 defaults: `UNENCRYPTED_SRTP`/`UNENCRYPTED_SRTCP` would put cleartext on
+/// a secure profile, `UNAUTHENTICATED_SRTP` is "NOT RECOMMENDED" (§6.4.1), and a key derivation
+/// rate would have to be echoed. `WSH` is ignored, which §6.3.6 allows.
 fn usable(policy: &CryptoPolicy) -> bool {
     let params = policy.params;
     policy.keys.len() == 1
@@ -614,13 +467,8 @@ fn usable(policy: &CryptoPolicy) -> bool {
         && params.kdr.is_none()
 }
 
-/// Whether every session parameter on a line is one this build knows.
-///
-/// §6.3.7: "If an SDP crypto attribute is received with an unknown session
-/// parameter that is not prefixed with a '-' character, that crypto attribute
-/// MUST be considered invalid." A parameter that has to be honoured and
-/// cannot be read is the one case where taking the line is worse than
-/// refusing it.
+/// Whether every session parameter on a line is known. §6.3.7: an unknown parameter without a
+/// leading '-' makes the attribute "MUST be considered invalid".
 fn understood(line: &Crypto) -> bool {
     line.session_params.iter().all(|parameter| {
         parameter.starts_with('-')
@@ -639,9 +487,8 @@ fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
-/// The `a=crypto` lines of a stream, as they were written. "The crypto
-/// attribute MUST only appear at the SDP media level", so nowhere else is
-/// looked at.
+/// A stream's `a=crypto` lines as written. Only media level is checked, since the attribute "MUST
+/// only appear at the SDP media level".
 fn crypto_lines(stream: &MediaDescription) -> impl Iterator<Item = Crypto> + '_ {
     stream
         .attributes
@@ -650,9 +497,8 @@ fn crypto_lines(stream: &MediaDescription) -> impl Iterator<Item = Crypto> + '_ 
         .filter_map(|attribute| Crypto::parse(attribute.value.as_deref()?))
 }
 
-/// Whether a stream carries an `a=crypto` line at all, whether or not any of
-/// them parses: what separates a far end that wrote no keys from one that
-/// wrote keys this end could not read.
+/// Whether a stream has any `a=crypto` line, parseable or not. Distinguishes a peer that wrote no
+/// keys from one whose keys we could not read.
 pub(crate) fn wrote_crypto(stream: &MediaDescription) -> bool {
     stream
         .attributes
@@ -660,12 +506,10 @@ pub(crate) fn wrote_crypto(stream: &MediaDescription) -> bool {
         .any(|attribute| attribute.name == "crypto")
 }
 
-/// [`SrtpPolicy::BestEffort`]'s one failure: an offer on the plain profile
-/// that wrote `a=crypto` lines, none of which this end can take — a line that
-/// does not parse, a suite this end does not allow, terms it will not be held
-/// to. The offerer asked for keys and an answer without one would be a plain
-/// call nobody chose, so it is refused, where an offer that wrote no line at
-/// all is answered plainly.
+/// [`SrtpPolicy::BestEffort`]'s one failure: a plain-profile offer whose `a=crypto` lines are all
+/// unusable (unparseable, disallowed suite, unsupported terms). The offerer wanted keys, so a plain
+/// answer would be a plain call nobody chose; it is refused. An offer with no lines is answered
+/// plainly.
 pub(crate) fn best_effort_unkeyable(
     policy: SrtpPolicy,
     allowed: Option<&[Suite]>,
@@ -691,19 +535,15 @@ pub(crate) const fn crypto_suite(suite: Suite) -> CryptoSuite {
     }
 }
 
-/// Whether `suite` protects at least as well as `floor`: a key at least as
-/// long and an authentication tag at least as long. The two measures are
-/// the ones the suites differ by (RFC 4568 §6.2, RFC 6188, RFC 7714), and a
-/// suite longer in one and shorter in the other is not counted as at least
-/// as strong — `AES_256_CM_HMAC_SHA1_32` is not, against
-/// `AES_CM_128_HMAC_SHA1_80`.
+/// Whether `suite` protects at least as well as `floor`: key and tag both at least as long (RFC
+/// 4568 §6.2, RFC 6188, RFC 7714). Longer in one and shorter in the other does not count, so
+/// `AES_256_CM_HMAC_SHA1_32` is not as strong as `AES_CM_128_HMAC_SHA1_80`.
 pub(crate) const fn at_least_as_strong(suite: Suite, floor: Suite) -> bool {
     suite.key_len() >= floor.key_len() && suite.tag() >= floor.tag()
 }
 
-/// The transform a suite names, on the media side of the boundary. Two
-/// enumerations of the same seven suites, because the crate that reads SDP
-/// and the crate that encrypts packets do not depend on each other.
+/// The media-side transform for an SDP suite. Two enumerations because the SDP crate and the SRTP
+/// crate do not depend on each other.
 pub(crate) const fn transform(suite: CryptoSuite) -> Suite {
     match suite {
         CryptoSuite::AesCm80 => Suite::AesCm80,
@@ -729,15 +569,12 @@ mod tests {
     #[cfg(not(feature = "dtls"))]
     use crate::error::MediaError;
 
-    /// Thirty octets of nothing in particular; what matters in these tests is
-    /// which key ends up where, not what is in it.
+    /// Thirty arbitrary octets; the tests care where a key ends up, not its value.
     fn keys(fill: u8) -> KeySalt {
         KeySalt::new(&[fill; 16], &[fill.wrapping_add(1); 14])
     }
 
-    /// One key per suite [`OFFERED`] names, each the width its own suite
-    /// calls for, filled from `fill` on so the four are never the same
-    /// bytes.
+    /// One key per [`OFFERED`] suite at its own width, filled from `fill` so they differ.
     fn offer_keys(fill: u8) -> Vec<(CryptoSuite, KeySalt)> {
         OFFERED
             .iter()
@@ -792,9 +629,8 @@ mod tests {
         assert!(SrtpPolicy::Required.offers());
     }
 
-    /// A call may ask for more than its account and never for less: not
-    /// for audio in the clear where the account requires SRTP, and not for
-    /// keys in the body where the account requires the handshake.
+    /// A call may ask for more than its account, never less: no clear audio where SRTP is required,
+    /// no body keys where the handshake is required.
     #[test]
     fn a_policy_is_at_least_as_strict_as_one_that_refuses_no_more_than_it() {
         use SrtpPolicy::{NotOffered, Offered, Required};
@@ -840,8 +676,7 @@ mod tests {
         );
     }
 
-    /// §5.1.2 has the answerer take the offerer's own first choice among the
-    /// ones it supports, not its own.
+    /// §5.1.2: the answerer takes the offerer's first supported choice, not its own.
     #[test]
     fn the_line_answered_is_the_first_one_this_build_supports() {
         let offered = stream(
@@ -855,9 +690,7 @@ mod tests {
         assert_eq!(taken.suite, CryptoSuite::AesCm32);
     }
 
-    /// §7.1.2's other branch: an answerer that can accept none of them
-    /// refuses the stream rather than falling back to something nobody
-    /// offered.
+    /// §7.1.2: an answerer that accepts no line refuses the stream.
     #[test]
     fn a_stream_whose_every_line_asks_for_the_impossible_is_answered_with_none() {
         let unencrypted = stream(
@@ -913,9 +746,7 @@ mod tests {
         );
     }
 
-    /// An identifier travels in a field of the width its line names, so a
-    /// value that field cannot carry is a line no stream can be opened with.
-    /// It is refused where it is read, not answered and then failed.
+    /// A value too wide for its identifier field makes the line unusable; refused when read.
     #[test]
     fn a_line_whose_identifier_does_not_fit_its_width_is_not_answered() {
         let line = Crypto::parse(
@@ -931,8 +762,7 @@ mod tests {
         );
     }
 
-    /// The peer's line is read off the description a second time because the
-    /// plan cannot say whether a parameter was dropped on the way in.
+    /// The peer's line is re-read because the plan cannot show a dropped parameter.
     #[test]
     fn a_peers_line_with_an_unknown_parameter_does_not_hold() {
         let good = stream(
@@ -951,7 +781,7 @@ mod tests {
         assert!(!peer_line_holds(&bad, 4));
     }
 
-    /// The one thing this module exists to be honest about, in both builds.
+    /// Both builds report DTLS support honestly.
     #[test]
     fn a_plan_keyed_by_a_handshake_opens_waiting_or_not_at_all() {
         let keyed = plan(Some(Keying::Dtls {
@@ -979,10 +809,8 @@ mod tests {
         ));
     }
 
-    /// The two contexts have to be built the right way round: what we send is
-    /// keyed with our own line, and what arrives with theirs. Reading it
-    /// through the overhead is the only observation available from outside,
-    /// since neither key can be read back.
+    /// The two contexts must be the right way round: ours for sending, theirs for receiving. The
+    /// overhead is the only thing visible from outside.
     #[test]
     fn each_direction_takes_the_key_of_the_end_that_wrote_it() {
         let ours = sipral_core::sdp::CryptoPolicy::new(1, CryptoSuite::AesCm32, keys(1));
@@ -995,17 +823,13 @@ mod tests {
         let Opening::Keyed(built) = built else {
             panic!("a secured plan opened something other than a pair of contexts");
         };
-        // the sending half is the one an overhead is quoted from, and the
-        // short suite is four octets of tag rather than ten
+        // the overhead comes from the sending half; the short suite has a 4-octet tag
         assert_eq!(built.rtp_overhead(), 4);
         assert_eq!(built.rtcp_overhead(), 14);
     }
 
-    /// RFC 4568 §6.1: a line whose key is not its suite's width is invalid
-    /// to whoever reads it, so an answer is never written with one. A
-    /// forty-four octet `AEAD_AES_256_GCM` key under the
-    /// `AES_CM_128_HMAC_SHA1_80` tag the offer was taken on is the line a
-    /// re-offer used to be answered with.
+    /// RFC 4568 §6.1: an answer never carries a key of the wrong width for its suite, such as a
+    /// 44-octet GCM key under an `AES_CM_128_HMAC_SHA1_80` tag.
     #[test]
     fn an_answer_line_is_never_written_with_a_key_of_another_suites_width() {
         let accepted = sipral_core::sdp::CryptoPolicy::new(2, CryptoSuite::AesCm80, keys(1));
@@ -1023,8 +847,7 @@ mod tests {
         assert_eq!(read.keys.first().map(|inline| &inline.keys), Some(&keys(5)));
     }
 
-    /// The key in force is the agreed line's, with that line's suite — not
-    /// whichever line this end happened to write first.
+    /// The key in force is the agreed line's, with its suite, not our first line.
     #[test]
     fn the_key_in_force_is_the_agreed_lines() {
         let ours = sipral_core::sdp::CryptoPolicy::new(2, CryptoSuite::AesCm80, keys(1));
@@ -1040,8 +863,7 @@ mod tests {
         assert_eq!(key_in_force(None), None);
     }
 
-    /// D5: the lifetime a line declares reaches the context it opens, and a
-    /// line with none leaves RFC 3711's own limits.
+    /// D5: a line's declared lifetime reaches its context; without one, RFC 3711 limits apply.
     #[test]
     fn a_declared_lifetime_reaches_the_context() {
         let mut line = sipral_core::sdp::CryptoPolicy::new(1, CryptoSuite::AesCm80, keys(3));

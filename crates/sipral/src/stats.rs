@@ -1,21 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What the call cost, for the two people who ask.
+//! What the call cost, for two kinds of reader.
 //!
-//! There are two consumers and they want different things. A live indicator is
-//! polled at the frame rate of a user interface and must therefore be cheap:
-//! no allocation, no lock, nothing that walks a history. An end-of-call record
-//! is written once and must be complete, because the moment anybody asks why a
-//! call sounded bad is after it has ended.
-//!
-//! Both are the same value here. The jitter buffer already keeps everything
-//! either of them needs — [`Quality`] is a plain copyable struct it hands back
-//! on demand — and RTCP contributes the round-trip time, which is the one
-//! number the receiving side cannot work out for itself. The requirement was
-//! never to compute any of this. It was that it reaches the application, which
-//! until this crate existed it could not, because nothing joined the two
-//! halves of the stack.
+//! A live indicator polls at UI frame rate and needs it cheap: no allocation, lock or history walk.
+//! An end-of-call record is written once and must be complete, since people ask why a call sounded
+//! bad after it ended. Both are the same value here: the jitter buffer's copyable [`Quality`] plus
+//! the RTCP round-trip time, the one number the receiver cannot measure itself.
 
 use std::time::Duration;
 
@@ -27,91 +18,66 @@ use crate::codec::Codec;
 /// percentage. Past this the score is zero however good everything else is.
 const HOPELESS_LOSS: f32 = 20.0;
 
-/// Round-trip time at which conversation stops working: ITU-T G.114 puts the
-/// limit of an acceptable one-way delay at 400 ms, and this is that, both
-/// ways, as the point where the score reaches zero.
+/// Round-trip time where conversation breaks down: ITU-T G.114's 400 ms one-way limit, both ways.
+/// The score reaches zero here.
 const HOPELESS_ROUND_TRIP: Duration = Duration::from_millis(800);
 
-/// Jitter buffer delay at which the same is true. The buffer will go this far
-/// to keep audio in sequence, and by the time it has, the two people are
-/// talking over each other.
+/// Jitter buffer delay at which the same holds: the buffer may go this far, but people then talk
+/// over each other.
 const HOPELESS_DELAY: Duration = Duration::from_millis(500);
 
 /// What one call's media has done, and is doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct StreamStatistics {
-    /// What the negotiation settled on, which is the first thing anybody
-    /// looking at a bad call wants to know.
+    /// The negotiated codec, the first thing anyone checks on a bad call.
     pub codec: Codec,
-    /// Everything the de-jitter buffer counted: packets, loss, the delay it
-    /// chose, and the jitter it measured.
+    /// Everything the jitter buffer counted: packets, loss, chosen delay, measured jitter.
     pub quality: Quality,
-    /// The round trip, from RTCP. `None` until a report has come back, which
-    /// on a short call may be never — the first one is deliberately delayed
-    /// (RFC 3550 §6.2), and a peer that sends no RTCP never provides one.
+    /// Round trip from RTCP. `None` until a report returns, which on a short call may never happen
+    /// (the first is delayed, RFC 3550 §6.2) and never does with a peer that sends no RTCP.
     pub round_trip: Option<Duration>,
     /// Packets this end has put on the wire.
     pub packets_sent: u64,
     /// Payload octets in them, not counting headers.
     pub octets_sent: u64,
-    /// Frames lost on the way here that were rebuilt from the copy of them
-    /// the packet after them carried, rather than concealed: Opus's in-band
-    /// forward error correction (RFC 7587 §3.3), which needs the far end to
-    /// have sent the copy and the next packet to have arrived in time. Part
-    /// of [`Quality::lost`], which counts the network's losses; the share
-    /// that reached the earpiece as invented audio is the difference. Zero
-    /// for every other codec.
+    /// Lost frames rebuilt from the FEC copy in the next packet instead of concealed (Opus, RFC
+    /// 7587 §3.3). Included in [`Quality::lost`], which counts network losses; the difference is
+    /// what reached the earpiece as concealment. Zero for other codecs.
     ///
     /// [`Quality::lost`]: sipral_rtp::Quality::lost
     pub fec_recovered: u64,
-    /// How long since a packet last arrived. A live call sits at one frame;
-    /// anything larger is the beginning of [`MediaEvent::Stalled`].
+    /// Time since the last packet. One frame on a live call; more is the start of a
+    /// [`MediaEvent::Stalled`].
     ///
     /// [`MediaEvent::Stalled`]: crate::MediaEvent::Stalled
     pub silent_for: Duration,
-    /// The RFC 3611 §4.7 VoIP Metrics this stream would report: burst and
-    /// gap loss, delay, jitter buffer sizing, and the R factor and MOS
-    /// the simplified E-model of `sipral_rtp::evaluate_e_model` rates it
-    /// at. `Some` as soon as this stream has identified a source to
-    /// report on, independent of whether RTCP XR reporting was
-    /// negotiated for the call — that only decides whether the same
-    /// figures also go out over the wire (see
-    /// [`sipral_rtp::RtpSession::build_report`]); this field is what an
-    /// RFC 6035 quality report and this crate's own statistics both read.
+    /// The RFC 3611 §4.7 VoIP Metrics for this stream: burst and gap loss, delay, jitter buffer
+    /// sizing, and the R factor and MOS from the simplified E-model
+    /// (`sipral_rtp::evaluate_e_model`). `Some` once a source is identified, whether or not RTCP XR
+    /// was negotiated; negotiation only decides whether they are also sent
+    /// ([`sipral_rtp::RtpSession::build_report`]). RFC 6035 reports and these statistics both read
+    /// this field.
     pub voip_metrics: Option<VoipMetricsBlock>,
-    /// What RTP/AVPF feedback this stream negotiated (RFC 4585, RFC 5506):
-    /// Generic NACKs, `trr-int`, reduced size. `None` on a stream whose
-    /// offer and answer did not both name a feedback profile, which runs
-    /// RFC 3550's RTCP alone.
+    /// The negotiated RTP/AVPF feedback (RFC 4585, RFC 5506): Generic NACK, `trr-int`, reduced
+    /// size. `None` unless both offer and answer named a feedback profile.
     pub feedback: Option<sipral_rtp::avpf::Negotiated>,
-    /// What that feedback has done: NACKs sent and received, Early and
-    /// reduced-size packets, Regular ones `trr-int` suppressed. Zero on a
-    /// stream without it.
+    /// What the feedback did: NACKs sent and received, Early and reduced-size packets, Regular ones
+    /// suppressed by `trr-int`. Zero without feedback.
     pub feedback_counts: sipral_rtp::avpf::FeedbackCounts,
 }
 
 impl StreamStatistics {
-    /// One number for a bar on a screen: a hundred for a call with nothing
-    /// wrong with it, zero for one nobody can hold.
+    /// A single 0 to 100 number for a bar on screen: 100 is a clean call, 0 an unusable one.
     ///
-    /// Not an ITU-T G.107 rating and not a mean opinion score. Those need the
-    /// codec's own impairment factors and an assumption about the listener,
-    /// and a number that looks like a MOS but is not one is worse than a
-    /// number that does not. This is the smallest honest thing: the three
-    /// impairments that actually vary during a call — how much was lost, how
-    /// far apart the ends are, and how much delay the buffer had to add to
-    /// keep the audio in order — each scaled to the point at which it alone
-    /// ruins the call, and the worst of the three deciding.
+    /// Not an ITU-T G.107 rating or MOS, which need codec impairment factors and listener
+    /// assumptions; a fake MOS would mislead. It takes the three impairments that vary during a
+    /// call (loss, round trip, buffer delay), scales each to the point where it alone ruins the
+    /// call, and uses the worst. Impairments do not add meaningfully, and heavy loss is not
+    /// improved by low jitter.
     ///
-    /// The worst rather than the sum, deliberately. Impairments do not add up
-    /// in any way that survives being written down, and a call with twenty
-    /// percent loss is not made worse by also having low jitter.
-    ///
-    /// The three limits were chosen here, from the behaviour wanted, with only
-    /// the round-trip one taken from anywhere authoritative. A reader who
-    /// wants to retune them should measure rather than assume they came from a
-    /// table.
+    /// Only the round-trip limit comes from a standard; the others were chosen for the behaviour
+    /// wanted. Measure before retuning.
     #[must_use]
     pub fn score(&self) -> f32 {
         let loss = fraction(self.quality.loss_rate * 100.0, HOPELESS_LOSS);
@@ -123,12 +89,9 @@ impl StreamStatistics {
         (1.0 - worst) * 100.0
     }
 
-    /// Whether the numbers say this call is in trouble now, which is a
-    /// different question from what it has cost so far.
-    ///
-    /// Five percent concealed frames is where a listener starts asking the
-    /// other person to repeat themselves, and it is the same threshold the
-    /// codec is told to expect when it decides how much redundancy to send.
+    /// Whether the call is in trouble now, as opposed to its total cost. 5% concealed frames is
+    /// where listeners start asking for repeats, and the same threshold the codec uses for
+    /// redundancy.
     #[must_use]
     pub fn is_suffering(&self) -> bool {
         self.quality.loss_rate >= 0.05
@@ -171,9 +134,7 @@ mod tests {
         }
     }
 
-    /// Scores are compared to a tenth of a point: the arithmetic is in single
-    /// precision and the question is never whether a bar is one part in a
-    /// million taller.
+    /// Scores are compared to a tenth of a point: the arithmetic is single precision.
     #[track_caller]
     fn assert_score(stats: &StreamStatistics, expected: f32) {
         let score = stats.score();
@@ -214,8 +175,7 @@ mod tests {
         stats.quality.loss_rate = 0.10;
         stats.round_trip = Some(Duration::from_millis(400));
         stats.quality.delay = Duration::from_millis(100);
-        // each of those is exactly half of its own limit, so a sum would read
-        // zero and the worst reads fifty
+        // each is half its limit: a sum would give zero, the worst gives fifty
         assert_score(&stats, 50.0);
     }
 
@@ -227,8 +187,7 @@ mod tests {
         assert_score(&stats, 0.0);
     }
 
-    /// A call with no RTCP back from it has no round-trip time, and that is
-    /// not the same as an infinite one.
+    /// No RTCP back means no round-trip time, not an infinite one.
     #[test]
     fn a_missing_round_trip_time_does_not_count_against_the_call() {
         let mut stats = statistics();

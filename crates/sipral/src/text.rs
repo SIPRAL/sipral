@@ -1,32 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! Real-time text in a call (RFC 4103): the `m=text` stream a call offers and
-//! answers beside its audio, what two descriptions agreed about it, and the
-//! stream that carries it.
+//! Real-time text in a call (RFC 4103): the `m=text` stream offered and answered beside the audio,
+//! what both descriptions agreed, and the stream itself.
 //!
-//! **A stream of its own, on a socket of its own.** RFC 4103 puts T.140 on an
-//! RTP session of its own, so the call's text has its own port: the
-//! application binds a second socket for it ([`crate::CallMedia::text`]), and
-//! the packets for it come out of [`crate::MediaSession::poll_text`] and go in
-//! through [`crate::MediaSession::receive_text`].
+//! **Its own socket.** RFC 4103 puts T.140 on its own RTP session, so the application binds a
+//! second socket ([`crate::CallMedia::text`]); packets come out of
+//! [`crate::MediaSession::poll_text`] and go in through [`crate::MediaSession::receive_text`].
 //!
-//! **What is offered is RFC 4103 §7's own example.** `t140/1000` on 98 inside
-//! `red/1000` on 100 with two redundant generations (`a=fmtp:100 98/98/98`),
-//! which §4 recommends because a lost packet loses what was typed rather than
-//! a few milliseconds of sound. An offer that names only `t140` is answered
-//! and sent without redundancy. Each end sends with the numbers the other's
-//! description gave (RFC 3264 §5.1), and each receives under its own.
+//! **The offer is RFC 4103 §7's example**: `t140/1000` on 98 inside `red/1000` on 100 with two
+//! redundant generations (`a=fmtp:100 98/98/98`), as §4 recommends, since a lost packet loses typed
+//! text. An offer with only `t140` is answered and sent without redundancy. Each end sends with the
+//! other's numbers (RFC 3264 §5.1) and receives under its own.
 //!
-//! **No RTCP.** The stream says so with `b=RS:0` and `b=RR:0` (RFC 3556 §2),
-//! sends none, and ignores what arrives: a character stream at a few packets
-//! a second has nothing an RTCP report would tell anybody that the call's
-//! audio stream does not already report.
+//! **No RTCP.** Signalled with `b=RS:0` and `b=RR:0` (RFC 3556 §2); none is sent and incoming RTCP
+//! is ignored, as the audio stream already reports on the path.
 //!
-//! **Not on a call that keys its audio.** The stream is plain `RTP/AVP`, and
-//! what is typed is exactly what an encrypted call is encrypted to hide, so a
-//! call whose policy offers or requires SRTP neither offers text nor takes an
-//! offered text stream.
+//! **Not with keyed audio.** The stream is plain `RTP/AVP`, and typed text is exactly what
+//! encryption should hide, so a call whose policy offers or requires SRTP neither offers nor
+//! accepts text.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -194,8 +186,8 @@ pub(crate) struct TextStream {
     receiver: TextReceiver,
     /// This stream's zero on the RTP clock.
     origin: Instant,
-    /// Where the far end's text comes from, once it has: where this end's
-    /// goes from then on (symmetric RTP, as the audio does).
+    /// Where the far end's text comes from once it has arrived; our text goes there from then on
+    /// (symmetric RTP, like the audio).
     latch: Option<SocketAddr>,
     heard: Heard,
 }
@@ -225,14 +217,14 @@ impl TextStream {
         })
     }
 
-    /// A later offer and answer agreed `plan`: the direction, the far end's
-    /// address and either end's numbers may have moved. Nothing typed and
-    /// not yet sent is lost; the numbering carries on. A receiver whose
-    /// numbers moved starts afresh, after handing on what it had read.
+    /// A later offer and answer agreed `plan`: direction, far-end address or numbers may change.
+    /// Unsent text is kept and numbering continues. A receiver whose numbers changed restarts after
+    /// handing on what it had read.
     ///
     /// # Errors
-    /// [`MediaError::NoText`] for payload types the RTP header cannot carry;
-    /// the stream is left as it was.
+    ///
+    /// [`MediaError::NoText`] for payload types the RTP header cannot carry; the stream is
+    /// unchanged.
     pub(crate) fn update(&mut self, plan: TextPlan) -> Result<(), MediaError> {
         let receiving = (plan.receive_t140, plan.receive_red);
         let receiver = if receiving == (self.plan.receive_t140, self.plan.receive_red) {
@@ -389,8 +381,7 @@ a=rtpmap:{red} red/1000\r\na=fmtp:{red} {t140}/{t140}/{t140}\r\n"
         )
         .expect("text agreed");
         let mut stream = TextStream::open(first, (7, 1, 1), now).expect("the stream");
-        // the far end offers again under other numbers, and the answer
-        // takes the offer's
+        // the far end re-offers with other numbers, and the answer adopts them
         let again = plan(
             &described("192.0.2.1", 41000, 96, 97),
             &described("192.0.2.2", 41002, 96, 97),

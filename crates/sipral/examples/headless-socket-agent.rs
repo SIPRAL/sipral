@@ -1,71 +1,48 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! The SIP and RTP half of a socket-framed voice agent: answers whatever
-//! calls it, and carries the audio, the voice activity, the DTMF and the
-//! call state across a TCP socket in `sipral-headless`'s own wire protocol,
-//! for a separate agent process to read and write —
-//! `docs/07-headless.md#real-media` is the design this binary is.
+//! The SIP and RTP half of a socket-framed voice agent: it answers every call and carries audio,
+//! voice activity, DTMF and call state over TCP in `sipral-headless`'s wire protocol, for a
+//! separate agent process. The design is `docs/07-headless.md#real-media`.
 //!
-//! This is the application side: it owns the SIP dialog, the RTP session and
-//! the socket. `crates/sipral-headless/examples/agent.rs` is the other side
-//! — a minimal reference agent that answers with an echo and a digit,
-//! depending on nothing but `sipral-headless` itself, the way a real agent
-//! process depends on nothing but that crate and whatever speech model it
-//! wraps.
+//! This is the application side, owning the SIP dialog, the RTP session and the socket.
+//! `crates/sipral-headless/examples/agent.rs` is the other side: a minimal reference agent that
+//! echoes and sends a digit, depending only on `sipral-headless`.
 //!
-//! Simplified from what `sipral_headless::SessionRegistry` can actually
-//! carry: one call at a time, one TCP connection, accepted once at startup
-//! before the SIP side comes up — the shape the interop lab's own flow
-//! needs and no more. The protocol has nothing against more than one of
-//! either; this binary just does not build it.
+//! Simpler than what `sipral_headless::SessionRegistry` supports: one call at a time, one TCP
+//! connection accepted at startup before SIP comes up, which is what the interop lab needs.
 //!
-//! The call's own RTP is driven by hand, on a raw `UdpSocket`, rather than
-//! through `common/media_socket.rs`'s shared `MediaSocket::turn`: that
-//! helper hands an application two closures, one for what it captures and
-//! one for what it heard, and both of them need `&mut` access to the same
-//! `HeadlessSession` here — one to fill a frame from its queue, the other to
-//! queue what was just decoded. Two closures each holding their own
-//! exclusive borrow of the same session cannot coexist as one call's
-//! arguments, so this binary paces its own tick instead, the same twenty
-//! milliseconds apart.
+//! RTP is driven by hand on a raw `UdpSocket` instead of `common/media_socket.rs`'s
+//! `MediaSocket::turn`, whose two closures would both need `&mut` access to the same
+//! `HeadlessSession`. So this binary paces its own 20 ms tick.
 //!
 //! ```text
 //! cargo run --example headless-socket-agent --features headless -- \
 //!     --host 127.0.0.1 --port 5070 --socket 0.0.0.0:7001
 //! ```
 //!
-//! Dialled directly as above, or reached through a server it registers with
-//! — `--register user@domain --registrar ip:port --pass secret` — which is
-//! how the interop lab runs it behind Asterisk.
+//! Dial it directly as above, or have it register with `--register user@domain --registrar ip:port
+//! --pass secret`, as the interop lab does behind Asterisk.
 //!
-//! `--ice-lite` answers as an ICE-lite endpoint (`sipral::IcePolicy::Lite`,
-//! `docs/06-nat.md`): the deployment for a server with a public address, and
-//! the one a full-ICE peer such as a WebRTC gateway needs before it will send
-//! it any audio. The candidate is the media socket's own address, or
-//! `--public ip` for a server behind a one-to-one NAT, where that is the
-//! address the NAT forwards unchanged to this host. Once the peer nominates
-//! a pair it prints `path chosen <local> -> <remote>`.
+//! `--ice-lite` answers as an ICE-lite endpoint (`sipral::IcePolicy::Lite`, `docs/06-nat.md`), for
+//! a server with a public address talking to a full-ICE peer such as a WebRTC gateway. The
+//! candidate is the media socket's address, or `--public ip` behind a one-to-one NAT. When the peer
+//! nominates a pair it prints `path chosen <local> -> <remote>`.
 //!
-//! The socket's own audio is fixed at 16 kHz; the codec catalogue is G.711
-//! only, so every call is 8 kHz regardless of which law is chosen, and
-//! `HeadlessSession` resamples between the two both ways — proving that seam
-//! rather than assuming the two rates happen to agree.
+//! Socket audio is fixed at 16 kHz and the catalogue is G.711 only (8 kHz), so `HeadlessSession`
+//! always resamples both ways, exercising that path.
 //!
-//! `--timings` prints two lines a call, each with the wall clock in
-//! microseconds since the Unix epoch: `timing invite <call> <us>` the turn the
-//! INVITE is handed to this binary, and `timing first-rtp <call> <us>` when
-//! the first RTP packet carrying audio the agent sent leaves for the caller.
-//! The agent example's own `--timings` prints the other half of each figure;
-//! `scripts/soak.sh latency` pairs them, `docs/19-numbers.md` says how.
+//! `--timings` prints two lines per call with wall-clock microseconds since the Unix epoch: `timing
+//! invite <call> <us>` when the INVITE reaches this binary, and `timing first-rtp <call> <us>` when
+//! the first RTP packet with agent audio leaves. The agent example's `--timings` prints the other
+//! halves; `scripts/soak.sh latency` pairs them (`docs/19-numbers.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 #[path = "common/entropy.rs"]
 mod entropy;
-// `udp_endpoint.rs` itself names `crate::media_socket::MediaSocket` in its
-// own `Endpoint`, even though this binary never calls `MediaSocket::turn` —
-// see this file's own doc comment for why.
+// `udp_endpoint.rs` names `crate::media_socket::MediaSocket` in its `Endpoint`, although this
+// binary never calls `MediaSocket::turn`
 #[path = "common/media_socket.rs"]
 mod media_socket;
 #[path = "common/udp_endpoint.rs"]
@@ -97,16 +74,14 @@ use sipral_headless::{
 
 use udp_endpoint::Endpoint;
 
-/// This socket's own audio: independent of the codec any call negotiates —
-/// `docs/07-headless.md`'s whole point — and fixed here rather than
-/// negotiated with the agent, which this simplified binary does not do.
+/// Socket audio format: independent of the call's codec (the point of `docs/07-headless.md`), fixed
+/// rather than negotiated in this simplified binary.
 fn session_audio() -> AudioConfig {
     AudioConfig::new(SampleRate::Hz16000)
 }
 
-/// G.711 only, both laws 8 kHz: this binary always knows a call's codec rate
-/// without waiting for the negotiation to settle, which is what lets it open
-/// a `HeadlessSession` in the same tick `IncomingCall` arrives in.
+/// G.711 only, both laws at 8 kHz, so the codec rate is known before negotiation settles and a
+/// `HeadlessSession` can open on `IncomingCall`.
 fn codecs() -> CodecCatalog {
     CodecCatalog::with_order(&["PCMU", "PCMA"]).expect("both are always in this build")
 }
@@ -114,35 +89,29 @@ fn codecs() -> CodecCatalog {
 const CODEC_RATE: u32 = 8_000;
 const PACE: Duration = Duration::from_millis(20);
 
-/// Writes the writer thread may have under way at once, beyond what the
-/// kernel's own send buffer already holds. Past that the agent is not
-/// reading, and what it has not taken waits here, turn by turn, in order.
+/// Writes the writer thread may have in progress beyond the kernel send buffer. Beyond that the
+/// agent is not reading, and turns wait here in order.
 const WRITES_IN_FLIGHT: usize = 4;
 
-/// Turns of the caller's audio held for an agent that is not reading — one
-/// second at the twenty milliseconds a turn — past which the oldest turn's
-/// audio is the one that goes, the policy the capture queue itself keeps.
+/// Turns of caller audio held for an agent that is not reading (one second at 20 ms per turn); then
+/// the oldest audio is dropped, as the capture queue does.
 const MOST_AUDIO_TURNS: usize = 50;
 
-/// Control bytes held back for an agent that has stopped reading, past which
-/// it is taken for gone. Control is never dropped the way audio is: a missed
-/// `CallState` or `VoiceActivity` is a lie about the call, not a gap in it.
+/// Control bytes held for an agent that stopped reading before it is considered gone. Control is
+/// never dropped like audio: a missed `CallState` or `VoiceActivity` misrepresents the call.
 const MOST_HELD: usize = 64 * 1_024;
 
-/// How much of the caller's address and display name reach the agent, each.
-/// Both come off an INVITE a stranger wrote, and the `IncomingCall` carrying
-/// them has to fit `sipral_headless::MAX_CONTROL_PAYLOAD` even when every
-/// byte of both is one JSON escapes six times over.
+/// Maximum bytes of the caller's address and display name passed to the agent, each. Both come from
+/// a stranger's INVITE, and `IncomingCall` must fit `sipral_headless::MAX_CONTROL_PAYLOAD` even if
+/// JSON escapes every byte sixfold.
 const IDENTITY_BYTES: usize = 512;
 
-/// The `Retry-After` on a call refused for want of an RTP port: long enough
-/// for one to come free, short enough that a caller who waits it out finds
-/// the agent answering again.
+/// `Retry-After` when refusing a call for lack of an RTP port: long enough for one to free up,
+/// short enough that a waiting caller gets through.
 const RETRY_AFTER_SECONDS: &[u8] = b"5";
 
-/// Where to register, for an application reached through a server rather
-/// than dialled directly: `--register user@domain --registrar ip:port
-/// --pass secret`, the way an agent sits behind a PBX.
+/// Registration for an agent behind a PBX: `--register user@domain --registrar ip:port --pass
+/// secret`.
 struct Registration {
     user: String,
     domain: String,
@@ -150,17 +119,17 @@ struct Registration {
     pass: String,
 }
 
-/// How a call is answered: the codecs, and — with `--ice-lite` — as an
-/// ICE-lite endpoint, advertised at the socket's address or at `--public`.
+/// How calls are answered: the codecs and, with `--ice-lite`, as an ICE-lite endpoint advertised at
+/// the socket's address or `--public`.
 struct Answering {
     catalog: CodecCatalog,
     public: Option<std::net::IpAddr>,
-    /// `--timings`: print the instants the latency figures are read from.
+    /// `--timings`: print the instants the latency figures use.
     timings: bool,
 }
 
-/// The wall clock in microseconds since the Unix epoch: the one clock this
-/// process and the agent's, on the same host, both read.
+/// Wall-clock microseconds since the Unix epoch, the clock this process and a local agent both
+/// read.
 fn epoch_us() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -168,9 +137,8 @@ fn epoch_us() -> u128 {
 }
 
 impl Answering {
-    /// What one call is answered with, on the media socket bound at `local`.
-    /// A one-to-one NAT keeps the port, so the public address takes the
-    /// socket's own.
+    /// What one call is answered with on the media socket at `local`. A one-to-one NAT keeps the
+    /// port, so the public address uses the socket's.
     fn media(&self, local: SocketAddr) -> CallMedia {
         let media = CallMedia::new(self.catalog.clone(), MediaConfig::default());
         match self.public {
@@ -260,15 +228,12 @@ fn args() -> Args {
 enum FromAgent {
     Audio(Vec<u8>),
     Control(ControlMessage),
-    /// A whole frame that was refused — audio of the wrong size, a control
-    /// message that did not decode — which the stream reads on past, and
-    /// which the agent is told about on the error channel.
+    /// A complete frame that was refused (wrong audio size, undecodable control). The stream
+    /// continues past it and the agent is told on the error channel.
     Refused(DecodeError),
 }
 
-/// Reads the agent's socket on a thread of its own, so the main loop never
-/// blocks on it: SIP, RTP and the socket all move at their own pace, and a
-/// slow or silent agent must not stall a call's signalling.
+/// Read the agent's socket on its own thread so a slow or silent agent never stalls SIP or RTP.
 fn read_agent(mut stream: TcpStream) -> Receiver<FromAgent> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -285,8 +250,7 @@ fn read_agent(mut stream: TcpStream) -> Receiver<FromAgent> {
                     Ok(Some(Decoded::Audio(payload))) => FromAgent::Audio(payload.to_vec()),
                     Ok(Some(Decoded::Control(message))) => FromAgent::Control(message),
                     Ok(None) => break,
-                    // a length that lied ends the connection: there is no
-                    // way to know where the frame it announced ends
+                    // a wrong length ends the connection: there is no way to find the frame's end
                     Err(error) if error.is_final() => return,
                     Err(error) => FromAgent::Refused(error),
                 };
@@ -299,30 +263,24 @@ fn read_agent(mut stream: TcpStream) -> Receiver<FromAgent> {
     rx
 }
 
-/// One turn's wire frames for the agent, in the order the turn produced
-/// them: control first — whatever signalling, the agent's own messages and
-/// this turn's voice activity gave rise to — then the caller's audio.
+/// One turn's frames for the agent, in order: control first (signalling, agent messages, voice
+/// activity), then caller audio.
 #[derive(Default)]
 struct Turn {
     control: Vec<u8>,
     audio: Vec<u8>,
 }
 
-/// The agent's socket, written from a thread of its own for the same reason
-/// it is read from one: an agent that stops reading fills the kernel's send
-/// buffer, and a write that blocks there would stall every call's SIP and
-/// RTP behind it.
+/// Writes to the agent's socket on their own thread: an agent that stops reading fills the send
+/// buffer, and a blocking write would stall every call's SIP and RTP.
 struct ToAgent {
     writes: Sender<Vec<u8>>,
     /// Writes handed to the thread and not finished yet.
     in_flight: Arc<AtomicUsize>,
-    /// Turns the writer had no room for yet, oldest first. Kept as turns
-    /// rather than bytes so that the order between a `VoiceActivity` and the
-    /// frames around it survives an agent falling behind, and so that the
-    /// audio can still be told apart from the control and dropped alone.
+    /// Turns the writer had no room for, oldest first. Kept as turns, not bytes, so `VoiceActivity`
+    /// stays ordered with its frames and audio can be dropped without dropping control.
     held: VecDeque<Turn>,
-    /// Frames of the caller's audio dropped here, oldest first, for an
-    /// agent that was not reading.
+    /// Caller audio frames dropped here, oldest first, because the agent was not reading.
     audio_dropped: u64,
 }
 
@@ -347,9 +305,8 @@ impl ToAgent {
         }
     }
 
-    /// Queues `turn` behind whatever is held and hands the writer as much as
-    /// it has room for. `Break` once the writer is gone or the agent has left
-    /// more control unread than [`MOST_HELD`].
+    /// Queue `turn` behind held ones and hand the writer what fits. `Break` once the writer is gone
+    /// or more than [`MOST_HELD`] control bytes are unread.
     fn send(&mut self, turn: Turn) -> ControlFlow<()> {
         if !turn.control.is_empty() || !turn.audio.is_empty() {
             self.held.push_back(turn);
@@ -397,23 +354,21 @@ fn bounded(mut text: String, most: usize) -> String {
     text
 }
 
-/// One call's socket-side state: its own RTP socket, the `HeadlessSession`
-/// that resamples and queues its audio, and the wire's own call id.
+/// One call's socket-side state: its RTP socket, the `HeadlessSession` that resamples and queues
+/// audio, and the wire call id.
 struct Bridge {
     call: CallHandle,
     call_id: String,
     rtp: UdpSocket,
     session: sipral::HeadlessSession,
-    /// Set the moment `UaEvent::CallEnded` arrives, which — `MediaEngine`'s
-    /// own event order — is always before the `MediaEvent::Ended` that
-    /// carries this call's final statistics. Kept rather than clearing
-    /// `bridge` straight away, so that later event still finds a `call_id`
-    /// to report against; `bridge` itself is only cleared once that arrives.
+    /// Set on `UaEvent::CallEnded`, which `MediaEngine` always reports before the
+    /// `MediaEvent::Ended` with final statistics. `bridge` is cleared only after that, so it still
+    /// has a `call_id` to report against.
     ended: bool,
-    /// The agent has sent this call audio, and the next packet out carries it.
+    /// The agent has sent audio for this call, and the next packet carries it.
     agent_spoke: bool,
-    /// Whether the first packet carrying the agent's audio is still to be
-    /// timed: `Some(false)` until it is, `None` without `--timings`.
+    /// Whether the first packet with agent audio is still to be timed: `Some(false)` until then,
+    /// `None` without `--timings`.
     first_rtp_timed: Option<bool>,
 }
 
@@ -457,8 +412,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             endpoint.local, registration.user, registration.domain, registration.registrar
         );
     } else {
-        // Still one account, never registered, so the `Contact` on a call it
-        // answers is a real address (`headless-agent.rs` says why).
+        // one unregistered account, so the `Contact` in answers is a real address (see
+        // `headless-agent.rs`)
         let identity = Uri::parse_str(&format!("sip:agent@{}", endpoint.local))?;
         endpoint.add_account(Account::unregistered(
             identity.clone(),
@@ -521,11 +476,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Everything the agent's own socket had queued: audio goes straight onto
-/// this call's playback queue, `BargeIn` empties it, `Hangup` ends the call,
-/// `DtmfSend` dials a digit, and a frame that was refused is reported back
-/// on the error channel. `ControlFlow::Break` once the socket has closed for
-/// good.
+/// Handle everything queued from the agent: audio to the playback queue, `BargeIn` empties it,
+/// `Hangup` ends the call, `DtmfSend` dials, refused frames are reported on the error channel.
+/// `ControlFlow::Break` once the socket closed.
 fn drain_agent(
     reader: &Receiver<FromAgent>,
     endpoint: &mut Endpoint,
@@ -583,11 +536,9 @@ fn drain_agent(
     }
 }
 
-/// One call's own RTP for this tick: whatever arrived goes to `media`, and —
-/// once a media tick is due — the caller's decoded audio is heard, its
-/// voice activity and whatever the queue had ready are written to `out` as
-/// wire frames, and whatever the agent had queued for playback is sent as
-/// the next RTP packet.
+/// One call's RTP for this tick: incoming datagrams go to `media`; when a media tick is due,
+/// decoded caller audio is heard, voice activity and ready frames are written to `out`, and queued
+/// agent audio is sent as the next RTP packet.
 fn drive_bridge(
     active: &mut Bridge,
     media: &mut sipral::MediaSession,
@@ -604,19 +555,15 @@ fn drive_bridge(
         let datagram = inbox.get_mut(..length).unwrap_or_default();
         let _ = media.receive(datagram, from, turn);
     }
-    // the session's own datagrams — an ICE-lite end's answers to the peer's
-    // checks among them — go out on the same socket, whatever the tick
+    // session datagrams (including ICE-lite check answers) go out on the same socket on every tick
     while let Some(datagram) = media.poll_transmit(turn) {
         let _ = active.rtp.send_to(datagram.payload, datagram.destination);
     }
     if !agent_up || turn < *next_tick {
         return;
     }
-    // More than a tick behind — the first tick of a call answered long after
-    // the loop began, or a turn that stalled — starts the cadence again from
-    // now. Catching up instead would run every missed tick back to back:
-    // RTP out several times faster than real time, and the far end's audio
-    // pulled out of its jitter buffer just as fast.
+    // more than a tick behind (first tick of a late call, or a stall) restarts the cadence;
+    // catching up would burst RTP and drain the far end's jitter buffer
     *next_tick = if turn.saturating_duration_since(*next_tick) > PACE {
         turn + PACE
     } else {
@@ -659,10 +606,8 @@ fn bind_rtp(ip: std::net::IpAddr) -> std::io::Result<(UdpSocket, SocketAddr)> {
     Ok((rtp, local))
 }
 
-/// Turns a call away that this binary could not take, rather than leaving it
-/// ringing until the caller gives up, and tells the agent why on the error
-/// channel: `status` goes to the caller, the reason to the agent and to
-/// standard output.
+/// Refuse a call this binary cannot take instead of leaving it ringing: `status` to the caller, the
+/// reason to the agent's error channel and stdout.
 fn refuse_call(
     endpoint: &mut Endpoint,
     out: &mut Vec<u8>,
@@ -692,12 +637,11 @@ fn refuse_call(
     );
 }
 
-/// Takes an incoming call: its own RTP socket and `HeadlessSession`, the
-/// session's opening and the caller on the wire, then the answer.
+/// Take an incoming call: RTP socket, `HeadlessSession`, session opening and caller sent on the
+/// wire, then the answer.
 ///
-/// A call this binary cannot take is refused at once, whichever step it
-/// failed at, and the agent hears why — before, each of them returned and
-/// left the call ringing, answered by nobody and refused by nobody.
+/// Any failed step refuses the call at once and tells the agent why, instead of leaving it ringing
+/// unanswered.
 fn open_bridge(
     endpoint: &mut Endpoint,
     bridge: &mut Option<Bridge>,
@@ -706,10 +650,8 @@ fn open_bridge(
     now: Instant,
 ) {
     let call_id = format!("{call:?}");
-    // No port to carry the call's audio on is a shortage of this host's, not
-    // a fault in the call: §21.5.4's 503, with a Retry-After, so that a
-    // server in front of several agents tries another one (RFC 3263 §4.3)
-    // and a caller that retries this one waits for a port to come free.
+    // no RTP port is this host's shortage, not the call's fault: 503 (§21.5.4) with Retry-After, so
+    // a front server tries another agent (RFC 3263 §4.3) and a retrying caller waits
     let (rtp, local) = match bind_rtp(endpoint.local.ip()) {
         Ok(bound) => bound,
         Err(error) => {
@@ -725,8 +667,7 @@ fn open_bridge(
             return;
         }
     };
-    // The socket's own audio against the codec's rate: fixed in this binary,
-    // so a refusal here is this binary's own fault — §21.5.1's 500.
+    // the socket rate is fixed here, so a failure is this binary's own: 500 (§21.5.1)
     let session =
         match sipral::HeadlessSession::open(call_id.clone(), session_audio(), CODEC_RATE, 50, 50) {
             Ok(session) => session,
@@ -756,8 +697,8 @@ fn open_bridge(
         &ControlMessage::SessionOpen(SessionOpen::new(session_audio().sample_rate())),
         out,
     );
-    // Who is calling comes out of the INVITE's own `From`, read while the
-    // call is still known to the agent, and cut to what the socket carries.
+    // caller identity from the INVITE's `From`, read while the call is still known, truncated to
+    // what the socket carries
     let identity = endpoint.agent.call_identity(call);
     let caller = identity.as_ref().map_or_else(String::new, |who| {
         bounded(
@@ -790,8 +731,7 @@ fn open_bridge(
         now,
     ) {
         Ok(()) => println!("answered {call_id}"),
-        // the engine sent nothing: an offer that cannot be answered is
-        // RFC 3261 §21.4.26's 488, and anything else this end's own 500
+        // nothing was sent: an unanswerable offer gets 488 (RFC 3261 §21.4.26), anything else 500
         Err(error) => {
             let status = match error {
                 MediaError::Description(_)
@@ -832,9 +772,7 @@ fn handle_event(
             event: MediaEvent::Failed(error),
             ..
         } => println!("media failed: {error}"),
-        // A second call while one is already bridged: this binary only
-        // ever drives one `Bridge` at a time (its own doc comment says so),
-        // so it declines rather than leaving the caller ringing forever.
+        // one bridged call at a time: decline a second one rather than leave it ringing
         Event::Signalling(UaEvent::IncomingCall { call, .. }) => {
             let _ = endpoint.agent.reject(*call, StatusCode::BUSY_HERE, now);
         }
@@ -842,8 +780,7 @@ fn handle_event(
         Event::Signalling(UaEvent::RegistrationFailed { reason, status, .. }) => {
             println!("registration failed: {reason} ({status:?})");
         }
-        // Only the bridged call's own end stops its audio: the call refused
-        // just above ends too, and its end is not this one's.
+        // only the bridged call's end stops its audio; the refused call above ends too
         Event::Signalling(UaEvent::CallEnded { call, .. }) => {
             if let Some(active) = bridge.as_mut().filter(|b| b.call == *call) {
                 active.ended = true;
@@ -869,9 +806,8 @@ fn handle_event(
             if bridge.as_ref().is_some_and(|b| b.call == *call)
                 && let Some(active) = bridge.take()
             {
-                // audio the agent did not read: dropped on this call's capture
-                // queue, or held for the socket until newer turns pushed it
-                // out — the second counted since the agent connected
+                // agent audio unread: dropped from the capture queue, or pushed out of the socket
+                // queue by newer turns; the latter counted since the agent connected
                 println!(
                     "ended {}: packets_received={} packets_sent={} capture_dropped={} audio_dropped={}",
                     active.call_id,
@@ -884,9 +820,8 @@ fn handle_event(
         }
         _ => {}
     }
-    // After the bridge above has had its chance to open, so that a call's own
-    // `IncomingCall` finds it and reaches the wire as `ringing`: only the
-    // bridged call's own transitions are reported, under its own id.
+    // after the bridge had its chance to open, so the call's `IncomingCall` reaches the wire as
+    // `ringing`; only the bridged call's transitions are reported
     if let Event::Signalling(sig) = event
         && let Some((call, state)) = sipral::call_state_of(sig)
         && let Some(active) = bridge.as_mut().filter(|b| b.call == call)

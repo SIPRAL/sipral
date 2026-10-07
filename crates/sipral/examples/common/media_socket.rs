@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One call's RTP socket, shared by every example in this directory.
+//! One call's RTP socket, shared by every example here.
 //!
-//! `sipral::MediaSession` is the codec, the jitter buffer, the concealment and
-//! the RTP session; it owns neither a socket nor a device, by design (see
-//! `docs/01-architecture.md`). Binding a port, moving datagrams between it and
-//! the session, and pacing a frame in and a frame out the way a real audio
-//! device would: that is what any application embedding the facade writes for
-//! itself, and every example here needs the same few dozen lines of it. It
-//! lives once, here, rather than four times, so that each example can stay
-//! about the thing it is actually demonstrating — placing a call, holding it,
-//! securing it — instead of about pacing a socket.
+//! `sipral::MediaSession` owns no socket or device (`docs/01-architecture.md`). Binding a port,
+//! moving datagrams to and from the session, and pacing frames like an audio device is what every
+//! embedding application writes; it lives here once so each example can focus on what it
+//! demonstrates.
 //!
-//! What is deliberately still per-example is *what* goes in and *what* is done
-//! with what comes out: a microphone and a speaker, a WAV file, or an answered
-//! call's own audio handed straight back. [`MediaSocket::turn`] takes those as
-//! two closures rather than owning either.
+//! What goes in and what happens to what comes out stays per example (microphone and speaker, a WAV
+//! file, an echo): [`MediaSocket::turn`] takes them as two closures.
 //!
-//! Shared source, included afresh into each example's own binary — see
-//! `udp_endpoint.rs`'s own note on why `dead_code` is silenced here too.
+//! Included into each example's binary; see `udp_endpoint.rs` for why `dead_code` is allowed.
 #![allow(dead_code)]
 
 use std::io::ErrorKind;
@@ -28,40 +20,28 @@ use std::time::{Duration, Instant};
 
 use sipral::{MediaSession, RtcpPlan};
 
-/// The largest frame any codec in this crate's default build produces, in
-/// samples: Opus's own, at its default twenty-millisecond packetisation and
-/// its fixed 48 kHz clock rate (RFC 7587 §7) — four times G.722's, which
-/// hears twice as fast as it counts and would otherwise look like the bound.
-/// An example that offers a catalogue with Opus left out of it never
-/// produces a frame this large, but the buffer is sized for whichever
-/// catalogue an example built, not for the narrowest one any of them
-/// happens to choose.
+/// The largest frame in samples of any codec in the default build: Opus at 20 ms and 48 kHz (RFC
+/// 7587 §7), four times G.722's. Sized for any catalogue an example may build.
 pub(crate) const MAX_SAMPLES: usize = 960;
 
-/// How often a frame goes out, matching [`sipral::CodecCatalog`]'s default
-/// twenty-millisecond packetisation.
+/// Frame interval, matching [`sipral::CodecCatalog`]'s default 20 ms.
 pub(crate) const PACE: Duration = Duration::from_millis(20);
 
-/// How many ports the system is asked for before an RTP and RTCP pair is
-/// given up on: about half of what it hands out is odd, and a few of the
-/// rest have their next port held.
+/// Ports to try before giving up on an RTP/RTCP pair: about half are odd, and some have their next
+/// port taken.
 const PAIR_ATTEMPTS: usize = 64;
 
-/// One call's RTP socket, and the port after it, held from the bind and
-/// kept for RTCP when the call keeps RTCP on a port of its own.
+/// One call's RTP socket plus the next port, held from the bind and used for RTCP if the call keeps
+/// RTCP separate.
 pub(crate) struct MediaSocket {
     socket: UdpSocket,
-    /// The port after the RTP one, bound once the call's plan says RTCP
-    /// runs there (RFC 3550 §11): a peer that did not agree to multiplex
-    /// the two (RFC 5761) sends its reports to it, and expects ours from it.
+    /// The port after RTP, bound once the plan puts RTCP there (RFC 3550 §11): a peer that did not
+    /// agree to mux (RFC 5761) sends reports to it and expects ours from it.
     rtcp: Option<UdpSocket>,
-    /// That port, held from the moment the RTP one was bound and until the
-    /// plan says whether RTCP runs there: bound only once the plan said so,
-    /// it had been taken meanwhile by another call's RTP in one call of
-    /// twenty-five at a thousand at once.
+    /// That port, held from the RTP bind until the plan decides. Binding it only then lost it to
+    /// another call's RTP in one call of 25 at a thousand concurrent calls.
     reserved: Option<UdpSocket>,
-    /// Whether binding it was tried and failed, so it is not tried again
-    /// every frame.
+    /// Whether binding it failed, so it is not retried every frame.
     rtcp_refused: bool,
     running: bool,
     started: Instant,
@@ -73,8 +53,7 @@ pub(crate) struct MediaSocket {
 }
 
 impl MediaSocket {
-    /// Bind a socket for RTP, so the offer or the answer can name its port,
-    /// and hold the one after it for RTCP.
+    /// Bind an RTP socket so the SDP can name its port, and hold the next port for RTCP.
     pub(crate) fn bind(now: Instant) -> std::io::Result<Self> {
         let (socket, reserved) = bind_pair(|| UdpSocket::bind("0.0.0.0:0"))?;
         socket.set_nonblocking(true)?;
@@ -97,8 +76,7 @@ impl MediaSocket {
         Ok(self.socket.local_addr()?.port())
     }
 
-    /// The port RTCP is received on when it has one of its own; `None`
-    /// while RTP and RTCP share one, or before the call's plan said.
+    /// The RTCP receive port if separate; `None` while muxed or before the plan decided.
     pub(crate) fn rtcp_port(&self) -> Option<u16> {
         self.rtcp
             .as_ref()
@@ -106,26 +84,22 @@ impl MediaSocket {
             .map(|address| address.port())
     }
 
-    /// Send a datagram the engine handed back for the RTP port — a DTLS
-    /// handshake record, an ICE check — from this call's own socket.
+    /// Send a datagram the engine returned for the RTP port (a DTLS record, an ICE check) from this
+    /// call's socket.
     pub(crate) fn send(&self, destination: SocketAddr, payload: &[u8]) {
         let _ = self.socket.send_to(payload, destination);
     }
 
-    /// Send an RTCP report or goodbye the engine handed back: from the RTCP
-    /// port when the call has one of its own, since that is where the peer
-    /// reads the report as coming from, and from the RTP socket when the two
-    /// are multiplexed.
+    /// Send an RTCP report or BYE from the RTCP port if separate, since the peer expects reports
+    /// from there, else from the RTP socket.
     pub(crate) fn send_rtcp(&self, destination: SocketAddr, payload: &[u8]) {
         let socket = self.rtcp.as_ref().unwrap_or(&self.socket);
         let _ = socket.send_to(payload, destination);
     }
 
-    /// Take the RTCP port the call's plan names, the first time it names one:
-    /// the one held beside the RTP port when that is it, else bound now. A
-    /// plan that multiplexes the two, or has no RTCP, lets the held one go.
-    /// A port somebody else holds is said on standard error; the call then
-    /// runs with its reports going out from the RTP port and none coming in.
+    /// Adopt the RTCP port the plan names, the first time: the held port if it matches, else bind
+    /// now. A muxed or RTCP-less plan releases the held port. A port in use elsewhere is logged;
+    /// the call then sends reports from the RTP port and receives none.
     fn follow_rtcp_plan(&mut self, session: &MediaSession) {
         if self.rtcp.is_some() || self.rtcp_refused {
             return;
@@ -154,19 +128,16 @@ impl MediaSocket {
         }
     }
 
-    /// Hand the session whatever arrived on this call's sockets, and nothing
-    /// more: what [`MediaSocket::turn`] does besides capturing and playing.
-    /// A call in a local conference is read this way, since the conference's
-    /// own tick is what captures and plays its frames.
+    /// Feed the session whatever arrived on this call's sockets, without capturing or playing. Used
+    /// for calls in a local conference, whose tick does the capture and playback.
     pub(crate) fn receive(&mut self, session: &mut MediaSession, now: Instant) {
         self.follow_rtcp_plan(session);
         loop {
             match self.socket.recv_from(&mut self.inbox) {
                 Ok((length, from)) => {
                     let datagram = self.inbox.get_mut(..length).unwrap_or_default();
-                    // `Arrival::Dropped` and every non-media control datagram
-                    // are for the session to act on, not this loop: nothing
-                    // here has to know a report from a goodbye
+                    // the session acts on drops and control packets; this loop need not tell them
+                    // apart
                     let _ = session.receive(datagram, from, now);
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -184,17 +155,14 @@ impl MediaSocket {
         }
     }
 
-    /// Drive this call's session for one tick: capture a frame from `source`
-    /// and send it, read whatever arrived and hand every decoded frame to
-    /// `sink`.
+    /// Run one tick: capture a frame from `source` and send it, read what arrived, and pass every
+    /// due frame to `sink`.
     ///
-    /// `source` fills a buffer of `session.frame_samples()` samples every time
-    /// it is called, at the pace above; `sink` is given every frame the pace
-    /// makes due, whatever [`MediaSession::playback`] filled it with — a
-    /// decoded packet, a concealed one, comfort noise or silence — which is
-    /// what a real earpiece is handed. Handing it only the decoded ones drops
-    /// every pause a far end that stops sending in silence leaves, and a
-    /// recording of the call comes out a fifth of its length.
+    /// `source` fills `session.frame_samples()` samples per call, at the pace above. `sink`
+    /// receives every due frame, whatever [`MediaSession::playback`] filled it with (decoded,
+    /// concealed, comfort noise or silence), as a real earpiece would. Passing only decoded frames
+    /// would drop the pauses of a far end using silence suppression, and a recording would come out
+    /// a fifth of its length.
     pub(crate) fn turn(
         &mut self,
         session: &mut MediaSession,
@@ -202,11 +170,8 @@ impl MediaSocket {
         mut source: impl FnMut(&mut [i16]),
         mut sink: impl FnMut(&[i16]),
     ) {
-        // The socket was bound before the call was placed or answered, so its
-        // port could go in the description, and the call may have taken
-        // seconds to come up after that. The first turn sends the frame due
-        // now, not a burst of every frame that would have been due since the
-        // socket was bound.
+        // the socket was bound before the call came up, maybe seconds ago; the first turn sends the
+        // frame due now, not a burst of everything since the bind
         if !self.running {
             self.running = true;
             self.started = now;
@@ -235,7 +200,7 @@ impl MediaSocket {
             let Some(room) = played.get_mut(..frame) else {
                 break;
             };
-            // what filled the frame does not change that it is played
+            // played regardless of what filled it
             let _ = session.playback(room);
             sink(room);
             self.next_play += PACE;
@@ -243,9 +208,8 @@ impl MediaSocket {
     }
 }
 
-/// An RTP socket on an even port, from `pick`, and an RTCP one on the port
-/// after it (RFC 3550 §11), taken as a pair: a port `pick` hands out odd, or
-/// whose next port somebody else holds, is let go of and another asked for.
+/// An RTP socket on an even port from `pick`, and RTCP on the next port (RFC 3550 §11), as a pair:
+/// odd ports, or ones whose next port is taken, are released and another is tried.
 fn bind_pair(
     mut pick: impl FnMut() -> std::io::Result<UdpSocket>,
 ) -> std::io::Result<(UdpSocket, UdpSocket)> {

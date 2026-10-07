@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! What a network test before a call found, and the one word it comes to.
+//! What a pre-call network test found, and the one word it comes to.
 //!
-//! A test asks four things, each of which can be left out: whether a STUN
-//! server answers and what the answer says about the NAT in front of this end,
-//! whether the TURN server gives a relay, whether the account's server answers
-//! on the account's own transport, and — when the application placed a short
-//! call to an echo service — how the audio that came back fared. This module
-//! holds the findings and the arithmetic; where the requests go and how their
-//! answers come back is the stack's (`sipral-ffi`'s `sipral_stack_network_test`).
+//! A test asks up to four things: whether a STUN server answers and what that says about the NAT,
+//! whether the TURN server grants a relay, whether the account's server answers on the account's
+//! transport, and, if the application placed a short call to an echo service, how the returned
+//! audio fared. This module holds the findings and the arithmetic; sending and receiving is the
+//! stack's (`sipral_stack_network_test` in `sipral-ffi`).
 //!
 //! # The verdict
 //!
-//! Every part that was tested gets a [`Verdict`], and the test's is the worst
-//! of them. A part that was not tested says nothing; a test that tested
-//! nothing is [`Verdict::Unknown`].
+//! Each tested part gets a [`Verdict`]; the test's verdict is the worst of them. Untested parts are
+//! ignored; a test of nothing is [`Verdict::Unknown`].
 //!
 //! | Part | Good | Acceptable | Poor |
 //! |---|---|---|---|
@@ -27,27 +24,19 @@
 //! | Echo: round trip | 300 ms or less | 600 ms or less | over 600 ms |
 //! | Echo: MOS (CQ) | 4.0 or more | 3.6 or more | under 3.6 |
 //!
-//! The reasons: a server that does not answer means no call is placed at all.
-//! A STUN or TURN server that does not answer leaves calls working wherever the
-//! far end sends its media back to where this end's came from (symmetric RTP,
-//! which every carrier does) but not through every NAT, so it is a warning and
-//! not a failure. ITU-T G.114 sees conversation start to suffer past 150 ms
-//! one way and gives 400 ms as the limit for most uses; the round-trip limits
-//! are 150 and 300 ms one way, doubled. 1 % loss is roughly what
-//! packet loss concealment hides from a listener, 3 % is where G.711 drops a
-//! whole category in G.107's own ratings, and MOS 4.0 and 3.6 are the
-//! "satisfied" and "some users dissatisfied" lines of G.107 Annex B.
+//! Why: without the server no call is placed. Without STUN or TURN, calls still work where the far
+//! end uses symmetric RTP (every carrier does), but not through every NAT, so it is a warning.
+//! ITU-T G.114 sees conversation suffer past 150 ms one way and sets 400 ms as the usual limit; the
+//! round-trip bounds are 150 and 300 ms doubled. 1 % loss is about what concealment hides, 3 % is
+//! where G.711 drops a category in G.107, and MOS 4.0 and 3.6 are the "satisfied" and "some users
+//! dissatisfied" lines of G.107 Annex B.
 //!
 //! # The echo rating
 //!
-//! R and the MOS come from the simplified G.107 E-model in `sipral-rtp`, rated
-//! for G.711 with packet loss concealment — `Ie` 0 and `Bpl` 25.1, ITU-T G.113
-//! Appendix I's entry for G.711 concealed as its Appendix I describes, which is
-//! what this stack does to a lost G.711 frame — whatever the echo call
-//! negotiated: the test rates the network, and a codec's own impairment is not
-//! the network's. The one-way delay fed to it is half the round trip RTCP
-//! measured plus the delay the jitter buffer held the audio for — RFC 3611
-//! §4.7.3's symmetric path estimate with this end's own share in it.
+//! R and MOS come from the simplified G.107 E-model in `sipral-rtp`, always rated for G.711 with
+//! concealment (`Ie` 0, `Bpl` 25.1, ITU-T G.113 Appendix I) whatever the echo call negotiated,
+//! since the test rates the network, not the codec. The one-way delay is half the RTCP round trip
+//! plus the jitter buffer delay, RFC 3611 §4.7.3's symmetric estimate.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -82,11 +71,9 @@ impl Verdict {
     }
 }
 
-/// What the mapping a STUN server gave says about the NAT in front of this
-/// end. Approximate by design: telling RFC 4787's mapping and filtering
-/// behaviours apart needs a server that answers from a second address (RFC
-/// 5780), which few public servers do, so this reads only what one answer
-/// shows.
+/// What a STUN mapping says about the NAT. Approximate: distinguishing RFC 4787 mapping and
+/// filtering behaviours needs a server answering from a second address (RFC 5780), which few public
+/// servers support.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NatKind {
     /// No answer to read.
@@ -94,12 +81,10 @@ pub enum NatKind {
     /// The server saw the socket's own address: no NAT, or one that does
     /// not translate.
     Open,
-    /// The address was translated and the port kept, which most home routers
-    /// do and which is the easiest kind to call through.
+    /// Address translated, port kept: most home routers, and the easiest to call through.
     PortPreserved,
-    /// The port was changed too. Calls work through it by symmetric RTP and
-    /// `rport`; a relay is what is left where the far end insists on the
-    /// address it was told.
+    /// Port changed too. Calls work via symmetric RTP and `rport`; a relay is needed where the far
+    /// end insists on the advertised address.
     PortChanged,
 }
 
@@ -148,8 +133,7 @@ impl ServerReach {
 pub struct EchoMeasurement {
     /// Packets that arrived and were held for playout.
     pub received: u64,
-    /// Packets that never arrived, and the ones that arrived too late to be
-    /// played: RFC 3611 §4.7.1 counts both, since they "have equal effect on
+    /// Packets lost or too late to play; RFC 3611 §4.7.1 counts both, as they "have equal effect on
     /// the quality of the voice stream".
     pub lost: u64,
     /// Interarrival jitter (RFC 3550 §6.4.1).

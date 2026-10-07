@@ -1,27 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! An agent with no device anywhere near it: it answers whatever calls it,
-//! and repeats back whatever it hears, one twenty-millisecond frame later.
+//! An agent with no audio device: it answers every call and echoes back what it hears, one 20 ms
+//! frame later.
 //!
-//! With no registrar named, dial it directly at the address it prints. It
-//! still holds one account, never registered, purely so the `Contact` on a
-//! call it answers is a real address rather than an empty one (RFC 3261
-//! §12.1.1); a caller that got an empty `Contact` back would have nowhere to
-//! send the rest of the dialog and would drop the call rather than complete
-//! it.
+//! Without a registrar, call it directly at the address it prints. It still holds one unregistered
+//! account so the `Contact` in its answers is a real address (RFC 3261 §12.1.1); with an empty one
+//! the caller could not continue the dialog.
 //!
 //! ```text
 //! cargo run --example headless-agent -- --host 127.0.0.1 --port 5070
 //! ```
 //!
-//! `--host` names a real, routable address rather than defaulting to a
-//! wildcard one: that address is what every call's offer or answer
-//! advertises, and a peer handed `0.0.0.0` has nowhere to send anything
-//! back to (`crates/sipral/examples/common/udp_endpoint.rs`'s own doc). On a
-//! machine reachable from elsewhere, name the interface that is.
+//! `--host` must be a routable address, not a wildcard: it is advertised in every offer and answer,
+//! and a peer told `0.0.0.0` cannot reply (see `crates/sipral/examples/common/udp_endpoint.rs`).
 //!
-//! Behind a PBX it registers instead, the way an agent sits behind one:
+//! Behind a PBX it registers instead:
 //!
 //! ```text
 //! cargo run --example headless-agent -- --register agent@pbx.example \
@@ -29,82 +23,45 @@
 //!     [--codecs PCMU,PCMA] [--max-calls 1000] [--invite-burst 200]
 //! ```
 //!
-//! Registered, `--host` defaults to whichever of this host's addresses the
-//! registrar is reached from, and the agent follows that address: when the
-//! route to the registrar leaves from a different one — a container moved
-//! between networks, a laptop between two — it binds its SIP socket there,
-//! reports the change (`UserAgent::network_changed`), points the account at
-//! the new address and offers every call again at it. `--call` places one
-//! call once the registration is accepted, `--ice` offers and answers with
-//! ICE (`sipral::IcePolicy::Offered`), `--codecs` names the codecs offered
-//! and accepted, in order, where this build's whole catalogue is the
-//! default, and `--invite-burst` lets that many INVITEs from one address
-//! arrive at once where the stack's own guard against scanners lets ten
-//! (`sipral::Rate`): an agent whose PBX is the only thing that calls it, and
-//! calls it a hundred times at once, is the switchboard that guard names.
+//! Registered, `--host` defaults to the local address the registrar is reached from, and the agent
+//! follows it: if the route moves to another address (a container or laptop changing networks) it
+//! rebinds its SIP socket there, reports it (`UserAgent::network_changed`), repoints the account
+//! and re-offers every call. `--call` places one call after registration, `--ice` uses
+//! `sipral::IcePolicy::Offered`, `--codecs` sets the codecs in order (default: the whole
+//! catalogue), and `--invite-burst` lets that many INVITEs from one address arrive at once instead
+//! of the scanner guard's ten (`sipral::Rate`), for an agent that only its PBX calls.
 //!
-//! **How many calls at once.** The agent holds 128 calls at once unless
-//! `--max-calls` says otherwise: the stack's default ceiling
-//! (`EndpointConfig::max_dialogs`), past which an incoming call is answered
-//! `503 Service Unavailable` with `Retry-After: 2` before it rings, so that a
-//! proxy in front of several agents sends it to another and comes back once a
-//! call here has ended. `--max-calls N` raises the ceiling to `N` (ten
-//! thousand calls on one machine are measured in `docs/19-numbers.md`), and
-//! with it what has to grow for `N` calls to stand: the server transactions
-//! the stack may hold, to three a call and the default 256 besides, since an
-//! answered INVITE keeps its transaction for 32 seconds (RFC 6026's timer
-//! L) and a BYE over UDP keeps its own as long (timer J), so a ceiling's
-//! worth of calls set up, ended and set up again inside that half minute
-//! holds three each. With `--max-calls` and no `--invite-burst`, the guard
-//! against scanners follows the ceiling too: twice `N` INVITEs from one
-//! address at once — a full ceiling, ended, and a second full one straight
-//! after it — and `N` more a second after that, so a rush up to the ceiling,
-//! and a second one as soon as the first has ended, meets the ceiling and
-//! not the guard. Calls shorter than a second, offered faster than `N` a
-//! second for longer than that, still meet the guard: past its burst it
-//! lets `N` a second in, whatever room the ceiling has.
-//! `--invite-burst` given as well is taken as it is, and the guard then
-//! refuses with 480 whatever it would refuse at that rate. Each call holds
-//! two UDP sockets for its audio, its RTP port and the one after it for
-//! RTCP, and lets the second go only once the far end keeps the two on one
-//! port, so the process's open-file limit (`ulimit -n`) has to allow twice
-//! `N` and a few more; a call the agent cannot open a socket for is refused 503 and
-//! said on standard error.
+//! **Concurrent calls.** 128 by default (`EndpointConfig::max_dialogs`); beyond that an incoming
+//! call gets `503 Service Unavailable` with `Retry-After: 2` before ringing, so a proxy can try
+//! another agent. `--max-calls N` raises the ceiling (ten thousand on one machine are measured in
+//! `docs/19-numbers.md`) and the server transaction limit with it, to three per call plus the
+//! default 256: an answered INVITE keeps its transaction 32 s (RFC 6026 timer L) and a BYE over UDP
+//! as long (timer J). Without `--invite-burst`, the scanner guard then allows 2N INVITEs at once
+//! and N per second after, so a full ceiling, ended and refilled, meets the ceiling and not the
+//! guard; sub-second calls faster than N per second still hit the guard. An explicit
+//! `--invite-burst` is used as given, and excess INVITEs get 480. Each call uses two UDP sockets
+//! (RTP, and RTCP until the far end muxes), so `ulimit -n` must allow 2N plus a few; a call that
+//! cannot get a socket is refused 503 and logged to stderr.
 //!
-//! **What it is told.** A line on standard input is a command: `netchange`
-//! says the network changed. The agent reads the route to the registrar
-//! again as soon as it reads the line — within a twentieth of a second,
-//! the longest its loop waits without looking at standard input — rather
-//! than at its next half-second look, and tells the
-//! stack (`UserAgent::network_changed`) even when the address is where it
-//! was — the platform knows of a change the address does not show, such as
-//! a new path behind the same one, so the stack registers again — and moves
-//! everything when the address did change. It prints one line of what it
-//! did. `quit` hangs every call up, gives the registration up and exits
-//! once both are done or five seconds have passed. The end of standard
-//! input is not a command: under a service manager with standard input
-//! closed, the agent goes on answering. Started in the background of an
-//! interactive shell (`&`), it is given `< /dev/null`: a background job
-//! that reads the terminal is stopped (`SIGTTIN`) until it is brought to
-//! the foreground.
+//! **Commands on stdin.** `netchange`: the network changed. The route is re-read within 50 ms (the
+//! loop's longest wait between stdin checks), the stack is told (`UserAgent::network_changed`) even
+//! if the address is unchanged, since the path behind it may have moved and the stack then
+//! re-registers, and everything moves if the address changed. One line reports what was done.
+//! `quit`: hang up all calls, unregister, and exit when both are answered or after five seconds.
+//! End of stdin is not a command, so under a service manager with stdin closed the agent keeps
+//! answering. Started with `&` in an interactive shell, give it `< /dev/null`, or `SIGTTIN` stops
+//! it.
 //!
-//! A request the stack will not put in a UDP datagram (RFC 3261
-//! §18.1.1: over 1300 bytes with no known path MTU) is said on one line,
-//! `transport wanted`, since this agent opens no stream transport to carry
-//! it. Every call's end prints one line of
-//! what its receiving side measured, the E-model's R factor and MOS among
-//! it and, as `recovered`, the lost frames an Opus call rebuilt from the
-//! copy the next packet carried, so a run is compared by reading its output
-//! rather than a capture —
-//! `scripts/lab.sh compare` reads it that way.
+//! A request too big for UDP (RFC 3261 §18.1.1: over 1300 bytes without a known path MTU) prints
+//! `transport wanted`, since this agent opens no stream transports. Each call's end prints what its
+//! receiving side measured, including the E-model R factor and MOS and, as `recovered`, frames Opus
+//! rebuilt from FEC; `scripts/lab.sh compare` reads these lines.
 //!
-//! This is the shape a voice agent embeds: a socket, a
-//! [`sipral::UserAgent`], a [`sipral::MediaEngine`], and PCM in `i16` frames
-//! that something other than an earpiece is free to read and write —
-//! whatever answers here could as well be a model instead of an echo.
+//! This is the shape a voice agent embeds: a socket, a [`sipral::UserAgent`], a
+//! [`sipral::MediaEngine`], and `i16` PCM frames for anything to read and write, such as a model
+//! instead of an echo.
 
-// the no-panic discipline is for what ships; the test at the bottom is
-// allowed the shortcuts a test is for
+// no-panic rules are for shipped code; the test at the bottom may take shortcuts
 #![cfg_attr(
     test,
     allow(
@@ -144,57 +101,39 @@ use udp_endpoint::Endpoint;
 /// One call's worth of what it said last turn, played back this turn.
 type Echoes = HashMap<CallHandle, Vec<i16>>;
 
-/// How often the route to the registrar is asked which address it leaves
-/// from. A platform that says when its network changed saves the asking; a
-/// process in a container is told nothing, so it asks, twice a second.
+/// How often to check which address the route to the registrar uses. Containers are not told about
+/// network changes, so it polls twice a second.
 const ROUTE_CHECK: Duration = Duration::from_millis(500);
 
-/// Once `--invite-burst` is spent, one more INVITE from the same source is
-/// let through every this often: the stack's own default interval, so the
-/// flag changes how many calls may arrive together and nothing else.
+/// After `--invite-burst` is spent, one more INVITE per source is allowed this often: the stack's
+/// default, so the flag only changes the burst size.
 const INVITE_REFILL: Duration = Duration::from_secs(2);
 
-/// How long `quit` waits for the calls it hung up and the registration it
-/// gave up to be answered before the process exits regardless: a BYE or a
-/// REGISTER nobody answers would otherwise hold it for the 32 seconds of
-/// RFC 3261's timer F.
+/// How long `quit` waits for answers to its BYEs and de-registration before exiting; otherwise an
+/// unanswered one would hold the process for RFC 3261's 32 s timer F.
 const QUIT_GRACE: Duration = Duration::from_secs(5);
 
-/// While a call has a socket for its audio, the loop turns at least this
-/// often to read it, on a fixed grid of instants ([`Grid`]): what a
-/// packet's arrival is timed at is the turn that read it, and the jitter
-/// and delay every call's last line reports are measured from those times.
-/// A frame is twenty milliseconds, two of these, so every frame a call
-/// sends falls due on the grid too.
+/// While a call has an audio socket, the loop turns at least this often, on a fixed [`Grid`].
+/// Packet arrival times (and so reported jitter and delay) are those turns. A 20 ms frame is two of
+/// these, so frames fall on the grid.
 ///
-/// Every turn reads every call's socket, which is most of what a call
-/// costs the agent: on the lab's Linux host the waits this grid replaced
-/// ended on scheduler ticks and the loop turned about every 8 ms. On
-/// loopback a hundred calls cost 11.7 to 12.4 % of a core with those
-/// turns, 16.3 to 16.7 % with a 5 ms grid and 13.3 to 13.9 % with this one
-/// (`docs/19-numbers.md`): ten keeps the reads about as fine as they were
-/// for a third of the extra cost of five.
+/// Every turn reads every call's socket, the main per-call cost. On the lab's Linux host the old
+/// waits ended on scheduler ticks (~8 ms). For a hundred loopback calls: 11.7 to 12.4 % of a core
+/// before, 16.3 to 16.7 % with a 5 ms grid, 13.3 to 13.9 % with this one (`docs/19-numbers.md`):
+/// nearly as fine-grained for a third of the cost.
 const MEDIA_LOOK: Duration = Duration::from_millis(10);
 
-/// While standard input is open, the longest a command waits to be read
-/// when nothing else turns the loop: the thread reading it cannot wake a
-/// loop waiting for SIP, so the loop looks.
+/// The longest a stdin command waits while nothing else turns the loop: the reader thread cannot
+/// wake a loop waiting for SIP, so the loop checks.
 const COMMAND_LOOK: Duration = Duration::from_millis(50);
 
-/// The instants the calls' audio moves at: every [`MEDIA_LOOK`] from the
-/// moment the agent started.
+/// The instants audio moves at: every [`MEDIA_LOOK`] since start.
 ///
-/// A call's first frame goes out on the grid and each one after it twenty
-/// milliseconds later, so every frame falls due on an instant the loop
-/// wakes at, whichever turn of the loop happens to come first. The media
-/// of a turn is run at the last grid instant the turn has reached, not at
-/// the moment it began: a turn a SIP datagram woke between two instants
-/// sends nothing early, and a wake that comes a little late sends the frame
-/// of the instant it was for, so the far end receives one frame every
-/// twenty milliseconds give or take how late the loop wakes, rather than
-/// give or take how far apart its turns happen to fall. On the lab's Linux
-/// host, before the grid, a call's frames left 16, 24 or 28 ms apart
-/// rather than 20 (`docs/19-numbers.md`).
+/// Frames are due on grid instants 20 ms apart. A turn runs media at the last grid instant it has
+/// reached, not when it began, so a turn woken early by SIP sends nothing early and a late wake
+/// sends the frame it owed. The far end then gets one frame per 20 ms plus wake-up lateness,
+/// instead of whatever the turn spacing was; before the grid, frames left the lab host 16, 24 or 28
+/// ms apart (`docs/19-numbers.md`).
 #[derive(Clone, Copy, Debug)]
 struct Grid {
     epoch: Instant,
@@ -215,14 +154,12 @@ impl Grid {
     }
 }
 
-/// Server transactions per call that `--max-calls` makes room for: the
-/// INVITE's own, kept 32 seconds after it is answered (RFC 6026's timer L),
-/// the BYE's, kept as long over UDP (RFC 3261's timer J), and the next
-/// call's INVITE arriving inside that half minute.
+/// Server transactions per call `--max-calls` reserves: the INVITE's (kept 32 s after answer, RFC
+/// 6026 timer L), the BYE's (as long over UDP, RFC 3261 timer J), and the next call's INVITE within
+/// that half minute.
 const TRANSACTIONS_PER_CALL: usize = 3;
 
-/// Where to register: `--register user@domain --registrar ip:port --pass
-/// secret`.
+/// Registration: `--register user@domain --registrar ip:port --pass secret`.
 #[derive(Debug, PartialEq, Eq)]
 struct Registration {
     user: String,
@@ -234,24 +171,20 @@ struct Registration {
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
-    /// `--host`; with a registrar and no `--host`, the address the
-    /// registrar is reached from.
+    /// `--host`; with a registrar and no `--host`, the address the registrar is reached from.
     host: Option<IpAddr>,
     port: u16,
     registration: Option<Registration>,
-    /// `--call`, placed through the registrar once it accepted the
-    /// registration.
+    /// `--call`, placed through the registrar once registration is accepted.
     call: Option<String>,
     /// `--ice`.
     ice: bool,
     /// `--codecs`, comma-separated; this build's whole catalogue when absent.
     codecs: Option<Vec<String>>,
-    /// `--invite-burst`: how many INVITEs one source may offer at once
-    /// before the stack's rate limit answers the rest 480; the stack's own
+    /// `--invite-burst`: INVITEs one source may send at once before the rest get 480; the stack
     /// default when absent.
     invite_rate: Option<Rate>,
-    /// `--max-calls`: the most calls held at once; the stack's own ceiling,
-    /// 128, when absent.
+    /// `--max-calls`: the most concurrent calls; the stack's 128 when absent.
     max_calls: Option<u32>,
 }
 
@@ -270,9 +203,8 @@ impl Args {
         config
     }
 
-    /// The guard against one source offering calls too fast, when it is not
-    /// the stack's own default: `--invite-burst` as given, or else, with
-    /// `--max-calls N`, twice `N` at once and `N` a second after that.
+    /// The scanner guard, when not the stack default: `--invite-burst` as given, or with
+    /// `--max-calls N`, 2N at once and N per second after.
     fn invite_guard(&self) -> Option<Rate> {
         if self.invite_rate.is_some() {
             return self.invite_rate;
@@ -407,10 +339,9 @@ impl Command {
     }
 }
 
-/// Read commands off `input` on a thread of their own, so that the loop
-/// carrying the calls never waits on it. The end of `input` ends the thread
-/// and nothing else: an agent under a service manager has standard input
-/// closed from the start, and must go on answering.
+/// Read commands on their own thread so the call loop never waits. End of input only ends that
+/// thread: under a service manager stdin is closed from the start and the agent must keep
+/// answering.
 fn commands(input: impl BufRead + Send + 'static) -> mpsc::Receiver<Command> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -426,7 +357,7 @@ fn commands(input: impl BufRead + Send + 'static) -> mpsc::Receiver<Command> {
                 }
                 None => continue,
             };
-            // the loop it was for has gone, which only happens on the way out
+            // the loop is gone, which only happens on exit
             if sender.send(command).is_err() {
                 return;
             }
@@ -435,10 +366,8 @@ fn commands(input: impl BufRead + Send + 'static) -> mpsc::Receiver<Command> {
     receiver
 }
 
-/// The catalogue every call is offered and answered from: this build's
-/// default or the codecs `--codecs` named — which [`parse_args`] has already
-/// checked this build has — with ICE on it when `--ice` asked for it, which
-/// [`parse_args`] allows only in a build that has it.
+/// The catalogue for every call: the build default or `--codecs` (already validated by
+/// [`parse_args`]), plus ICE if `--ice` (allowed only in builds with ICE).
 fn catalog(codecs: Option<&[String]>, ice: bool) -> CodecCatalog {
     let refs: Vec<&str> = codecs
         .unwrap_or_default()
@@ -475,11 +404,9 @@ impl Route {
         }
     }
 
-    /// `Some((from, to))` once `probe` — which address a datagram to the
-    /// registrar would leave from — names a different one than before; at
-    /// most once every [`ROUTE_CHECK`]. A loopback or unspecified answer
-    /// is a host with no route out at this moment, not a new address, and
-    /// is waited out rather than moved to.
+    /// `Some((from, to))` once `probe` (the local address toward the registrar) changes, checked at
+    /// most every [`ROUTE_CHECK`]. A loopback or unspecified answer means no route right now and is
+    /// waited out.
     fn moved(
         &mut self,
         now: Instant,
@@ -491,9 +418,8 @@ impl Route {
         self.reread(now, probe)
     }
 
-    /// [`Route::moved`] without waiting for its interval: what being told
-    /// the network changed asks for. The next scheduled look is put back by
-    /// a whole interval, since this one has just been taken.
+    /// [`Route::moved`] without waiting, for `netchange`. The next scheduled check is pushed back a
+    /// full interval.
     fn reread(
         &mut self,
         now: Instant,
@@ -510,15 +436,13 @@ impl Route {
     }
 }
 
-/// What one call's receiving side counted by the time it ended, and the
-/// E-model's rating of it when the stream got as far as rating: the figures
-/// [`Ending::line`] prints.
+/// What one call's receiving side counted by its end, and the E-model rating if it got that far:
+/// the figures [`Ending::line`] prints.
 struct Ending {
     codec: String,
     sent: u64,
     quality: Quality,
-    /// Of the packets lost, the frames rebuilt from the copy the next packet
-    /// carried (Opus's in-band FEC), not concealed.
+    /// Lost frames rebuilt from Opus FEC rather than concealed.
     recovered: u64,
     round_trip: Option<Duration>,
     r_factor: Option<u8>,
@@ -539,13 +463,12 @@ impl Ending {
         }
     }
 
-    /// One line, `name=value` apart: loss as a share of the packets the
-    /// sequence numbers say were sent, jitter and the buffer's delay in
-    /// milliseconds, and `-` for what was never measured.
+    /// One line of `name=value` pairs: loss as a share of packets sent per sequence numbers, jitter
+    /// and buffer delay in ms, `-` for anything not measured.
     fn line(&self) -> String {
         let quality = &self.quality;
         let expected = quality.received + quality.lost;
-        // counts of packets in one call, far inside f64's exact range
+        // packet counts of one call are exact in f64
         #[allow(clippy::cast_precision_loss)]
         let loss_pct = if expected == 0 {
             0.0
@@ -586,8 +509,7 @@ struct Agent {
     echoes: Echoes,
     /// When the calls' audio moves.
     grid: Grid,
-    /// Set by `quit`: when the process exits whether or not everything it
-    /// hung up and gave up has been answered by then.
+    /// Set by `quit`: when the process exits regardless of pending answers.
     leaving: Option<Instant>,
     /// `quit` gave the registration up and the registrar has not answered.
     unregistering: bool,
@@ -602,9 +524,8 @@ impl Agent {
         }
     }
 
-    /// `netchange`: read the route again now, and tell the stack the network
-    /// changed whether or not the address did. `probe` is
-    /// [`udp_endpoint::route_to`] outside a test.
+    /// `netchange`: re-read the route now and tell the stack the network changed, whether or not
+    /// the address did. `probe` is [`udp_endpoint::route_to`] outside tests.
     fn told(&mut self, now: Instant, probe: impl FnOnce(SocketAddr) -> IpAddr) {
         if let Some(route) = self.route.as_mut()
             && let Some((from, to)) = route.reread(now, probe)
@@ -613,13 +534,8 @@ impl Agent {
             println!("told the network changed: moved from {from} to {to}: {recovery}");
             return;
         }
-        // Told, and finding the address where it was, the agent cannot see
-        // what changed: the path behind the address, a NAT in front of it, a
-        // link of another kind. It takes the platform at its word — the
-        // network it was on is gone and this one came up at the same
-        // address — and `Recovery::choose` answers that with a registration
-        // proved again: the transports stand, and what is upstream of them
-        // may not.
+        // same address, so the agent cannot see what changed (path, NAT, link type). It trusts the
+        // platform, and `Recovery::choose` re-proves the registration
         let here = self.endpoint.local.ip();
         let recovery = self.endpoint.agent.network_changed(
             &Network::new(Link::Down).address(here).resolves(true),
@@ -672,19 +588,14 @@ impl Agent {
         })
     }
 
-    /// When the loop has to turn again if no SIP datagram arrives first —
-    /// [`run`] waits for SIP until then: the earliest of the stack's own
-    /// timers, the next look at the route, the end of `quit`'s grace, the
-    /// next instant of the [`Grid`] while any call has audio, and the next
-    /// look at standard input while it is open (`listening`). `None` is
-    /// nothing to do until a datagram arrives.
+    /// When the loop must turn if no SIP datagram arrives first ([`run`] waits for SIP until then):
+    /// the earliest stack timer, route check, `quit` deadline, next [`Grid`] instant while any call
+    /// has audio, and next stdin check while stdin is open (`listening`). `None` means wait for a
+    /// datagram.
     ///
-    /// Only SIP is waited for. Every call's socket is read on every turn,
-    /// and the turns come at every instant of the grid while a call has
-    /// one, so a call's audio sitting unread in its socket never wakes the
-    /// loop by itself: with a thousand calls, a wait that woke for any
-    /// readable socket would wake at once, every time, for audio that is
-    /// read on the next turn anyway.
+    /// Only SIP is waited on. Every call socket is read every turn, and turns follow the grid while
+    /// calls have audio, so waking on any readable media socket would just spin with a thousand
+    /// calls.
     fn next_turn(&self, now: Instant, listening: bool) -> Option<Instant> {
         [
             (!self.endpoint.media.is_empty()).then(|| self.grid.after(now)),
@@ -720,10 +631,8 @@ impl Agent {
         }
     }
 
-    /// Follow the address the registrar is reached from, when it changed:
-    /// the SIP socket bound there, the change reported, the account pointed
-    /// at it. Every call the stack then names in `CallAddressWanted` is
-    /// offered again from there by [`tick`].
+    /// Follow a changed registrar route: rebind SIP there, report the change, repoint the account.
+    /// Calls the stack then names in `CallAddressWanted` are re-offered by [`tick`].
     fn follow(&mut self, now: Instant) {
         let Some(route) = self.route.as_mut() else {
             return;
@@ -735,10 +644,9 @@ impl Agent {
         println!("moved from {from} to {to}: {recovery}");
     }
 
-    /// The address the registrar is reached from is `to` now, where it was
-    /// `from`: the SIP socket bound there, the change reported, the account
-    /// pointed at it. What the stack decided is the answer, or `Nothing`
-    /// when the socket could not be bound and nothing was reported.
+    /// The route to the registrar moved from `from` to `to`: rebind SIP, report, repoint the
+    /// account. Returns the stack's decision, or `Nothing` if binding failed and nothing was
+    /// reported.
     fn move_to(&mut self, from: IpAddr, to: IpAddr, now: Instant) -> Recovery {
         let Some(registration) = self.registration.as_ref() else {
             return Recovery::Nothing;
@@ -778,32 +686,24 @@ impl Agent {
     }
 }
 
-/// Read what arrived and answer it, and let every call's session move the
-/// frames due by the last instant of the [`Grid`]: what it said comes back
-/// out, and what it says now is kept for the next frame. `true` when a SIP
+/// Handle what arrived and move each session's frames due by the last [`Grid`] instant: what was
+/// heard goes back out, and what is heard now is kept for the next frame. `true` when a SIP
 /// datagram arrived.
 ///
-/// What the turn decided goes out before it ends: an answer queued while
-/// the events are handled is written by the drain that finds no more of
-/// them, not left for the next turn, which may be a wait away.
+/// Anything the turn queued is sent before it ends, by the drain that finds no more events.
 fn tick(agent: &mut Agent, now: Instant) -> bool {
     agent.follow(now);
     let arrived = agent.endpoint.read_sip(now);
     agent.endpoint.timers(now);
     settle(agent, now);
     let echoes = &mut agent.echoes;
-    // The frames move on the grid, whenever in it this turn came; the
-    // reports and everything else the engine sends are polled at the time it
-    // is. Polled at the grid's instant, a report that fell due between two
-    // instants stayed due — the engine's next deadline already past, the
-    // wait for it over at once — and the loop turned without resting until
-    // the next instant: a hundred calls, each with a report due every few
-    // seconds, cost twice the processor time they had cost.
+    // frames move on the grid; reports and other engine output are polled at the real time. Polling
+    // at the grid instant left reports due between instants overdue, so the loop spun until the
+    // next instant and a hundred calls cost twice the CPU
     let beat = agent.grid.at_or_before(now);
     agent.endpoint.run_media(now, |call, media, session, _| {
-        // one closure says what was heard at the last frame, the other
-        // keeps what is heard at this one — two different `Vec`s, since
-        // both closures exist at once and neither may borrow the same one
+        // one closure reads last frame's audio, the other stores this frame's: two `Vec`s, since
+        // both closures exist at once
         let heard_before = echoes.remove(&call).unwrap_or_default();
         let mut heard_now = Vec::with_capacity(heard_before.len());
         let mut said = false;
@@ -822,10 +722,8 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
             },
             |room| heard_now.extend_from_slice(room),
         );
-        // A turn that moved no frame leaves what was heard for the turn
-        // that does: the loop turns more than once a frame, and keeping
-        // only what each turn heard handed the frame that is said an empty
-        // one, which went out as silence.
+        // a turn that moved no frame keeps what it heard for the turn that does; the loop turns
+        // several times per frame, and dropping it sent silence
         let kept = if !heard_now.is_empty() {
             heard_now
         } else if said {
@@ -839,9 +737,8 @@ fn tick(agent: &mut Agent, now: Instant) -> bool {
     arrived
 }
 
-/// Drain every event the stack has and answer each, until a drain finds
-/// none: answering one can raise another (a call refused ends), and the
-/// drain that comes back empty has written whatever the answers queued.
+/// Drain and handle events until none are left: handling one can raise another, and the empty drain
+/// flushes what the answers queued.
 fn settle(agent: &mut Agent, now: Instant) {
     loop {
         let events = agent.endpoint.pump(now);
@@ -887,8 +784,8 @@ fn handle(agent: &mut Agent, event: &Event, now: Instant) {
                         Err(error) => eprintln!("cannot answer {call:?}: {error}"),
                     }
                 }
-                // most often the open-file limit: two sockets a call until
-                // the far end keeps RTP and RTCP on one port
+                // usually the open-file limit: two sockets per call until the far end muxes RTP and
+                // RTCP
                 Err(error) => {
                     eprintln!("cannot open a media socket for {call:?}, refused 503: {error}");
                     let _ =
@@ -920,11 +817,8 @@ fn handle(agent: &mut Agent, event: &Event, now: Instant) {
         } => println!("ended {call:?} {}", Ending::of(stats).line()),
         Event::Signalling(UaEvent::CallEnded { call, .. }) => {
             agent.echoes.remove(call);
-            // Without this, every call this agent has ever answered
-            // keeps its bound RTP socket alive in `endpoint.media` for
-            // the rest of the process's life — harmless for the examples
-            // that place one call and exit, real for the one that keeps
-            // answering (`Endpoint::close_media`'s own doc).
+            // otherwise every answered call's RTP socket stays in `endpoint.media` forever, which
+            // matters for this long-running agent (see `Endpoint::close_media`)
             agent.endpoint.close_media(*call);
         }
         _ => {}
@@ -973,9 +867,8 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         wall_clock::at(now),
         entropy::seed()?,
     );
-    // A real address, not a wildcard: `Endpoint::bind`'s own documentation
-    // says why — it becomes what every call's offer or answer advertises,
-    // and a peer handed `0.0.0.0` has nowhere to send anything back to.
+    // a real address, not a wildcard: it is advertised in every offer and answer (see
+    // `Endpoint::bind`)
     let mut endpoint = Endpoint::bind(SocketAddr::new(host, args.port), agent, engine, now)?;
     let (account, route) = if let Some(registration) = &args.registration {
         let aor = Uri::parse_str(&format!(
@@ -999,8 +892,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "listening on {}; registering {}@{} at {}",
             endpoint.local, registration.user, registration.domain, registration.registrar
         );
-        // `--host` pins the address; only the one found by asking the
-        // route is followed when the route changes
+        // `--host` pins the address; only a route-derived one is followed
         let route = args
             .host
             .is_none()
@@ -1021,7 +913,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         (account, None)
     };
 
-    // waited for on a channel from here on, which ends a wait on time
+    // from here on SIP arrives on a channel, whose wait ends on time
     endpoint.read_in_background()?;
     let mut agent = Agent {
         endpoint,
@@ -1042,7 +934,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             match told.try_recv() {
                 Ok(command) => agent.obey(command, now),
                 Err(mpsc::TryRecvError::Empty) => break,
-                // standard input has ended, and with it any need to look
+                // stdin has ended; stop checking it
                 Err(mpsc::TryRecvError::Disconnected) => {
                     listening = false;
                     break;
@@ -1067,16 +959,13 @@ mod tests {
     use super::*;
     use sipral::WallClock;
 
-    /// Two stacks on loopback: this crate's own agent answers, and a second
-    /// endpoint places a call at it, says something, and hears it again.
+    /// Two stacks on loopback: the agent answers, a second endpoint calls it, speaks, and hears
+    /// itself back.
     ///
-    /// Run more than once before giving up: on a machine doing other heavy
-    /// work at the same time (this workspace's own build is run four ways at
-    /// once), a real UDP send can sit long enough in the kernel's queue that
-    /// the jitter buffer reads the gap as a lost source and reopens RFC
-    /// 3550's probation on the very packet meant to prove the round trip.
-    /// Each attempt is a full, independent call on its own pair of sockets,
-    /// so only a repeated failure to hear anything back fails the test.
+    /// Retried a few times: on a heavily loaded machine a UDP send can be delayed enough that the
+    /// jitter buffer treats it as a new source and restarts RFC 3550 probation on the very packet
+    /// meant to prove the round trip. Each attempt is an independent call, so only repeated failure
+    /// fails the test.
     #[test]
     fn echoes_what_it_hears() {
         let mut last_failure = String::new();
@@ -1089,11 +978,9 @@ mod tests {
         panic!("{last_failure}");
     }
 
-    /// The same call from a caller that keeps RTCP on a port of its own, as
-    /// Asterisk does unless told otherwise: the agent's answer then promises
-    /// RTCP on the port after its RTP one (RFC 3550 §11), and it has to be
-    /// listening there, or the caller's reports go nowhere and neither end
-    /// ever measures a round trip.
+    /// The same with a caller that keeps RTCP on its own port, as Asterisk does by default: the
+    /// agent's answer promises RTCP on RTP port + 1 (RFC 3550 §11) and must listen there, or no
+    /// round trip is ever measured.
     #[test]
     fn a_caller_that_does_not_multiplex_rtcp_finds_it_on_the_next_port() {
         let mut last_failure = String::new();
@@ -1111,9 +998,8 @@ mod tests {
         let now = Instant::now();
         let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-        // G.711 rather than this crate's own default catalogue: it encodes
-        // each sample on its own rather than perceptually, so a steady tone
-        // survives the round trip recognisably, which is all this test reads.
+        // G.711, not the default catalogue: it encodes sample by sample, so a steady tone survives
+        // the round trip recognisably
         let codecs = || CodecCatalog::with_order(&["PCMU", "PCMA"]).unwrap();
 
         let mut agent_endpoint = Endpoint::bind(
@@ -1136,7 +1022,7 @@ mod tests {
             agent_endpoint.transport,
             agent_address,
         ));
-        // read the way `run` reads, on a thread of its own
+        // read as `run` does, on its own thread
         agent_endpoint.read_in_background().unwrap();
         let mut agent = Agent {
             endpoint: agent_endpoint,
@@ -1176,20 +1062,15 @@ mod tests {
             OutgoingCall::new(target).to_address(caller_endpoint.transport, agent_address);
         let call = udp_endpoint::place(&mut caller_endpoint, account, outgoing, now).unwrap();
 
-        // What the caller says once the call is up, and what it heard back —
-        // filled and read by the run_media closures below, once the call
-        // moves past `CallConfirmed`. The tone starts only once a few silent
-        // frames have gone first: RFC 3550 appendix A.1's own source
-        // validation drops the very first packet or two of a new SSRC on
-        // probation (`MIN_SEQUENTIAL`), and a tone sent only in that first
-        // packet would prove nothing but the drop.
+        // What the caller says once the call is up, and what it hears back. A few silent frames go
+        // first, because RFC 3550 appendix A.1 source validation drops the first packets of a new
+        // SSRC (`MIN_SEQUENTIAL`)
         let mut frames_sent = 0_u32;
         let mut heard: Vec<i16> = Vec::new();
         let mut up = false;
         const TONE: i16 = 8_000;
         const WARM_UP_FRAMES: u32 = 5;
-        // G.711's twenty milliseconds, and how many of them are listened to
-        // once the tone is first heard back
+        // 20 ms of G.711, and how many frames are checked once the tone is heard
         const FRAME: usize = 160;
         const LISTENED: usize = 25;
         let loud = |frame: &[i16]| frame.iter().any(|sample| sample.abs() > 1_000);
@@ -1200,10 +1081,8 @@ mod tests {
                 .map_or(0, |first| heard.len() / FRAME - first)
         };
 
-        // Runs until the tone has plainly come back and gone on coming back
-        // for a while, or the deadline says it never will — not until `heard`
-        // reaches some fixed length, since the early frames the agent echoes
-        // are its own opening silence and only a loud one proves anything.
+        // run until the tone has clearly and repeatedly come back, or the deadline passes; the
+        // first echoed frames are the agent's own silence
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline && !(up && after_first_loud(&heard) > LISTENED) {
             let turn = Instant::now();
@@ -1255,9 +1134,8 @@ mod tests {
                 heard.len()
             ));
         }
-        // the tone is sent without a pause, so it comes back without one:
-        // an agent that said only the frames it happened to hear on the turn
-        // it said them sent back mostly silence, three frames in four
+        // continuous tone in, continuous tone back: an agent echoing only what each turn heard sent
+        // back mostly silence
         let frames: Vec<&[i16]> = heard.chunks(FRAME).collect();
         let first = frames.iter().position(|frame| loud(frame)).unwrap_or(0);
         let listened = frames.iter().skip(first).take(LISTENED);
@@ -1362,8 +1240,8 @@ mod tests {
             Some(Rate::new(50, INVITE_REFILL).unwrap())
         );
 
-        // below the default it lowers the ceiling, and the transactions keep
-        // the default's room for everything that is not a call
+        // below the default it lowers the ceiling; transactions keep the default room for non-call
+        // use
         let small = parse_args(words("--max-calls 4")).unwrap();
         assert_eq!(small.endpoint_config().max_dialogs, 4);
         assert_eq!(small.endpoint_config().max_server_transactions, 3 * 4 + 256);
@@ -1392,15 +1270,15 @@ mod tests {
         let wait = Duration::from_secs(5);
         assert_eq!(told.recv_timeout(wait), Ok(Command::NetChange));
         assert_eq!(told.recv_timeout(wait), Ok(Command::Quit));
-        // the end of the input ends the reading thread, and is no command
+        // end of input ends the reader thread and is not a command
         assert_eq!(
             told.recv_timeout(wait),
             Err(mpsc::RecvTimeoutError::Disconnected)
         );
     }
 
-    /// The agent `run` makes from `args`, on loopback: registered at the
-    /// registrar `args` names, if it names one, and following the route to it.
+    /// The agent `run` builds from `args`, on loopback: registered with the named registrar, if
+    /// any, and following its route.
     fn agent_on_loopback(args: &Args, seed: u8) -> Agent {
         let now = Instant::now();
         let mut user_agent = UserAgent::new(args.endpoint_config(), [seed; 32]).unwrap();
@@ -1476,8 +1354,7 @@ mod tests {
         ended: HashMap<CallHandle, (Option<u16>, String)>,
     }
 
-    /// Turn the caller and the agent until `done` says so, or twenty seconds
-    /// pass; whether `done` did.
+    /// Turn caller and agent until `done` is true or 20 s pass; returns whether `done` became true.
     fn drive(
         caller: &mut Endpoint,
         agent: &mut Agent,
@@ -1521,13 +1398,10 @@ mod tests {
         false
     }
 
-    /// A ceiling's worth of calls, ended and placed again at once, with one
-    /// more in between: every one of the two ceilings' worth is let in —
-    /// neither the guard against scanners, nor the server transactions the
-    /// first round still holds, turn any away — and the one past the
-    /// ceiling is refused 503 with a `Retry-After`. 150 is past both of the
-    /// stack's defaults: 128 calls, and 256 transactions where the second
-    /// round meets 300 still held from the first.
+    /// A ceiling's worth of calls, ended and immediately placed again, plus one more: all of both
+    /// rounds get in (neither the scanner guard nor transactions still held from round one refuse
+    /// any), and the extra one gets 503 with `Retry-After`. 150 exceeds both stack defaults: 128
+    /// calls, and 256 transactions while round two meets 300 still held.
     #[test]
     fn two_full_bursts_back_to_back_meet_neither_the_guard_nor_the_ceiling() {
         const CALLS: usize = 150;
@@ -1536,8 +1410,7 @@ mod tests {
         let agent_address = agent.endpoint.local;
         let now = Instant::now();
         let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        // where the caller says its audio goes, read by nobody: the caller
-        // carries no audio, so it needs no socket a call of its own
+        // the caller's audio destination, never read: the caller sends no audio
         let sink = std::net::UdpSocket::bind(loopback).unwrap();
         let sink_address = sink.local_addr().unwrap();
         let mut roomy = EndpointConfig::default();
@@ -1625,9 +1498,8 @@ mod tests {
         );
     }
 
-    /// Answer one REGISTER waiting on `registrar` with a 200, the binding
-    /// granted for five minutes or, for one with `expires` of zero, given
-    /// up; the request, when there was one.
+    /// Answer one REGISTER on `registrar` with 200: five minutes, or removal for `expires` zero.
+    /// Returns the request, if any.
     fn answer_register(registrar: &std::net::UdpSocket) -> Option<String> {
         let mut inbox = [0_u8; 4_096];
         let (length, from) = registrar.recv_from(&mut inbox).ok()?;
@@ -1669,9 +1541,8 @@ mod tests {
         Some(request)
     }
 
-    /// Turn the agent, answering every REGISTER it sends and counting them
-    /// in `registers`, until `done` says so or ten seconds pass; whether
-    /// `done` did.
+    /// Turn the agent, answering and counting REGISTERs in `registers`, until `done` or 10 s;
+    /// returns whether `done` became true.
     fn turn_until(
         agent: &mut Agent,
         registrar: &std::net::UdpSocket,
@@ -1712,8 +1583,7 @@ mod tests {
         );
         assert_eq!(registers, 1);
 
-        // told, with the route where it was: the stack proves the
-        // registration again, and the agent goes on
+        // route unchanged: the stack re-proves the registration and the agent continues
         let here = agent.endpoint.local.ip();
         agent.told(Instant::now(), |_| here);
         assert_ne!(
@@ -1729,8 +1599,7 @@ mod tests {
         assert_eq!(agent.endpoint.local.ip(), here);
         assert!(!agent.finished(Instant::now()), "being told is not leaving");
 
-        // quit: nothing to hang up, the registration given up, and finished
-        // once the registrar says so
+        // nothing to hang up; unregisters and finishes once the registrar answers
         agent.quit(Instant::now());
         assert!(agent.unregistering);
         assert!(!agent.finished(Instant::now()));
@@ -1773,14 +1642,14 @@ mod tests {
         let look = MEDIA_LOOK;
         assert_eq!(grid.at_or_before(epoch), epoch);
         assert_eq!(grid.after(epoch), epoch + look);
-        // anywhere inside a look is the look's start, and the next one after
+        // any point inside a look maps to its start, and the next look follows
         for inside in [1, look.as_micros() / 2, look.as_micros() - 1] {
             let now = epoch + 7 * look + Duration::from_micros(u64::try_from(inside).unwrap());
             assert_eq!(grid.at_or_before(now), epoch + 7 * look);
             assert_eq!(grid.after(now), epoch + 8 * look);
         }
-        // a frame is a whole number of looks, so a call's frames, twenty
-        // milliseconds apart from an instant of the grid, all fall on it
+        // a frame is a whole number of looks, so frames 20 ms apart from a grid instant stay on the
+        // grid
         let frame = media_socket::PACE;
         assert_eq!(frame.as_nanos() % look.as_nanos(), 0);
         let first = epoch + 3 * look;
@@ -1788,7 +1657,7 @@ mod tests {
             let due = first + frame * n;
             assert_eq!(grid.at_or_before(due), due);
         }
-        // a day in, the arithmetic has not run out
+        // still correct a day in
         let later = epoch + Duration::from_secs(86_400) + Duration::from_micros(2_500);
         assert_eq!(
             grid.at_or_before(later),
@@ -1796,10 +1665,8 @@ mod tests {
         );
     }
 
-    /// The loop waits for SIP on the reader thread's channel: a wait ends
-    /// at its deadline and never before it, which a wait on the socket's own
-    /// timeout does not promise (it counts in scheduler ticks), and a
-    /// datagram ends it at once.
+    /// The loop waits for SIP on the reader's channel: the wait ends at its deadline, never before
+    /// (a socket timeout counts in scheduler ticks), and immediately on a datagram.
     #[test]
     fn a_wait_for_sip_ends_at_its_deadline_or_when_a_datagram_arrives() {
         let now = Instant::now();
@@ -1841,8 +1708,7 @@ mod tests {
         );
         sender.join().unwrap();
 
-        // the endpoint gone, its reader is woken to end and lets the port go
-        // at once, not at the end of its next read's timeout
+        // when the endpoint is dropped its reader wakes and frees the port at once
         let port = endpoint.local;
         drop(endpoint);
         let gone = Instant::now();

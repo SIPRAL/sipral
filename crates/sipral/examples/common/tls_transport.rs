@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 
-//! One SIP connection over TLS, for the examples that bring their own: a
-//! non-blocking `TcpStream` with a `rustls` client on top of it. `tls.rs`
-//! signals over nothing else; `agent-bridge.rs` opens one beside its UDP
-//! socket when the agent's address asks for TLS.
+//! One SIP connection over TLS for the examples that bring their own: a non-blocking `TcpStream`
+//! with a `rustls` client. `tls.rs` signals only over this; `agent-bridge.rs` opens one when the
+//! agent's address asks for TLS.
 //!
-//! `sipral-core` never opens a TLS connection (`docs/01-architecture.md`,
-//! "who owns the sockets, the resolver and TLS"): what this reads goes in as
-//! `Input::StreamData` fragments, and what the agent writes for this
-//! transport comes back out through [`TlsTransport::send`]. Built only with
-//! the `example-tls` feature, which is what brings `rustls` in.
+//! `sipral-core` never opens TLS (`docs/01-architecture.md`): what this reads goes in as
+//! `Input::StreamData`, and what the agent writes for this transport goes out through
+//! [`TlsTransport::send`]. Built only with the `example-tls` feature.
 #![allow(dead_code)]
 
 use std::io::{self, ErrorKind, Read, Write};
@@ -34,14 +31,12 @@ pub(crate) enum Trust {
     Pinned(CertificatePin),
 }
 
-/// A `rustls` verifier that trusts one certificate by its SHA-256
-/// fingerprint and nothing else ([`sipral::CertificatePin`]).
+/// A `rustls` verifier trusting one certificate by SHA-256 fingerprint
+/// ([`sipral::CertificatePin`]).
 ///
-/// The fingerprint replaces the chain, the trust anchors and the host name,
-/// and an expired certificate that matches is accepted, as the pin's own
-/// documentation says why. The handshake signature is still verified the
-/// ordinary way: a matching certificate proves nothing until the server has
-/// shown it holds the certificate's private key.
+/// The fingerprint replaces chain, anchors and host name, and a matching expired certificate is
+/// accepted (see the pin's docs). The handshake signature is still verified, proving the server
+/// holds the key.
 #[derive(Debug)]
 struct PinnedServer {
     pin: CertificatePin,
@@ -105,27 +100,20 @@ impl ServerCertVerifier for PinnedServer {
     }
 }
 
-/// One SIP connection over TLS: a non-blocking `TcpStream` with a `rustls`
-/// client on top of it, checked against the platform's own trust store —
-/// [`rustls_native_certs`] reads it once, at connect time, the way an
-/// application that is not an example would too.
+/// One SIP connection over TLS: a non-blocking `TcpStream` with a `rustls` client, trusting the
+/// platform store as read once at connect by [`rustls_native_certs`].
 pub(crate) struct TlsTransport {
     pub(crate) tcp: TcpStream,
     conn: ClientConnection,
 }
 
 impl TlsTransport {
-    /// The platform's own trust store, the way a real deployment checks a
-    /// real server's certificate. Split out from [`TlsTransport::connect`]
-    /// so a test can hand that one a store of its own instead — a throwaway
-    /// certificate, trusted for that connection alone, rather than one more
-    /// thing this process trusts everywhere.
+    /// The platform trust store. Separate from [`TlsTransport::connect`] so tests can pass a store
+    /// with a throwaway certificate instead.
     pub(crate) fn platform_roots() -> RootCertStore {
         let mut roots = RootCertStore::empty();
-        // A handful of certificates a platform's store carries are not valid
-        // roots by rustls's own reading (an expired one, an algorithm it does
-        // not implement); `add` refuses those and the rest still load, which
-        // is why the failures are dropped rather than propagated.
+        // some platform certificates are not valid roots for rustls (expired, unsupported
+        // algorithm); `add` refuses those and the rest load, so failures are ignored
         for cert in rustls_native_certs::load_native_certs().certs {
             let _ = roots.add(cert);
         }
@@ -151,9 +139,7 @@ impl TlsTransport {
         Ok(Self { tcp, conn })
     }
 
-    /// Hand `data` to the connection and push out whatever that produces —
-    /// the handshake's own flights first, if it has not finished, then the
-    /// record `data` became.
+    /// Write `data` and flush the result: pending handshake flights first, then `data`'s record.
     pub(crate) fn send(&mut self, data: &[u8]) -> io::Result<()> {
         self.conn.writer().write_all(data)?;
         self.flush_tls()
@@ -170,16 +156,12 @@ impl TlsTransport {
         Ok(())
     }
 
-    /// Read whatever ciphertext has arrived, hand every decrypted fragment to
-    /// `on_data`, and let the handshake and any alert run themselves.
+    /// Read arrived ciphertext, pass each decrypted fragment to `on_data`, and let the handshake
+    /// and alerts run.
     ///
-    /// `read_tls` returning `Ok(0)` is not "nothing arrived yet" — on a
-    /// non-blocking socket that is `Err(WouldBlock)`, already handled below —
-    /// it is the peer's FIN, the TCP connection ending for good (the same
-    /// meaning `Read::read` gives it). Conflating the two would leave a
-    /// closed connection looking merely idle: `flush_tls` would keep failing
-    /// silently underneath `send`, and nothing would ever tell
-    /// `sipral-core` the transport is gone.
+    /// `read_tls` returning `Ok(0)` is the peer's FIN, not "nothing yet" (that is
+    /// `Err(WouldBlock)`, handled below). Treating it as idle would hide a closed connection and
+    /// `sipral-core` would never learn the transport is gone.
     pub(crate) fn poll(&mut self, mut on_data: impl FnMut(&[u8])) -> io::Result<PollOutcome> {
         let mut moved = false;
         let mut closed = false;
@@ -195,9 +177,8 @@ impl TlsTransport {
             }
         }
         if let Err(error) = self.conn.process_new_packets() {
-            // the alert saying why goes out before the connection is given
-            // up, so that the server hears a refused certificate at once
-            // rather than a silence it has to time out
+            // send the alert first, so the server learns of a refused certificate at once instead
+            // of timing out
             let _ = self.flush_tls();
             return Err(io::Error::other(error));
         }
@@ -220,10 +201,8 @@ impl TlsTransport {
     }
 }
 
-/// What one [`TlsTransport::poll`] found: whether anything moved, on the wire
-/// or off it, and whether the peer closed the connection — the two are
-/// independent, since a closing read can still have delivered a last decrypted
-/// fragment first.
+/// What one [`TlsTransport::poll`] found: whether anything moved, and whether the peer closed.
+/// Independent, since a closing read can still deliver a last fragment.
 pub(crate) struct PollOutcome {
     pub(crate) moved: bool,
     pub(crate) closed: bool,
