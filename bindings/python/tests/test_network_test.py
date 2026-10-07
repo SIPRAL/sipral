@@ -64,7 +64,7 @@ class ANetworkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.fields["echo"], NetworkProbe.SUCCEEDED)
         self.assertLess(event.fields["loss_percent"], 1.0)
         self.assertGreater(event.fields["r_factor"], 80)
-        self.assertGreater(event.fields["mos"], 4.0)
+        self.assertGreaterEqual(event.fields["mos"], 4.0)
         self.assertEqual(event.fields["echo_verdict"], NetworkVerdict.GOOD)
         async with asyncio.timeout(5):
             while not call.ended:

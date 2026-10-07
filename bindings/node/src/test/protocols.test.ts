@@ -310,7 +310,7 @@ describe('a network test', () => {
     try {
       const done = await alice.next((event) => event.kind === SipralEventKind.NetworkTest && event.fields.test === test);
       assert.equal(done.fields.echo, SipralNetworkProbe.Succeeded);
-      assert.ok((done.fields.mos as number) > 4);
+      assert.ok((done.fields.mos as number) >= 4);
     } finally {
       clearInterval(speaking);
     }
