@@ -26,50 +26,37 @@ import org.sipral.telecom.EngineAudioDevice
 import org.sipral.telecom.TelecomBridge
 
 /**
- * One self-managed call's microphone and speaker, kept through whatever the
- * platform does to them while the call lasts, with every change reported.
+ * One self-managed call's microphone and speaker, kept through whatever
+ * the platform does to them during the call, with every change reported.
  *
- * What a self-managed `ConnectionService` is left to do about audio, and
- * what this does about each:
+ * What a self-managed `ConnectionService` must handle about audio:
  *
- * - **Hold from the framework.** A cellular call or another application's
- *   call answered over this one reaches it as `Connection.onHold`, which
- *   "must call `Connection.setOnHold()`", and the call comes back through
- *   `onUnhold`, which "must call `Connection.setActive()`"
- *   (developer.android.com/reference/android/telecom/ConnectionService,
- *   "Holding and Unholding Calls"). [TelecomBridge.hold] does both at once
- *   and holds the far end with a re-INVITE; this follows the bridge's
- *   phase, letting the device go while the call is held -- the other call
- *   has the microphone -- and taking it back when it is active again.
- * - **The call focus.** From Android 9 the framework moves it between
- *   calling applications, and one that loses it "should release the call
- *   resources" ([SipralConnectionService.onConnectionServiceFocusLost]).
- *   The device is let go for as long as the focus is elsewhere, without
- *   holding the far end, since the framework did not hold the call.
- * - **Routes and mute.** The framework routes a voice-communication
- *   stream wherever the call went -- earpiece, speaker, a wired or
- *   Bluetooth headset, a car -- and applies the mute its own controls ask
- *   for through `onMuteStateChanged`. Routes are reported; mute sends the
- *   far end silence in place of the microphone.
- * - **Audio focus.** Not requested here. The framework holds it for the
- *   call while the connection is live -- a self-managed account is one
- *   that "want[s] to leverage the call and audio routing capabilities of
- *   the Telecom framework" (`PhoneAccount.CAPABILITY_SELF_MANAGED`) -- and
- *   what it leaves to the application is the call focus above.
- * - **The audio server dying.** `AudioRecord.read` and `AudioTrack.write`
- *   answer `ERROR_DEAD_OBJECT`; both streams are built again, until they
- *   open, and the far end hears silence meanwhile.
+ * - **Hold from the framework.** A cellular or other app's call answered
+ *   over this one arrives as `Connection.onHold`, which must call
+ *   `setOnHold()`, and returns through `onUnhold`, which must call
+ *   `setActive()` (ConnectionService docs, "Holding and Unholding Calls").
+ *   [TelecomBridge.hold] does both and holds the far end; this follows the
+ *   bridge's phase, releasing the device while held.
+ * - **Call focus.** From Android 9 the framework moves it between calling
+ *   apps, and one that loses it should release call resources
+ *   ([SipralConnectionService.onConnectionServiceFocusLost]). The device is
+ *   released while focus is elsewhere, without holding the far end.
+ * - **Routes and mute.** The framework routes a voice-communication stream
+ *   wherever the call went and reports mute via `onMuteStateChanged`.
+ *   Routes are reported; mute sends silence.
+ * - **Audio focus.** Not requested: the framework holds it while a
+ *   self-managed connection is live (`CAPABILITY_SELF_MANAGED`), leaving
+ *   only call focus to the app.
+ * - **Audio server death.** `read`/`write` answer `ERROR_DEAD_OBJECT`;
+ *   both streams are rebuilt until they open, with silence meanwhile.
  *
- * On a client whose engine carries the calls (device mode, Android 9 and
- * later) the streams are the engine's AAudio ones and none of the above
- * opens anything: the device is the engine's activation, shared by every
- * call, let go when no call holds it and taken back when one does; the
- * framework's mute is the engine's; and the audio server dying is the
- * engine's to recover from, reported on the client's
- * `AUDIO_DEVICES_CHANGED` events.
+ * When the engine carries the calls (device mode, Android 9+) nothing here
+ * opens streams: the device is the engine's shared activation, released
+ * when no call holds it; mute is the engine's; and audio server death is
+ * the engine's to recover, reported as `AUDIO_DEVICES_CHANGED`.
  *
- * Built once the call has media, for the call [id] the bridge knows it by,
- * and closed on its own when the call ends.
+ * Built once the call has media, for the bridge's call [id], and closed
+ * on its own when the call ends.
  */
 class SipralCallAudio(
     context: Context,
@@ -77,9 +64,8 @@ class SipralCallAudio(
     val id: String,
     media: SipralMedia,
     private val scope: CoroutineScope,
-    /** The client's engine when it carries the call ([SipralCallAudios]
-     * passes it for a client in device mode), or null for `AudioRecord` and
-     * `AudioTrack` opened here. */
+    /** The client's engine when it carries the call (device mode), or null
+     * for `AudioRecord` and `AudioTrack` opened here. */
     private val engine: SipralAudioDevices? = null,
     /** What the call's audio is opened on: the engine's activation, shared
      * by every call, or this call's own `AudioRecord` and `AudioTrack`. */
@@ -108,8 +94,8 @@ class SipralCallAudio(
             launch {
                 connection.muted.collect { muted ->
                     audio.setMuted(muted)
-                    // the engine reads the microphone into the call itself,
-                    // so the framework's mute is the engine's
+                    // the engine reads the microphone itself, so the framework's mute is the
+                    // engine's
                     engine?.setMuted(SipralAudioDirection.INPUT, muted)
                 }
             }

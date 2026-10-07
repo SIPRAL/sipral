@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// CallAudio against a fake device whose streams can be made to fail the way
-// Android's do when the audio server dies (a negative code from read or
-// write) or refuse to open at all: the device let go and taken back for a
-// hold and for the platform's call focus, following a TelecomBridge call,
-// reopened after every kind of failure, and every step reported. Run from
+// CallAudio against a fake device whose streams fail as Android's do when
+// the audio server dies (negative read/write) or refuse to open: released
+// and retaken for hold and call focus, following a TelecomBridge call,
+// reopened after every failure, every step reported. Run from
 // TelecomCheck.kt's main.
 
 package org.sipral.telecom
@@ -216,10 +215,9 @@ internal fun callAudioSequences(): String {
         ran++
     }
 
-    // The audio server dies under the microphone: the dead streams closed,
-    // the device opened again -- the second open refused, as it is while
-    // the server restarts -- and the microphone read again, reported as one
-    // failure and one recovery.
+    // The audio server dies under the microphone: dead streams closed, the
+    // device reopened (the second open refused, as during a server restart),
+    // reported as one failure and one recovery.
     AudioRig().run {
         audio.start()
         waitFor("the device to open") { audio.state.value == AudioState.RUNNING }
@@ -268,10 +266,9 @@ internal fun callAudioSequences(): String {
         ran++
     }
 
-    // An audio server that stops answering, with the microphone's read stuck
-    // inside it: a hold still lets the device go at once -- stopped, which
-    // is what brings the read back -- and does not wait for the device,
-    // since on Android the hold arrives on the main thread.
+    // An audio server that stops answering with a read stuck inside: a hold
+    // still releases the device at once (stopping it unblocks the read)
+    // without waiting, since on Android the hold arrives on the main thread.
     AudioRig().run {
         audio.start()
         waitFor("the device to open") { audio.state.value == AudioState.RUNNING }
@@ -289,8 +286,7 @@ internal fun callAudioSequences(): String {
     }
 
     // A device that dies as soon as it opens: each quick death waits a step
-    // longer before the next open, rather than the device being rebuilt in
-    // a tight loop.
+    // longer, rather than rebuilding in a tight loop.
     AudioRig(listOf(0L, 50L, 100L)).run {
         device.dieAtOnce = true
         audio.start()
@@ -331,9 +327,8 @@ internal fun callAudioSequences(): String {
         ran++
     }
 
-    // Following a TelecomBridge call: nothing opened while ringing is not
-    // the rule (the call's media may carry early audio), but held means let
-    // go, active means taken back, and the call ending closes it for good.
+    // Following a TelecomBridge call: ringing may still carry early media,
+    // but held releases, active retakes, and the end closes for good.
     AudioRig().run {
         val log = Log()
         val platform = FakePlatform(log)

@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// STIR/SHAKEN, the SRTP policy per account and the encryption report through
-// org.sipral.idiomatic -- the Kotlin counterpart of
-// bindings/python/tests/test_security.py. Two clients on loopback with no
-// registrar between them, one signing the call it places and the other
-// verifying it. A valid signature is verified against the chain the C ABI's
-// tests keep in bindings/fixtures/stir-provider-709J, whose signing
-// certificate names a service provider code and no number; beside that, what
-// this proves is the plumbing every half of it runs through. Run by
-// IdiomaticCheck.kt's main, under -Xcheck:jni.
+// STIR/SHAKEN, per-account SRTP policy and the encryption report through
+// org.sipral.idiomatic, the counterpart of
+// bindings/python/tests/test_security.py. Two loopback clients without a
+// registrar, one signing, one verifying. A valid signature is checked
+// against bindings/fixtures/stir-provider-709J, whose signing certificate
+// names a service provider code and no number. Run by IdiomaticCheck.kt's
+// main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -37,12 +35,11 @@ import org.sipral.SipralVerificationFailure
 import org.sipral.SipralVerificationOutcome
 import org.sipral.SipralVerificationStage
 
-// short, and the clients offer one codec: a signed INVITE is some five
-// hundred octets longer than an unsigned one, and past RFC 3261 §18.1.1's
-// 1300 it needs a stream transport this check does not open
+// short, with one codec offered: signing adds some 500 octets, and past
+// RFC 3261 §18.1.1's 1300 a stream transport would be needed
 private const val URL = "https://c.test/p"
 
-// a P-256 private key as the bare scalar: any 32 octets below the group
+// a P-256 private key as a bare scalar: any 32 octets below the group
 // order are one, and these are nobody's
 private val KEY = ByteArray(32) { 0x2B }
 
@@ -148,10 +145,10 @@ private suspend fun sdesReported(): String {
 }
 
 /**
- * One of the credentials `sipral_stir::testing` issues for the service
- * provider code 709J, checked against it by the C ABI's own tests: a root, a
- * chain whose signing certificate names that code and no number, and its key.
- * Found from the directory the JVM runs in, anywhere inside the checkout.
+ * A credential `sipral_stir::testing` issues for service provider code
+ * 709J (also used by the C ABI tests): a root, a chain whose signer names
+ * the code and no number, and its key. Located from the JVM's working
+ * directory.
  */
 private fun provider(name: String): ByteArray {
     var at: File? = File(System.getProperty("user.dir")).absoluteFile

@@ -21,9 +21,9 @@ import org.sipral.SipralVerificationFailure
 import org.sipral.SipralVerificationOutcome
 
 /**
- * The `Privacy` values of RFC 3323 §4.2: what a caller asked to keep to
- * itself, and what an account asks for on every call it places
- * ([SipralClient.addAccount]). [ID] is "withhold my number".
+ * The `Privacy` values of RFC 3323 §4.2: what a caller asked to withhold,
+ * and what an account asks for on its calls ([SipralClient.addAccount]).
+ * [ID] is "withhold my number".
  */
 enum class SipralPrivacy(val bit: Long) {
     /** Obscure the fields that could identify the caller. */
@@ -73,15 +73,14 @@ sealed class SipralSessionTimerChoice {
 }
 
 /**
- * Why this end is ending a call, written as a `Reason` (RFC 3326) on the BYE
- * or the CANCEL [SipralCall.hangup] sends: a SIP status, a Q.850 cause, or
- * both, and a line of text on the first one written.
+ * Why this end ends a call, as a `Reason` (RFC 3326) on the BYE or CANCEL
+ * [SipralCall.hangup] sends: a SIP status, a Q.850 cause, or both, with
+ * text on the first.
  */
 data class SipralHangupReason(val sipCause: Int? = null, val q850Cause: Int? = null, val text: String? = null) {
     companion object {
-        /** `SIP;cause=200;text="Call completed elsewhere"`: another of this
-         * person's phones took the call, so the one cancelled shows no
-         * missed call. */
+        /** `SIP;cause=200;text="Call completed elsewhere"`: another of the user's
+         * phones answered, so this one shows no missed call. */
         val COMPLETED_ELSEWHERE = SipralHangupReason(sipCause = 200, text = "Call completed elsewhere")
 
         /** `Q.850;cause=16`: a normal end. */
@@ -117,19 +116,18 @@ data class SipralHistoryEntry(val uri: String, val index: String?)
 data class SipralAlertInfo(val uri: String, val name: String?)
 
 /**
- * Who is calling beyond the `From`: what the network asserted, behind the
- * account's trust gate, what the caller asked to keep private, and where
- * the call was diverted from. Read with [SipralClient.callerIdentity] from
- * the `SIPRAL_EVENT_KIND_INCOMING_CALL`, before deciding whether to answer,
- * or with [SipralCall.identity] later.
+ * Who is calling beyond the `From`: the network's assertion (behind the
+ * account's trust gate), the caller's privacy request, and diversions.
+ * Read with [SipralClient.callerIdentity] from the INCOMING_CALL before
+ * answering, or with [SipralCall.identity] later.
  */
 data class SipralCallerIdentity(
     /** Whether the INVITE came from a peer the account trusts; when it did
      * not, [asserted], [assertedParties] and [verstat] say nothing (RFC 3325
      * §8). */
     val trusted: Boolean,
-    /** Who the network says is calling: the first `P-Asserted-Identity`, or
-     * a calling `Remote-Party-ID` when there is none. */
+    /** Who the network says is calling: the first `P-Asserted-Identity`, else
+     * a calling `Remote-Party-ID`. */
     val asserted: SipralParty?,
     val assertedParties: List<SipralParty>,
     val remoteParties: List<SipralParty>,
@@ -141,17 +139,16 @@ data class SipralCallerIdentity(
     val diversions: List<SipralDiversion>,
     /** Every `History-Info` entry. */
     val history: List<SipralHistoryEntry>,
-    /** This end's own STIR/SHAKEN verdict on the call's `Identity` (RFC
-     * 8224), when the account verifies: the outcome, the attestation a valid
-     * SHAKEN PASSporT claimed, and why an invalid one did not hold. */
+    /** This end's STIR/SHAKEN verdict on the call's `Identity` (RFC 8224)
+     * when the account verifies: outcome, claimed attestation, and why an
+     * invalid one failed. */
     val verification: SipralVerificationOutcome = SipralVerificationOutcome.NONE,
     val attestation: SipralAttestation = SipralAttestation.NONE,
     val verificationFailure: SipralVerificationFailure = SipralVerificationFailure.NONE,
 )
 
 /** How a call asked to be answered (RFC 5373) and rung (`Alert-Info`).
- * Whether to answer without the person is the application's policy; this is
- * what the caller asked for. */
+ * Whether to auto-answer is the application's policy. */
 data class SipralAnswering(
     val mode: SipralAnswerMode,
     /** The caller would rather be refused, with a 403, than answered any
@@ -186,9 +183,9 @@ fun endCauseOf(event: SipralEvent): SipralEndCause? {
     )
 }
 
-/** Which SRTP suite keys a call, off `SIPRAL_EVENT_KIND_MEDIA_SECURED`: RFC
- * 4568's AES-CM, RFC 6188's AES-256 and RFC 7714's AES-GCM each have a name
- * of their own. Null for any other kind. */
+/** The SRTP suite keying a call, from `SIPRAL_EVENT_KIND_MEDIA_SECURED`
+ * (RFC 4568 AES-CM, RFC 6188 AES-256, RFC 7714 AES-GCM). Null for any
+ * other kind. */
 fun srtpSuiteOf(event: SipralEvent): SipralSrtpSuite? =
     if (event.kind == SipralEventKind.MEDIA_SECURED.value.toLong()) {
         SipralSrtpSuite.of(event.payload.media.suite.toInt())

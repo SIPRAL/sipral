@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// What a Kotlin integrator does on the first afternoon, compiled and run by
-// scripts/check.sh against the shared library: load the binding and have it
-// check the ABI, build a stack out of a class, hear its first event on a
-// thread the JVM did not make, hear a poll's worth of incoming calls without
-// the shim holding on to what it handed over for any of them, put header
-// fields of its own on a call in a list and find them in what went out, throw
-// from a listener, and destroy a stack from inside its own listener.
+// Run by scripts/check.sh against the shared library: load the binding and
+// check the ABI, build a stack from a class, hear its first event on a
+// non-JVM thread, take a poll's worth of incoming calls without the shim
+// keeping their arrays, send application header fields given as a list,
+// throw from a listener, and destroy a stack from inside its listener.
 //
-// A program rather than a test runner's test, because the gate has a compiler
-// and a JVM and no build tool; kotlin.test's assertions throw without one.
+// A program rather than a test-runner test: the gate has a compiler and a
+// JVM but no build tool.
 
 package org.sipral
 
@@ -71,11 +69,8 @@ private fun fieldIn(message: ByteArray, name: String): String? {
     return String(message, offset.toInt(), len.toInt(), Charsets.UTF_8)
 }
 
-/**
- * Where call `index` comes from: a caller of its own each time, because the
- * user agent limits how fast any one address may dial, and a poll's worth of
- * calls from one address is a scanner rather than a busy morning.
- */
+/** A different caller for each call: the per-address INVITE limit would
+ * otherwise refuse a poll's worth from one address. */
 private fun caller(index: Int): String = "198.51.100.${index + 1}:5060"
 
 /** Read, not written down, for the reason bindings/c/smoke.c gives. */
@@ -103,11 +98,8 @@ private fun invitation(index: Int): ByteArray =
             "Content-Length: 0\r\n\r\n"
         ).toByteArray(Charsets.US_ASCII)
 
-/**
- * What a listener heard, kept without holding on to anything it was handed:
- * a message held here would keep its array alive, and the one thing this
- * check wants to know about those arrays is whether the shim did.
- */
+/** What a listener heard, kept without holding any array it was handed,
+ * since the check is whether the shim held them. */
 private class Heard : SipralEventListener {
     val kinds = mutableListOf<Long>()
     val calls = mutableListOf<Long>()
@@ -132,10 +124,9 @@ private class Heard : SipralEventListener {
         threads.add(Thread.currentThread())
         val message = event.message
         openings.add(message?.let { String(it, 0, minOf(it.size, 6), Charsets.US_ASCII) } ?: "")
-        // A local reference the shim did not delete for the event before
-        // keeps that event's array reachable until the poll returns; nothing
-        // in Kotlin holds one. So after a collection the weak reference is
-        // empty exactly when the shim let go.
+        // A local reference the shim failed to delete keeps the previous event's
+        // array alive until the poll returns; nothing in Kotlin holds one. So
+        // after a GC the weak reference is empty exactly when the shim let go.
         val before = previous
         if (before != null) {
             System.gc()
@@ -156,19 +147,16 @@ fun main() {
         exitProcess(1)
     }
     println("kotlin binding: $said")
-    // exitProcess rather than returning: a native thread the shim attached and
-    // never detached is a live non-daemon thread, and a JVM that waited for it
-    // would never exit
+    // exitProcess: a native thread the shim attached and never detached would
+    // keep the JVM from exiting
     exitProcess(0)
 }
 
 private fun everything(): String {
-    // Touching SipralNative ran its check against the version it was printed
-    // from, or this line would be an ExceptionInInitializerError. The same
-    // check asked about other versions keeps the 1.x rule: within this
-    // major every minor up to the library's own is served -- a binding the
-    // library is newer than -- and a later minor, another major or any 0.x
-    // is refused with the caller's version named.
+    // Loading SipralNative already checked the version it was generated from.
+    // Asked about other versions, the 1.x rule holds: any minor up to the
+    // library's own is served, and a later minor, another major or any 0.x is
+    // refused, naming the caller's version.
     val library = Sipral.abiVersion()
     assertEquals(Sipral.ABI_VERSION_MAJOR, library.major)
     assertTrue(library.minor >= Sipral.ABI_VERSION_MINOR, "library minor ${library.minor}")
@@ -184,8 +172,8 @@ private fun everything(): String {
         assertTrue(sentence.contains("$major.$minor"), sentence)
     }
 
-    // A stack built out of a class. The bind address is text and the two
-    // seeds are arrays, so a member copied wrong is a refusal here.
+    // A stack built from a class. The bind address is text and the seeds are
+    // arrays, so a member copied wrong is a refusal here.
     val heard = Heard()
     val stack = Sipral.stackCreate(configured(heard))
     assertNotEquals(Sipral.HANDLE_NONE, stack)
@@ -198,8 +186,8 @@ private fun everything(): String {
     assertTrue(heard.sizes.first() > 0, "an event that says it is zero bytes long")
     val foreign = heard.threads.first()
     assertNotEquals(Thread.currentThread(), foreign, "the event arrived on the thread that polled from Kotlin")
-    // a thread still attached is a live java.lang.Thread, and the native one
-    // has been joined, so this is false only if the shim detached it
+    // a still-attached thread is a live java.lang.Thread and the native one
+    // was joined, so this is false only if the shim detached it
     assertFalse(foreign.isAlive, "the thread the shim attached is attached still")
 
     // A poll's worth of events that each carry a message.
@@ -232,11 +220,10 @@ private fun everything(): String {
     assertTrue(heard.looked >= calls - 1, "only ${heard.looked} messages were looked for after their event")
     assertEquals(0, heard.survived, "${heard.survived} messages were still held by the shim when the next event arrived")
 
-    // Header fields of the application's own, handed over in a list: two on
-    // a call's configuration, found in the INVITE it went out in, and two set
-    // on a call that came in, found in the refusal it went out on. Two rather
-    // than one, because one is what a binding that hands over a single struct
-    // also gets right.
+    // Application header fields handed over as a list: two on an outgoing
+    // call's configuration, found in its INVITE, and two on an incoming call,
+    // found in its refusal. Two, because a binding passing a single struct
+    // gets one right.
     drained(stack)
     val placed = Sipral.callPlace(
         stack,
@@ -260,8 +247,8 @@ private fun everything(): String {
     assertEquals("the second of two", fieldIn(invite, "X-Second-Field"))
 
     val ringing = heard.calls[incoming.first()]
-    // The second element is where a binding that read one struct would have
-    // read past it, so it is the one the stack is made to refuse by name.
+    // The second element is where a one-struct binding would read past the
+    // end, so it is the one the stack is made to refuse by name.
     val owned = assertFailsWith<SipralException> {
         Sipral.callSetHeaders(
             stack,
@@ -283,9 +270,9 @@ private fun everything(): String {
         ),
     )
 
-    // What the shim is handed is what SipralHeader.packed makes, and it checks
-    // it anyway, before it points into any of it. None of these reaches the
-    // library, which the refusal below shows by carrying the fields set above.
+    // The shim checks what SipralHeader.packed makes before pointing into it.
+    // None of these reaches the library, as the refusal below shows by
+    // carrying the fields set above.
     val text = "X-Conversation-Id".toByteArray(Charsets.US_ASCII)
     val whole = text.size.toLong()
     for ((what, bytes, lengths) in listOf(
@@ -312,9 +299,9 @@ private fun everything(): String {
     assertEquals("kotlin-refusal", fieldIn(refusal, "X-Conversation-Id"))
     assertEquals("on the refusal", fieldIn(refusal, "X-Second-Field"))
 
-    // A listener that throws hands its exception to the thread's handler and
-    // does not stop the poll; destroying the stack from inside it is the one
-    // call the contract allows there, and the handle is stale afterwards.
+    // A throwing listener hands its exception to the thread's handler without
+    // stopping the poll; destroying the stack from inside it is the one call
+    // the contract allows there, and the handle is stale afterwards.
     val caught = mutableListOf<Throwable>()
     val here = Thread.currentThread()
     val handler = here.uncaughtExceptionHandler
@@ -337,12 +324,12 @@ private fun everything(): String {
     val stale = assertFailsWith<SipralException> { Sipral.stackPoll(doomed, 1) }
     assertEquals(SipralStatus.STALE_HANDLE, stale.status)
 
-    // What a class leaves out is what a zeroed C struct leaves out, and is
-    // refused the same way: no listener is no callback.
+    // Fields a class leaves out are zero as in C, and refused the same way:
+    // no listener means no callback.
     val deaf = assertFailsWith<SipralException> { Sipral.stackCreate(configured(null)) }
     assertEquals(SipralStatus.INVALID_ARGUMENT, deaf.status)
-    // and the two arrays arrive as the bytes they are: the same draw twice is
-    // the one thing only sipral_stack_create can see
+    // the two arrays arrive as their bytes: the same draw twice is something
+    // only sipral_stack_create can see
     val once = drawn()
     val twice = assertFailsWith<SipralException> {
         Sipral.stackCreate(
@@ -357,9 +344,8 @@ private fun everything(): String {
     }
     assertTrue(assertNotNull(twice.message).contains("media_seed"), twice.message)
 
-    // A string the binding hands over empty is a real pointer and a length
-    // of zero, which is how C says the address a datagram arrived on is
-    // left out: it was refused as an address that was empty.
+    // An empty string becomes a real pointer with length zero, which C reads
+    // as "no source address": refused as an empty address.
     Sipral.stackReceiveDatagram(stack, Sipral.TRANSPORT_MAIN, invitation(calls), caller(calls), "", 30)
 
     Sipral.stackDestroy(stack)
@@ -371,17 +357,16 @@ private fun everything(): String {
 }
 
 /**
- * Every record's length on the layout this JVM runs on, as tools/abi-gen
- * worked it out, against the library's own answer: this binding lays nothing
- * out itself, and bindings/c/abi-layout.c holds a C compiler to the same
- * table on the layouts this machine cannot run.
+ * Every record's length on this JVM's layout, as tools/abi-gen computed
+ * it, against the library's answer. bindings/c/abi-layout.c checks the
+ * layouts this machine cannot run.
  */
 private fun layoutsHold(): Int {
     val wide = System.getProperty("sun.arch.data.model") != "32"
     val arch = System.getProperty("os.arch").lowercase()
     val windows = System.getProperty("os.name").lowercase().startsWith("windows")
-    // 32-bit x86 aligns a 64-bit integer to four inside a struct on every
-    // system but Windows, which aligns it to eight like ARM does
+    // 32-bit x86 aligns a 64-bit integer to four inside a struct except on
+    // Windows, which aligns to eight like ARM
     val column = when {
         wide -> 0
         arch in setOf("x86", "i386", "i686") && !windows -> 1

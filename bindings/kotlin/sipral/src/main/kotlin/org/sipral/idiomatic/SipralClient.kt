@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The idiomatic Kotlin layer over org.sipral.Sipral (SipralAbi.kt, printed
-// by tools/abi-gen and never edited here): classes over the handles, events
-// as a kotlinx.coroutines Flow, and suspend functions where the ABI
-// completes through an event rather than through its own return value --
-// the shape docs/08-ffi.md asks a binding author to build once they have
-// met the threading rules in its own first section, and the one
-// bindings/python (cffi, asyncio) and bindings/kotlin (JNI, coroutines)
-// both build over the same six calls: create, poll, the two receive
-// entry points, poll_transmit and destroy.
+// The idiomatic Kotlin layer over org.sipral.Sipral (SipralAbi.kt, generated
+// by tools/abi-gen): classes over the handles, events as a Flow, and suspend
+// functions where the ABI completes through an event. Threading follows the
+// first section of docs/08-ffi.md.
 
 package org.sipral.idiomatic
 
@@ -69,11 +64,9 @@ private const val TRANSMIT_BYTES = 1 shl 16
 private const val ADDRESS_BYTES = 64
 private const val PACKET_BYTES = 1500
 
-/** The first transport id a connection this layer opens is bound under --
- * to a recording server, or for `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` -- one
- * more for each after it, whichever it is for: clear of the main transport
- * and of the small numbers an application driving [org.sipral.Sipral]
- * itself would pick. */
+/** The first transport id this layer binds its own connections under (a
+ * recording server, `TRANSPORT_WANTED`), counting up: clear of the main
+ * transport and of the small ids an application would pick. */
 private const val FIRST_LINK = 64L
 
 /** The protocols an account on a connection of its own may speak. */
@@ -91,9 +84,9 @@ internal fun parseHostPort(text: String): InetSocketAddress {
 internal fun overStream(protocol: Long): Boolean =
     protocol == SipralTransport.TCP.value.toLong() || protocol == SipralTransport.TLS.value.toLong()
 
-/** One media socket's TCP or TLS connection to the TURN server: written by
- * the poll thread and by the call's media thread, each write whole under
- * the stream's own lock; read by a thread of its own. */
+/** One media socket's TCP or TLS connection to the TURN server. Written by
+ * the poll thread and the media thread, each write whole under the stream's
+ * lock; read by a thread of its own. */
 private class TurnStream(val socket: Socket) {
     val input: InputStream = socket.getInputStream()
     val output: OutputStream = socket.getOutputStream()
@@ -101,13 +94,12 @@ private class TurnStream(val socket: Socket) {
 
 /**
  * One `sipral_stack_create` handle, its signalling socket and its poll
- * thread: the class an application reaches for first.
+ * thread.
  *
- * Built with [SipralClient.open], torn down with [close] (also reached
- * through `use { }`), which calls `sipral_stack_destroy` exactly once. Not
- * built with a public constructor: the socket has to be open, bound and
- * its address known before `sipral_stack_create` is ever called, since
- * that address is what every `Via` this stack writes carries.
+ * Built with [SipralClient.open] and torn down with [close], which calls
+ * `sipral_stack_destroy` exactly once. There is no public constructor: the
+ * socket must be bound before `sipral_stack_create`, since its address goes
+ * in every `Via`.
  */
 class SipralClient private constructor(
     socket: DatagramSocket?,
@@ -145,22 +137,19 @@ class SipralClient private constructor(
 
     /**
      * Whether the last [networkChanged] that bound the UDP signalling socket
-     * again kept its port -- `bindPort`, or the port in use when that was
-     * zero. False when another socket held that port at the new address and
-     * the system chose one instead, which [bindAddress] then names: a peer or
-     * a firewall rule that only knows the old port has to be told. True
-     * before any change.
+     * again kept its port. False when the port was taken at the new address
+     * and the system chose another, which [bindAddress] names; a peer or
+     * firewall rule that knows only the old port has to be told. True before
+     * any change.
      */
     @Volatile
     var keptSignallingPort: Boolean = true
         private set
 
-    /** The signalling socket's address, `host:port`: where it was bound, and
-     * after [networkChanged] where it is bound now. Over TCP or TLS, the
-     * address the connection to the server was made from, which moves with
-     * every connection made again. A client opened with no `bindHost`
-     * listens on every interface, and this is the address it advertises:
-     * the route toward its first account's server. */
+    /** The signalling socket's address, `host:port`, as bound now. Over TCP or
+     * TLS, the local address of the current connection, which changes on every
+     * reconnect. With no `bindHost` the socket listens everywhere and this is
+     * the advertised address: the route toward the first account's server. */
     @Volatile
     var bindAddress: String = bindAddress
         private set
@@ -178,18 +167,14 @@ class SipralClient private constructor(
     internal val isClosed: Boolean
         get() = closed.get()
 
-    /**
-     * The library's audio engine -- the devices, their gain, mute and level,
-     * the ring and when they are open -- in [SipralAudioMode.Device], and
-     * null in [SipralAudioMode.Application], where the application runs the
-     * audio itself.
-     */
+    /** The library's audio engine in [SipralAudioMode.Device]; null in
+     * [SipralAudioMode.Application], where the application runs the audio. */
     var audio: SipralAudioDevices? = null
         private set
 
-    /** Serialises a network change with the calls it moves, so that every
-     * account points at the new address before any call is offered there;
-     * also guards [network] and [accounts]. */
+    /** Serialises a network change with the calls it moves, so every account
+     * points at the new address before a call is offered there. Also guards
+     * [network] and [accounts]. */
     private val movingLock = Any()
     private var network: SipralNetwork = network
     private val accounts = LinkedHashMap<Long, SipralAccount>()
@@ -203,18 +188,12 @@ class SipralClient private constructor(
     )
 
     /**
-     * Every event this stack's listener heard, in the order it heard them.
+     * Every event this stack's listener heard, in order.
      *
-     * Bounded, not unbounded: at most 4096 unread events are kept per
-     * collector's own lag behind the poll thread. `DROP_OLDEST` means a
-     * collector that falls more than 4096 events behind -- doing real work
-     * per event, or simply not reading for a while -- has its oldest unread
-     * events silently discarded to make room, with no exception and no
-     * signal that anything was dropped; it never blocks the poll thread and
-     * never grows without bound. A collector that intends to see every
-     * event has to keep its own per-event work short, or hand events off to
-     * something else (a channel, a queue) rather than do the work inline in
-     * `collect`.
+     * Each collector may lag at most 4096 events behind the poll thread; past
+     * that its oldest unread events are dropped silently (`DROP_OLDEST`), so
+     * the poll thread never blocks. A collector that must see every event
+     * keeps its per-event work short or hands events to a queue.
      */
     val events: SharedFlow<SipralEvent> = eventsFlow
 
@@ -227,201 +206,128 @@ class SipralClient private constructor(
         /**
          * Open a UDP socket, bind it, and build a [SipralClient] over it.
          *
-         * `bindHost`/`bindPort` name where this stack's own socket binds;
-         * `0` for the port picks an ephemeral one, read back from
-         * [SipralClient.bindAddress] once this returns -- the same
-         * two-step `bindings/python/sipral/stack.py` follows, because the
-         * ABI has to be told the address before it exists.
+         * Port `0` picks an ephemeral port, read back from [bindAddress]. Every
+         * option left null is this build's default.
          *
-         * Every option left null is this build's own default, which is what
-         * a client opened before the option existed does. [ice] is what
-         * every call does about ICE (RFC 8445) unless [placeCall] says
-         * otherwise; `SipralIce.OFF` by default. [stunServer], as
-         * `host:port` -- an address, not a name -- turns on
-         * `SIPRAL_NAT_STUN`: the signalling socket asks it where it appears
-         * from, every account's `Contact` moves to that public address
-         * (`SIPRAL_EVENT_KIND_NAT_MAPPING`, read with [natOf]), and every
-         * media socket [placeCall] or [answerCall] opens is asked the same
-         * before its call is described, so the SDP a far end reads names an
-         * address it can actually send to. [turn] adds a relay on a TURN
-         * server for each of those media sockets, offered as the call's
-         * relayed ICE candidate ([relayOf]); it needs [stunServer] too, and
-         * a call only uses the relay under ICE. [SipralTurnServer.transport]
-         * reaches it over TCP or TLS instead of UDP, the client opening each
-         * connection itself. [g729AnnexB] allows G.729's
-         * silence compression, on by default. `SipralIce.LITE` is for a
-         * server reachable at the address it advertises, answering full ICE
-         * peers, and nothing else (`docs/06-nat.md`, "ICE-lite").
+         * [ice] is every call's ICE policy (RFC 8445) unless [placeCall] says
+         * otherwise; `SipralIce.OFF` by default. `SipralIce.LITE` is for a server
+         * reachable at the address it advertises (`docs/06-nat.md`).
+         * [stunServer], `host:port` (an address, not a name), turns on
+         * `SIPRAL_NAT_STUN`: accounts' `Contact` moves to the public address
+         * (`SIPRAL_EVENT_KIND_NAT_MAPPING`, [natOf]) and every media socket is
+         * asked the same before its call is described. [turn] adds a relayed
+         * candidate per media socket ([relayOf]); it needs [stunServer] and is
+         * used only under ICE. [g729AnnexB] allows G.729 silence compression, on
+         * by default.
          *
-         * [referrals] set to true hands a REFER outside any dialog --
-         * click-to-dial from a switchboard -- to the application as
-         * `SIPRAL_EVENT_KIND_REFERRAL` (read with [referralOf]), to take with
-         * [acceptReferral] or refuse with [rejectReferral]. Off by default,
-         * when every one is refused 403: a peer that can make a phone dial
-         * is a toll-fraud vector, so each one is the application's decision.
+         * [referrals] hands a REFER outside any dialog (click-to-dial) to the
+         * application as `SIPRAL_EVENT_KIND_REFERRAL` ([referralOf]), to take with
+         * [acceptReferral] or refuse with [rejectReferral]. Off by default, when
+         * each is refused 403: a peer that can make a phone dial is a toll-fraud
+         * vector.
          *
-         * [registrarKeepalive] keeps the registrar's flow open behind a
-         * NAT: every account [stunServer] showed to be behind one sends its
-         * registrar a double CRLF every [registrarKeepaliveMs] (`0` for 25
-         * seconds, 1 000 to 120 000), so that a NAT filtering by address and
-         * port still lets the registrar's INVITE in minutes after the
-         * REGISTER. On by default; false turns it off, and an interval with
-         * it off is refused. Nothing is sent while the stack is suspended.
+         * [registrarKeepalive] sends a double CRLF every [registrarKeepaliveMs]
+         * (`0` for 25 s, 1 000 to 120 000) to the registrar of every account STUN
+         * showed to be behind a NAT, so the registrar's INVITE still gets in. On
+         * by default; an interval with it off is refused. Nothing is sent while
+         * suspended.
          *
-         * [audio] says who runs the calls' audio:
-         * [SipralAudioMode.platformDefault], the library's own engine
-         * wherever this build has one for the platform, unless the
-         * application pumps the frames itself with
-         * [SipralAudioMode.Application]. Under `SipralAudioActivation.MANUAL`
-         * the devices open only between [SipralAudioDevices.activate] and
-         * [SipralAudioDevices.deactivate], rather than with the first call's
-         * media and the last call's end. [audioProbeMs] bounds how long a
-         * platform call about the devices may block before it is reported as
-         * `DEVICE_TIMED_OUT` (`0` for three seconds), and [audioDeviceRateHz]
-         * is the rate the devices are asked to run at (`0` for 48 000).
+         * [audio] says who runs the audio: [SipralAudioMode.platformDefault] or
+         * [SipralAudioMode.Application]. Under `SipralAudioActivation.MANUAL` the
+         * devices open only between [SipralAudioDevices.activate] and
+         * [SipralAudioDevices.deactivate]. [audioProbeMs] bounds a blocking
+         * platform device call before `DEVICE_TIMED_OUT` (`0` for 3 s);
+         * [audioDeviceRateHz] is the device rate (`0` for 48 000).
          *
-         * [maxDialogs] is the most calls the client holds at once, either
-         * way (`0` for 128): one that arrives past it is answered 503, and
-         * one placed past it throws with `LIMIT_REACHED`.
-         * [maxServerTransactions] is the most requests from other ends it
-         * works on at once (`0` for 256). [diagnosticDecisions] and
-         * [diagnosticRecords] bound the diagnostic record: decisions kept
-         * per call (`0` for 64) and calls kept (`0` for 32).
+         * [maxDialogs] caps concurrent calls (`0` for 128): an incoming one past
+         * it is answered 503, an outgoing one throws `LIMIT_REACHED`.
+         * [maxServerTransactions] caps requests worked on at once (`0` for 256).
+         * [diagnosticDecisions] and [diagnosticRecords] bound the diagnostic
+         * record per call (`0` for 64) and in calls (`0` for 32).
          *
-         * [network] is the network the client starts on, what the first
-         * [networkChanged] compares with: a wired link at [bindHost], on no
-         * interface in particular, unless the application knows better.
+         * [network] is what the first [networkChanged] compares with.
          *
-         * [srtp] is what every call does about SRTP unless [placeCall]'s own
-         * `srtp` says otherwise: offered, required, or keyed by DTLS-SRTP,
-         * whose suite `SIPRAL_EVENT_KIND_MEDIA_SECURED` names ([srtpSuiteOf]).
+         * [srtp] is every call's SRTP policy unless [placeCall] overrides it;
+         * DTLS-SRTP's suite is reported by `SIPRAL_EVENT_KIND_MEDIA_SECURED`
+         * ([srtpSuiteOf]). `SipralSrtp.BEST_EFFORT` offers SDES on plain
+         * `RTP/AVP`, for a PBX that answers an `RTP/SAVP` offer with 488.
+         * [srtpSuites] are the suites offered and accepted, most preferred first,
+         * by their RFC 4568 and RFC 7714 names.
          *
-         * [stunFallbacks] are the STUN servers to turn to, in order, when
-         * [stunServer] does not answer in five and a half seconds or answers
-         * without an address, each `host:port`: every socket asking the one
-         * that failed moves to the next at once, the one that failed is
-         * passed over for thirty seconds and twice as long each time it
-         * fails again, up to ten minutes, and `SIPRAL_EVENT_KIND_STUN_SERVER`
-         * (read with [stunServerOf]) says when the server in use moves or
-         * every one has failed.
+         * [stunFallbacks] are tried in order when [stunServer] does not answer in
+         * 5.5 s or answers without an address. A failed server is passed over for
+         * 30 s, doubling per failure up to ten minutes;
+         * `SIPRAL_EVENT_KIND_STUN_SERVER` ([stunServerOf]) reports moves.
          *
-         * [rtpPortMin] and [rtpPortMax] are the range a firewall in front of
-         * this machine was opened for: every media socket this client opens
-         * without an explicit port then binds an even port from it, reserved
-         * with `sipral_stack_rtp_port_reserve`, with the odd one above kept
-         * for RTCP (RFC 3550 §11), and a call is refused a port outside it.
-         * Both `0` -- the default -- leave the ports to the operating system.
-         * Every pair taken throws `SipralStatus.EXHAUSTED` rather than binding
-         * outside the range.
+         * [rtpPortMin] and [rtpPortMax] bound media ports for a firewall: each
+         * media socket binds an even port from the range
+         * (`sipral_stack_rtp_port_reserve`), the odd one above kept for RTCP (RFC
+         * 3550 §11). Both `0` leave ports to the OS. A full range throws
+         * `SipralStatus.EXHAUSTED`.
          *
-         * [dtmfDetection] is when a call listens for keypad digits in the far
-         * end's audio: `AUTO` on the calls that negotiated no telephone
-         * event, `ALWAYS` or `OFF`; [SipralCall.setDtmfDetection] changes it
-         * for one call.
+         * [dtmfDetection] is when a call listens for digits in the far end's
+         * audio; [SipralCall.setDtmfDetection] changes it per call.
          *
-         * [signalling] is what SIP travels over: `SipralTransport.UDP` (the
-         * default) on a socket bound at [bindHost], or `TCP` or `TLS` on one
-         * connection to [signallingServer] (`host:port` -- the registrar or
-         * the outbound proxy, 5061 for TLS by convention), which every
-         * account and every call on this client then shares, and on which
-         * the server's own requests arrive. Over TLS the server's
-         * certificate is checked against [tlsServerName] (the host part of
-         * [signallingServer] when null) with [tlsTrust]: the platform's
-         * authorities, a private authority beside them, or only one
-         * authority (`docs/22-tls.md`). Nothing here turns the check off.
+         * [signalling] is `SipralTransport.UDP` (default) on a socket at
+         * [bindHost], or `TCP`/`TLS` on one connection to [signallingServer]
+         * (`host:port`), shared by every account and call. Over TLS the
+         * certificate is checked against [tlsServerName] (default: the host of
+         * [signallingServer]) with [tlsTrust] (`docs/22-tls.md`); the check
+         * cannot be turned off.
          *
-         * The first connection is made here, before this returns. When it
-         * fails, or later breaks, the stack is told why and raises
-         * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`, read with [transportFailedOf]:
-         * untrusted, a name that does not match, expired, a handshake
-         * refused or a server that refused the connection, with
-         * `SSLSocket`'s own words; and this client connects again, one
-         * second after the loss and twice as long after each attempt that
-         * fails, up to thirty seconds. Once connected again every account is
-         * pointed at the new connection and registered again if it was
-         * registering. [SipralAccount.register] asked while it is down is
-         * kept for then; a call placed meanwhile throws with
-         * `SipralStatus.TRANSPORT_DOWN`.
+         * The first connection is made before this returns. When it fails or
+         * breaks, `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` ([transportFailedOf]) says
+         * why, and the client reconnects after 1 s, doubling up to 30 s. On
+         * reconnect every account is re-pointed and re-registered if it was
+         * registering. [SipralAccount.register] while down waits for that; a call
+         * placed meanwhile throws `SipralStatus.TRANSPORT_DOWN`.
          *
          * [inviteLimit] is how fast one address may ring this client:
-         * [SipralInviteLimit.DEFAULT] (what every client starts with, ten
-         * INVITEs at once then one every two seconds, past which a call is
-         * answered 480) or [SipralInviteLimit.VOICE_AGENT] for a service
-         * taking a trunk's calls.
+         * [SipralInviteLimit.DEFAULT] (ten INVITEs, then one every 2 s, past which
+         * a call gets 480) or [SipralInviteLimit.VOICE_AGENT] for a trunk.
          *
-         * [streamFallback] is what a client signalling over UDP does when a
-         * request is too large for a datagram -- nearly always the answer to
-         * a challenge, whose `Authorization` takes a call offering two SRTP
-         * suites past RFC 3261 §18.1.1's 1300 bytes. On (the default),
-         * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` (read with
-         * [transportWantedOf]) is answered by opening a TCP connection to the
-         * address it names -- the registrar or proxy the request was going
-         * to, on the same port -- and binding it
-         * (`sipral_stack_transport_bind`): the request the stack was holding
-         * goes on it, and the call or registration carries on over it. When
-         * that connection is refused or times out, or with false, the stack
-         * is told at once (`sipral_stack_transport_failed_with`, whose detail
-         * names where the connection was going and whether it was refused,
-         * timed out or not tried), and what was
-         * waiting ends rather than hanging: a call as unreachable, its
-         * `causeSip` 513 and its `causeText` naming the size and the limit.
-         * The event reaches [events] either way. [streamServer]
-         * (`host:port`) is where that connection goes instead, for a server
-         * that takes TCP on another port than UDP -- a PBX on 5060 for one
-         * and 5160 for the other: the connection stands for the address the
-         * event named, and everything the stack sends there goes on it.
+         * [streamFallback] covers a UDP request too large for a datagram, nearly
+         * always an `Authorization` past RFC 3261 §18.1.1's 1300 bytes. On (the
+         * default), `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` ([transportWantedOf]) is
+         * answered by opening TCP to the same address and port and binding it
+         * (`sipral_stack_transport_bind`); the held request goes on it. If that
+         * fails, or with false, the stack is told
+         * (`sipral_stack_transport_failed_with`) and the waiting call ends as
+         * unreachable, `causeSip` 513 with the size and limit in `causeText`.
+         * [streamServer] (`host:port`) redirects that connection, for a PBX
+         * taking TCP on another port than UDP.
          *
-         * [bindHost] is the address the signalling socket is bound at and
-         * advertises. Left null, the socket listens on every interface and
-         * the client advertises the address of the operating system's route
-         * toward the server of its first account (`sipral_advertised_address`):
-         * the address a PBX on the network reaches this device at, and
-         * `127.0.0.1` for one on this machine. Each account is reached at the
-         * route toward its own server, and a call's media socket, when
-         * `mediaHost` is null, at the route toward the far end or the
-         * account's server. A loopback address is never advertised to a peer
-         * elsewhere: the library refuses that with `UNREACHABLE_ADDRESS`.
+         * [bindHost] left null listens on every interface and advertises the
+         * route toward the first account's server (`sipral_advertised_address`).
+         * Each account is reached at the route toward its own server, and a
+         * media socket with no `mediaHost` at the route toward the far end. A
+         * loopback address is never advertised to a remote peer
+         * (`UNREACHABLE_ADDRESS`).
          *
-         * [srtp] may be `SipralSrtp.BEST_EFFORT`: SDES offered on plain
-         * `RTP/AVP`, the call encrypted when the answer takes a key and plain
-         * when it takes none, for a PBX that answers an `RTP/SAVP` offer with
-         * 488. [srtpSuites] are the SRTP suites every call offers and accepts
-         * unless its account names its own, most preferred first, by their
-         * RFC 4568 and RFC 7714 names.
+         * [pathMtu] is the path MTU toward the server when known (`0` for
+         * unknown, else at least 576); RFC 3261 §18.1.1 moves a request to a
+         * stream within 200 bytes of it. [datagramWithoutStreamBytes] deliberately
+         * deviates from that section for UDP-only servers: when no stream can be
+         * had, requests up to this size still go over UDP (`0` never, at most
+         * 65 507), recorded as `transport.kept.datagram`.
          *
-         * [pathMtu] is the MTU of the path toward the server when the
-         * deployment knows it (`0` for unknown, else 576 or more): RFC 3261
-         * §18.1.1 moves a request to a stream within 200 bytes of it.
-         * [datagramWithoutStreamBytes] is a deliberate deviation from that
-         * section, for a server that takes SIP over UDP alone: once no stream
-         * to it can be had, a request up to this many bytes goes over UDP
-         * anyway (`0` for never, at most 65 507), and [diagnosticsJson] says
-         * so as `transport.kept.datagram`.
+         * [pseudonymSalt] (at least 16 bytes, kept by the installation) keys the
+         * pseudonyms in the log and [state], so two runs' traces compare. Treat it
+         * as a secret. [diagnosticTrace] logs whole SIP messages at trace level,
+         * credentials and keys removed; see [setDiagnosticTrace].
          *
-         * [pseudonymSalt] (16 bytes or more, kept by the installation) keys
-         * the pseudonyms the log and [state] write, so that two runs' traces
-         * compare line by line; it is a secret, like a key.
-         * [diagnosticTrace] writes whole SIP messages at the trace level,
-         * peers included and credentials and keys taken out, for a diagnosis;
-         * [setDiagnosticTrace] turns it on and off later.
+         * [systemEchoCancellation] false opens device-mode audio without the
+         * platform's echo canceller (on Android, the voice-recognition preset),
+         * for a headset or an application that cancels echo itself.
          *
-         * [systemEchoCancellation] false opens the devices of a client in
-         * device mode past the platform's echo cancellation -- on Android the
-         * microphone with the voice-recognition preset rather than the
-         * voice-communication one -- for a headset, which has no echo to
-         * cancel, or an application that cancels it on each call itself;
-         * [SipralAudioDevices.info] says what the platform did.
+         * [heldAudio] is what a held party is sent: [SipralHeldAudio.DEFAULT] and
+         * [SipralHeldAudio.SILENCE] send silence in either mode, since application
+         * frames may be a microphone's; [SipralHeldAudio.APPLICATION] sends the
+         * application's frames (hold music, an announcement).
          *
-         * [heldAudio] is what a party this end holds is sent while the hold
-         * lasts: [SipralHeldAudio.DEFAULT] and [SipralHeldAudio.SILENCE] are
-         * silence in either mode, since in application mode too the frames
-         * sent may be a microphone's; [SipralHeldAudio.APPLICATION] sends the
-         * frames the application sends -- hold music, an announcement, a
-         * voice agent's own speech.
-         *
-         * [resolver] answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the
-         * accounts added with a `serverUri`, on a thread of its own per
-         * lookup; [SipralDns.platform] when null.
+         * [resolver] answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for accounts added
+         * with a `serverUri`, one thread per lookup; [SipralDns.platform] when
+         * null.
          */
         fun open(
             bindHost: String? = null,
@@ -631,8 +537,7 @@ class SipralClient private constructor(
         }
     }
 
-    /** The ABI 0.34 to 0.36 members of the stack's configuration, as
-     * [open] took them. */
+    /** The rest of the stack's configuration, as [open] took it. */
     private class Tail(
         val srtpSuites: List<String>,
         val pathMtu: Long,
@@ -643,15 +548,13 @@ class SipralClient private constructor(
         val heldAudio: SipralHeldAudio,
     )
 
-    /** Elapsed milliseconds since this stack was created -- what every
-     * `now_ms` parameter below expects. */
+    /** Milliseconds since this stack was created: what every `now_ms` below
+     * expects. */
     fun nowMs(): Long = (System.nanoTime() - origin) / 1_000_000
 
-    /** Whether this client picks the address peers reach it at -- it was
-     * opened with no `bindHost`, and keeps picking across every
-     * [networkChanged] -- and whether it has picked it yet: the route toward
-     * the first server an account names, since open or since the network
-     * last moved it. Under [movingLock]. */
+    /** Whether this client picks the address peers reach it at (opened with no
+     * `bindHost`), and whether it has picked it yet since open or the last
+     * network move. Under [movingLock]. */
     private var routes = false
     private var routeChosen = true
 
@@ -669,9 +572,8 @@ class SipralClient private constructor(
         get() = synchronized(movingLock) { routes } && link == null
 
     /** The `host:port` an account whose server is [peer] is reached at, on a
-     * client that picks its own address: the route toward the server, on
-     * this client's port. The first server named also becomes the address
-     * the stack's `Via` carries. */
+     * client that picks its own address. The first server named also becomes
+     * the address in the stack's `Via`. */
     private fun advertiseToward(peer: String): String {
         val address = formatAddress(routeHost(peer), bindAddress.substringAfterLast(':').toInt())
         val first = synchronized(movingLock) { (!routeChosen).also { routeChosen = true } }
@@ -695,10 +597,9 @@ class SipralClient private constructor(
         bindAddress = address
     }
 
-    /** What a client bound on every interface advertises after a move,
-     * chosen again as it was at open: the route toward its first account's
-     * server, or with no server to route toward, [address] -- the new
-     * network's own -- on the same port. Under [movingLock]. */
+    /** What a client bound on every interface advertises after a move: the
+     * route toward its first account's server, or else [address] on the same
+     * port. Under [movingLock]. */
     private fun advertiseAgain(address: String?): String {
         routeChosen = false
         val server = accounts.values.map { it.registrarAddress }.firstOrNull(::isAddress)
@@ -712,9 +613,8 @@ class SipralClient private constructor(
         return local
     }
 
-    /** Where a call's media socket is bound: [mediaHost] when one was given,
-     * else the route toward where the media will come from -- [destination],
-     * the account's server, or the address this client is reached at. */
+    /** Where a call's media socket binds: [mediaHost] if given, else the route
+     * toward [destination], the account's server, or this client's address. */
     private fun mediaHostFor(mediaHost: String?, account: SipralAccount?, destination: String?): String {
         if (mediaHost != null) {
             return mediaHost
@@ -729,8 +629,8 @@ class SipralClient private constructor(
 
     private fun accountFor(handle: Long): SipralAccount? = synchronized(movingLock) { accounts[handle] }
 
-    /** The poll thread's half: what the events asked, kept for right after
-     * the poll. */
+    /** Poll thread side: remember what the events asked, to act after the
+     * poll. */
     private fun noteLocate(event: SipralEvent) {
         val locate = locateOf(event) ?: return
         val name = locate.name
@@ -742,12 +642,10 @@ class SipralClient private constructor(
         }
     }
 
-    /** Answer what `LOOKUP_WANTED` asked in the poll that just ran, each
-     * lookup on a thread of its own -- a resolver may take seconds, and the
-     * poll thread may not wait for it -- and act on what `LOCATED` found: an
-     * account located at an address it has not been told of is pointed at
-     * it and, on a client that picks its own address, reached at the route
-     * toward it. */
+    /** Answer the lookups `LOOKUP_WANTED` asked during the last poll, each on
+     * its own thread since a resolver may take seconds. An account `LOCATED`
+     * at a new address is pointed at it and, on a client that picks its own
+     * address, reached at the route toward it. */
     private fun actOnLookups() {
         while (true) {
             val (account, name, record) = lookupsAsked.poll() ?: break
@@ -767,8 +665,7 @@ class SipralClient private constructor(
             try {
                 account.reach(advertiseToward(target), target)
             } catch (_: SipralException) {
-                // the account was removed meanwhile: the next location says
-                // it again, or nothing needs it
+                // the account was removed meanwhile
             }
         }
     }
@@ -777,8 +674,7 @@ class SipralClient private constructor(
         try {
             resolver(name, record)
         } catch (_: Exception) {
-            // the resolver's failure is an answer: the procedure waits for
-            // every one
+            // a failure is an answer too: the procedure waits for every one
             SipralLookup.FAILED
         }
 
@@ -800,11 +696,9 @@ class SipralClient private constructor(
         }
     }
 
-    /** Turn the diagnostic trace on or off while the client runs
-     * (`sipral_stack_diagnostic_trace`): whether the trace level writes every
-     * SIP message whole, with its peer, from now on -- credentials and keys
-     * taken out either way -- or pseudonymised, as by default. Nothing is
-     * written unless the log is at `TRACE`. */
+    /** Turn the diagnostic trace on or off (`sipral_stack_diagnostic_trace`):
+     * whole SIP messages with peers, rather than pseudonymised, at `TRACE`
+     * level. Credentials and keys are removed either way. */
     fun setDiagnosticTrace(on: Boolean) {
         retryBusy { Sipral.stackDiagnosticTrace(handle, toggle(on)) }
     }
@@ -819,11 +713,9 @@ class SipralClient private constructor(
         return SipralSettings.of(raw, suites)
     }
 
-    /** The diagnostic record of every call the client keeps, as JSON
+    /** The diagnostic record of every kept call, as JSON
      * (`sipral_stack_diagnostics_json`): each decision the stack made and
-     * why -- `transport.kept.datagram` among them for a request that went
-     * over UDP past RFC 3261 §18.1.1's line because
-     * `datagramWithoutStreamBytes` let it. */
+     * why. */
     fun diagnosticsJson(): String {
         var capacity = 4096
         while (true) {
@@ -838,15 +730,13 @@ class SipralClient private constructor(
         }
     }
 
-    // -- media ports, the log and the state snapshot ---------------------------
+    // Media ports, the log and the state snapshot
 
     /**
-     * A UDP socket for a call's media at [host]: at [port] when one is named,
-     * otherwise -- on a client with an RTP range -- at an even port reserved
-     * from it (`sipral_stack_rtp_port_reserve`), where one another process
-     * already holds is given back and the next tried, and elsewhere wherever
-     * the operating system puts it. `SipralStatus.EXHAUSTED` once every pair
-     * is taken.
+     * A UDP socket for a call's media at [host]: at [port] if given, else, on
+     * a client with an RTP range, at a reserved even port
+     * (`sipral_stack_rtp_port_reserve`), skipping ports another process holds.
+     * `SipralStatus.EXHAUSTED` once every pair is taken.
      */
     fun openMediaSocket(host: String, port: Int = 0): DatagramSocket {
         val range = rtpPorts
@@ -866,9 +756,8 @@ class SipralClient private constructor(
         throw failure ?: SipralException(SipralStatus.EXHAUSTED, "no RTP port could be bound")
     }
 
-    /** `sipral_stack_rtp_port_release` for a port no call took, on a client
-     * with a range. Best effort: a port a call did take comes back by itself
-     * when the call ends. */
+    /** `sipral_stack_rtp_port_release` for a port no call took. Best effort: a
+     * call's own port comes back when the call ends. */
     internal fun giveBackPort(port: Int) {
         if (rtpPorts == null) {
             return
@@ -882,13 +771,11 @@ class SipralClient private constructor(
 
     /**
      * Send this client's log to [handler] at [level] and louder, or turn it
-     * off with `SipralLogLevel.OFF` or a null handler (`sipral_stack_log`).
-     * The handler runs on whichever thread has just finished a call into the
-     * stack -- the poll thread, usually -- with the stack let go, so it may
-     * call back into it. Every line is already redacted: no user part,
-     * number, IP address or credential reaches it. Its arguments are the
-     * level, which part of the stack wrote the line, the line, and how many
-     * lines a flood had turned away before it.
+     * off with `SipralLogLevel.OFF` or null (`sipral_stack_log`).
+     * The handler runs on whichever thread just left the stack (usually the
+     * poll thread), with the stack unlocked, so it may call back in. Lines are
+     * already redacted. Arguments: level, target, line, and how many lines a
+     * flood suppressed before it.
      */
     fun setLog(level: SipralLogLevel, handler: ((SipralLogLevel, String, String, Long) -> Unit)?) {
         val on = level != SipralLogLevel.OFF && handler != null
@@ -908,10 +795,9 @@ class SipralClient private constructor(
     }
 
     /**
-     * Everything this client's stack is holding, as the redacted text
-     * `sipral_stack_state_text` writes for a crash report: accounts, calls,
-     * transports, media sessions, the last refused calls, the queues, the
-     * RTP range and the counters. Safe from any thread, and never waits.
+     * Everything the stack holds, as the redacted text
+     * `sipral_stack_state_text` writes for a crash report. Safe from any
+     * thread, and never waits.
      */
     fun state(): String {
         val buffer = ByteArray(Sipral.STATE_TEXT_MAX.toInt())
@@ -920,19 +806,13 @@ class SipralClient private constructor(
     }
 
     /**
-     * Send this client's log to `java.util.logging`, which every JVM and
-     * Android carries with no library to add (on Android it reaches logcat).
-     * Each line goes to the child logger of its target -- `sipral.call`,
-     * `sipral.sip`, `sipral.api` and so on under the default `sipral`
-     * logger (`docs/17-observability.md` lists the targets) -- so an
-     * application filters by the part of the stack that wrote it. The
-     * levels map as `ERROR` to `SEVERE`, `WARN` to `WARNING`, `INFO` to
-     * `INFO`, `DEBUG` to `FINE` and `TRACE` to `FINEST`; a line that follows
-     * a flood says how many lines were turned away before it. [level] left
-     * null follows the logger's effective level as it is now, so lines the
-     * logger would drop are never formatted. An application on SLF4J or
-     * Timber hands [setLog] a lambda that calls it instead. Replaces
-     * whatever [setLog] installed.
+     * Send this client's log to `java.util.logging` (logcat on Android).
+     * Each line goes to the child logger of its target (`sipral.call`,
+     * `sipral.sip`, ...; `docs/17-observability.md`). Levels map `ERROR` to
+     * `SEVERE`, `WARN` to `WARNING`, `INFO` to `INFO`, `DEBUG` to `FINE`,
+     * `TRACE` to `FINEST`. [level] null follows the logger's current effective
+     * level, so dropped lines are never formatted. For SLF4J or Timber, pass
+     * [setLog] a lambda instead. Replaces whatever [setLog] installed.
      */
     fun logTo(logger: Logger = Logger.getLogger("sipral"), level: SipralLogLevel? = null) {
         val children = ConcurrentHashMap<String, Logger>()
@@ -947,31 +827,19 @@ class SipralClient private constructor(
     }
 
     /**
-     * This client's health counters since it was opened
-     * (`sipral_stack_counters`): registrations, how calls ended, what was
-     * screened, and -- new in ABI 0.30 -- requests and responses sent again,
-     * transactions timed out and requests refused at a limit. One struct
-     * copy, cheap enough to sample on a timer; every field only grows except
-     * `activeCalls`.
+     * Health counters since open (`sipral_stack_counters`). One struct copy,
+     * cheap to sample on a timer; every field only grows except `activeCalls`.
      */
     fun counters(): SipralCounters = retryBusy { Sipral.stackCounters(handle) }
 
     /**
-     * Ask these STUN servers from now on, in order of preference, each
-     * `host:port` -- what [open]'s `stunServer` and `stunFallbacks` would
-     * have named -- without opening the client again
-     * (`sipral_stack_stun_servers`). Every socket the stack keeps mapped is
-     * asked again of the new list at once: `SIPRAL_EVENT_KIND_STUN_SERVER`
-     * ([stunServerOf]) says the server in use moved and
-     * `SIPRAL_EVENT_KIND_NAT_MAPPING` what the new one answers. On a client
-     * opened without a STUN server the signalling socket starts being kept
-     * mapped, and every media socket opened from then on is asked where it
-     * appears from before its call is described. An empty list asks nobody
-     * any more: accounts a STUN answer moved register their own address
-     * again, and calls are described by their sockets' own addresses. A
-     * client with a TURN server keeps asking STUN, so an empty list there
-     * throws `SipralStatus.INVALID_ARGUMENT`, as does an entry that is not
-     * an address and a port.
+     * Replace the STUN servers, in order of preference, each `host:port`
+     * (`sipral_stack_stun_servers`). Every mapped socket asks the new list at
+     * once; `SIPRAL_EVENT_KIND_STUN_SERVER` and `SIPRAL_EVENT_KIND_NAT_MAPPING`
+     * follow. On a client opened without STUN, mapping starts now. An empty
+     * list stops STUN: accounts register their own address again. A client
+     * with a TURN server needs STUN, so an empty list there throws
+     * `SipralStatus.INVALID_ARGUMENT`, as does a malformed entry.
      */
     fun setStunServers(servers: List<String>) {
         retryBusy { Sipral.stackStunServers(handle, servers.joinToString(","), nowMs()) }
@@ -979,16 +847,13 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_stack_network_test`: test the network before a call without
-     * placing one of its own, and return the test's number. What it found
-     * arrives as `SIPRAL_EVENT_KIND_NETWORK_TEST` ([networkTestOf]).
-     * [account] has its server asked with an `OPTIONS` on its own transport;
-     * on a client with a STUN server the answer the signalling socket was
-     * last given stands for the STUN part. [echoCall] is a call this client
-     * placed to an echo service: its audio is measured for [echoMs] (8000 by
-     * default) once its media starts, and the test hangs it up. A part that
-     * has not answered within [timeoutMs] (30000 by default) counts as
-     * failed.
+     * `sipral_stack_network_test`: test the network without placing a call;
+     * returns the test's number, and the result arrives as
+     * `SIPRAL_EVENT_KIND_NETWORK_TEST` ([networkTestOf]). [account]'s server
+     * gets an `OPTIONS`; with a STUN server, the signalling socket's last
+     * answer stands for the STUN part. [echoCall] is a call to an echo
+     * service, measured for [echoMs] (default 8000) once media starts, then
+     * hung up. A part silent past [timeoutMs] (default 30000) fails.
      */
     fun networkTest(
         account: SipralAccount? = null,
@@ -1009,18 +874,14 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_stack_stir`: verify the callers of the calls this client's
-     * accounts receive against [anchors] (PEM or DER certificates, the
-     * STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224),
-     * replacing what an earlier call set. [unixSeconds] is the wall clock
-     * now, which a PASSporT is signed and judged by, and defaults to this
-     * machine's; a client whose accounts only sign calls this too, with no
-     * anchors, before adding them. The certificate a call names is asked for
-     * by `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` ([verificationOf]) and
-     * handed over with [stirCertificate]. [acceptServiceProviderCodes] lets
-     * a certificate that names a service provider code rather than numbers
-     * vouch for any caller, as a SHAKEN deployment's do; off, a certificate
-     * covers only the numbers it names.
+     * `sipral_stack_stir`: verify the callers of incoming calls against
+     * [anchors] (PEM or DER, the STI-PA roots under SHAKEN) from now on (RFC
+     * 8224), replacing earlier anchors. [unixSeconds] is the clock a PASSporT
+     * is judged by. A client that only signs calls this too, with no anchors,
+     * before adding accounts. The certificate is requested by
+     * `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` ([verificationOf]) and supplied
+     * with [stirCertificate]. [acceptServiceProviderCodes] lets a certificate
+     * naming a service provider code vouch for any caller, as SHAKEN's do.
      */
     fun stir(
         anchors: ByteArray?,
@@ -1040,62 +901,51 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_call_stir_certificate`: the chain the URL a verification asked
-     * for yielded -- PEM or DER, the signing certificate first -- or null for
-     * one that could not be had. [call] is the handle the event named: the
-     * call has not been announced yet. Its verdict follows as
-     * `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` at
+     * `sipral_call_stir_certificate`: the chain fetched for a verification
+     * (PEM or DER, signer first), or null if it could not be had. [call] is
+     * the handle from the event; the call is not yet announced. The verdict
+     * follows as `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` at
      * `SIPRAL_VERIFICATION_STAGE_VERIFIED`.
      */
     fun stirCertificate(call: Long, chain: ByteArray?) {
         retryBusy { Sipral.callStirCertificate(handle, call, chain ?: ByteArray(0), nowMs()) }
     }
 
-    // -- accounts and calls ------------------------------------------------
+    // Accounts and calls
 
     /**
      * `sipral_account_add`. See [SipralAccount].
      *
-     * [sessionTimer] is how the account's calls ask for a session timer (RFC
-     * 4028): thirty minutes by default. [privacy] places every call
-     * anonymously (RFC 3323): `setOf(SipralPrivacy.ID)` is "withhold my
-     * number" -- `From` becomes `"Anonymous"
-     * <sip:anonymous@anonymous.invalid>`, `Privacy` carries the values, and
-     * the account's own identity goes in `P-Asserted-Identity` only toward a
-     * trusted peer. [trustedPeers] are the IP addresses of the peers this
-     * account trusts -- usually the registrar or the trunk -- RFC 3325's
-     * trust domain: a call from one of them has its asserted identity read
-     * ([callerIdentity]), from anywhere else it is left out, and once any
-     * are named no identity field leaves toward any other peer. [security]
-     * is the account's own SRTP policy and suites, and its STIR/SHAKEN
-     * verification and signing ([SipralAccountSecurity]).
+     * [sessionTimer] is the session timer the account's calls ask for (RFC
+     * 4028), thirty minutes by default. [privacy] places calls anonymously
+     * (RFC 3323): `setOf(SipralPrivacy.ID)` withholds the number, `From`
+     * becomes `"Anonymous" <sip:anonymous@anonymous.invalid>`, and the real
+     * identity goes in `P-Asserted-Identity` only toward a trusted peer.
+     * [trustedPeers] are the IP addresses of RFC 3325's trust domain (usually
+     * the registrar or trunk): a call from one has its asserted identity read
+     * ([callerIdentity]), from elsewhere it is dropped, and once any are named
+     * no identity header goes to other peers. [security] is the account's
+     * SRTP and STIR/SHAKEN policy ([SipralAccountSecurity]).
      *
-     * [serverUri] names the server by a URI whose host RFC 3263 locates --
-     * `sip:pbx.example.com`, `sips:example.com:5061` -- in place of
-     * [registrarAddress]: exactly one of the two is given. The lookups are
-     * the client's `resolver`'s; `SIPRAL_EVENT_KIND_LOCATED` ([locateOf])
-     * says where the server was found and `LOCATE_FAILED` why not. A
-     * REGISTER waits for the first answer, and a call placed before it with
-     * no `destination` throws with `WRONG_STATE`. [serverNaptr] asks the
-     * domain for NAPTR records before SRV (RFC 3263 §4.1). [keepaliveMs]
-     * keeps the account's flow to its server open at that interval whatever
-     * STUN found -- a double CRLF on UDP, a ping on a stream -- 1 000 to
-     * 120 000, `0` for never. [tlsPin] is the SHA-256 fingerprint of the one
-     * TLS certificate the account trusts, for an application that runs the
-     * account's TLS itself: [SipralAccount.checkCertificate] is its verdict.
+     * [serverUri] names the server by a URI located per RFC 3263
+     * (`sip:pbx.example.com`), instead of [registrarAddress]: give exactly
+     * one. `SIPRAL_EVENT_KIND_LOCATED` ([locateOf]) says where it was found,
+     * `LOCATE_FAILED` why not. REGISTER waits for the first answer; a call
+     * placed before it with no `destination` throws `WRONG_STATE`.
+     * [serverNaptr] asks for NAPTR before SRV (RFC 3263 §4.1). [keepaliveMs]
+     * keeps the flow open whatever STUN found (1 000 to 120 000, `0` never).
+     * [tlsPin] is the SHA-256 fingerprint of the one TLS certificate trusted,
+     * for an application running the account's TLS itself;
+     * [SipralAccount.checkCertificate] gives the verdict.
      *
      * [streamProtocol] ([SipralTransport.TCP] or [SipralTransport.TLS]) puts
-     * the account on a connection of its own to its server, beside accounts
-     * on this client's UDP socket to other servers, in one stack with one
-     * audio engine: the stack asks for the connection
-     * (`SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, nothing outgrown), this client
-     * opens it to the account's server whatever `streamFallback` says and
-     * binds it, and the REGISTER and every call of the account go over it. A
-     * TLS one is held to [tlsPin] when the account has one, to the client's
-     * `tlsTrust` otherwise, under `tlsServerName` or the server's host. One
-     * that closes is opened again. Until it is open a call the account
-     * places throws with `TRANSPORT_DOWN`. Only on a client that signals
-     * over UDP.
+     * the account on its own connection to its server, alongside UDP accounts
+     * in the same stack. The stack asks for it with
+     * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED`, this client opens and binds it
+     * regardless of `streamFallback`, and the account's REGISTER and calls use
+     * it. TLS is held to [tlsPin] if set, else to the client's `tlsTrust`. A
+     * closed connection is reopened; until it is open a call throws
+     * `TRANSPORT_DOWN`. Only on a client signalling over UDP.
      */
     fun addAccount(
         aor: String,
@@ -1156,9 +1006,8 @@ class SipralClient private constructor(
         synchronized(movingLock) { accounts.remove(account) }
     }
 
-    /** Where an account is reached, for one that wrote no `Contact` of its
-     * own: the AOR's user at [at], and after it the transport -- [stream]'s
-     * for an account on a connection of its own, the client's otherwise. */
+    /** Where an account without its own `Contact` is reached: the AOR's user
+     * at [at], with [stream]'s transport or the client's. */
     internal fun defaultContact(aor: String, at: String = bindAddress, stream: SipralTransport? = null): String {
         val scheme = aor.substringBefore(':', "sip")
         val rest = aor.substringAfter(':', aor)
@@ -1177,9 +1026,9 @@ class SipralClient private constructor(
         bindAddress = local
     }
 
-    /** Every account added without a `Contact` of its own moves to the new
-     * connection's address, and every one that was registering registers
-     * again now rather than at its next back-off. */
+    /** Accounts without their own `Contact` move to the new connection's
+     * address, and those registering register again now rather than at their
+     * next back-off. */
     internal fun afterReconnect() {
         val all = synchronized(movingLock) { accounts.values.toList() }
         for (account in all) {
@@ -1195,31 +1044,24 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_call_place`, with this stack running the call's own audio: a
-     * media socket is opened here, before the INVITE goes out, and its
-     * `host:port` is what `media_address` in `sipral_call_config_t` offers.
+     * `sipral_call_place`, with this stack running the call's audio: a media
+     * socket is opened before the INVITE and offered as `media_address`.
      *
-     * With a [stunServer], the socket is first asked where it appears from,
-     * and this returns once the server has answered -- or has not, five and
-     * a half seconds on; with a TURN server, once the relay is allocated or
-     * refused as well. So call it off the main thread. [ice] overrides the
-     * client's own ICE policy for this call. [headers] go on the INVITE as
-     * written -- an `Alert-Info` asking for a distinctive ring, an
-     * `Answer-Mode` asking an intercom to pick up.
+     * With a [stunServer] this blocks until the server answers (or 5.5 s
+     * pass), and with TURN until the relay is allocated or refused, so call it
+     * off the main thread. [ice] overrides the client's ICE policy. [headers]
+     * go on the INVITE as written (`Alert-Info`, `Answer-Mode`).
      *
-     * [codecs] offers this call's audio in that order instead of the
-     * client's (`sipral_codec_info_t` names, comma-separated): `L16/16000` or
-     * `L16/8000` is how linear audio is offered at all. [text] binds a second
-     * socket at [mediaHost] and offers real-time text on it (RFC 4103):
-     * [SipralMedia.sendText] and [SipralCall.text] carry it once the far end
-     * agrees; it is not offered on a call keyed by SRTP or gathering ICE,
-     * which the text stream would leave in the clear. [feedback] offers
-     * RTP/AVPF with Generic NACKs and reduced-size RTCP (RFC 4585, RFC 5506),
-     * which a far end knowing only RTP/AVP refuses; [focus] says this end is
-     * a conference's focus (`isfocus`, RFC 4579). [followRedirects] sends
-     * the call on to the targets a 3xx names (RFC 3261 §8.1.3.4); left off,
-     * a 3xx ends the call with its status, and the `Contact` it named is the
-     * application's to act on.
+     * [codecs] orders this call's codecs (`sipral_codec_info_t` names,
+     * comma-separated); `L16/16000` or `L16/8000` is the only way to offer
+     * linear audio. [text] offers real-time text (RFC 4103) on a second socket
+     * at [mediaHost], carried by [SipralMedia.sendText] and [SipralCall.text];
+     * it is not offered with SRTP or ICE, which would leave it in the clear.
+     * [feedback] offers RTP/AVPF with Generic NACK and reduced-size RTCP (RFC
+     * 4585, RFC 5506), which an RTP/AVP-only peer refuses. [focus] marks this
+     * end as a conference focus (`isfocus`, RFC 4579). [followRedirects]
+     * follows a 3xx's targets (RFC 3261 §8.1.3.4); otherwise a 3xx ends the
+     * call and its `Contact` is the application's to act on.
      */
     fun placeCall(
         account: SipralAccount,
@@ -1275,14 +1117,11 @@ class SipralClient private constructor(
      * Open a media socket for an incoming call and answer it there.
      * `event` is the `SIPRAL_EVENT_KIND_INCOMING_CALL` read off [events].
      *
-     * [text] binds a second socket at [mediaHost] and takes the real-time
-     * text the offer carries on it. [codecs] answers in that order of this
-     * build's codecs instead of the client's -- `L16/16000` for linear
-     * audio -- and [focus] says this end is the focus of a conference
-     * (`isfocus`, RFC 4579). An offer that asked for RTCP feedback is
-     * answered on RTP/AVPF whatever this says (RFC 4585 §4.1 leaves an
-     * answerer no other way to take the stream); [feedback] adds what this
-     * end does with it, Generic NACKs and reduced-size RTCP.
+     * [text] takes the offer's real-time text on a second socket. [codecs]
+     * orders the answer's codecs (`L16/16000` for linear audio). [focus] marks
+     * a conference focus (`isfocus`, RFC 4579). An offer asking for RTCP
+     * feedback is answered on RTP/AVPF regardless (RFC 4585 §4.1 leaves no
+     * other way); [feedback] adds Generic NACK and reduced-size RTCP.
      */
     fun answerCall(
         event: SipralEvent,
@@ -1298,18 +1137,15 @@ class SipralClient private constructor(
     )
 
     /**
-     * [answerCall] by call handle, for a caller that has the handle and not
-     * the event -- [SipralAnnounced.Arrived] hands back only the handle, and
-     * the `SIPRAL_EVENT_KIND_INCOMING_CALL` behind it may already have been
-     * read by somebody else. [SipralCall.identity] then has the lists but
-     * not the facts the event carried: whether the peer was trusted, and
-     * what it asserted.
+     * [answerCall] by call handle, for a caller that has only the handle (from
+     * [SipralAnnounced.Arrived]). [SipralCall.identity] then lacks what only
+     * the event carried: whether the peer was trusted and what it asserted.
      */
     fun answerCall(callHandle: Long, mediaHost: String? = null, mediaPort: Int = 0): SipralCall =
         answerCall(callHandle, mediaHostFor(mediaHost, null, null), mediaPort, null, Answered())
 
-    /** How [answerCall] answers: what `sipral_call_answer_with` takes beyond
-     * the media socket, none of it asked for by default. */
+    /** What `sipral_call_answer_with` takes beyond the media socket; nothing
+     * asked for by default. */
     private data class Answered(
         val text: Boolean = false,
         val codecs: String? = null,
@@ -1353,8 +1189,7 @@ class SipralClient private constructor(
         return call
     }
 
-    /** `sipral_call_reject`, for a call nothing has answered: no media
-     * socket was ever needed. */
+    /** `sipral_call_reject`, for a call nothing has answered. */
     fun rejectCall(event: SipralEvent, code: Long = 486) {
         rejectCall(event.call, code)
     }
@@ -1365,12 +1200,11 @@ class SipralClient private constructor(
     }
 
     /**
-     * Answer the `SIPRAL_EVENT_KIND_INCOMING_CALL` [event] names with a 3xx
-     * instead of taking it (`sipral_call_redirect`, RFC 3261 §21.3): 302 is
-     * call forwarding, [targets] are where to try in order of preference,
-     * and [reason] -- `no-answer`, `user-busy`, `unconditional`,
-     * `deflection`, `do-not-disturb` or any other token -- adds a
-     * `Diversion` (RFC 5806) naming the address that was called.
+     * Answer an incoming call with a 3xx instead (`sipral_call_redirect`, RFC
+     * 3261 §21.3): 302 is call forwarding, [targets] in order of preference.
+     * [reason] (`no-answer`, `user-busy`, `unconditional`, `deflection`,
+     * `do-not-disturb` or any token) adds a `Diversion` (RFC 5806) naming the
+     * called address.
      */
     fun redirectCall(event: SipralEvent, targets: List<String>, status: Int = 302, reason: String? = null) {
         redirect(event.call, targets, status, reason)
@@ -1382,8 +1216,8 @@ class SipralClient private constructor(
         }
     }
 
-    /** Who is calling, beyond the `From`, for the incoming call [event]
-     * names -- read before deciding whether to answer. */
+    /** Who is calling, beyond the `From`, for the incoming call [event] names;
+     * read it before deciding whether to answer. */
     fun callerIdentity(event: SipralEvent): SipralCallerIdentity =
         IdentityReader.identity(this, event.call, event.payload.call)
 
@@ -1392,19 +1226,16 @@ class SipralClient private constructor(
         IdentityReader.answering(this, event.call, event.payload.call)
 
     /**
-     * Take a REFER outside any dialog and place the call it asks for:
-     * `sipral_call_accept_transfer` on the referral's handle. `event` is the
-     * `SIPRAL_EVENT_KIND_REFERRAL` read off [events], whose [referralOf]
-     * has a zero `statusCode`.
+     * Take a REFER outside any dialog and place the call it asks for
+     * (`sipral_call_accept_transfer`). `event` is a `SIPRAL_EVENT_KIND_REFERRAL`
+     * whose [referralOf] has a zero `statusCode`.
      *
-     * The stack answers 202, reports on the call to whoever asked, and
-     * places it from the account the event names, to the REFER's own target
-     * -- never the caller's. A media socket is opened for it here, the way
-     * [placeCall] opens one, and the [SipralCall] returned is that placed
-     * call. Whoever sent the REFER can make this line dial anything, so this
-     * is never done on the application's behalf. With a [stunServer] it
-     * waits for the mapping as [placeCall] does, so call it off the main
-     * thread.
+     * The stack answers 202, reports progress to the referrer, and places the
+     * call from the event's account to the REFER's target. A media socket is
+     * opened as for [placeCall], and the returned [SipralCall] is that call.
+     * The referrer can make this line dial anything, so this is never done
+     * automatically. With a [stunServer] it blocks like [placeCall]; call it
+     * off the main thread.
      */
     fun acceptReferral(
         event: SipralEvent,
@@ -1439,20 +1270,18 @@ class SipralClient private constructor(
         retryBusy { Sipral.callRejectTransfer(handle, event.call, code, nowMs()) }
     }
 
-    /** `sipral_announcement_forget`: the user dismissed a screen a push
-     * raised before its INVITE came. `SIPRAL_STATUS_WRONG_STATE` when it
-     * was already fulfilled or had already expired -- the event saying so
-     * and this call can cross. */
+    /** `sipral_announcement_forget`: the user dismissed a screen a push raised
+     * before its INVITE came. `SIPRAL_STATUS_WRONG_STATE` when it was already
+     * fulfilled or expired, since that event and this call can cross. */
     fun forgetAnnouncement(announcement: Long) {
         retryBusy { Sipral.announcementForget(handle, announcement) }
     }
 
     internal fun callFor(callHandle: Long): SipralCall? = calls[callHandle]
 
-    /** A call this client runs the media of, and -- with a TURN server
-     * reached over TCP or TLS -- the socket whose connection its last
-     * farewell goes on, kept past the call itself until that connection
-     * closes. */
+    /** A call whose media this client runs. With TURN over TCP or TLS, the
+     * socket is kept past the call until its connection closes, since the last
+     * farewell goes on it. */
     private fun track(call: SipralCall, callHandle: Long, mediaAddress: String) {
         calls[callHandle] = call
         if (turn != null && overStream(turn.transport.value.toLong())) {
@@ -1464,16 +1293,14 @@ class SipralClient private constructor(
         calls.remove(callHandle)
     }
 
-    // -- connections to recording servers -------------------------------------
+    // Connections to recording servers
 
     /** The TCP connections to recording servers, by the transport id each
      * was bound under. */
     private val recordingLinks = ConcurrentHashMap<Long, Socket>()
 
-    /** The next transport id a connection this layer opens is bound under:
-     * the number is the caller's to choose, and one count for every kind of
-     * connection keeps two of them from ever sharing one, however many
-     * recordings a long-running client makes. */
+    /** The next transport id for a connection this layer opens. One counter for
+     * every kind of connection keeps two from ever sharing an id. */
     internal val nextLink = java.util.concurrent.atomic.AtomicLong(FIRST_LINK)
 
     /** The recording sessions running, by handle: the call each records and
@@ -1482,9 +1309,8 @@ class SipralClient private constructor(
 
     /**
      * Connect over TCP to a recording server at [destination] (`host:port`)
-     * and bind the connection as a transport of its own, for
-     * [SipralCall.recordTo]: its INVITE is larger than RFC 3261 §18.1.1 lets
-     * over UDP. `TRANSPORT_DOWN` when the server refused the connection.
+     * and bind it as its own transport, for [SipralCall.recordTo]: the INVITE
+     * is too large for UDP (RFC 3261 §18.1.1). `TRANSPORT_DOWN` when refused.
      */
     internal fun openRecordingLink(destination: String): Long {
         val socket = Socket()
@@ -1577,9 +1403,8 @@ class SipralClient private constructor(
         recordings[recording] = call to link
     }
 
-    /** A recording session ended: its call stops copying, and its
-     * connection closes a second later, once what this end still owes the
-     * server -- the answer to its BYE -- has left on it. */
+    /** A recording session ended: its call stops copying, and the connection
+     * closes a second later, once the answer to the BYE has left on it. */
     private fun recordingEnded(recording: Long) {
         val (call, link) = recordings.remove(recording) ?: return
         call.recordingEnded()
@@ -1588,7 +1413,6 @@ class SipralClient private constructor(
                 try {
                     Thread.sleep(1_000)
                 } catch (_: InterruptedException) {
-                    // closing now, then
                 }
                 closeRecordingLink(link)
             }, "sipral-recording-close").apply {
@@ -1598,7 +1422,7 @@ class SipralClient private constructor(
         }
     }
 
-    // -- RFC 3261 §18.1.1: a request too large for a datagram -----------------
+    // RFC 3261 §18.1.1: a request too large for a datagram
 
     /** Whether a request too large for a datagram gets a connection
      * ([open]'s `streamFallback`). */
@@ -1608,46 +1432,37 @@ class SipralClient private constructor(
      * ([open]'s `streamServer`). */
     private var streamServer: String? = null
 
-    /** The TCP connections opened for requests too large for a datagram, by
-     * the transport id each was bound under ([nextLink]), with where each
-     * goes; the destinations one is being opened to; and where
-     * `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for one during the poll that
-     * raised it, acted on right after that poll. */
+    /** TCP connections opened for oversized requests, by transport id, with
+     * their destination; destinations being connected; and what
+     * `TRANSPORT_WANTED` asked during the last poll, acted on after it. */
     private val streamLinks = ConcurrentHashMap<Long, Pair<String, Socket>>()
     private val streamsOpening: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val streamsAsked = java.util.concurrent.ConcurrentLinkedQueue<SipralTransportWantedEvent>()
 
-    /** What a TLS connection of an account's own trusts when the account
-     * pins nothing, and the name it is opened under (the server's host when
-     * null): [open]'s `tlsTrust` and `tlsServerName`. */
+    /** Trust and server name for an account's own TLS connection when the
+     * account pins nothing: [open]'s `tlsTrust` and `tlsServerName`. */
     private var streamTlsTrust: SipralTlsTrust = SipralTlsTrust.Platform
     private var givenTlsServerName: String? = null
 
-    /** The transport ids `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` named during
-     * that same poll, acted on at the same moment. */
+    /** Transport ids `TRANSPORT_FAILED` named during the same poll. */
     private val streamsLetGo = java.util.concurrent.ConcurrentLinkedQueue<Long>()
 
-    /** Whether that same poll named the main transport of a client that
-     * signals over TCP or TLS: the stack retires a connection that stopped
-     * answering keep-alives (RFC 5626 §4.4.1) with its socket still open
-     * here, and sends nothing on it again until a new one is bound. Read and
-     * written on the poll thread only. */
+    /** Whether that poll retired the main TCP/TLS transport. The stack retires
+     * a connection that stopped answering keep-alives (RFC 5626 §4.4.1) while
+     * its socket is still open here. Poll thread only. */
     private var mainLetGo = false
 
-    /** Remember a transport the stack let go of, for after the poll that
-     * said so: a connection opened here that stopped answering keep-alives
-     * (RFC 5626 §4.4.1) is retired by the stack while its socket is still
-     * open here, and a connection kept open that the stack will never write
-     * to again would stand in for the new one it asks for. */
+    /** Remember a transport the stack let go of, to close after the poll: a
+     * retired connection left open would stand in for the new one the stack
+     * asks for. */
     internal fun noteStreamLetGo(id: Long) {
         streamsLetGo.add(id)
     }
 
-    /** Answer what `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` asked for in the poll
-     * that just ran: a connection to each destination not already connected
-     * or being connected to, opened on a thread of its own, or -- with
-     * `streamFallback` off -- the word that none is coming. First the
-     * connections the stack let go of in that poll. */
+    /** Answer `TRANSPORT_WANTED` from the last poll: connect to each
+     * destination not already connected or connecting, on its own thread, or,
+     * with `streamFallback` off, say none is coming. Retired connections are
+     * closed first. */
     private fun actOnStreamsWanted() {
         while (true) {
             val letGo = streamsLetGo.poll() ?: break
@@ -1660,8 +1475,8 @@ class SipralClient private constructor(
             if (!seen.add(destination) || streamLinks.values.any { it.first == destination }) {
                 continue
             }
-            // an account on a connection of its own asks with nothing
-            // outgrown; that one is opened whatever streamFallback says
+            // an account on its own connection asks with nothing outgrown, and is
+            // opened whatever streamFallback says
             val opens = streamFallback || (wanted.requestBytes == 0L && wanted.limitBytes == 0L)
             val over = if (wanted.protocol == SipralTransport.TLS.value.toLong()) SipralTransport.TLS else SipralTransport.TCP
             if (!opens) {
@@ -1683,9 +1498,8 @@ class SipralClient private constructor(
         }
     }
 
-    /** What a TLS connection to [destination] trusts: the pin of an account
-     * on a connection of its own to that server when it has one, the
-     * client's `tlsTrust` otherwise. */
+    /** What a TLS connection to [destination] trusts: the pin of an account on
+     * its own connection there, else the client's `tlsTrust`. */
     private fun streamTrust(destination: String): SipralTlsTrust {
         val pinned = synchronized(movingLock) {
             accounts.values.firstOrNull {
@@ -1695,12 +1509,9 @@ class SipralClient private constructor(
         return pinned?.tlsPin?.let { SipralTlsTrust.Pinned(it) } ?: streamTlsTrust
     }
 
-    /** Connect over TCP -- or TLS, for an account whose connection speaks
-     * it -- to [destination], or to `streamServer` when one was given for
-     * TCP, and bind the connection under [id] as the stream to
-     * [destination], then read it until it closes; a connection that cannot
-     * be made is told to the stack under that same id, which ends what was
-     * waiting for it. */
+    /** Connect over TCP or TLS to [destination] (or `streamServer` for TCP),
+     * bind it under [id] and read it until it closes. A failed connection is
+     * reported under the same id, which ends whatever waited for it. */
     private fun openStreamLink(id: Long, destination: String, over: SipralTransport = SipralTransport.TCP) {
         val tls = over == SipralTransport.TLS
         val server = if (tls) destination else streamServer ?: destination
@@ -1754,10 +1565,9 @@ class SipralClient private constructor(
         readStreamLink(id, socket)
     }
 
-    /** `sipral_stack_transport_failed_with` for a connection that was not made;
-     * never throwing on the way out. [what] finishes a sentence that begins
-     * with the protocol, "TCP" or "TLS" -- where the connection was going
-     * and what became of it -- carried to the event's detail. */
+    /** `sipral_stack_transport_failed_with` for a connection not made; never
+     * throws. [what] completes a sentence starting with "TCP" or "TLS" and
+     * ends up in the event's detail. */
     private fun sayNoStream(
         id: Long,
         error: SipralTransportError,
@@ -1779,7 +1589,7 @@ class SipralClient private constructor(
                 )
             }
         } catch (_: SipralException) {
-            // nothing was waiting any more, or the stack is going away
+            // nothing waits any more, or the stack is going away
         }
     }
 
@@ -1805,8 +1615,8 @@ class SipralClient private constructor(
         }
     }
 
-    /** What the connection carried, to `sipral_stack_receive_stream`, every
-     * byte in order; the far end closing it is `sipral_stack_stream_closed`. */
+    /** Feed the connection's bytes, in order, to `sipral_stack_receive_stream`;
+     * the far end closing it is `sipral_stack_stream_closed`. */
     private fun readStreamLink(id: Long, socket: Socket) {
         val buffer = ByteArray(TRANSMIT_BYTES)
         val input = try {
@@ -1858,15 +1668,14 @@ class SipralClient private constructor(
         }
     }
 
-    // -- media sockets behind a NAT ------------------------------------------
+    // Media sockets behind a NAT
 
-    // Media sockets `sipral_stack_nat_map` named whose call has no media
-    // handle yet, by `host:port`: the poll thread reads them and hands what
-    // arrives to `sipral_stack_receive_stun`, and sends what
-    // `sipral_stack_poll_stun` names each of them as the source of. Every
-    // read, send and close of one happens under `natLock`, so the poll
-    // thread never touches a socket that was just given back; no ABI call
-    // is made under it.
+    // Media sockets `sipral_stack_nat_map` named whose call has no media handle
+    // yet, by `host:port`. The poll thread reads them for
+    // `sipral_stack_receive_stun` and sends from them what
+    // `sipral_stack_poll_stun` names. Every read, send and close happens under
+    // `natLock`, so the poll thread never touches a socket just given back; no
+    // ABI call is made under it.
     private val natLock = Any()
     private val stunSockets = HashMap<String, DatagramSocket>()
     private val natWaiters = ConcurrentHashMap<String, NatWaiter>()
@@ -1888,12 +1697,11 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_stack_nat_map` for a media socket about to carry a call, and
-     * the wait until the stack can describe the call by what the servers
-     * said: placing or answering before that is `SIPRAL_STATUS_WRONG_STATE`.
-     * The STUN answer comes within five and a half seconds whatever the
-     * server does; a TURN Allocate nobody answers is given up on after
-     * thirty-nine and a half. Nothing at all without a STUN server.
+     * `sipral_stack_nat_map` for a media socket about to carry a call, then
+     * wait until the stack can describe the call; placing or answering before
+     * that is `SIPRAL_STATUS_WRONG_STATE`. STUN answers within 5.5 s whatever
+     * the server does; an unanswered TURN Allocate is abandoned after 39.5 s.
+     * Does nothing without a STUN server.
      */
     private fun mapMediaSocket(mediaSocket: DatagramSocket, local: String): String? {
         if (stunServer == null) {
@@ -1929,19 +1737,18 @@ class SipralClient private constructor(
         }
     }
 
-    /** The call on `local` has its media handle: its socket's datagrams go
-     * to `sipral_media_receive` from now on, read by [SipralMedia]'s own
-     * thread. Called on the poll thread, in the poll that raised
-     * `SIPRAL_EVENT_KIND_MEDIA_STARTED`. */
+    /** The call on `local` has its media handle: its datagrams now go to
+     * `sipral_media_receive` on [SipralMedia]'s thread. Called on the poll
+     * thread, in the poll that raised `SIPRAL_EVENT_KIND_MEDIA_STARTED`. */
     internal fun mediaSocketTaken(local: String) {
         synchronized(natLock) { stunSockets.remove(local) }
     }
 
     /**
-     * A media socket that will carry no call after all, or whose call ended
-     * before it had media: `sipral_stack_nat_unmap`, so the stack stops
-     * refreshing its mapping and gives its relay back, the Refresh that
-     * does that sent from the socket itself, and then the socket closed.
+     * A media socket that will carry no call, or whose call ended before
+     * media: `sipral_stack_nat_unmap` stops the mapping refresh and releases
+     * the relay (the Refresh is sent from the socket itself), then the socket
+     * is closed.
      */
     internal fun giveBackMediaSocket(mediaSocket: DatagramSocket, local: String) {
         val named = synchronized(natLock) { stunSockets.containsKey(local) }
@@ -1961,11 +1768,10 @@ class SipralClient private constructor(
     }
 
     /**
-     * `sipral_stack_poll_stun`: every request a media socket owes, sent from
-     * the socket the stack names -- the address the server sees it come from
-     * is the whole point -- to wherever the stack says. Its buffers are its
-     * own, since the poll thread and a thread giving a socket back can both
-     * be here.
+     * `sipral_stack_poll_stun`: send each request from the socket the stack
+     * names, since the source address the server sees is the point. Buffers
+     * are local because the poll thread and a thread giving a socket back can
+     * both be here.
      */
     private fun drainStun() {
         if (stunServer == null) {
@@ -1989,8 +1795,8 @@ class SipralClient private constructor(
             }
             val from = String(source, 0, lens[2].toInt(), Charsets.UTF_8)
             if (overStream(lens[3])) {
-                // for the TURN server, on the socket's connection to it:
-                // never a datagram, which a network that blocks UDP drops
+                // to the TURN server on its connection, never as a datagram, which a
+                // network that blocks UDP drops
                 writeTurn(from, data.copyOfRange(0, len))
                 continue
             }
@@ -2005,9 +1811,8 @@ class SipralClient private constructor(
         }
     }
 
-    /** Everything waiting on the media sockets not yet handed to a call's
-     * media, read under `natLock` and handed to `sipral_stack_receive_stun`
-     * outside it. */
+    /** Read the media sockets not yet handed to a call, under `natLock`, and
+     * pass the data to `sipral_stack_receive_stun` outside it. */
     private fun receiveStun() {
         val arrived = ArrayList<Triple<ByteArray, String, String>>()
         synchronized(natLock) {
@@ -2029,28 +1834,25 @@ class SipralClient private constructor(
             try {
                 retryBusy { Sipral.stackReceiveStun(handle, data, from, local, nowMs()) }
             } catch (_: SipralException) {
-                // a datagram from a stranger, or early media before the
-                // session opens: refused, and it costs that one datagram
+                // a stranger's datagram, or early media before the session opens:
+                // refused, at the cost of that one datagram
             }
         }
     }
 
-    // -- a TURN server reached over TCP or TLS --------------------------------
+    // A TURN server reached over TCP or TLS
 
-    // Every media socket's open connection to the TURN server, by the
-    // socket's `host:port`; what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for
-    // during the poll that raised it -- nothing may call back into the stack
-    // from its own callback -- acted on right after that poll; and every
-    // call's socket, by the call, for its last farewell.
+    // Each media socket's connection to the TURN server, by `host:port`; what
+    // `SIPRAL_EVENT_KIND_TURN_STREAM` asked during the last poll (nothing may
+    // call into the stack from its own callback); and each call's socket, for
+    // its last farewell.
     private val turnStreams = ConcurrentHashMap<String, TurnStream>()
     private val turnAsked = java.util.concurrent.ConcurrentLinkedQueue<org.sipral.SipralTurnStreamEvent>()
     private val turnSockets = ConcurrentHashMap<Long, String>()
 
-    /** Write [payload] on media socket [local]'s connection to the TURN
-     * server, whole: what `sipral_stack_poll_stun`,
-     * `sipral_stack_poll_farewell` and a call's media hand out marked TCP or
-     * TLS. Thread-safe; a connection that fails here is closed and the stack
-     * told, which loses the relay on it. */
+    /** Write [payload] whole on [local]'s TURN connection. Thread-safe; a
+     * connection that fails here is closed and the stack told, which loses
+     * the relay on it. */
     internal fun writeTurn(local: String, payload: ByteArray) {
         val stream = turnStreams[local] ?: return
         try {
@@ -2063,8 +1865,8 @@ class SipralClient private constructor(
         }
     }
 
-    /** Open or close what `SIPRAL_EVENT_KIND_TURN_STREAM` asked for in the
-     * poll that just ran, after this round's queues were written. */
+    /** Open or close what `TURN_STREAM` asked in the last poll, after this
+     * round's queues were written. */
     private fun actOnTurnStreams() {
         while (true) {
             val said = turnAsked.poll() ?: return
@@ -2083,9 +1885,9 @@ class SipralClient private constructor(
         }
     }
 
-    /** Connect to the TURN server for media socket [local] -- over TLS, with
-     * the certificate checked against [SipralTurnServer.serverName], when
-     * [protocol] says so -- say how that went, and read it until it closes. */
+    /** Connect to the TURN server for [local], over TLS checked against
+     * [SipralTurnServer.serverName] when [protocol] says so, report the
+     * outcome, and read it until it closes. */
     private fun openTurnStream(local: String, server: String, protocol: Long) {
         val turn = turn ?: return
         val stream = try {
@@ -2142,10 +1944,9 @@ class SipralClient private constructor(
         }
     }
 
-    /** What a connection carried, to `sipral_stack_turn_receive`: every
-     * byte, in order, since a stream that loses one never finds its place
-     * again, so a busy stack is waited for rather than skipped. False for a
-     * connection the stack found broken. */
+    /** Feed a connection's bytes to `sipral_stack_turn_receive`. Every byte,
+     * in order: a stream that loses one never resyncs, so a busy stack is
+     * waited for rather than skipped. False when the stack found it broken. */
     private fun turnReceived(local: String, bytes: ByteArray): Boolean {
         while (!closed.get()) {
             try {
@@ -2162,9 +1963,9 @@ class SipralClient private constructor(
         return true
     }
 
-    /** Close media socket [local]'s connection, and when [tell], say so with
-     * `sipral_stack_turn_closed` -- not for one the stack itself asked to
-     * close or found broken. */
+    /** Close [local]'s connection and, when [tell], report it with
+     * `sipral_stack_turn_closed` (not for one the stack closed or found
+     * broken). */
     private fun loseTurnStream(local: String, tell: Boolean) {
         val stream = turnStreams.remove(local) ?: return
         try {
@@ -2177,29 +1978,22 @@ class SipralClient private constructor(
         }
     }
 
-    // -- the network changing under the client ------------------------------
+    // The network changing under the client
 
     /**
      * The platform said the network changed: `sipral_stack_network_changed`,
-     * and what its answer asks of the client's own sockets.
+     * then whatever its answer asks of this client's sockets.
      *
-     * When the address or the interface changed -- `SipralRecovery.REBUILD`
-     * -- the signalling socket is bound again at [next]'s address, over UDP
-     * on the port it had ([keptSignallingPort] says when that port was taken
-     * there), and handed to the stack as its transport, and every account is
-     * pointed at it
-     * (`sipral_account_rebind`), so the REGISTER that follows names where
-     * this end is now. A client opened with no `bindHost` keeps its socket
-     * on every interface, and its port, and keeps picking its own address:
-     * it advertises the route toward its first account's server again, as
-     * at open -- [next]'s address only when no account names a server by
-     * its address -- and each account is reached at the route toward its
-     * own. Every call up at the time then raises
-     * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`: the far end is still sending
-     * its audio to the old address, and [SipralCall.moveMedia] offers it the
-     * new one. Anything less -- a roam that keeps the address -- only
-     * re-registers or re-proves. Safe to call as often as the platform
-     * notifies; `NOTHING` is most of the answers.
+     * On `SipralRecovery.REBUILD` (address or interface changed) the UDP
+     * signalling socket is bound again at [next]'s address on the same port
+     * ([keptSignallingPort] says if that failed), handed to the stack, and
+     * every account is re-pointed (`sipral_account_rebind`) so the following
+     * REGISTER names the new address. A client opened with no `bindHost`
+     * keeps its socket and re-picks its advertised address as at open. Every
+     * active call then raises `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED`, since
+     * the far end still sends to the old address; [SipralCall.moveMedia]
+     * offers the new one. Lesser changes only re-register. Safe to call on
+     * every platform notification; `NOTHING` is the usual answer.
      */
     fun networkChanged(next: SipralNetwork): SipralRecovery = synchronized(movingLock) {
         val previous = network
@@ -2211,10 +2005,9 @@ class SipralClient private constructor(
         if (moves && link != null) {
             rebound = link.move(next.address ?: bindAddress.substringBeforeLast(':'))
         } else if (moves && picks) {
-            // a socket bound on every interface already receives at the new
-            // address, on the port it had: only what this end advertises
-            // moves. An address this machine lacks is refused as a client
-            // bound at one refuses it
+            // a socket bound everywhere already receives at the new address; only
+            // what is advertised moves. An address this machine lacks is refused,
+            // as for a client bound at one.
             next.address?.let { DatagramSocket(0, InetAddress.getByName(it)).close() }
             keptSignallingPort = true
             rebound = advertiseAgain(next.address)
@@ -2251,9 +2044,7 @@ class SipralClient private constructor(
         network = next.copy(address = next.address ?: previous.address)
         if (rebound != null) {
             for (account in accounts.values) {
-                // on a client that picks its own address, each account is
-                // reached at the route toward its own server, as when it
-                // was added
+                // each account is reached at the route toward its own server
                 val server = account.registrarAddress
                 val local = if (picks && account.derivesContact && isAddress(server)) advertiseToward(server) else rebound
                 account.rebind(local, previous.address)
@@ -2264,12 +2055,10 @@ class SipralClient private constructor(
 
     /**
      * The UDP signalling socket bound again at [host], on the port chosen at
-     * open or, when that was zero, the port in use now; on a port the system
-     * picks only when that one is held there by another socket, which
-     * [keptSignallingPort] then says. The old socket holds the port itself
-     * when it is bound on every interface or at [host] already, so it is
-     * let go of -- which ends the poll thread's receive on it -- before the
-     * port is tried a second time.
+     * open (or the current one when that was zero); a system-chosen port only
+     * when another socket holds it, which [keptSignallingPort] reports. The
+     * old socket may itself hold the port, so it is closed (ending the poll
+     * thread's receive) before the port is tried again.
      */
     private fun signallingSocket(host: InetAddress): DatagramSocket {
         val inUse = socket?.localPort ?: 0
@@ -2281,8 +2070,8 @@ class SipralClient private constructor(
                 null
             }
         var made = if (wanted == 0) null else on(wanted)
-        // the socket in use is let go of only for an address this machine
-        // has: a move to one it lacks throws below with that socket open
+        // the old socket is closed only for an address this machine has; a move
+        // to one it lacks throws below with the socket still open
         if (made == null && wanted != 0 && inUse == wanted && on(0)?.also { it.close() } != null) {
             socket?.close()
             socket = null
@@ -2296,8 +2085,8 @@ class SipralClient private constructor(
     internal val currentHost: String
         get() = synchronized(movingLock) { network.address } ?: bindAddress.substringBeforeLast(':')
 
-    /** Runs [body] with no network change half done: what
-     * [SipralCall.moveMedia] holds while it binds and offers. */
+    /** Runs [body] with no network change half done; held by
+     * [SipralCall.moveMedia] while it binds and offers. */
     internal fun <T> moving(body: () -> T): T = synchronized(movingLock) { body() }
 
     /** `mapMediaSocket` for the socket [SipralCall.moveMedia] binds: where the
@@ -2305,8 +2094,8 @@ class SipralClient private constructor(
     internal fun mapMovedSocket(mediaSocket: DatagramSocket, local: String): String? =
         mapMediaSocket(mediaSocket, local)
 
-    /** The call's old socket is gone: `sipral_stack_nat_unmap`, so the stack
-     * stops refreshing a mapping nothing uses. */
+    /** `sipral_stack_nat_unmap` for a call's old socket, so the stack stops
+     * refreshing it. */
     internal fun forgetMapping(local: String) {
         if (stunServer == null) {
             return
@@ -2318,11 +2107,11 @@ class SipralClient private constructor(
         }
     }
 
-    // -- the library's own audio engine ---------------------------------------
+    // The library's own audio engine
 
-    /** A packet the engine encoded from the microphone: sent from its call's
-     * media socket, or on its connection to a TURN server. On the engine's
-     * thread, which must not call the audio engine back. */
+    /** An encoded microphone packet, sent from its call's media socket or on
+     * its TURN connection. Runs on the engine's thread, which must not call
+     * the engine back. */
     private fun transmitAudio(transmit: SipralAudioTransmit) {
         val call = calls[transmit.call] ?: return
         val payload = transmit.payload ?: return
@@ -2334,13 +2123,11 @@ class SipralClient private constructor(
         call.sendOnMediaSocket(payload, parseHostPort(destination))
     }
 
-    // -- the poll thread -----------------------------------------------------
+    // The poll thread
 
     private fun onEvent(event: SipralEvent) {
-        // Side effects first, delivery second: a coroutine woken by
-        // `events` reading `callFor(event.call)`'s own state must find it
-        // already current, the same ordering `sipral.call.Call.deliver`
-        // (the Python binding) keeps for the same reason.
+        // Side effects first, delivery second: a coroutine woken by `events` must
+        // find `callFor(event.call)` already current.
         turnStreamOf(event)?.let { turnAsked.add(it) }
         if (link == null) {
             transportWantedOf(event)?.let { streamsAsked.add(it) }
@@ -2379,8 +2166,7 @@ class SipralClient private constructor(
             }
             val link = link
             if (link != null) {
-                // one connection carries everything, whatever it names: the
-                // server it reaches is the outbound proxy
+                // one connection carries everything: it reaches the outbound proxy
                 link.write(data, len)
                 continue
             }
@@ -2389,18 +2175,16 @@ class SipralClient private constructor(
             try {
                 socket?.send(DatagramPacket(data, len, to))
             } catch (_: Exception) {
-                // best effort: the poll thread never raises out of its own loop
+                // best effort: the poll loop never throws
             }
         }
     }
 
     /**
-     * What a call that just ended still owes -- its RTCP BYE, and with a
-     * TURN server the Refresh that gives its relay back -- sent through
-     * that call's own media socket to the address the stack names. Under
-     * ICE that is the path ICE chose or the TURN server, not necessarily the
-     * last address media came from, which is only the fallback for a packet
-     * that names none.
+     * Send what a just-ended call still owes (its RTCP BYE and, with TURN, the
+     * Refresh releasing its relay) from its own media socket to the address
+     * the stack names. Under ICE that is the selected path or the TURN server,
+     * not necessarily the last address media came from.
      */
     private fun drainFarewells() {
         val data = ByteArray(PACKET_BYTES)
@@ -2414,8 +2198,8 @@ class SipralClient private constructor(
                 return
             }
             if (overStream(lens[2])) {
-                // given back on the relay's connection, which is the
-                // client's and not the call's, and outlives it
+                // on the relay's connection, which belongs to the client and outlives
+                // the call
                 turnSockets[outCall[0]]?.let { writeTurn(it, data.copyOfRange(0, len)) }
                 continue
             }
@@ -2434,12 +2218,12 @@ class SipralClient private constructor(
         val buffer = ByteArray(TRANSMIT_BYTES)
         while (!closed.get()) {
             try {
-                // the socket of this pass: [networkChanged] closes the one
-                // it replaces, which ends a receive waiting on it
+                // this pass's socket: [networkChanged] closes the one it replaces, which
+                // ends a receive waiting on it
                 val listening = socket
                 if (listening == null) {
-                    // over TCP or TLS the connection has a reader of its
-                    // own; this loop only keeps the poll's cadence
+                    // over TCP or TLS the connection has its own reader; this only keeps the
+                    // poll cadence
                     Thread.sleep(20)
                     throw SocketTimeoutException()
                 }
@@ -2458,8 +2242,7 @@ class SipralClient private constructor(
                     )
                 }
             } catch (_: SocketTimeoutException) {
-                // ordinary: this is what lets the loop poll on a cadence
-                // rather than blocking on the socket forever
+                // expected: the receive timeout is what gives the loop its cadence
             } catch (_: Exception) {
                 if (closed.get()) {
                     return
@@ -2488,15 +2271,12 @@ class SipralClient private constructor(
     }
 
     /**
-     * Hang up every call still open, let their goodbyes drain, then
+     * Hang up every open call, let the goodbyes drain, then
      * `sipral_media_release`, `sipral_stack_destroy` and close the socket.
      *
-     * Idempotent. Hanging up happens before any call's own [SipralCall.close]
-     * -- which releases its media handle -- for the reason
-     * `bindings/python/sipral/stack.py`'s own `close()` gives: the poll
-     * thread is what actually drains the BYE and the RTCP goodbye it
-     * queues, and it can only do that while the call is still tracked and
-     * its media socket still open.
+     * Idempotent. Calls are hung up before their own [SipralCall.close]
+     * releases the media handle, because the poll thread drains the BYE and
+     * RTCP goodbye only while the call is tracked and its socket open.
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) {
@@ -2518,9 +2298,8 @@ class SipralClient private constructor(
         for (call in open) {
             call.close()
         }
-        // A socket mapped for a call that was never placed still holds a
-        // relay the server would keep for up to ten minutes after the stack
-        // is gone, since `sipral_stack_destroy` sends nothing.
+        // A socket mapped for a call never placed still holds a relay the server
+        // keeps for up to ten minutes; `sipral_stack_destroy` sends nothing.
         val unspent = synchronized(natLock) { stunSockets.toList() }
         for ((local, mediaSocket) in unspent) {
             giveBackMediaSocket(mediaSocket, local)
@@ -2528,8 +2307,7 @@ class SipralClient private constructor(
         if (Thread.currentThread() !== thread) {
             thread.join(5000)
         }
-        // and every connection to the TURN server still open: what it
-        // carried was given back through it above, or lapses with it
+        // and every TURN connection still open
         for (local in turnStreams.keys.toList()) {
             loseTurnStream(local, tell = false)
         }

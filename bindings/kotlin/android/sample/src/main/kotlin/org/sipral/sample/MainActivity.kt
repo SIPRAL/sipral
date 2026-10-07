@@ -51,15 +51,10 @@ class MainActivity : ComponentActivity() {
     private val model: SampleModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Edge to edge on every release, not only from Android 15 on, and
-        // with the status and navigation bars' icons dark over this light
-        // screen rather than the platform's white ones. The no-argument
-        // form picks icon colour from the system's dark-mode setting
-        // (`SystemBarStyle.auto`), not from this app's content, which is
-        // unconditionally light (`MaterialTheme` here takes no colour
-        // scheme, so it is always `lightColorScheme()`): in system dark
-        // mode that leaves white icons over a light window. `light` style
-        // is used explicitly instead, for both bars.
+        // Edge to edge on every release, with dark bar icons over this always-light
+        // screen. The no-argument form picks icon colour from the system dark-mode
+        // setting (`SystemBarStyle.auto`), which in dark mode gives white icons on
+        // a light window, so `light` is set explicitly for both bars.
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.light(
@@ -87,18 +82,16 @@ private fun Permissions() {
             add(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-    // The answer is not kept here: the call's device (AndroidAudioDevice)
-    // asks again every time it opens,
-    // and a notification the user refused is simply not shown.
+    // not kept: AndroidAudioDevice asks again on every open, and a refused
+    // notification is simply not shown
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
     LaunchedEffect(Unit) { ask.launch(wanted.toTypedArray()) }
 }
 
 @Composable
 private fun Sample(model: SampleModel) {
-    // Android 15 draws every application targeting it edge to edge, under
-    // the status bar, the navigation bar and the keyboard: the screen keeps
-    // its content out of all three itself.
+    // Android 15 draws apps targeting it edge to edge under the status bar,
+    // navigation bar and keyboard; the screen keeps content clear of all three.
     Column(
         modifier = Modifier
             .fillMaxSize()

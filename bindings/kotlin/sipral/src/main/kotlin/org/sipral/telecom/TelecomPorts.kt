@@ -1,26 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The three seams TelecomBridge talks through: the telecom framework as a
-// whole, one call the framework is showing, and the SIP side. Each is small
-// enough to fake in a test on a plain JVM, which is where the sequence
-// docs/15-mobile.md's "C2" asks for is proven -- the Android adapters in
-// bindings/kotlin/android/telecom implement the first two over
-// android.telecom, and IdiomaticSipCalls implements the third over
-// org.sipral.idiomatic.
+// The three seams TelecomBridge talks through: the telecom framework, one
+// call it shows, and the SIP side. Each is small enough to fake on a plain
+// JVM, where docs/15-mobile.md's "C2" sequence is tested. The Android
+// adapters in bindings/kotlin/android/telecom implement the first two;
+// IdiomaticSipCalls the third.
 
 package org.sipral.telecom
 
 import org.sipral.idiomatic.SipralAnnounced
 
 /**
- * What [TelecomBridge] asks of the telecom framework as a whole.
+ * What [TelecomBridge] asks of the telecom framework.
  *
- * On Android: `TelecomManager.addNewIncomingCall` and
- * `TelecomManager.placeCall` for a self-managed `PhoneAccount`. Both answer
- * later, by the framework creating a connection for [id] -- which the
- * adapter hands back through [TelecomBridge.connectionCreated] -- or by
- * refusing to, which it hands back through [TelecomBridge.connectionFailed].
+ * On Android: `TelecomManager.addNewIncomingCall` and `placeCall` for a
+ * self-managed `PhoneAccount`. Both answer later, by creating a connection
+ * for [id] (passed to [TelecomBridge.connectionCreated]) or refusing
+ * ([TelecomBridge.connectionFailed]).
  */
 interface TelecomPlatform {
     /** A call is ringing, or a push says one is about to. Must be called
@@ -71,8 +68,8 @@ enum class TelecomDisconnect {
     /** The far end was busy (486, 600). */
     BUSY,
 
-    /** The call was withdrawn before it was ever a call -- a duplicate
-     * screen for a call that already had one. */
+    /** Withdrawn before it was ever a call: a duplicate screen for a call
+     * that already had one. */
     CANCELED,
 
     /** Anything else: a failure response, or a step that threw. */

@@ -3,9 +3,8 @@
 //
 // A headless voice agent over org.sipral.idiomatic: registers, answers,
 // echoes what it hears, hangs up on "#", and reports what it heard. The
-// Kotlin equivalent of bindings/python/examples/agent.py, run in the lab by
-// scripts/lab.sh's kotlin_agent the way python_agent runs the Python one,
-// against the same [agent-call] extension.
+// Kotlin twin of bindings/python/examples/agent.py, run by scripts/lab.sh's
+// kotlin_agent against the [agent-call] extension.
 //
 //   SIPRAL_AOR=sip:labuser-agent-kotlin@asterisk \
 //   SIPRAL_REGISTRAR=sip:asterisk \
@@ -13,16 +12,13 @@
 //   SIPRAL_AUTH_USER=labuser-agent-kotlin SIPRAL_AUTH_PASSWORD=labpass \
 //   java -cp ... org.sipral.examples.AgentKt
 //
-// SIPRAL_SIGNALLING is udp (the default), tcp or tls: over either of the
-// last two the agent keeps one connection to SIPRAL_REGISTRAR_ADDRESS and
-// signals on it, and over TLS checks the server's certificate against
-// SIPRAL_TLS_SERVER_NAME (the address's host when unset) with SIPRAL_TLS_CA
-// as the only authority it trusts (the platform's when unset). A connection
-// that fails is printed as "transport failed error=<...> tls=<...>" with
-// SSLSocket's own words, and tried again. SIPRAL_INVITE_LIMIT=voice-agent
-// takes a trunk's rush of calls the default rate floor would answer 480.
-// SIPRAL_TEXT=echo takes the real-time text a call offers, prints each
-// piece as "text <...>" and types it back.
+// SIPRAL_SIGNALLING is udp (default), tcp or tls; over TLS the certificate
+// is checked against SIPRAL_TLS_SERVER_NAME (default: the address's host)
+// with SIPRAL_TLS_CA as the only authority (default: the platform's). A
+// failed connection prints "transport failed error=<...> tls=<...>" and is
+// retried. SIPRAL_INVITE_LIMIT=voice-agent lifts the default INVITE rate
+// limit for a trunk. SIPRAL_TEXT=echo prints real-time text as
+// "text <...>" and types it back.
 
 package org.sipral.examples
 
@@ -65,10 +61,9 @@ import org.sipral.idiomatic.transportFailedOf
  * 4103) is printed and typed back to it. */
 private val echoesText = System.getenv("SIPRAL_TEXT") == "echo"
 
-/** Which of this host's addresses a datagram to `address` leaves from.
- * `bindings/python/examples/agent.py`'s own `route_to`: connecting a UDP
- * socket sends nothing, it only asks the system which route it would take,
- * which is what has to go in `Contact` and in every answer's SDP. */
+/** Which local address a datagram to `address` leaves from: connecting a
+ * UDP socket sends nothing, it only asks for the route. That address goes
+ * in `Contact` and the SDP. */
 private fun routeTo(address: String): String {
     val at = address.lastIndexOf(':')
     val host = address.substring(0, at)
@@ -103,17 +98,11 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
         }
     }
 
-    // Kept fresh at a steady interval rather than read once when the call
-    // is seen to be over: once the BYE is answered the stack tears this
-    // call's media down on its own poll thread, so by the time either
-    // collector below notices the call has ended, `statistics()` can
-    // already answer WRONG_STATE (bindings/c/include/sipral.h, `sipral_media_statistics`:
-    // "the end-of-call record arrives instead as
-    // SIPRAL_EVENT_KIND_MEDIA_STATISTICS ... because by then the stream is
-    // gone"). A read that lands mid-teardown is skipped, not fatal --
-    // `stats` just keeps the last good reading, at most one interval stale.
-    // Cheap enough for this rate: the same doc calls it fit "at the frame
-    // rate of a user interface".
+    // Refreshed on an interval rather than read at the end: once the BYE is
+    // answered the stack tears media down on its poll thread, and
+    // `statistics()` may already answer WRONG_STATE (the end-of-call record
+    // comes as MEDIA_STATISTICS instead). A read during teardown is skipped,
+    // keeping the last good value.
     var stats: SipralStreamStats? = null
     val polling = launch {
         while (isActive) {
@@ -131,8 +120,7 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
             val digit = digitOf(event) ?: return@collect
             println("dtmf $digit")
             if (digit == '#') {
-                // One last read while the call is still certainly up, for
-                // the freshest number this path can give.
+                // a last read while the call is surely still up
                 stats = try {
                     media.statistics()
                 } catch (_: Exception) {
@@ -143,19 +131,12 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
             }
         }
     }
-    // No cap: scripts/lab.sh always ends this call itself, either through
-    // the digit handler above or by the far end hanging up on its own, and
-    // a fixed wait here would end a call that outlives it -- cutting short
-    // a phone's own hang-up is this agent's bug to avoid, not the far
-    // end's. bindings/python/examples/agent.py's own wait_for_remote_hangup
-    // is the same shape, with the same absence of a cap.
+    // No cap: lab.sh always ends this call (the "#" handler or the far end),
+    // and a fixed wait would cut short a call that outlives it.
     //
-    // waitEnded, not a hand-rolled `if (!call.ended) events.first { ... }`:
-    // that check-then-subscribe shape has a real gap between reading
-    // `ended` and the flow subscribing, where a CALL_ENDED delivered on
-    // the poll thread is missed outright (replay = 0), and with no cap
-    // left the miss hangs forever. waitEnded subscribes UNDISPATCHED
-    // before it reads `ended`, closing that gap.
+    // waitEnded rather than `if (!call.ended) events.first { }`: that shape
+    // misses a CALL_ENDED delivered between the check and the subscription,
+    // and with no cap would hang forever.
     val ending = launch {
         call.waitEnded(Long.MAX_VALUE)
     }
@@ -178,15 +159,11 @@ private suspend fun handleCall(call: SipralCall) = coroutineScope {
 }
 
 /**
- * Talk for the life of one call this end placed, the same shape [handleCall]
- * is but for a peer with nothing of its own that would ever hang up first
- * (the lab's own two-NAT pair, `scripts/lab.sh`'s `ice_turn_flow`, where the
- * far end is the harness's own `iceanswer` role): [patienceMs] is how long
- * this end waits for media at all, so a call under `SipralIce.REQUIRED` with
- * every path blocked is given up on rather than waited on forever, and
- * [dwellMs] is how long it talks before hanging up on its own once media has
- * started. `false` when it ended before media ever started, which
- * [runDirectCall] needs to tell apart from an ordinary hangup.
+ * Talk for one call this end placed, to a peer that never hangs up first
+ * (lab.sh's `ice_turn_flow`, the harness's `iceanswer`). [patienceMs] bounds
+ * the wait for media, so a `SipralIce.REQUIRED` call with every path
+ * blocked gives up; [dwellMs] is how long it talks once media started.
+ * `false` when it ended before media started.
  */
 private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: Long): Boolean = coroutineScope {
     println("answered ${call.handle.toString(16)}")
@@ -234,8 +211,7 @@ private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: L
     }
     dwelling.cancel()
     if (!call.ended) {
-        // one last read while the call is still certainly up, for the
-        // freshest number this path can give
+        // a last read while the call is surely still up
         stats = try {
             media.statistics()
         } catch (_: Exception) {
@@ -245,18 +221,15 @@ private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: L
             call.hangup()
         } catch (_: SipralException) {
         }
-        // the relayed call's farewell -- the TURN Refresh that gives its
-        // allocation back, not only the RTCP BYE -- is queued once the far
-        // end's 200 to this end's own BYE is read on the poll thread, so
-        // this waits for `ended` rather than closing right behind hangup()
+        // the relayed call's farewell (TURN Refresh as well as RTCP BYE) is
+        // queued once the 200 to our BYE is read, so wait for `ended` rather than
+        // closing right after hangup()
         withTimeoutOrNull(5_000) { call.waitEnded() }
     }
     ending.cancel()
     talking.cancel()
     polling.cancel()
-    // the same short wait bindings/python/examples/agent.py's own
-    // hang_up_after_dwell gives, so a relayed call's farewell has had its
-    // own turn on the poll thread before the stack tears the socket down
+    // let the farewell take its turn on the poll thread before the socket goes
     delay(200)
 
     call.close()
@@ -268,25 +241,17 @@ private suspend fun runCallDirect(call: SipralCall, patienceMs: Long, dwellMs: L
 }
 
 /**
- * Dial a peer straight at its address, no registrar between them --
- * `scripts/lab.sh`'s own `ice_turn_flow`, where the far end is the
- * harness's own `iceanswer` role rather than a server. SIPRAL_PEER_HOST/
- * SIPRAL_PEER_PORT name it, and the account this end adds is one
- * [SipralClient.addAccount]'s own registrarAddress is just the routing
- * destination for: `registrar` is left null, so nothing is ever registered.
+ * Dial a peer directly, no registrar (lab.sh's `ice_turn_flow`).
+ * SIPRAL_PEER_HOST/SIPRAL_PEER_PORT name it; the account's registrarAddress
+ * is only a routing destination, and nothing is registered.
  *
- * SIPRAL_STUN_SERVER turns on STUN the same way [SipralClient.open] already
- * offers any application; SIPRAL_TURN_SERVER/SIPRAL_TURN_USER/
- * SIPRAL_TURN_PASSWORD ride on it. SIPRAL_TURN_TRANSPORT is `udp`, `tcp` or
- * `tls` (RFC 8656 §3.1); over TLS the server's certificate is checked
- * against SIPRAL_TURN_NAME and trusted if it chains to the PEM file
- * SIPRAL_TURN_CA names, the platform's roots otherwise -- the lab's own
- * coturn presents a certificate made for the run, and this is how the run
- * tells the agent to trust it. SIPRAL_ICE=required asks
- * [SipralIce.REQUIRED] of the call this places, which is what makes a call
- * that cannot find a path fail outright rather than fall back to the
- * address this end bound to -- the one thing that would let a run through a
- * blocked NAT pair pass by accident.
+ * SIPRAL_STUN_SERVER turns on STUN; SIPRAL_TURN_SERVER/USER/PASSWORD add
+ * TURN. SIPRAL_TURN_TRANSPORT is `udp`, `tcp` or `tls` (RFC 8656 §3.1);
+ * over TLS the certificate is checked against SIPRAL_TURN_NAME and trusted
+ * if it chains to SIPRAL_TURN_CA (the lab's per-run coturn certificate),
+ * else the platform roots. SIPRAL_ICE=required makes a call with no path
+ * fail rather than fall back to the bound address, which would let a run
+ * through a blocked NAT pair pass by accident.
  */
 private suspend fun runDirectCall(): Boolean {
     val peerHost = System.getenv("SIPRAL_PEER_HOST") ?: error("SIPRAL_PEER_HOST is required")
@@ -344,9 +309,8 @@ private fun authority(path: String): X509Certificate =
         CertificateFactory.getInstance("X.509").generateCertificate(input) as X509Certificate
     }
 
-/** A socket factory that trusts the certificates in the PEM file at `path`
- * and nothing else: how the lab's coturn, whose certificate is made for the
- * run, is trusted over TLS. */
+/** A socket factory trusting only the certificates in the PEM file at
+ * `path`: the lab's per-run coturn certificate. */
 private fun trusting(path: String): SSLSocketFactory {
     val anchors = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
     File(path).inputStream().use { input ->
@@ -359,10 +323,8 @@ private fun trusting(path: String): SSLSocketFactory {
 }
 
 fun main() = runBlocking {
-    // The lab's own NAT-pair flow (`ice_turn_flow`) runs this mode instead
-    // of the registrar-and-listen one below: SIPRAL_PEER_HOST is what tells
-    // the two apart, since a real registrar address never doubles as one --
-    // the same tell bindings/python/examples/agent.py's own `main` reads.
+    // SIPRAL_PEER_HOST selects the NAT-pair mode (`ice_turn_flow`) instead of
+    // registering and listening.
     if (System.getenv("SIPRAL_PEER_HOST") != null) {
         if (!runDirectCall()) {
             kotlin.system.exitProcess(1)
@@ -397,9 +359,8 @@ fun main() = runBlocking {
         authPassword = System.getenv("SIPRAL_AUTH_PASSWORD"),
     )
     if (streamed) {
-        // over a connection the first attempt may already have failed, and
-        // every one after it says so: printed as it happens, and the
-        // registration left to go whenever the connection is made
+        // the first connection attempt may already have failed: print each
+        // failure, and let registration go whenever it connects
         launch {
             client.events.collect { event ->
                 transportFailedOf(event)?.let { failed ->
@@ -417,14 +378,8 @@ fun main() = runBlocking {
     }
     println("listening on ${client.bindAddress}")
 
-    // One persistent collector, not a loop calling `events.first { }`
-    // again for every call: a fresh subscription each time round that loop
-    // would leave a real gap between one match completing and the next
-    // subscribe -- an INCOMING_CALL landing in it would be missed outright
-    // (a SharedFlow with replay = 0 never queues a value for a subscriber
-    // that has not subscribed yet, bindings/kotlin/README.md's own note) --
-    // and this agent is meant to keep listening for the next call, forever,
-    // not to miss one to a race with its own bookkeeping.
+    // One persistent collector, not `events.first { }` per call: resubscribing
+    // leaves a gap where an INCOMING_CALL is missed (replay = 0).
     coroutineScope {
         client.events
             .filter { it.kind == SipralEventKind.INCOMING_CALL.value.toLong() }

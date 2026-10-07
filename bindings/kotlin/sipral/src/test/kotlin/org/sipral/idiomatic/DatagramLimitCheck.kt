@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// RFC 3261 §18.1.1 through org.sipral.idiomatic: a call whose answer to a
-// challenge is too large for a datagram -- the Kotlin counterpart of
-// bindings/python/tests/test_datagram_limit.py. The PBX is this check's own,
-// on loopback: a UDP socket that answers every INVITE without credentials
-// with a 401 whose nonce takes the answer past 1300 bytes, and -- when asked
-// for -- a TCP listener on the same port that answers the INVITE carrying
-// credentials with a 486. With the listener there the client opens the
-// connection itself and the call carries on over it; with none, or with
-// `streamFallback = false`, the call ends at once with a 513 naming the
-// limit, never hanging. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
+// RFC 3261 §18.1.1 through org.sipral.idiomatic, the counterpart of
+// bindings/python/tests/test_datagram_limit.py: a call whose answer to a
+// challenge is too large for a datagram. The loopback PBX challenges every
+// INVITE over UDP with a 401 whose nonce pushes the answer past 1300 bytes,
+// and optionally listens on TCP, answering the credentialed INVITE with
+// 486. With the listener the client opens the connection and carries on;
+// without it, or with `streamFallback = false`, the call ends at once with
+// 513 naming the limit. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -38,9 +36,9 @@ import org.sipral.SipralSrtp
 import org.sipral.SipralStatus
 import org.sipral.SipralTransportError
 
-/** RFC 3261 §7.3.3's compact names for the fields this PBX reads: a request
- * over the line is written compact before it is weighed against it, and a
- * server reads either form. */
+/** RFC 3261 §7.3.3 compact names for the fields this PBX reads: an
+ * oversized request is compacted before being measured, and a server
+ * reads either form. */
 private val compactNames = mapOf("via" to "v", "from" to "f", "to" to "t", "call-id" to "i", "content-length" to "l")
 
 private fun header(name: String, message: String): String? {
@@ -62,9 +60,8 @@ private fun response(request: String, status: String, extra: String = ""): ByteA
     return (lines.joinToString("\r\n") + "\r\n" + extra + "Content-Length: 0\r\n\r\n").toByteArray(Charsets.UTF_8)
 }
 
-/** A PBX that challenges INVITEs over UDP, with a TCP listener when [tcp]:
- * on the same port, or -- [apart] -- on one of its own, as a PBX that takes
- * UDP on 5060 and TCP on 5160 has it. */
+/** A PBX challenging INVITEs over UDP, with a TCP listener when [tcp]: on
+ * the same port, or with [apart] on its own (UDP 5060, TCP 5160). */
 private class ChallengingPbx(tcp: Boolean, apart: Boolean = false) : AutoCloseable {
     private val udp = DatagramSocket(0, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 50 }
     private val listener: ServerSocket? = if (tcp) {
@@ -215,8 +212,8 @@ private suspend fun aPbxListeningOnTcpGetsTheAnswerOverAConnectionTheClientOpene
             assertEquals(1, invites.size)
             assertNotNull(header("Authorization", invites[0]))
             assertTrue(header("Via", invites[0])?.startsWith("SIP/2.0/TCP ") == true)
-            // the dialog carries on over the connection: the 486 is
-            // acknowledged on it (RFC 3261 §17.1.1.3)
+            // the dialog continues on the connection: the 486 is acknowledged there
+            // (RFC 3261 §17.1.1.3)
             repeat(100) {
                 if (pbx.overTcp.none { it.startsWith("ACK ") }) delay(20)
             }
@@ -234,7 +231,7 @@ private suspend fun aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(): String {
             assertTrue(System.currentTimeMillis() - started < 5_000, "ended by the refusal, not by the wait")
             val lost = seen.mapNotNull { transportFailedOf(it) }
             assertEquals(SipralTransportError.CONNECTION_REFUSED.value.toLong(), lost.firstOrNull()?.error)
-            // where the connection was going and what became of it, for a log
+            // where the connection was going and what happened, for a log
             val detail = lost.firstOrNull()?.detail ?: ""
             assertTrue(detail.startsWith("TCP to ${pbx.address} refused"), detail)
             val ended = seen.last().payload.call
@@ -248,8 +245,8 @@ private suspend fun aPbxOnUdpAloneEndsTheCallAtOnceWithTheLimitNamed(): String {
     return "one with no stream to go on ends at once with the limit named"
 }
 
-/** A deliberate deviation from §18.1.1: no stream is coming, and the
- * client was told the server takes a large request over UDP. */
+/** A deliberate deviation from §18.1.1: no stream is available, and the
+ * client was told the server accepts a large request over UDP. */
 private suspend fun aPbxOnUdpAloneTakesTheRequestOverUdpUpToTheClientsLimit(): String {
     ChallengingPbx(tcp = false).use { pbx ->
         SipralClient.open(
@@ -262,7 +259,7 @@ private suspend fun aPbxOnUdpAloneTakesTheRequestOverUdpUpToTheClientsLimit(): S
             assertTrue(bytes > 1300, "$bytes")
             val diagnostics = client.diagnosticsJson()
             assertTrue(diagnostics.contains("transport.kept.datagram"))
-            // written compact first, and still over the line
+            // compacted first, and still over the limit
             assertTrue(diagnostics.contains("transport.compacted.size"))
         }
     }
@@ -308,16 +305,15 @@ private suspend fun aClientToldToOpenNoStreamEndsTheCallWithoutTrying(): String 
 }
 
 // RFC 5626 §4.4.1: the stack retires a stream that stopped answering
-// keep-alives and says so with TRANSPORT_FAILED; the socket is this layer's,
-// and one kept open would stand in for the new connection the stack asks for
-// next time
+// keep-alives (TRANSPORT_FAILED); the socket is this layer's, and left
+// open it would stand in for the next connection the stack asks for
 private suspend fun aConnectionTheStackLetGoOfIsClosedHereToo(): String {
     ChallengingPbx(tcp = true).use { pbx ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->
             untilTheEnd(client) { place(client, pbx) }
             assertEquals(1, pbx.connections)
             assertEquals(0, pbx.closedByTheClient, "the connection outlives the call")
-            // the one connection opened is the last id handed out
+            // the only connection opened has the last id handed out
             client.noteStreamLetGo(client.nextLink.get() - 1)
             repeat(150) {
                 if (pbx.closedByTheClient == 0) delay(20)

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// A local conference through this layer -- the Kotlin counterpart of
-// bindings/python/tests/test_local_conference.py: made on its own and asked
-// about, recorded, refused at a rate it cannot mix, and, with three clients
-// on 127.0.0.1, two calls bridged so that what one far end says the other
-// hears. Run by IdiomaticCheck.kt's main under -Xcheck:jni.
+// A local conference through this layer, the counterpart of
+// bindings/python/tests/test_local_conference.py: created and queried,
+// recorded, refused at an unmixable rate, and with three clients on
+// 127.0.0.1 two calls bridged so each far end hears the other. Run by
+// IdiomaticCheck.kt's main under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -27,9 +27,9 @@ import org.sipral.SipralStatus
 
 private fun square(samples: Int): ShortArray = ShortArray(samples) { n -> if ((n / 8) % 2 == 0) 8000 else -8000 }
 
-// Above this, a frame of square() that came through PCMU whole: it decodes at
-// 7900. A frame concealed in place of one that never came fades from the last
-// one heard and stays under it, so it is not counted as heard.
+// Above this, a square() frame came through PCMU whole (it decodes at
+// 7900). A concealed frame fades from the last one heard and stays below,
+// so it does not count.
 private const val WHOLE_FRAME = 7_500
 
 private fun loudness(frame: ShortArray): Int =
@@ -95,8 +95,8 @@ private suspend fun theMixIsRecordedToAFile(): String {
     return "the mix recorded to a WAV file, and 44.1 kHz refused"
 }
 
-/** Alice calls [far] directly, through an account of her own that names it
- * as the next hop, and it answers. */
+/** Alice calls [far] directly, through an account naming it as next hop,
+ * and it answers. */
 private suspend fun call(alice: SipralClient, far: SipralClient, user: String): Pair<SipralCall, SipralCall> {
     val account = alice.addAccount(aor = "sip:alice-to-$user@example.invalid", registrarAddress = far.bindAddress)
     far.addAccount(aor = "sip:$user@example.invalid", registrarAddress = alice.bindAddress)
@@ -132,16 +132,12 @@ private suspend fun whatOneFarEndSaysTheOtherHears(): String {
                 val carolFrames = assertNotNull(carolCall.media).frames
                 val heard = withTimeout(10_000) { carolFrames.first { loudness(it) > 2_000 } }
                 assertTrue(loudness(heard) > 2_000, "Carol never heard Bob")
-                // and in full, ninety-five of Bob's hundred frames at least:
-                // a call whose own thread still carried frames beside the
-                // conference would have every other frame taken from under
-                // it, and a frame clock slower than the conference's
-                // overflows the buffers and drops them. Counted whenever they
-                // arrive rather than as an unbroken run: on a machine with
-                // more work than cores, the threads of all three clients are
-                // held up together for a hundred milliseconds and more,
-                // Carol's buffer runs dry, and the frames play late but all
-                // play.
+                // and in full: at least 95 of Bob's 100 frames. A call whose own thread
+                // still carried frames beside the conference would lose every other one,
+                // and a slower frame clock would overflow the buffers. Counted whenever
+                // they arrive, not as an unbroken run: on an overloaded machine all three
+                // clients stall together for 100 ms or more and frames play late, but
+                // all play.
                 var whole = if (loudness(heard) > WHOLE_FRAME) 1 else 0
                 withTimeoutOrNull(10_000) {
                     carolFrames.first { frame ->

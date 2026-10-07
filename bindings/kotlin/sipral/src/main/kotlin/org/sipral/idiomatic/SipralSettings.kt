@@ -9,16 +9,14 @@ import org.sipral.SipralToggle
 import org.sipral.SipralTransport
 
 /**
- * What a client's stack runs with, every default filled in
- * (`sipral_stack_settings`, [SipralClient.settings]): what a settings screen
- * or a support report shows, rather than what was passed. [rtpPorts] is null
- * for no range, [mediaStallMs] and [registrarKeepaliveMs] zero with that
- * watchdog or keep-alive off. The last four are ABI 0.35: [srtpSuites] the
- * suites the stack's calls offer and accept unless their account names its
- * own, in order; whether a pseudonym salt was given (the salt itself is never
- * read back); whether the diagnostic trace is whole now; and whether the
- * platform's echo cancellation is asked for -- [SipralAudioDevices.info]
- * says what the platform did.
+ * What the stack runs with, every default filled in
+ * (`sipral_stack_settings`, [SipralClient.settings]): for a settings screen
+ * or support report. [rtpPorts] is null with no range; [mediaStallMs] and
+ * [registrarKeepaliveMs] are zero when off. [srtpSuites] are the suites
+ * calls offer and accept unless their account names its own, in order.
+ * Whether a pseudonym salt was given is reported, never the salt. The echo
+ * flag is what was asked; [SipralAudioDevices.info] says what the platform
+ * did.
  */
 data class SipralSettings(
     val transport: SipralTransport?,

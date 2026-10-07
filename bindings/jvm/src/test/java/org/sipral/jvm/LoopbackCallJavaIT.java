@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The same loopback call as LoopbackCallKotlinIT, from plain Java: the
-// idiomatic layer's classes used directly where their methods are plain,
-// SipralJava where they are suspend functions, defaults or flows. Run by
-// failsafe against the packaged jar.
+// The loopback call of LoopbackCallKotlinIT from plain Java: idiomatic
+// classes where their methods are plain, SipralJava for suspend functions,
+// defaults and flows. Run by failsafe against the packaged jar.
 
 package org.sipral.jvm;
 
@@ -106,9 +105,9 @@ class LoopbackCallJavaIT {
         }
     }
 
-    /** An account on a TCP connection of its own, beside one on the client's
-     * UDP socket, added from Java: its REGISTER reaches a registrar that
-     * takes TCP alone, over a connection the client opened. */
+    /** An account on its own TCP connection beside one on the client's UDP
+     * socket, added from Java: its REGISTER reaches a TCP-only registrar over
+     * a connection the client opened. */
     @Test
     void theCeilingsAServerRaisesReachTheLibrary() throws Exception {
         try (SipralClient plain = SipralJava.open("127.0.0.1");
@@ -153,9 +152,9 @@ class LoopbackCallJavaIT {
         }
     }
 
-    /** The realms an account names reach the library one per line from
-     * Java: a realm with a comma of its own is one realm, and one with a
-     * control byte is refused there. */
+    /** Account realms reach the library one per line from Java: a realm
+     * containing a comma is one realm, and one with a control byte is
+     * refused. */
     @Test
     void theRealmsAnAccountNamesReachTheLibrary() throws Exception {
         try (SipralClient client = SipralJava.open("127.0.0.1")) {
@@ -168,10 +167,9 @@ class LoopbackCallJavaIT {
         }
     }
 
-    /** The rate a call's frames cross at, chosen from Java: at 24 kHz a
-     * 20 ms frame is 480 samples whatever the codec and the call still
-     * carries RTP both ways, a rate outside the four is refused and changes
-     * nothing, and 0 is the codec's own again. */
+    /** A call's frame rate chosen from Java: at 24 kHz a 20 ms frame is 480
+     * samples whatever the codec and RTP still flows both ways; other rates
+     * are refused and change nothing; 0 restores the codec's. */
     @Test
     void theApplicationChoosesTheRateOfItsFrames() throws Exception {
         try (SipralClient alice = SipralJava.open("127.0.0.1");
@@ -211,10 +209,9 @@ class LoopbackCallJavaIT {
         }
     }
 
-    /** The platform's echo cancellation switched on a running client from
-     * Java (ABI 1.1): a client in application mode has no engine to switch,
-     * and one in device mode, its devices closed, opens nothing and reads
-     * the switch back from its settings. */
+    /** Echo cancellation switched on a running client from Java: application
+     * mode has no engine to switch; device mode with closed devices opens
+     * nothing and reads the switch back from settings. */
     @Test
     void theEchoCancellationIsSwitchedOnARunningClient() throws Exception {
         try (SipralClient pumped = SipralJava.open("127.0.0.1")) {
@@ -235,11 +232,9 @@ class LoopbackCallJavaIT {
         }
     }
 
-    /** The check the binding makes at load, asked from Java about other
-     * versions than its own: within this major every minor up to the
-     * library's own is served -- a binding the library is newer than --
-     * and a later minor, another major or any 0.x is refused, naming the
-     * caller's version. */
+    /** The binding's load-time version check, asked from Java about other
+     * versions: any minor up to the library's is served; a later minor,
+     * another major or any 0.x is refused, naming the caller's version. */
     @Test
     void theAbiCheckKeepsTheOneXRule() {
         SipralAbiVersion library = Sipral.INSTANCE.abiVersion();

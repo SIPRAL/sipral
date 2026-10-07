@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Where a client is reached and where its server is, through
-// org.sipral.idiomatic: the address advertised when the application names
-// none, a server named by a URI and located by RFC 3263, the account's
-// keep-alive, a certificate trusted by its fingerprint, and the diagnostic
-// trace -- the Kotlin counterpart of
-// bindings/python/tests/test_reachability.py. The registrar is this check's
-// own, a UDP socket on loopback that answers every REGISTER 200 and keeps
-// every datagram. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
+// Reachability through org.sipral.idiomatic, the counterpart of
+// bindings/python/tests/test_reachability.py: the advertised address when
+// the application names none, a URI-named server located per RFC 3263, the
+// account keep-alive, a fingerprint-pinned certificate, and the diagnostic
+// trace. The registrar is a loopback UDP socket answering every REGISTER
+// 200 and keeping every datagram. Run by IdiomaticCheck.kt's main, under
+// -Xcheck:jni.
 
 package org.sipral.idiomatic
 

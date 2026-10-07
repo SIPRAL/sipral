@@ -21,10 +21,10 @@ import org.sipral.SipralRecordingFormat
 import org.sipral.SipralRecordingOptions
 import org.sipral.SipralToggle
 
-/** One member of a [SipralLocalConference], as
- * `sipral_local_conference_member_at` reads it: its handle -- a call's, or
- * [SipralLocalConference.handle] for this end -- whether it is talking, its
- * two mutes and its two gains in the audio engine's steps (256 is unity). */
+/** One member of a [SipralLocalConference] from
+ * `sipral_local_conference_member_at`: its handle (a call's, or
+ * [SipralLocalConference.handle] for this end), whether it is talking, its
+ * two mutes and two gains in engine steps (256 is unity). */
 data class SipralLocalMember(
     val member: Long,
     val talking: Boolean,
@@ -36,23 +36,20 @@ data class SipralLocalMember(
 
 /**
  * A local conference: any number of this client's calls, each on its own
- * codec and rate, mixed here so that every member hears everybody but itself
- * -- this end too, unless it was made without (`docs/08-ffi.md`, "A local
- * conference").
+ * codec and rate, mixed so every member hears everyone but itself,
+ * including this end unless made without (`docs/08-ffi.md`).
  *
- * A call added stops carrying its own frames -- its [SipralMedia] goes on
- * reading the socket and sending RTCP -- and the conference carries them
- * instead: on a client in [SipralAudioMode.Device] the library's audio engine
- * does, and every packet leaves from the member's own socket through the
- * client's transmit path; in [SipralAudioMode.Application] a thread of this
- * class's own ticks every twenty milliseconds -- [sendAudio] is this end's
- * microphone, [frames] what it hears. What changes arrives on the client's
- * events as `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED`, read with
- * [localConferenceOf].
+ * An added call stops carrying its own frames (its [SipralMedia] still
+ * reads the socket and sends RTCP); the conference carries them. In
+ * [SipralAudioMode.Device] the engine does, packets leaving from each
+ * member's socket; in [SipralAudioMode.Application] this class's thread
+ * ticks every 20 ms, with [sendAudio] as this end's microphone and
+ * [frames] what it hears. Changes arrive as
+ * `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` ([localConferenceOf]).
  *
- * `maxMembers` counts this end; `sampleRate` is the rate of its frames --
- * 8000, 16000, 32000 or 48000 -- in application mode. A rate the conference
- * cannot mix throws [SipralException] with `SIPRAL_STATUS_CONFERENCE_REFUSED`.
+ * `maxMembers` counts this end; `sampleRate` (8000, 16000, 32000 or 48000)
+ * is this end's frame rate in application mode. A rate the conference
+ * cannot mix throws `SIPRAL_STATUS_CONFERENCE_REFUSED`.
  */
 class SipralLocalConference(
     private val client: SipralClient,
@@ -107,10 +104,8 @@ class SipralLocalConference(
      * at its own codec's rate. A full conference, a call already in one, or a
      * codec it cannot mix throws with `SIPRAL_STATUS_CONFERENCE_REFUSED`. */
     fun add(call: SipralCall) {
-        // the call's own thread stops carrying frames before the conference
-        // starts, so that no frame is taken twice; a call refused keeps
-        // whatever it had -- a call already in this conference keeps being
-        // carried by it
+        // the call's own thread stops before the conference starts, so no frame
+        // is taken twice; a refused call keeps what it had
         val was = call.media?.carriedByConference ?: false
         call.media?.carriedByConference = true
         try {
@@ -275,10 +270,9 @@ class SipralLocalConference(
 }
 
 /**
- * What a `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` carries -- which
- * [SipralLocalConference], what changed (a `SipralLocalConferenceChange`
- * number), why a member left (a `SipralDeparture` number), who, and how the
- * conference stands now -- or null for an event of any other kind.
+ * A `SIPRAL_EVENT_KIND_LOCAL_CONFERENCE_CHANGED` payload (which
+ * conference, what changed, why a member left, who, and the current
+ * state), or null for any other kind.
  */
 fun localConferenceOf(event: SipralEvent): SipralLocalConferenceEvent? =
     if (event.kind == SipralEventKind.LOCAL_CONFERENCE_CHANGED.value.toLong()) event.payload.localConference else null

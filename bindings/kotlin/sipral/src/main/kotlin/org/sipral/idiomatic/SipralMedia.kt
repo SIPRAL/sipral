@@ -30,10 +30,8 @@ import org.sipral.SipralStreamStats
 private const val PACKET_BYTES = 1500
 private const val ADDRESS_BYTES = 64
 
-/**
- * One path a call's ICE agent tried, and what became of it: a
- * `sipral_path_candidate_t` with its two addresses read out.
- */
+/** One path a call's ICE agent tried, and its outcome: a
+ * `sipral_path_candidate_t` with both addresses read out. */
 data class PathCandidate(
     /** A candidate pair, or a relay. */
     val kind: SipralPathKind,
@@ -59,62 +57,53 @@ internal fun parseAddress(text: String): InetSocketAddress {
 }
 
 /**
- * One call's audio: `sipral_call_media` minted, and the four calls that
- * carry the packets (`docs/08-ffi.md`, "A call's media has a handle of its
- * own"), paced at the frame rate the negotiation settled on, on a UDP
- * socket this class owns and never shares with signalling.
+ * One call's audio: the `sipral_call_media` handle and the calls that carry
+ * its packets (`docs/08-ffi.md`), paced at the negotiated frame rate, on a
+ * UDP socket this class owns.
  *
- * Not built directly. [SipralCall] mints one the moment
- * `SIPRAL_EVENT_KIND_MEDIA_STARTED` says the session exists, and hands it
- * over as [SipralCall.media]. `close()`, or `use { }`, releases the media
- * handle and the socket together; a media handle outlives its call
- * (`docs/08-ffi.md`), so releasing it explicitly rather than waiting for
- * `SipralClient.close()` to sweep it is what lets a long call's media be
- * let go the moment `SIPRAL_EVENT_KIND_CALL_ENDED` says the session is
- * over.
+ * Not built directly: [SipralCall] mints one on
+ * `SIPRAL_EVENT_KIND_MEDIA_STARTED` and exposes it as [SipralCall.media].
+ * `close()` releases the handle and the socket together. A media handle
+ * outlives its call, so release it on `CALL_ENDED` rather than waiting for
+ * `SipralClient.close()`.
  *
- * On a client in [SipralAudioMode.Device] the library's engine takes the far
- * end's audio and gives the microphone's, so this thread carries only the
- * packets: [frames] hands out nothing and [sendAudio] is not read
- * ([pumpsFrames] says which). Statistics, the ICE paths and the socket are
- * the same in both modes.
+ * In [SipralAudioMode.Device] the library's engine plays and captures, so
+ * this carries only packets: [frames] yields nothing and [sendAudio] is
+ * ignored ([pumpsFrames] says which). Statistics, ICE paths and the socket
+ * work in both modes.
  */
 class SipralMedia internal constructor(
     internal val client: SipralClient,
     private val callHandle: Long,
     socket: DatagramSocket,
-    /** Whether this media carries the call's frames through [frames] and
-     * [sendAudio] -- [SipralAudioMode.Application] -- or the library's
-     * engine does. */
+    /** Whether frames go through [frames] and [sendAudio]
+     * ([SipralAudioMode.Application]) rather than the library's engine. */
     val pumpsFrames: Boolean = true,
-    /** The call's real-time text socket, when it has one: read and written
-     * on this thread beside the audio, and closed with it. */
+    /** The real-time text socket, if any: serviced on this thread beside the
+     * audio, and closed with it. */
     private val textSocket: DatagramSocket? = null,
 ) : AutoCloseable {
-    /** The two sockets the copies for a recording server leave from, while
-     * a recording session runs, guarded by [ioLock]. */
+    /** The two sockets recording copies leave from while a recording session
+     * runs. Guarded by [ioLock]. */
     private var recordingSockets: Pair<DatagramSocket, DatagramSocket>? = null
 
-    /** The call's socket, guarded by [ioLock] -- as is every send and
-     * receive on it -- since [SipralCall.moveMedia] puts another in its
-     * place and the engine's thread sends on it in device mode. */
+    /** The call's socket. Guarded by [ioLock], with every send and receive,
+     * since [SipralCall.moveMedia] replaces it and the engine's thread sends
+     * on it in device mode. */
     private var socket: DatagramSocket = socket
     private val ioLock = Any()
     /**
-     * `sipral_call_media`'s own handle. Retried on `SIPRAL_STATUS_BUSY` the
-     * same way every other signalling call in this layer is: minting
-     * normally runs from inside the poll thread's own event callback, where
-     * the ABI never answers Busy (docs/08-ffi.md, re-entry), but a second
-     * thread's own signalling call -- [SipralCall.close] hanging up, most
-     * often -- can still land on the stack's lock at the same moment, which
-     * is exactly the ordinary contention [retryBusy] exists for.
+     * `sipral_call_media`'s handle. Retried on `SIPRAL_STATUS_BUSY`: minting
+     * runs inside the poll thread's callback, where the ABI never answers
+     * Busy (docs/08-ffi.md, re-entry), but another thread ([SipralCall.close]
+     * hanging up) can still hold the stack's lock.
      */
     val handle: Long = retryBusy { Sipral.callMedia(client.handle, callHandle) }
 
     private val negotiated: SipralMediaInfo = Sipral.mediaInfo(handle)
 
     /** Held for one frame's playback and capture, and while [setAppRate]
-     * moves the frame's length under them. */
+     * changes the frame length. */
     private val frameLock = Any()
 
     /** `sipral_media_info_t::sample_rate`: the codec's, or the one
@@ -132,10 +121,8 @@ class SipralMedia internal constructor(
     private var silence = ShortArray(frameSamples)
 
     /**
-     * Where the last datagram this call's media received came from. Null
-     * until at least one has arrived. Read by [SipralClient] to send the
-     * RTCP goodbye `sipral_stack_poll_farewell` hands back once signalling
-     * has already ended this call.
+     * Where the last media datagram came from; null until one arrives. Used
+     * by [SipralClient] for the RTCP goodbye after signalling has ended.
      */
     @Volatile
     var remoteAddress: InetSocketAddress? = null
@@ -146,8 +133,8 @@ class SipralMedia internal constructor(
 
     private val frameChannel = Channel<ShortArray>(Channel.UNLIMITED)
 
-    /** Whether a [SipralLocalConference] carries this call's frames, which
-     * this media's own thread then leaves alone, as it does in device mode. */
+    /** Whether a [SipralLocalConference] carries this call's frames; this
+     * thread then leaves them alone, as in device mode. */
     @Volatile
     internal var carriedByConference: Boolean = false
 
@@ -169,11 +156,10 @@ class SipralMedia internal constructor(
 
     /**
      * What the call agreed about RTCP feedback (RFC 4585, RFC 5506), read
-     * fresh from `sipral_media_info_t`: whether the stream runs RTP/AVPF,
-     * with Generic NACKs, and with reduced-size RTCP. A call asks for it
-     * with `SipralClient.placeCall(feedback = true)`; an offer that asks is
-     * answered on the profile, and with the NACKs and reduced size when
-     * answered with `feedback = true`. [statistics] counts what it did.
+     * fresh from `sipral_media_info_t`: RTP/AVPF, Generic NACK, reduced-size
+     * RTCP. Asked for with `placeCall(feedback = true)`; an offer that asks is
+     * always answered on the profile, with NACK and reduced size only when
+     * answered with `feedback = true`.
      */
     fun rtcpFeedback(): SipralRtcpFeedback {
         val now = Sipral.mediaInfo(handle)
@@ -186,18 +172,17 @@ class SipralMedia internal constructor(
         get() = Sipral.mediaInfo(handle).hasText != 0L
 
     /**
-     * `sipral_media_send_text`: queue what the user typed for the far end
-     * (RFC 4103, T.140), UTF-8. It leaves in the next 300 ms interval, each
-     * block sent twice more as redundancy where both ends agreed `red`; a
-     * new line goes as one, and BACKSPACE (U+0008) erases the far end's last
-     * character. `NOT_NEGOTIATED` on a call that agreed no text stream,
-     * `EXHAUSTED` when more is waiting unsent than a stream holds.
+     * `sipral_media_send_text`: queue UTF-8 text for the far end (RFC 4103,
+     * T.140). It leaves within 300 ms, repeated twice as redundancy when both
+     * agreed `red`. BACKSPACE (U+0008) erases the far end's last character.
+     * `NOT_NEGOTIATED` without a text stream, `EXHAUSTED` when too much is
+     * queued.
      */
     fun sendText(text: String) {
         retryBusy { Sipral.mediaSendText(handle, text) }
     }
 
-    /** The recorded call's copies leave from these two sockets from now on
+    /** Send the recording copies from these two sockets
      * ([SipralCall.recordTo]). */
     internal fun copyRecording(thisEnd: DatagramSocket, farEnd: DatagramSocket) {
         thisEnd.soTimeout = 1
@@ -220,9 +205,8 @@ class SipralMedia internal constructor(
     fun info(): SipralMediaInfo = Sipral.mediaInfo(handle)
 
     /**
-     * `sipral_media_statistics`. Once the call has ended the stream is gone
-     * and the library answers `SIPRAL_STATUS_WRONG_STATE`; from the moment
-     * the end-of-call record has arrived this answers with that record
+     * `sipral_media_statistics`. After the call ends the library answers
+     * `WRONG_STATE`; once the end-of-call record has arrived this returns it
      * ([SipralCall.finalStatistics]) instead.
      */
     fun statistics(): SipralStreamStats =
@@ -239,20 +223,18 @@ class SipralMedia internal constructor(
     @Volatile
     private var finalStatistics: SipralStreamStats? = null
 
-    /** The end-of-call record arrived: what [statistics] answers from now
-     * on, when the library no longer can. */
+    /** The end-of-call record, returned by [statistics] from now on. */
     internal fun endedWith(record: SipralStreamStats) {
         finalStatistics = record
     }
 
     /**
-     * `sipral_media_record_start_with`: record both directions to [path] --
-     * WAV, or Ogg Opus where the build has Opus; one channel, or this end on
-     * the left and the far end on the right; at [sampleRate] (zero for the
-     * call's); Ogg Opus at [bitrate] (zero for libopus's choice); made to
-     * survive a crash every [checkpointMs] (zero for five seconds). The file
-     * is finished by [stopRecording], by the call ending, or by the client
-     * closing.
+     * `sipral_media_record_start_with`: record both directions to [path], as
+     * WAV, or Ogg Opus where the build has Opus; mono, or stereo with this end
+     * left and the far end right; at [sampleRate] (zero: the call's); Opus at
+     * [bitrate] (zero: libopus's choice); crash-safe every [checkpointMs]
+     * (zero: 5 s). The file is finished by [stopRecording], the call ending,
+     * or the client closing.
      */
     fun record(
         path: String,
@@ -286,10 +268,9 @@ class SipralMedia internal constructor(
         }
 
     /**
-     * Every path this call's ICE agent tried -- the candidate pairs its
-     * checklist held, then the relays it held -- and what became of each
-     * (`sipral_media_path_candidate_count`/`_at`; D5's transport and NAT
-     * half, `docs/05-media.md`). Empty for a call not using ICE.
+     * Every path this call's ICE agent tried (checklist pairs, then relays)
+     * and its outcome (`sipral_media_path_candidate_count`/`_at`,
+     * `docs/05-media.md`). Empty without ICE.
      */
     fun pathCandidates(): List<PathCandidate> {
         val count = Sipral.mediaPathCandidateCount(handle)
@@ -315,11 +296,10 @@ class SipralMedia internal constructor(
     }
 
     /**
-     * The call's encryption report, now (`sipral_media_encryption_count` and
-     * `sipral_media_encryption_at`): per stream, whether it is encrypted, how
-     * its keys were exchanged, the suite, and whether the exchange
-     * authenticated the far end -- SDES never does, a DTLS-SRTP handshake
-     * whose certificate matched the signalled fingerprint does.
+     * The call's encryption report (`sipral_media_encryption_count`/`_at`):
+     * per stream, whether encrypted, the key exchange, the suite, and whether
+     * the far end was authenticated. SDES never is; DTLS-SRTP is when the
+     * certificate matched the signalled fingerprint.
      */
     fun encryption(): List<SipralStreamProtection> =
         (0 until Sipral.mediaEncryptionCount(handle)).map { index ->
@@ -335,29 +315,24 @@ class SipralMedia internal constructor(
         }
 
     /**
-     * Queue 16-bit mono PCM to go out, one frame at a time. A chunk that is
-     * not exactly [frameSamples] long is accepted and cut to size on the
-     * frame-rate thread, the same way `sipral.media.Media.send_audio`
-     * (the Python binding) cuts it.
+     * Queue 16-bit mono PCM to send, one frame at a time. Chunks of any
+     * length are cut to [frameSamples] on the frame thread.
      */
     fun sendAudio(pcm: ShortArray) {
         if (!pumpsFrames) {
-            // the microphone is the engine's: nothing would ever read this
+            // the engine owns the microphone; nothing would read this
             return
         }
         outgoing.put(pcm)
     }
 
     /**
-     * `sipral_media_set_app_rate`: the rate [frames] hands out and
-     * [sendAudio] takes, whatever rate the codec runs at -- 8000, 16000,
-     * 24000 or 48000, or 0 for the codec's own, which is where every call
-     * starts. The library converts both ways with its own resampler, and the
-     * frame keeps the call's duration, so [sampleRate] and [frameSamples]
-     * say the new rate and its length from here on. Audio queued with
-     * [sendAudio] and not yet sent was at the old rate, and is dropped. Any
-     * other rate throws [SipralException] with `INVALID_ARGUMENT`, and
-     * device mode with `WRONG_STATE`.
+     * `sipral_media_set_app_rate`: the rate [frames] yields and [sendAudio]
+     * takes, whatever the codec runs at: 8000, 16000, 24000 or 48000, or 0 for
+     * the codec's own (the initial state). The library resamples both ways
+     * and the frame keeps its duration, so [sampleRate] and [frameSamples]
+     * change. Unsent audio queued at the old rate is dropped. Other rates
+     * throw `INVALID_ARGUMENT`; device mode throws `WRONG_STATE`.
      */
     fun setAppRate(hz: Int) {
         synchronized(frameLock) {
@@ -371,9 +346,8 @@ class SipralMedia internal constructor(
         }
     }
 
-    /** Write a datagram straight to this call's own RTP socket: how
-     * [SipralClient] sends the RTCP goodbye a call that just ended still
-     * owes the far end, and the packets the engine encodes in device mode. */
+    /** Send a datagram from this call's RTP socket: the RTCP goodbye after
+     * the call ended, and device-mode packets. */
     internal fun sendTo(payload: ByteArray, address: InetSocketAddress) {
         synchronized(ioLock) {
             try {
@@ -384,13 +358,13 @@ class SipralMedia internal constructor(
         }
     }
 
-    /** This call's media socket, as `host:port`: where it is offered now,
-     * and the name of its connection to a TURN server. */
+    /** This call's media socket as `host:port`: where it is offered, and the
+     * name of its TURN connection. */
     val localAddress: String
         get() = synchronized(ioLock) { formatAddress(socket.localAddress.hostAddress, socket.localPort) }
 
-    /** Put [fresh] in the place of the call's socket and close the old one:
-     * [SipralCall.moveMedia], once the call has been offered at the new one. */
+    /** Swap in [fresh] and close the old socket, once [SipralCall.moveMedia]
+     * has offered the new one. */
     internal fun replaceSocket(fresh: DatagramSocket) {
         fresh.soTimeout = 5
         synchronized(ioLock) {
@@ -417,7 +391,7 @@ class SipralMedia internal constructor(
         copies?.second?.close()
     }
 
-    // -- the frame-rate thread --------------------------------------------
+    // The frame-rate thread
 
     private fun nextChunk(): ShortArray {
         while (pending.size < frameSamples) {
@@ -431,8 +405,8 @@ class SipralMedia internal constructor(
 
     private fun drainReceive() {
         val buffer = ByteArray(2048)
-        // the socket of this pass: one [replaceSocket] closes under a
-        // receive ends it, and the next pass reads the new one
+        // this pass's socket: closing it in [replaceSocket] ends the receive,
+        // and the next pass reads the new one
         val current = synchronized(ioLock) { socket }
         while (true) {
             val packet = DatagramPacket(buffer, buffer.size)
@@ -454,9 +428,8 @@ class SipralMedia internal constructor(
         }
     }
 
-    /** One drain loop shared by RTCP and the DTLS-SRTP handshake record
-     * path: both fill a `sipral_media_packet_t` the same way and are sent
-     * the same way, and differ only in which ABI call produces the packet. */
+    /** One drain loop for RTCP and DTLS records: same packet struct, same
+     * send, only the ABI call differs. */
     private fun drainQueued(poll: (ByteArray, ByteArray, LongArray) -> Int) {
         val data = ByteArray(PACKET_BYTES)
         val destination = ByteArray(ADDRESS_BYTES)
@@ -471,10 +444,9 @@ class SipralMedia internal constructor(
         }
     }
 
-    /** One packet out where it says: a datagram from this call's socket,
-     * or -- marked TCP or TLS -- bytes on the socket's connection to the TURN
-     * server, which the client holds. `lens` is [len, destination_len,
-     * protocol]. */
+    /** Send one packet: a datagram from this call's socket or, marked TCP or
+     * TLS, bytes on the client's TURN connection. `lens` is [len,
+     * destination_len, protocol]. */
     private fun send(payload: ByteArray, destination: ByteArray, lens: LongArray) {
         if (overStream(lens[2])) {
             client.writeTurn(localAddress, payload)
@@ -484,8 +456,8 @@ class SipralMedia internal constructor(
         sendTo(payload, parseAddress(destinationText))
     }
 
-    /** What arrived on the text socket, to `sipral_media_receive_text`, and
-     * what is due on it, out of it. */
+    /** Feed the text socket to `sipral_media_receive_text` and send what is
+     * due on it. */
     private fun pumpText() {
         val text = textSocket ?: return
         val buffer = ByteArray(2048)
@@ -516,14 +488,13 @@ class SipralMedia internal constructor(
             try {
                 text.send(DatagramPacket(data, len, to))
             } catch (_: Exception) {
-                // best effort, as every datagram of a call's
+                // best effort, like every media datagram
             }
         }
     }
 
-    /** Every copy waiting for the recording server, out of the socket its
-     * party's stream is offered from. What the server sends back on them
-     * (its RTCP) is read and let go. */
+    /** Send the queued recording copies from each party's socket; whatever
+     * the server sends back (its RTCP) is read and dropped. */
     private fun pumpRecording() {
         val sockets = synchronized(ioLock) { recordingSockets } ?: return
         val buffer = ByteArray(2048)
@@ -552,7 +523,7 @@ class SipralMedia internal constructor(
                 try {
                     (if (farEnd[0] != 0L) open.second else open.first).send(DatagramPacket(data, len, to))
                 } catch (_: Exception) {
-                    // best effort, as every datagram of a call's
+                    // best effort, like every media datagram
                 }
             }
         }
@@ -582,8 +553,8 @@ class SipralMedia internal constructor(
                             captureOnce(nextChunk())
                         }
                     } else {
-                        // the engine plays and captures; asking after the
-                        // media is what notices it gone
+                        // the engine plays and captures; querying the media is how a dead handle
+                        // is noticed
                         Sipral.mediaInfo(handle)
                     }
                     drainRtcp()
@@ -591,16 +562,10 @@ class SipralMedia internal constructor(
                     pumpText()
                     pumpRecording()
                 } catch (stale: SipralException) {
-                    // "A media handle outlives its call, and says so. Once
-                    // the call has ended, or its stack has been destroyed,
-                    // every media entry point answers
-                    // SIPRAL_STATUS_WRONG_STATE" (docs/08-ffi.md) -- the
-                    // frame thread stops pumping the moment that starts
-                    // happening rather than raising on every remaining
-                    // frame until close() catches up with it. Anything else
-                    // this ABI could answer here is a real, unexpected
-                    // failure and is left to reach this thread's own
-                    // uncaught-exception handler.
+                    // After the call or stack ends, every media entry point answers
+                    // WRONG_STATE (docs/08-ffi.md): stop pumping instead of throwing every
+                    // frame until close() runs. Anything else is a real failure and reaches
+                    // the thread's uncaught-exception handler.
                     if (stale.status == SipralStatus.WRONG_STATE ||
                         stale.status == SipralStatus.STALE_HANDLE
                     ) {
@@ -611,10 +576,9 @@ class SipralMedia internal constructor(
                 }
             }
 
-            // on a schedule, not a sleep after each frame: a sleep ends late,
-            // and a frame clock that loses what it overslept sends and plays
-            // fewer frames a second than the far end's clock expects, which
-            // its buffer then fills with silence
+            // on a schedule, not a sleep per frame: sleeps end late, and a clock that
+            // loses the oversleep sends fewer frames than the far end expects, which
+            // it fills with silence
             due += frameMillis * 1_000_000L
             val remainingNs = due - System.nanoTime()
             if (remainingNs > 0) {

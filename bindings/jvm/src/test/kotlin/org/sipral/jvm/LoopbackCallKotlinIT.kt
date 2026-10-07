@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Two stacks on loopback in one JVM, driven through org.sipral.idiomatic as
-// a Kotlin server would: one calls the other directly, the other answers,
-// RTP crosses both ways, digits go over, and one side hangs up. Run by
-// failsafe against the packaged jar, so the natives come out of the jar.
+// Two loopback stacks in one JVM through org.sipral.idiomatic: a direct
+// call, answered, RTP both ways, digits, hang-up. Run by failsafe against
+// the packaged jar, so the natives come from the jar.
 
 package org.sipral.jvm
 
@@ -119,8 +118,8 @@ class LoopbackCallKotlinIT {
         }
 
     /** An answer keeps the offer's order (RFC 3264 §6.1): placed with PCMA
-     * first, a call beats the client's own order, which would settle on Opus;
-     * answered with PCMA,PCMU, it leaves out the G.722 an offer put first. */
+     * first, a call overrides the client order (which would pick Opus);
+     * answered with PCMA,PCMU it drops the G.722 the offer put first. */
     @Test
     fun aCallsOwnCodecsSettleOnPcmaPlacedAndAnswered() = runBlocking {
         val pcma = SipralCodec.PCMA.value.toLong()
@@ -128,8 +127,8 @@ class LoopbackCallKotlinIT {
         assertEquals(listOf(pcma, pcma), codecsOf(place = "G722,PCMA,PCMU", answer = "PCMA,PCMU"))
     }
 
-    /** The loudest sample the far end hears of a tone sent on a call held
-     * from this end, on clients [SipralJava.open] gave [heldAudio]. */
+    /** The loudest sample the far end hears of a tone sent on a call held from
+     * this end, with clients opened with [heldAudio]. */
     private suspend fun loudestHeardOnHold(heldAudio: SipralHeldAudio): Int =
         SipralJava.open("127.0.0.1", 0, null, heldAudio).use { alice ->
             SipralJava.open("127.0.0.1", 0, null, heldAudio).use { bob ->

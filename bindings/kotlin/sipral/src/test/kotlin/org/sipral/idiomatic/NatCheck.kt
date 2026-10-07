@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// What SipralClient.open(ice, stunServer, turn) carries, proven on the wire
-// rather than by reading a field back: a STUN and TURN server in the test
-// itself tells every socket it appears somewhere else, and the checks look at
-// what reaches a far end -- the INVITE's Contact and SDP, the relay offered
-// as a candidate, the credential's realm handling -- and at two clients that
-// require ICE carrying audio both ways through sockets the stack reads until
-// their media exists. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
+// SipralClient.open(ice, stunServer, turn) checked on the wire: an
+// in-process STUN/TURN server reports every socket elsewhere, and the
+// checks read what reaches a far end (Contact, SDP, relayed candidate,
+// realm handling), plus two ICE-requiring clients carrying audio both
+// ways. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -57,14 +55,13 @@ import org.sipral.SipralStunServerState
 import org.sipral.SipralTransport
 
 /**
- * A STUN and TURN server on `host` that tells every socket it appears at
- * `publicHost` on its own port moved by ten thousand: a NAT that moves the
- * port too, so an address naming the socket's own port cannot pass for
- * right. Binding requests get an XOR-MAPPED-ADDRESS (RFC 8489 §14.2); an
- * Allocate without a credential gets the 401 with a REALM and a NONCE, and a
- * signed one is checked against the long-term key -- MD5 of
- * `username:realm:password` (RFC 8489 §9.2.2) -- and answered with a relay on
- * 198.51.100.9, signed the same way. Nothing is answered until [open] is set.
+ * A STUN and TURN server on `host` that reports every socket at
+ * `publicHost` with its port moved by ten thousand, so an address carrying
+ * the socket's own port cannot pass. Binding gets an XOR-MAPPED-ADDRESS
+ * (RFC 8489 §14.2); an unsigned Allocate gets a 401 with REALM and NONCE,
+ * and a signed one is checked against the long-term key, MD5 of
+ * `username:realm:password` (RFC 8489 §9.2.2), and answered with a signed
+ * relay on 198.51.100.9. Silent until [open] is set.
  */
 private class FakeStunServer(
     host: String,
@@ -230,9 +227,8 @@ private class FakeStunServer(
     }
 }
 
-/** An IPv4 address of this machine's own that ICE may use: RFC 8445
- * §5.1.1.1 keeps loopback out of the candidates. Nothing leaves the
- * machine: every socket these checks open is this process's own. */
+/** A non-loopback IPv4 address of this machine, since RFC 8445 §5.1.1.1
+ * keeps loopback out of candidates. Nothing leaves the machine. */
 private fun hostAddress(): String? = NetworkInterface.getNetworkInterfaces().asSequence()
     .filter { it.isUp && !it.isLoopback && !it.isPointToPoint && !it.isVirtual }
     .flatMap { it.inetAddresses.asSequence() }
@@ -260,8 +256,8 @@ private fun read(peer: DatagramSocket, prefix: String, withinMs: Long = 10_000):
 private suspend fun firstEvent(client: SipralClient, withinMs: Long = 10_000, match: (SipralEvent) -> Boolean): SipralEvent? =
     withTimeoutOrNull(withinMs) { client.events.first(match) }
 
-/** Every event `client` raises from now on, collected on a thread of its
- * own, for a check that blocks its own thread in `placeCall`. */
+/** Every event `client` raises from now on, collected on its own thread,
+ * for a check that blocks in `placeCall`. */
 private fun recordEvents(client: SipralClient, forMs: Long): MutableList<SipralEvent> {
     val seen = Collections.synchronizedList(ArrayList<SipralEvent>())
     val subscribed = java.util.concurrent.CountDownLatch(1)
@@ -298,9 +294,8 @@ private fun stunMappingReachesContactAndSdp(host: String): String {
                 assertEquals(1L, sip.accounts)
 
                 client.placeCall(account, target = "sip:bob@$peerAddress", mediaHost = host).use {
-                    // placeCall returns once the poll thread has seen the
-                    // media socket's mapping, which is before that event
-                    // reaches `events` and the thread collecting it here
+                    // placeCall returns once the poll thread saw the mapping, before the
+                    // event reaches this collector
                     val mediaDeadline = System.currentTimeMillis() + 5_000
                     while (mappingFor(false) == null && System.currentTimeMillis() < mediaDeadline) Thread.sleep(20)
                     val media = assertNotNull(mappingFor(false), "the media socket was never mapped")
@@ -321,9 +316,8 @@ private fun stunMappingReachesContactAndSdp(host: String): String {
     }
 }
 
-/** `stunFallbacks`: the first server named never answers, and the
- * signalling socket is asked of the next one once five and a half seconds
- * have gone by, with `SIPRAL_EVENT_KIND_STUN_SERVER` saying so. */
+/** `stunFallbacks`: the first server never answers, and after 5.5 s the
+ * next is asked, with `SIPRAL_EVENT_KIND_STUN_SERVER` reporting it. */
 private fun aSilentFirstServerHandsOver(host: String): String {
     DatagramSocket(0, InetAddress.getByName(host)).use { silent ->
         val silentAddress = formatAddress(host, silent.localPort)
@@ -354,10 +348,9 @@ private fun aSilentFirstServerHandsOver(host: String): String {
     }
 }
 
-/** [SipralClient.setStunServers] on a client opened with nobody to ask: the
- * signalling socket is mapped at once, a call placed afterwards is offered
- * at the address the server handed out, and an entry that is not an address
- * is refused. */
+/** [SipralClient.setStunServers] on a client opened without STUN: the
+ * signalling socket is mapped at once, a later call is offered at the
+ * mapped address, and a malformed entry is refused. */
 private fun aListNamedLaterMapsTheSignallingAndTheCalls(host: String): String {
     FakeStunServer(host).use { stun ->
         stun.open = true
@@ -407,8 +400,8 @@ private fun turnRelayIsAllocatedAndOffered(host: String): String {
                 val seen = recordEvents(client, 60_000)
                 val account = client.addAccount(aor = "sip:alice@example.invalid", registrarAddress = peerAddress)
                 client.placeCall(account, target = "sip:bob@$peerAddress", mediaHost = host).use {
-                    // The relay event reaches `seen` on the recorder's thread,
-                    // which a loaded machine can run after placeCall returns.
+                    // the relay event reaches `seen` on the recorder's thread, which may run
+                    // after placeCall returns
                     fun relayed() = seen.toList().mapNotNull { relayOf(it) }.firstOrNull()
                     val deadline = System.currentTimeMillis() + 10_000
                     while (relayed() == null && System.currentTimeMillis() < deadline) Thread.sleep(20)
@@ -484,9 +477,8 @@ private suspend fun iceBehindStunCarriesAudio(host: String): String {
 
 /**
  * `SipralIce.LITE` answering a full agent that requires ICE (RFC 8445
- * §2.5): the lite end offers its one host candidate and answers the checks,
- * the full end nominates, both ends report the pair, and audio crosses it
- * both ways.
+ * §2.5): the lite end offers its host candidate and answers checks, the
+ * full end nominates, both report the pair, and audio crosses both ways.
  */
 private suspend fun liteAnsweringAFullAgentCarriesAudio(host: String): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
@@ -528,28 +520,20 @@ private suspend fun liteAnsweringAFullAgentCarriesAudio(host: String): String {
 
 /**
  * A call that allocated a TURN relay gives it back when it ends:
- * `SipralClient.drainFarewells` must send
- * what `stackPollFarewell` hands out to the destination it names -- the
- * TURN server, for the Refresh with a lifetime of zero that gives a relay
- * back (`crates/sipral/src/relay.rs`, "gives it back when the call ends")
- * -- and only fall back to the last address media was heard from when it
- * names none. A call whose peer never carries any ICE still had a relay
- * allocated for it and still gives it back the same way (`relay.rs`: "A
- * call whose peer does no ICE never uses it, and gives it back the same
- * way"), so this needs nothing more than a call that reaches both ends and
- * is then closed -- were the destination ignored in favour of the far
- * end's own address, as it once was, this fake TURN server would never see
- * the Refresh at all.
+ * `drainFarewells` must send `stackPollFarewell`'s packet to the
+ * destination it names (the TURN server, for the zero-lifetime Refresh),
+ * falling back to the last media source only when none is named. A peer
+ * without ICE still had a relay allocated, so a plain call that connects
+ * and closes is enough: sending to the far end instead would never reach
+ * this fake server.
  */
 private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): String {
     val password = "turn-secret-${System.nanoTime() % 1_000_000}"
     FakeStunServer(host, credential = "alice-turn" to password).use { stun ->
         stun.open = true
-        // codecs = "PCMU" keeps the offer short: three ICE candidates
-        // (host, server-reflexive, relayed) on top of every codec this
-        // build has by default clears RFC 3261 Section 18.1.1's
-        // 1300-byte line, and this loopback pair has no stream transport
-        // open to fall back to.
+        // PCMU only: three ICE candidates plus every default codec exceed RFC
+        // 3261 §18.1.1's 1300 bytes, and this loopback pair has no stream to fall
+        // back to.
         SipralClient.open(
             audio = SipralAudioMode.Application,
             bindHost = host,
@@ -573,22 +557,15 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
 
                 val bobCall = bob.answerCall(incoming, mediaHost = host)
 
-                // The session has to actually open -- and the relay
-                // actually become the call's -- before there is anything
-                // for a farewell to give back; bob carries no ICE at all,
-                // so MEDIA_PATH_CHOSEN (an ICE nomination) never fires
-                // here the way it does when both ends require it.
+                // wait for the session to open and the relay to become the call's; bob
+                // does no ICE, so MEDIA_PATH_CHOSEN never fires here
                 val mediaDeadline = System.currentTimeMillis() + 8_000
                 while (aliceCall.media == null && System.currentTimeMillis() < mediaDeadline) delay(20)
                 assertNotNull(aliceCall.media, "alice's media never started")
 
-                // SipralClient.close, not SipralCall.close: hanging up and
-                // forgetting the call right here would race the poll
-                // thread's own drain of the farewell it leaves behind
-                // (SipralClient.close's own doc comment). It hangs up,
-                // gives the poll thread a round to drain both queues
-                // while the call is still tracked, and only then forgets
-                // it.
+                // SipralClient.close, not SipralCall.close: forgetting the call here would
+                // race the poll thread's drain of its farewell. close() hangs up, lets the
+                // poll thread drain while the call is tracked, then forgets it.
                 alice.close()
                 bobCall.close()
 
@@ -610,10 +587,9 @@ private suspend fun turnAllocationIsGivenBackWhenTheCallEnds(host: String): Stri
 }
 
 /**
- * D5's path half and a restart this end starts, through the idiomatic
- * layer: the call's agent says which pair carries it and what became of
- * every other, and `restartIce()` checks again under new credentials until
- * a second path is chosen.
+ * ICE paths and a local restart through the idiomatic layer: the agent
+ * reports the chosen pair and every other's outcome, and `restartIce()`
+ * rechecks under new credentials until a second path is chosen.
  */
 private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = host, ice = SipralIce.REQUIRED).use { alice ->
@@ -643,8 +619,8 @@ private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): Strin
                         "the selected pair is not described: $paths",
                     )
 
-                    // the restart's own selection is a second PATH_CHOSEN,
-                    // subscribed to before the restart is asked for
+                    // the restart's selection is a second PATH_CHOSEN, subscribed before
+                    // asking for it
                     val (_, again) = alice.events.awaitNext(SipralEventKind.MEDIA_PATH_CHOSEN, timeoutMs = 15_000) {
                         aliceCall.restartIce()
                     }
@@ -656,10 +632,9 @@ private suspend fun iceCallSaysWhichPathsItTriedAndRestarts(host: String): Strin
     }
 }
 
-/** An account the STUN answer showed behind a NAT keeps its registrar's
- * flow open: a double CRLF, alone in a datagram, reaches the registrar every
- * `registrarKeepaliveMs`, and none does with the keep-alive off
- * (`docs/06-nat.md`, "Refresh"). */
+/** An account STUN showed behind a NAT keeps the registrar flow open: a
+ * lone double CRLF every `registrarKeepaliveMs`, and none with the
+ * keep-alive off (`docs/06-nat.md`). */
 private fun registrarFlowIsKeptOpenBehindTheNat(host: String): String {
     for (keepalive in listOf(true, false)) {
         FakeStunServer(host).use { stun ->
@@ -701,12 +676,10 @@ private fun registrarFlowIsKeptOpenBehindTheNat(host: String): String {
 }
 
 /**
- * A TURN server on a TCP port of this machine's loopback -- over TLS when it
- * is given a server socket that speaks it -- and on nothing else: no
- * datagram reaches it. What arrives is framed as RFC 8656 §12.5 and RFC 8489
- * §6.2.2 say, and every request is recorded with the connection it came on,
- * counting from one; an unauthenticated Allocate gets the 401, a signed one
- * a relay, and every other signed request its success.
+ * A TURN server on loopback TCP only (TLS when given a TLS server socket).
+ * Framing per RFC 8656 §12.5 and RFC 8489 §6.2.2; every request is recorded
+ * with its connection number from one. Unsigned Allocate gets 401, signed
+ * one a relay, any other signed request success.
  */
 private class FakeTurnOverStream(
     private val credential: Pair<String, String>,
@@ -835,9 +808,8 @@ private class FakeTurnOverStream(
 
 private const val TURN_SERVER_NAME = "turn.sipral.test"
 
-/** A key and a certificate for [TURN_SERVER_NAME], made with the `openssl`
- * command: the server's side as a key manager's, and the client's as a
- * socket factory that trusts that certificate and nothing else. */
+/** A key and certificate for [TURN_SERVER_NAME] made with `openssl`: the
+ * server's key manager, and a client socket factory trusting only it. */
 private fun selfSigned(): Pair<SSLContext, SSLSocketFactory> {
     val openssl = listOf("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl")
         .firstOrNull { File(it).canExecute() } ?: error("no openssl command to make the server's certificate with")
@@ -876,9 +848,9 @@ private fun selfSigned(): Pair<SSLContext, SSLSocketFactory> {
 }
 
 /**
- * Alice behind `server`, reached as `turn` says, calling Bob, who answers:
- * what her relay event said. The call is closed and forgotten with the
- * clients still running, so its farewell goes out after it is gone.
+ * Alice behind `server`, reached as `turn` says, calls Bob, who answers;
+ * returns her relay event. The call is closed with the clients still
+ * running, so its farewell goes out after it.
  */
 private suspend fun callThrough(
     host: String,

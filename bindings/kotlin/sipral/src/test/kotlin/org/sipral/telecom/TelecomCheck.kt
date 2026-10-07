@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The ConnectionService helper's logic, on a plain JVM with no Android in
-// it: TelecomBridge driven through recording fakes of the telecom framework
-// and of the SIP side, one sequence per race docs/15-mobile.md names, and
-// then once more end to end over two real SipralClients on loopback --
-// a push announced, the INVITE that follows matched to it, answered, held
-// both ways, sent a digit and hung up, with only the telecom framework
-// faked. Compiled and run by scripts/check.sh beside IdiomaticCheck.kt.
+// TelecomBridge on a plain JVM: driven through recording fakes of the
+// telecom framework and the SIP side, one sequence per race
+// docs/15-mobile.md names, then end to end over two real SipralClients on
+// loopback (push, matched INVITE, answer, hold both ways, a digit, hang up)
+// with only the framework faked. Run by scripts/check.sh.
 
 package org.sipral.telecom
 
@@ -50,10 +48,10 @@ fun main() {
     exitProcess(0)
 }
 
-// -- the fakes ------------------------------------------------------------
+// The fakes
 
-/** Everything every fake was asked, in one order, so that "reported before
- * announced" is a comparison of two indices. */
+/** Everything every fake was asked, in one order, so "reported before
+ * announced" compares two indices. */
 internal class Log {
     val lines = mutableListOf<String>()
 
@@ -74,9 +72,8 @@ internal class FakePlatform(val log: Log) : TelecomPlatform {
     var bridge: TelecomBridge? = null
     val connections = mutableMapOf<String, FakeConnection>()
 
-    /** What the framework does on a real device: create the connection
-     * for the id it was given. Left to the test to call, since on a device
-     * it happens later, on another thread. */
+    /** Create the connection for an id, as the framework does on a device;
+     * left to the test, since there it happens later on another thread. */
     fun create(id: String): FakeConnection {
         val connection = FakeConnection(id, log)
         connections[id] = connection
@@ -524,10 +521,10 @@ private fun fakeSequences(): String {
         "connection existed, every call ended at once)"
 }
 
-// -- the real thing, with only the telecom framework faked -----------------
+// The real thing, with only the telecom framework faked
 
-/** Wait for [condition], and on a timeout say what every fake was asked,
- * which is most of what there is to know about where the sequence stopped. */
+/** Wait for [condition]; on timeout report what every fake was asked,
+ * which shows where the sequence stopped. */
 private suspend fun Log.waitFor(what: String, condition: () -> Boolean) {
     try {
         withTimeout(15_000) {
@@ -589,8 +586,7 @@ private suspend fun overLoopback(): String {
         placed.resume()
         log.waitFor("the far end's resume to reach the connection") { !conn.farEndHolding }
 
-        // Undispatched, so the subscription to the digits exists before the
-        // digit is sent rather than whenever the dispatcher gets round to it.
+        // undispatched: subscribed before the digit is sent
         val digit = scope.async(start = CoroutineStart.UNDISPATCHED) { withTimeout(15_000) { placed.digits.first() } }
         bridge.playDtmf(id, '7')
         digit.await()

@@ -21,10 +21,9 @@ import org.sipral.SipralTransport
 /**
  * `sipral_account_add`, and the entry points that take its handle.
  *
- * Built through [SipralClient.addAccount], never directly: a handle names
- * something only on the stack that minted it (`docs/08-ffi.md`), so
- * keeping the two together is what makes every method here safe to call
- * with nothing further to pass.
+ * Built only through [SipralClient.addAccount]: a handle is valid only on
+ * the stack that minted it (`docs/08-ffi.md`), so the account keeps its
+ * client.
  */
 class SipralAccount internal constructor(
     val client: SipralClient,
@@ -32,22 +31,19 @@ class SipralAccount internal constructor(
     val aor: String,
     registrarAddress: String,
     contact: String,
-    /** The `Contact` the application wrote, or null when the account's is
-     * the one this layer derives from the signalling socket. */
+    /** The `Contact` the application wrote, or null when this layer derives
+     * it from the signalling socket. */
     private val givenContact: String?,
     /** The server named by a URI RFC 3263 locates, or null. */
     val serverUri: String? = null,
-    /** The protocol of the connection of its own the account's requests go
-     * over, [SipralTransport.TCP] or [SipralTransport.TLS], or null for the
-     * client's own transport ([SipralClient.addAccount]'s `streamProtocol`). */
+    /** [SipralTransport.TCP] or [SipralTransport.TLS] for an account on its own
+     * connection, or null for the client's transport. */
     val streamProtocol: SipralTransport? = null,
-    /** The certificate pin it was added with, which a TLS connection of its
-     * own is held to. */
+    /** The certificate pin a TLS connection of its own is held to. */
     internal val tlsPin: String? = null,
 ) {
-    /** Where the account's requests go, `host:port`: the address it was
-     * added with, or -- for one added with a [serverUri] -- the address it
-     * was last located at, empty until then. */
+    /** Where requests go, `host:port`: the address it was added with, or for a
+     * [serverUri] account the last located address (empty until then). */
     @Volatile
     var registrarAddress: String = registrarAddress
         private set
@@ -75,13 +71,12 @@ class SipralAccount internal constructor(
     }
 
     /**
-     * `sipral_account_check_certificate`: the verdict of this account's
-     * `tlsPin` on [certificate], the DER bytes of the leaf a TLS server
-     * presented, from inside the application's own certificate check. The
-     * certificate's dates when it is the pinned one -- accept the handshake
-     * whoever signed it, an expired one included; null when the account pins
-     * nothing and the platform's own checks decide; a [SipralException] with
-     * `CERTIFICATE_REFUSED` when it pins another.
+     * `sipral_account_check_certificate`: this account's `tlsPin` verdict on
+     * [certificate] (the leaf's DER), from inside the application's own
+     * certificate check. Returns the certificate's dates when it is the pinned
+     * one (accept it whoever signed it, even expired); null when nothing is
+     * pinned and the platform decides; throws `CERTIFICATE_REFUSED` when
+     * another is pinned.
      */
     fun checkCertificate(certificate: ByteArray, unixSeconds: Long = System.currentTimeMillis() / 1000): SipralPinnedCertificate? {
         val found = retryBusy { Sipral.accountCheckCertificate(client.handle, handle, certificate, unixSeconds) }
@@ -89,8 +84,7 @@ class SipralAccount internal constructor(
     }
 
     /** How an account names and keeps its server, beside the registrar's
-     * address: the ABI 0.34 members of `sipral_account_config_t`, and the
-     * address this layer chose for its `Contact`. */
+     * address, and the address this layer chose for its `Contact`. */
     internal class Location(
         val serverUri: String?,
         val serverNaptr: Boolean,
@@ -100,8 +94,8 @@ class SipralAccount internal constructor(
         val streamProtocol: SipralTransport? = null,
         val realms: List<String> = emptyList(),
     )
-    /** Where this account says it can be reached, as its `Contact` carries
-     * it now: after [SipralClient.networkChanged], the new address. */
+    /** The account's current `Contact` address; after
+     * [SipralClient.networkChanged], the new one. */
     @Volatile
     var contact: String = contact
         private set
@@ -172,10 +166,10 @@ class SipralAccount internal constructor(
     }
 
     /**
-     * `sipral_account_rebind` onto the signalling socket [local] the client
-     * bound after a network change: a derived `Contact` names the new
-     * socket; one the application wrote has the old address, wherever it
-     * names it, replaced by the new host, and is otherwise left as written.
+     * `sipral_account_rebind` onto the new signalling socket [local] after a
+     * network change. A derived `Contact` names the new socket; an
+     * application-written one has the old address replaced by the new host and
+     * is otherwise kept.
      */
     internal fun rebind(local: String, previous: String?) {
         val next = if (givenContact == null) {
@@ -199,33 +193,29 @@ class SipralAccount internal constructor(
             retryBusy { Sipral.accountRegistrationState(client.handle, handle) }.toInt(),
         ) ?: SipralRegistrationState.UNKNOWN
 
-    /** Whether it was asked to register and not to unregister since: the
-     * accounts a client signalling over TCP or TLS registers again once its
-     * connection is made again. */
+    /** Asked to register and not since to unregister: a TCP/TLS client
+     * re-registers these after reconnecting. */
     @Volatile
     var wantsRegistration: Boolean = false
         private set
 
     /**
-     * `sipral_account_set_access_token`: the OAuth 2.0 access token the
-     * account's server asked for (RFC 8898), in place of any it had; null
-     * takes it away. The answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED`
-     * ([tokenRequiredOf]), and the way a renewed token goes in: from the next
-     * request on, the server's `Bearer` challenge is answered with it. A
-     * registration that failed for want of one starts again with [register].
-     * `SipralStatus.INVALID_ARGUMENT` for a token that is not RFC 6750's
-     * `b64token`, with nothing changed.
+     * `sipral_account_set_access_token`: the OAuth 2.0 access token the server
+     * asked for (RFC 8898), replacing any previous one; null removes it. The
+     * answer to `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` ([tokenRequiredOf]) and the
+     * way to renew: the next `Bearer` challenge is answered with it. A
+     * registration that failed for lack of one restarts with [register].
+     * `SipralStatus.INVALID_ARGUMENT`, changing nothing, for a token that is
+     * not an RFC 6750 `b64token`.
      */
     fun setAccessToken(token: String?) {
         retryBusy { Sipral.accountSetAccessToken(client.handle, handle, token ?: "") }
     }
 
     /**
-     * `sipral_account_register`. A no-op account refuses this. On a client
-     * signalling over TCP or TLS whose connection is down
-     * (`SipralStatus.TRANSPORT_DOWN`, already raised as
-     * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`) it is kept, and the REGISTER goes
-     * the moment the connection is made again.
+     * `sipral_account_register`. A no-op account refuses this. On a TCP/TLS
+     * client whose connection is down (`TRANSPORT_DOWN`, already raised as
+     * `TRANSPORT_FAILED`) the request is kept and sent on reconnect.
      */
     fun register() {
         wantsRegistration = true
@@ -239,13 +229,12 @@ class SipralAccount internal constructor(
     }
 
     /**
-     * `sipral_account_unregister`.
+     * `sipral_account_unregister`: a REGISTER with Expires: 0.
      *
-     * Gives the binding up: a REGISTER with Expires: 0. The registration state
-     * reads unregistered as soon as this returns, before the registrar answers;
-     * the answer is the registration-changed event that follows. Wait for that
-     * event before closing the stack, which otherwise cannot answer a challenge
-     * to the un-REGISTER.
+     * The state reads unregistered as soon as this returns; the registrar's
+     * answer is the following registration-changed event. Wait for it before
+     * closing the stack, which otherwise cannot answer a challenge to the
+     * un-REGISTER.
      */
     fun unregister() {
         wantsRegistration = false
@@ -253,22 +242,13 @@ class SipralAccount internal constructor(
     }
 
     /**
-     * [register], suspended until the registration reaches a terminal
-     * state -- `REGISTERED` or one of the failures -- rather than left for
-     * the caller to poll [registrationState] itself. This is the ABI
-     * completing through an event: `sipral_account_register` only enqueues
-     * the REGISTER, and `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED` is where
-     * the answer actually arrives, with the state already on it --
-     * `event.payload.registration.state` -- so nothing here queries the
-     * stack a second time for what the event that woke it already said.
+     * [register], suspended until the registration is `REGISTERED` or failed.
+     * `sipral_account_register` only queues the REGISTER; the outcome arrives
+     * in `SIPRAL_EVENT_KIND_REGISTRATION_CHANGED`, state included.
      *
-     * Subscribed before [register] runs, through [awaitNext], not after:
-     * a terminal `REGISTRATION_CHANGED` for this account can arrive
-     * within microseconds of the REGISTER going out, and `register()`
-     * first, subscribe second would be free to miss it and then hang
-     * until, or wrongly match, whatever this account's *next*
-     * registration change happens to be -- a periodic refresh, a retry --
-     * see [awaitNext]'s own note.
+     * Subscribes through [awaitNext] before [register] runs: the answer can
+     * arrive microseconds after the REGISTER leaves, and subscribing after
+     * would miss it and then hang or match a later refresh.
      */
     suspend fun registerAndWait(timeoutMs: Long = 10_000) {
         val (_, last) = client.events.awaitNext(
@@ -297,12 +277,12 @@ class SipralAccount internal constructor(
 
     /**
      * `sipral_account_announce`: a push said [caller] is calling on this
-     * account (`docs/15-mobile.md`, "C2"). The binding is refreshed at once
-     * as part of the same call, so nothing else needs asking for.
+     * account (`docs/15-mobile.md`, "C2"). The binding is refreshed by the
+     * same call.
      *
-     * [SipralAnnounced.Waiting] when the INVITE is still to come, and
-     * [SipralAnnounced.Arrived] when it beat the push -- the call screen
-     * just raised then belongs to that call handle.
+     * [SipralAnnounced.Waiting] when the INVITE is still to come;
+     * [SipralAnnounced.Arrived] when it beat the push, and the call screen
+     * just raised belongs to that handle.
      */
     fun announce(caller: String): SipralAnnounced {
         val (announcement, call) = retryBusy {
@@ -323,16 +303,15 @@ class SipralAccount internal constructor(
         client.forgetAccount(handle)
     }
 
-    // -- subscriptions and presence ------------------------------------------
+    // Subscriptions and presence
 
     /**
-     * `sipral_account_subscribe` (RFC 6665): watch [target], a SIP URI, for
-     * the event [package] -- `presence` (RFC 3856), `conference` (RFC 4575),
-     * `dialog` for a busy lamp field, `message-summary` -- from this account.
-     * [accept] is the `Accept` value when the package's default body type is
-     * not the one wanted, [expiresSeconds] how long to ask for (zero for an
-     * hour), and [destination] (`host:port`) where to send the SUBSCRIBE when
-     * not where the account registers.
+     * `sipral_account_subscribe` (RFC 6665): watch [target] for the event
+     * [package] (`presence` RFC 3856, `conference` RFC 4575, `dialog` for a
+     * busy lamp field, `message-summary`). [accept] overrides the package's
+     * default body type, [expiresSeconds] is the requested duration (zero for
+     * an hour), and [destination] (`host:port`) is where the SUBSCRIBE goes
+     * when not to the registrar.
      */
     fun subscribe(
         target: String,
@@ -353,21 +332,18 @@ class SipralAccount internal constructor(
     }
 
     /**
-     * Watch [target]'s presence (RFC 3856): a `presence` subscription asking
-     * for PIDF, whose every notification arrives as
-     * `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with [presenceOf]'s `kind`
-     * `WATCHED`: open or closed, the activity, the presentity and its note.
+     * Watch [target]'s presence (RFC 3856) with PIDF. Each notification is a
+     * `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` whose [presenceOf] `kind` is
+     * `WATCHED`.
      */
     fun watchPresence(target: String, expiresSeconds: Long = 0, destination: String? = null): SipralSubscription =
         subscribe(target, "presence", "application/pidf+xml", expiresSeconds, destination)
 
     /**
-     * `sipral_account_publish_presence` (RFC 3903): publish this account's
-     * presence to its registrar as the presence compositor; the first call
-     * publishes and every later one modifies the same publication, which the
-     * stack keeps refreshed until [unpublishPresence]. What the compositor
-     * did with it arrives as `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with
-     * [presenceOf]'s `kind` `PUBLICATION`, naming this account.
+     * `sipral_account_publish_presence` (RFC 3903): publish to the registrar
+     * as presence compositor. Later calls modify the same publication, which
+     * the stack refreshes until [unpublishPresence]. The outcome arrives as
+     * `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` with `kind` `PUBLICATION`.
      */
     fun publishPresence(presence: SipralPublishedPresence) {
         val document = SipralPresence(
@@ -387,11 +363,10 @@ class SipralAccount internal constructor(
 }
 
 /**
- * The RFC 8599 parameters an account's REGISTER carries so that a proxy can
- * wake this device (`docs/15-mobile.md`, "RFC 8599 push parameters"):
- * `pn-provider` (`fcm` on Android), `pn-prid` (the device token) and
- * `pn-param` (for FCM, the project the token belongs to). [wakesItself]
- * is `+sip.pnsreg`, and is the application's fact to state.
+ * The RFC 8599 parameters a REGISTER carries so a proxy can wake this
+ * device (`docs/15-mobile.md`): `pn-provider` (`fcm` on Android),
+ * `pn-prid` (the device token) and `pn-param` (for FCM, the token's
+ * project). [wakesItself] is `+sip.pnsreg`, the application's to state.
  */
 class SipralPush(
     val provider: String,
@@ -413,10 +388,10 @@ sealed class SipralAnnounced {
 }
 
 /**
- * A challenge an account's password was not given to
- * (`SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`): why ([refusal], null for a
- * reason this build has no name for), where the challenged request went
- * ([server], `host:port`), and every realm it was challenged for.
+ * A challenge the account's password was not given to
+ * (`SIPRAL_EVENT_KIND_CHALLENGE_DECLINED`): why ([refusal], null when this
+ * build has no name for it), where the request went ([server]), and every
+ * realm challenged.
  */
 class SipralDeclinedChallenge(
     val refusal: SipralChallengeRefusal?,
@@ -424,10 +399,8 @@ class SipralDeclinedChallenge(
     val realms: List<String>,
 )
 
-/**
- * The `SIPRAL_EVENT_KIND_CHALLENGE_DECLINED` payload, its realms one per
- * line in C read as a list, or null for an event of any other kind.
- */
+/** The `CHALLENGE_DECLINED` payload with its realms as a list, or null for
+ * another kind. */
 fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? {
     if (event.kind != SipralEventKind.CHALLENGE_DECLINED.value.toLong()) {
         return null
@@ -441,15 +414,13 @@ fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? {
 }
 
 /**
- * An account's server asking for an OAuth 2.0 access token
+ * The server asking for an OAuth 2.0 access token
  * (`SIPRAL_EVENT_KIND_TOKEN_REQUIRED`, RFC 8898): what was wrong with the
- * last one ([error], `INVALID_TOKEN` for one expired or revoked, and
- * [errorCode] as the server wrote it), whether a proxy asked ([proxy]),
- * where the challenged request went ([server], `host:port`), the [realm],
- * the [scope] a token has to carry and the [authzServer] it comes from.
- * Check [authzServer] against the authorization servers the application
- * trusts before going near it, then hand the token to
- * [SipralAccount.setAccessToken].
+ * last ([error], `INVALID_TOKEN` when expired or revoked; [errorCode] as
+ * written), whether a proxy asked, where the request went ([server]), the
+ * [realm], the required [scope] and the [authzServer]. Check [authzServer]
+ * against the servers the application trusts before contacting it, then
+ * pass the token to [SipralAccount.setAccessToken].
  */
 class SipralTokenRequired(
     val error: SipralTokenError?,
@@ -461,8 +432,7 @@ class SipralTokenRequired(
     val authzServer: String?,
 )
 
-/** The `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` payload, or null for an event of
- * any other kind. */
+/** The `TOKEN_REQUIRED` payload, or null for another kind. */
 fun tokenRequiredOf(event: SipralEvent): SipralTokenRequired? {
     if (event.kind != SipralEventKind.TOKEN_REQUIRED.value.toLong()) {
         return null

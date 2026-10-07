@@ -1,34 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The library's own audio engine as a CallAudio device: on Android from API
-// level 28 the engine runs every call over AAudio, and what a call's
-// CallAudio still has to do is say when the device is the call's -- which
-// is the engine's activation.
+// The library's audio engine as a CallAudio device: on Android API 28+ the
+// engine runs every call over AAudio, and a call's CallAudio only has to
+// say when the devices are the call's, which is the engine's activation.
 
 package org.sipral.telecom
 
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * [AudioDevice] over the library's own engine
+ * [AudioDevice] over the library's engine
  * (`org.sipral.idiomatic.SipralAudioMode.Device`), for a client whose calls
  * the engine carries.
  *
- * The engine already pumps every call, so there is nothing here to read or
- * write: [open] turns the engine's devices on ([activate]) and the streams
- * it returns carry no frames. What is left is who holds the devices. One
- * engine serves every call, so the streams of every [CallAudio] built over
- * the same instance share it: the devices come on when the first is
- * opened and go off only when the last is let go -- a call held for a
- * cellular one lets go, the call answered beside it keeps them. A refusal
- * from [activate] is an open that failed, which [CallAudio] retries and
- * reports as it does any other.
+ * The engine pumps every call, so nothing is read or written here: [open]
+ * activates the engine's devices and returns streams without frames. One
+ * engine serves every call, so all [CallAudio]s built over one instance
+ * share it: devices come on with the first open and go off with the last
+ * release (a call held for a cellular one releases; the call answered
+ * beside it keeps them). A refusal from [activate] is a failed open, which
+ * [CallAudio] retries and reports.
  *
- * The engine keeps the devices open itself through what happens under
- * them -- a headset unplugged, a route moved, the audio server restarted --
- * and says so on the client's `AUDIO_DEVICES_CHANGED` events, so these
- * streams never fail.
+ * The engine keeps its devices open through unplugs, route moves and
+ * audio server restarts, reporting them as `AUDIO_DEVICES_CHANGED`, so
+ * these streams never fail.
  */
 class EngineAudioDevice(
     private val activate: () -> Unit,
@@ -62,13 +58,13 @@ class EngineAudioDevice(
     private inner class Held : AudioStreams {
         private val released = AtomicBoolean(false)
 
-        // The engine reads the microphone into the call itself.
+        // the engine reads the microphone into the call itself
         override val capturing: Boolean = false
 
         override fun read(buffer: ShortArray): Int = 0
 
-        // The engine plays the call itself, and on a client in device mode
-        // the media hands out no frames to write.
+        // the engine plays the call itself; in device mode media hands out no
+        // frames to write
         override fun write(frame: ShortArray): Int = frame.size
 
         override fun interrupt() {

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Hand-written, beside bindings/kotlin/sipral/src/main/jni/audio_routes.c:
-// the one call that hands the library's audio engine an Android Context, so
-// that it can list the phone's devices and route its calls. Typed Any
-// because this library compiles and runs on a plain JVM too; the shim
-// checks that it is a Context.
+// Hand-written, beside audio_routes.c: the call that gives the audio engine
+// an Android Context, to list devices and route calls. Typed Any because
+// this library also runs on a plain JVM; the shim checks it.
 
 package org.sipral.idiomatic
 
@@ -24,30 +22,26 @@ internal object SipralAudioRoutesNative {
  * The phone's devices and call routes, for the library's audio engine on
  * Android.
  *
- * On Android, [SipralAudioMode.Device] runs every call through AAudio from
- * API level 28 (on an older phone [SipralAudioMode.platformDefault] is
- * [SipralAudioMode.Application], and the telecom helper's `AudioRecord` and
- * `AudioTrack` carry the call). AAudio opens streams and knows nothing of
- * the phone's devices: listing them -- the earpiece, the loudspeaker, a
- * wired or Bluetooth headset -- and moving a call between them is
- * `AudioManager`'s, which needs a `Context`. [attach] gives it one. Until
- * it is called [SipralAudioDevices.devices] is empty and every call stays
- * on the route the platform chose; after it, the list is the phone's,
- * [SipralAudioDevices.select] on the speaker role moves the call, and
- * `AUDIO_DEVICES_CHANGED` reports a headset arriving or leaving and the
- * route moving, as on every other platform.
+ * [SipralAudioMode.Device] runs calls through AAudio from API 28 (older
+ * phones default to [SipralAudioMode.Application], with the telecom
+ * helper's `AudioRecord`/`AudioTrack`). AAudio knows nothing of devices:
+ * listing them and moving a call between them is `AudioManager`'s, which
+ * needs a `Context`, given by [attach]. Before it,
+ * [SipralAudioDevices.devices] is empty and calls stay on the platform's
+ * route; after it, the list is the phone's, [SipralAudioDevices.select] on
+ * the speaker role moves the call, and `AUDIO_DEVICES_CHANGED` reports
+ * headsets and route moves as elsewhere.
  *
  * The telecom helper (`SipralCallAudios`) calls it itself. Call it once,
- * with any context -- the application's is kept, not the one given -- before
- * or after the client opens.
+ * with any context (the application context is kept), before or after the
+ * client opens.
  */
 object SipralAndroidAudio {
     /**
      * Hand the engine [context]'s `AudioManager`.
      *
-     * @throws IllegalArgumentException when [context] is no
-     * `android.content.Context`, which is every object on a JVM that is not
-     * Android.
+     * @throws IllegalArgumentException when [context] is not an
+     * `android.content.Context` (always, off Android).
      * @throws IllegalStateException when the context gave no `AudioManager`.
      */
     fun attach(context: Any) {

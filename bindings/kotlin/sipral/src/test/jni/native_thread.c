@@ -1,22 +1,18 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
  * Copyright (c) 2026 Sytek
  *
- * The two things BindingCheck.kt cannot do from Kotlin. The first is to poll
- * a stack on a thread no JVM made. The event callback then lands on a thread
- * the JNI shim has to attach before it can call the listener, and has to
- * detach again before the thread ends -- which is the half of the shim a poll
- * made from Kotlin never reaches, because a thread that calls a native method
- * is attached already.
+ * Two things BindingCheck.kt cannot do from Kotlin. First, poll a stack on
+ * a thread no JVM made, so the shim must attach it before calling the
+ * listener and detach it after; a thread calling a native method is
+ * already attached, so a Kotlin poll never reaches that path.
  *
- * The second is to read what a stack wants sent. sipral_stack_poll_transmit
- * takes a struct the caller part-fills with buffers of its own, which the
- * binding still hands over as an address, and the header fields a list put
- * on a message can only be read back out of the message.
+ * Second, read what a stack wants sent: sipral_stack_poll_transmit takes a
+ * caller-filled struct the binding passes as an address, and header fields
+ * set from a list can only be read back out of the message.
  */
 
-/* Before any header: pthread.h is POSIX and not ISO C, and glibc under a
- * strict -std hides what a file does not ask for. `scripts/check.sh` says why
- * every C file here that reaches past ISO C asks first. */
+/* Before any header: pthread.h is POSIX, not ISO C, and glibc under a
+ * strict -std hides what is not asked for (see `scripts/check.sh`). */
 #define _POSIX_C_SOURCE 200809L
 
 #include <jni.h>
@@ -44,8 +40,8 @@ JNIEXPORT jint JNICALL
 Java_org_sipral_NativeThread_poll(JNIEnv *env, jobject self, jlong stack, jlong nowMs)
 {
     pthread_t thread;
-    /* a status the poll cannot answer without panicking, so a thread that
-     * never ran fails the check rather than passing it */
+    /* a status the poll cannot return without panicking, so a thread that
+     * never ran fails the check */
     struct polled polled = { (sipral_handle_t)stack, (uint64_t)nowMs, SIPRAL_STATUS_PANIC };
 
     (void)env;
@@ -87,8 +83,8 @@ Java_org_sipral_NativeThread_transmitted(JNIEnv *env, jobject self, jlong stack)
     transmit.source = source;
     transmit.source_capacity = sizeof source;
     if (sipral_stack_poll_transmit((sipral_handle_t)stack, &transmit) != SIPRAL_STATUS_OK) {
-        /* a poll that failed is not a stack with nothing to send, and the
-         * check that asked has to hear the difference */
+        /* a failed poll is not a stack with nothing to send, and the caller must
+         * hear the difference */
         thrown = (*env)->FindClass(env, "java/lang/IllegalStateException");
         if (thrown != NULL) {
             (*env)->ThrowNew(env, thrown, "sipral_stack_poll_transmit did not answer ok");

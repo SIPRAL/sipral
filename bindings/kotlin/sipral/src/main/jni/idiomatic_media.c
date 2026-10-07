@@ -1,28 +1,17 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
  * Copyright (c) 2026 Sytek
  *
- * Hand-written, not printed by tools/abi-gen: the idiomatic layer's own
- * small shim, sitting beside the generated sipral_jni.c rather than inside
- * it. bindings/kotlin/README.md names the gap this closes -- "docs/08-ffi.md
- * says what else the binding does not carry: the event payload union, and
- * the two structs a caller part-fills with buffers, which still cross as
- * addresses" -- sipral_media_packet_t is one of those two structs, and the
- * generated Kotlin binding has no way to build one: sipral_media_capture,
- * sipral_media_poll_rtcp, sipral_media_poll_transmit and
- * sipral_stack_poll_farewell all take a `sipral_media_packet_t *`, printed
- * into SipralAbi.kt as a bare `packet: Long` -- a native address a caller is
- * left to construct however it can (docs/08-ffi.md, "The conventions are
- * load-bearing now"). This file is that construction, exposed as plain
- * byte arrays so org.sipral.idiomatic can stay pure Kotlin above it.
+ * Hand-written shim beside the generated sipral_jni.c. The generated
+ * binding passes structs a caller part-fills with buffers as bare
+ * addresses (`packet: Long`), which Kotlin cannot build
+ * (bindings/kotlin/README.md, docs/08-ffi.md). This file builds them from
+ * plain byte arrays so org.sipral.idiomatic stays pure Kotlin.
  *
- * Six entry points -- the four above, and sipral_media_poll_text and
- * sipral_media_poll_recording beside them -- each building one
- * sipral_media_packet_t on the C stack (and sipral_media_mix, two),
- * filling it from Java arrays the caller owns, and copying what came back
- * into two more the caller also owns -- nothing here keeps a pointer past
- * its own call, the same rule sipral_jni.c follows throughout. Below them,
- * the same done for sipral_path_candidate_t and sipral_transmit_t, the
- * other structs a caller part-fills with buffers.
+ * Each entry point builds its sipral_media_packet_t (two for
+ * sipral_media_mix) on the C stack over Java arrays the caller owns and
+ * copies the results back; no pointer is kept past the call, as in
+ * sipral_jni.c. The same is done below for sipral_path_candidate_t and
+ * sipral_transmit_t.
  */
 
 #include <jni.h>
@@ -32,10 +21,9 @@
 
 #include "sipral.h"
 
-/* Fill one sipral_media_packet_t pointed at data/destination buffers the
- * caller pinned, run `fetch`, and copy `len`, `destination_len` and
- * `protocol` back into `outLen` -- as many of the three as it has room for,
- * so a caller that brings two longs still gets the first two. Returns the
+/* Fill one sipral_media_packet_t over the caller's pinned data and
+ * destination buffers, run `fetch`, and copy `len`, `destination_len` and
+ * `protocol` into `outLen`, as many as it has room for. Returns the
  * status. */
 static jint
 run_packet_call(JNIEnv *env, jbyteArray outData, jbyteArray outDestination, jlongArray outLen,
@@ -125,8 +113,8 @@ Java_org_sipral_idiomatic_SipralMediaNative_mediaCapture(JNIEnv *env, jclass cls
     return status;
 }
 
-/* One sipral_media_packet_t over arrays the caller owns, for the one entry
- * point that fills two at once and so cannot go through run_packet_call. */
+/* One sipral_media_packet_t over caller-owned arrays, for the entry point
+ * that fills two at once and so cannot use run_packet_call. */
 struct pinned_packet {
     sipral_media_packet_t packet;
     jbyteArray data;
@@ -164,8 +152,8 @@ pin_packet(JNIEnv *env, struct pinned_packet *pinned, jbyteArray outData,
     return 0;
 }
 
-/* Copy what the library wrote back into the arrays, and `len`,
- * `destination_len` and `protocol` into `outLen` as run_packet_call does. */
+/* Copy what the library wrote back into the arrays, and the lengths into
+ * `outLen` as run_packet_call does. */
 static void
 unpin_packet(JNIEnv *env, struct pinned_packet *pinned, jlongArray outLen)
 {
@@ -183,9 +171,8 @@ unpin_packet(JNIEnv *env, struct pinned_packet *pinned, jlongArray outLen)
     (*env)->SetLongArrayRegion(env, outLen, 0, room < 3 ? room : 3, lens);
 }
 
-/* sipral_media_mix: a frame of the microphone into each of two joined calls,
- * and what their far ends sent into `local`. SipralAbi.kt prints its two
- * sipral_media_packet_t as bare addresses, which is no way to call it. */
+/* sipral_media_mix: a microphone frame into each of two joined calls, and
+ * what their far ends sent into `local`. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralMediaNative_mediaMix(JNIEnv *env, jclass cls,
     jlong mediaA, jlong mediaB, jlong nowMs, jshortArray mic, jshortArray local,
@@ -313,9 +300,8 @@ conference_fetch(sipral_media_packet_t *packet, void *raw)
     return sipral_local_conference_poll_transmit(args->conference, &args->out_call, packet);
 }
 
-/* sipral_local_conference_poll_transmit: the oldest packet a member of a
- * local conference owes its far end, filled the same way, with the call it
- * belongs to in outCall. */
+/* sipral_local_conference_poll_transmit: the oldest packet a local
+ * conference member owes its far end, with its call in outCall. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralMediaNative_localConferencePollTransmit(JNIEnv *env, jclass cls,
     jlong conference, jbyteArray outData, jbyteArray outDestination, jlongArray outLen, jlongArray outCall)
@@ -340,8 +326,7 @@ poll_text_fetch(sipral_media_packet_t *packet, void *raw)
     return sipral_media_poll_text(args->media, args->now_ms, packet);
 }
 
-/* sipral_media_poll_text: the next datagram due on the call's real-time text
- * socket, filled the same way. */
+/* sipral_media_poll_text: the next datagram due on the text socket. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralMediaNative_mediaPollText(JNIEnv *env, jclass cls,
     jlong media, jlong nowMs, jbyteArray outData, jbyteArray outDestination, jlongArray outLen)
@@ -367,8 +352,7 @@ poll_recording_fetch(sipral_media_packet_t *packet, void *raw)
 }
 
 /* sipral_media_poll_recording: the next copy for the recording server,
- * filled the same way, with which socket it leaves from -- 0 this end's, 1
- * the far end's -- in `outFarEnd`. */
+ * with its socket (0 this end's, 1 the far end's) in `outFarEnd`. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralMediaNative_mediaPollRecording(JNIEnv *env, jclass cls,
     jlong media, jbyteArray outData, jbyteArray outDestination, jlongArray outLen, jlongArray outFarEnd)
@@ -386,11 +370,9 @@ Java_org_sipral_idiomatic_SipralMediaNative_mediaPollRecording(JNIEnv *env, jcla
     return status;
 }
 
-/* sipral_media_path_candidate_at's sipral_path_candidate_t is a third struct
- * a caller part-fills with buffers: two addresses, the path's own and the far
- * one. Both buffers are the caller's, and `outNumbers` comes back as
- * [priority, kind, outcome, code, local_kind, remote_kind, local_len,
- * remote_len]. */
+/* sipral_media_path_candidate_at: both address buffers are the caller's,
+ * and `outNumbers` comes back as [priority, kind, outcome, code,
+ * local_kind, remote_kind, local_len, remote_len]. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralMediaNative_mediaPathCandidateAt(JNIEnv *env, jclass cls,
     jlong media, jlong index, jbyteArray outLocal, jbyteArray outRemote, jlongArray outNumbers)
@@ -436,11 +418,8 @@ Java_org_sipral_idiomatic_SipralMediaNative_mediaPathCandidateAt(JNIEnv *env, jc
     return (jint)status;
 }
 
-/* sipral_stack_poll_transmit's sipral_transmit_t is the other struct a
- * caller "part-fills with buffers", for signalling rather than media, and
- * SipralAbi.kt has the same gap for it as for sipral_media_packet_t above:
- * the generated sipral_stack_poll_transmit(stack: Long, transmit: Long)
- * takes a native address with nothing here to build one from. */
+/* sipral_stack_poll_transmit: sipral_transmit_t has the same gap in
+ * SipralAbi.kt as sipral_media_packet_t. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jclass cls,
     jlong stack, jbyteArray outData, jbyteArray outDestination, jlongArray outLen)
@@ -474,17 +453,17 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
     }
     transmit.destination = (char *)dest_buf;
     transmit.destination_capacity = (size_t)dest_cap;
-    /* transmit.source left null/zero: this shim is used only where the
-     * caller's own socket is unconnected and does not need to answer from
-     * a source address of its own -- loopback tests and the lab agent. */
+    /* transmit.source left empty: only used where the caller's socket is
+     * unconnected and needs no source address (loopback tests, the lab
+     * agent). */
 
     status = sipral_stack_poll_transmit((sipral_handle_t)stack, &transmit);
 
     (*env)->ReleaseByteArrayElements(env, outData, data_buf, 0);
     (*env)->ReleaseByteArrayElements(env, outDestination, dest_buf, 0);
 
-    /* the transport it goes out on fourth, for a caller that brings room:
-     * a recording session's own connection is not the main one */
+    /* the transport fourth, for a caller with room: a recording session's
+     * connection is not the main one */
     lens[0] = (jlong)transmit.len;
     lens[1] = (jlong)transmit.destination_len;
     lens[2] = (jlong)transmit.protocol;
@@ -494,13 +473,11 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollTransmit(JNIEnv *env, jcla
     return (jint)status;
 }
 
-/* sipral_stack_poll_stun fills the same sipral_transmit_t, and here the
- * source is the point: it names the media socket the request has to leave
- * from, since the address the server sees it come from is the answer. So all
- * three buffers are the caller's, and `outLen` comes back as
- * [len, destination_len, source_len, protocol] -- as many as it has room
- * for -- the last saying whether it is a datagram or bytes for the socket's
- * connection to a TURN server reached over TCP or TLS. */
+/* sipral_stack_poll_stun: here the source matters, since it names the
+ * media socket the request must leave from. All three buffers are the
+ * caller's; `outLen` comes back as [len, destination_len, source_len,
+ * protocol], as many as fit, the last saying datagram or bytes for a TURN
+ * connection over TCP or TLS. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass cls,
     jlong stack, jbyteArray outData, jbyteArray outDestination, jbyteArray outSource,
@@ -555,11 +532,10 @@ Java_org_sipral_idiomatic_SipralSignalNative_stackPollStun(JNIEnv *env, jclass c
     return (jint)status;
 }
 
-/* sipral_stack_transport_bind for the main transport, bound again at
- * `local` after the network changed, speaking what it already speaks. The
- * remote is the null pointer a datagram transport says "none" with: the
- * generated shim turns an empty Kotlin array into a pointer the stack reads
- * as an address, and refuses. */
+/* sipral_stack_transport_bind for the main transport, rebound at `local`
+ * after a network change. The remote is NULL, a datagram transport's
+ * "none": the generated shim would turn an empty array into a pointer the
+ * stack reads as an address and refuses. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralSignalNative_stackTransportRebind(JNIEnv *env, jclass cls,
     jlong stack, jbyteArray local, jlong nowMs)

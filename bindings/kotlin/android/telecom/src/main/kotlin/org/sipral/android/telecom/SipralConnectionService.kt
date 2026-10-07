@@ -14,9 +14,8 @@ import org.sipral.telecom.TelecomBridge
 /**
  * The `ConnectionService` this library's manifest declares, for the account
  * [SipralTelecom.registerAccount] registers. The framework creates it and
- * calls it on the main thread; it builds a [SipralConnection] for each call
- * the bridge asked for and hands it to the bridge, or tells the bridge the
- * framework would not have it.
+ * calls it on the main thread; it builds a [SipralConnection] per call the
+ * bridge asked for, or tells the bridge the framework refused.
  */
 class SipralConnectionService : ConnectionService() {
     override fun onCreateIncomingConnection(account: PhoneAccountHandle?, request: ConnectionRequest): Connection =
@@ -33,13 +32,10 @@ class SipralConnectionService : ConnectionService() {
         failed(request)
     }
 
-    // The call focus, from Android 9: the framework moves it between calling
-    // applications as the user moves between their calls, and on losing it
-    // "The ConnectionService should release the call resources and invokes
-    // connectionServiceFocusReleased() to inform telecom that it has
-    // released the call resources"
-    // (developer.android.com/reference/android/telecom/ConnectionService#onConnectionServiceFocusLost()).
-    // Every call's device is let go before the framework is told so.
+    // Call focus (Android 9+) moves between calling apps; on losing it the
+    // service "should release the call resources and invokes
+    // connectionServiceFocusReleased()" (ConnectionService reference). Every
+    // call's device is released before the framework is told.
     override fun onConnectionServiceFocusLost() {
         SipralTelecom.callFocusChanged(false)
         connectionServiceFocusReleased()
@@ -70,9 +66,9 @@ class SipralConnectionService : ConnectionService() {
         SipralTelecom.bridge?.connectionFailed(id)
     }
 
-    /** The id [AndroidTelecomPlatform] put in the extras: at the top level
-     * for an incoming call, inside `EXTRA_OUTGOING_CALL_EXTRAS` for an
-     * outgoing one, and looked for in both. */
+    /** The id [AndroidTelecomPlatform] put in the extras: top level for an
+     * incoming call, inside `EXTRA_OUTGOING_CALL_EXTRAS` for an outgoing one;
+     * both are checked. */
     private fun idOf(request: ConnectionRequest): String? {
         val extras = request.extras ?: return null
         return extras.getString(SipralTelecom.EXTRA_CALL_ID)

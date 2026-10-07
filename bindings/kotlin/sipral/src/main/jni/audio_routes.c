@@ -1,27 +1,25 @@
 /* SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
  * Copyright (c) 2026 Sytek
  *
- * Hand-written, not printed by tools/abi-gen: a phone's audio devices and
- * the route of its calls, for the library's own audio engine on Android.
+ * Hand-written, not generated: an Android phone's audio devices and call
+ * route, for the library's audio engine.
  *
- * The engine opens its streams through AAudio, which lists no devices and
- * routes nothing: both are AudioManager's, a Java API that needs the
- * application's Context to reach and a JavaVM to call. This library is the
- * one a JVM loads, so it holds both: SipralAndroidAudio.attach(context)
- * hands the context over, and sipral_jni_audio_bridge() hands the Rust
- * library (crates/sipral-io-aaudio/src/bridge.rs, which finds it with
- * dlsym in the library already loaded) a table of plain C functions over
- * it. The table is this file's and that one's, and not part of sipral.h.
+ * The engine uses AAudio, which neither lists devices nor routes; both
+ * belong to AudioManager, a Java API needing the app's Context and a
+ * JavaVM. This library is the one the JVM loads, so it holds both:
+ * SipralAndroidAudio.attach(context) passes the context, and
+ * sipral_jni_audio_bridge() gives the Rust side
+ * (crates/sipral-io-aaudio/src/bridge.rs, via dlsym) a table of C functions
+ * over it. The table is private to these two files, not part of sipral.h.
  *
- * Every function in the table may be called from a thread no JVM made; it
- * attaches the thread for the length of the call and detaches it again,
- * clears any exception a Java call threw, and answers a negative number
- * for "could not ask" -- no context attached, a method this API level does
- * not have, or a call that threw. They are serialised by one mutex, which
- * is held for a binder call to the audio service at most.
+ * Each table function may run on a non-JVM thread: it attaches for the
+ * call and detaches after, clears any Java exception, and returns a
+ * negative number for "could not ask" (no context, a method this API level
+ * lacks, or a throw). One mutex serialises them, held at most for one
+ * binder call to the audio service.
  *
- * On a JVM that is not Android, attach finds no android.content.Context
- * and says so, and the table answers "could not ask" to everything.
+ * On a non-Android JVM, attach finds no android.content.Context and says
+ * so, and the table answers "could not ask" to everything.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -302,7 +300,7 @@ routes_communication_device(void)
     return id;
 }
 
-/* setCommunicationDevice takes an AudioDeviceInfo, and only one of
+/* setCommunicationDevice takes an AudioDeviceInfo, which must come from
  * getAvailableCommunicationDevices: found there by id. */
 static int32_t
 routes_set_communication(int32_t id)
@@ -459,10 +457,10 @@ routes_class(JNIEnv *env, const char *name)
     return global;
 }
 
-/* SipralAudioRoutesNative.attach(context): 0 once the context's
- * AudioManager is held, -1 for an object that is no android.content.Context
- * (or a JVM that has none), -2 when the context would not give one. A
- * second call replaces the first. */
+/* SipralAudioRoutesNative.attach(context): 0 once the AudioManager is
+ * held, -1 for an object that is not an android.content.Context (or a JVM
+ * without one), -2 when the context gives none. A second call replaces
+ * the first. */
 JNIEXPORT jint JNICALL
 Java_org_sipral_idiomatic_SipralAudioRoutesNative_attach(JNIEnv *env, jobject self, jobject context)
 {

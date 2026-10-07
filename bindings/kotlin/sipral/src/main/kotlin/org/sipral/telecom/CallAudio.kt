@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// One call's audio device, kept alive through what a phone does to it in
-// the middle of a call: the platform holding the call for a cellular one,
-// the platform taking the call's audio resources for another calling
-// application, the route moving to a headset or a car, and the audio
-// server dying under an open stream. The device itself is behind
-// AudioDevice, so that all of this runs on a plain JVM against a fake; the
+// One call's audio device, kept alive through what a phone does mid-call:
+// hold for a cellular call, another calling app taking the audio, route
+// changes, and the audio server dying under an open stream. The device is
+// behind AudioDevice so this runs on a plain JVM against a fake; the
 // Android adapter in bindings/kotlin/android/telecom implements it over
 // AudioRecord and AudioTrack.
 
@@ -35,9 +33,8 @@ data class AudioRoute(val id: String, val name: String, val kind: Kind) {
 
 /**
  * A call's microphone and speaker, opened together. [open] opens both or
- * throws; what it returns is used by two threads at once, one reading and
- * one writing, stopped by a third while they may be inside, and closed once
- * neither is.
+ * throws. The result is used by a reader and a writer thread at once,
+ * stopped by a third while they may be inside, and closed once neither is.
  */
 fun interface AudioDevice {
     fun open(sampleRate: Int, frameSamples: Int): AudioStreams
@@ -49,32 +46,28 @@ interface AudioStreams : AutoCloseable {
      * granted it, and the far end then hears silence. */
     val capturing: Boolean
 
-    /** Block for up to [buffer]'s length of samples. The count read, or a
-     * negative platform error code (on Android, `AudioRecord.ERROR_DEAD_OBJECT`
-     * and its siblings), after which the streams are not used again. */
+    /** Block for up to [buffer]'s length of samples. Returns the count read,
+     * or a negative platform error (on Android, `AudioRecord.ERROR_DEAD_OBJECT`
+     * and siblings), after which the streams are not used again. */
     fun read(buffer: ShortArray): Int
 
     /** Write one frame. The count written, or a negative platform error
      * code, as [read]. */
     fun write(frame: ShortArray): Int
 
-    /** Stop both at once, from any thread, while another may be blocked in
-     * [read] or [write]: that call returns, and the microphone and speaker
-     * are free for whoever the platform is giving them to. [close] follows,
-     * once neither call is inside. */
+    /** Stop both from any thread while another may be blocked in [read] or
+     * [write]: that call returns and the devices are free for whoever the
+     * platform gives them to. [close] follows once neither call is inside. */
     fun interrupt()
 }
 
 /** Why a call's device has been let go while the call goes on. */
 enum class AudioPause {
-    /** The call is on hold -- asked for by the platform (a cellular call
-     * answered over it), by a Bluetooth or car control, or by the
-     * application's own screen. */
+    /** The call is on hold (platform, Bluetooth or car control, or the app). */
     HELD,
 
-    /** The platform took the call's audio resources for another calling
-     * application without holding the call (on Android, the
-     * `ConnectionService` lost the call focus). */
+    /** The platform gave the audio to another calling app without holding the
+     * call (on Android, the `ConnectionService` lost call focus). */
     CALL_FOCUS_LOST,
 }
 
@@ -102,25 +95,24 @@ sealed class AudioTransition {
     /** The device was opened for the first time and is carrying the call. */
     data object Started : AudioTransition()
 
-    /** The device was let go; [reasons] is every reason it is still let go
-     * for, and the transition is reported each time that set grows or
-     * shrinks without emptying. */
+    /** The device was let go; [reasons] is the full current set, reported
+     * each time it changes without emptying. */
     data class Paused(val reasons: Set<AudioPause>) : AudioTransition()
 
     /** The last reason was lifted and the device is open again. */
     data object Resumed : AudioTransition()
 
     /** The platform moved the call's audio. Reported, never acted on: the
-     * platform routes a voice-communication stream wherever the call went. */
+     * platform routes a voice-communication stream itself. */
     data class RouteChanged(val route: AudioRoute) : AudioTransition()
 
-    /** The platform muted or unmuted the call -- a headset's button, a car's
-     * control. While muted the far end is sent silence. */
+    /** The platform muted or unmuted the call (headset button, car control).
+     * While muted the far end gets silence. */
     data class MuteChanged(val muted: Boolean) : AudioTransition()
 
-    /** The device failed: [code] is the platform's own error code (zero when
-     * opening threw, and [detail] says why). Reported once per failure; the
-     * device is opened again until it opens. */
+    /** The device failed: [code] is the platform's error (zero when opening
+     * threw; [detail] says why). Reported once per failure; reopening
+     * continues until it succeeds. */
     data class DeviceFailed(val direction: AudioDirection, val code: Int, val detail: String?) : AudioTransition()
 
     /** The device opened again after [DeviceFailed], at the [attempts]th try. */
@@ -132,26 +124,22 @@ sealed class AudioTransition {
 
 /**
  * One call's audio between an [AudioDevice] and the call's media: the
- * microphone read a frame at a time into [send], and every decoded frame
- * from [frames] written to the speaker.
+ * microphone read a frame at a time into [send], and every frame from
+ * [frames] written to the speaker.
  *
- * What keeps it alive is that the device is never assumed to stay open.
- * [pause] lets it go -- stopped before it returns, so that whoever the
- * platform gave the microphone to has it at once, and released on a thread
- * of its own once no read or write is inside it, so that the caller (the
- * framework's main thread, on Android) never waits on a device -- and
- * lifting the last reason opens a new one. A negative code from either
- * stream, or an exception opening it, lets it go the same way and opens a
- * new one after [retryDelays], the last delay repeating for as long as the
- * call lasts. The far end is sent silence meanwhile: the
- * media keeps its own frame clock and sends silence when nothing is queued,
- * so a gap in the device is a gap in the sound and not in the stream.
- * Frames that arrive while the device is let go are dropped, so that the
- * speaker picks up at the live edge of the call rather than behind it.
+ * The device is never assumed to stay open. [pause] stops it before
+ * returning, so whoever the platform gave the microphone to has it at
+ * once, and releases it on its own thread once no read or write is inside,
+ * so the caller (Android's main thread) never waits on a device. Lifting
+ * the last reason opens a new one. A negative code or an exception on open
+ * lets it go the same way and reopens after [retryDelays], the last delay
+ * repeating while the call lasts. The media keeps its own frame clock and
+ * sends silence meanwhile, so a device gap is a gap in sound, not in the
+ * stream. Frames arriving while let go are dropped, so playback resumes at
+ * the live edge.
  *
- * Every change is a [transitions] item and a [state] value. [transitions]
- * replays the last 64, so a reader that starts late still sees how the call
- * got where it is.
+ * Every change is a [transitions] item and a [state] value; [transitions]
+ * replays the last 64 for a late reader.
  */
 class CallAudio(
     /** The id [TelecomBridge] knows the call by, or any label. */
@@ -224,8 +212,7 @@ class CallAudio(
                 stateFlow.value = AudioState.PAUSED
             }
         }
-        // Undispatched, so that the subscription exists before this returns
-        // and a frame decoded right after it is played, not lost.
+        // undispatched, so a frame decoded right after this returns is played
         playback = scope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
             frames.collect { play(it) }
         }
@@ -235,8 +222,8 @@ class CallAudio(
         }
     }
 
-    /** Let the device go for [reason]; it stays let go until every reason
-     * given is [resume]d. Returns once the device is closed. */
+    /** Let the device go for [reason] until every given reason is [resume]d.
+     * Returns once the device is stopped. */
     fun pause(reason: AudioPause) {
         lock.withLock {
             if (stopped || !pauseSet.add(reason)) {
@@ -281,7 +268,7 @@ class CallAudio(
     }
 
     /** The platform muted or unmuted the call. The microphone is still read
-     * while muted, and silence sent in its place. */
+     * while muted, and silence sent instead. */
     fun setMuted(muted: Boolean) {
         lock.withLock {
             if (stopped || this.muted == muted) {
@@ -293,11 +280,11 @@ class CallAudio(
     }
 
     /**
-     * Follow call [id] on [bridge]: let the device go while it is held, take
-     * it back when it is active again, and stop for good when it ends.
-     * Started undispatched, and the call's state as it is now applied before
-     * this returns; [start] is called once the call is not held, so a call
-     * placed on hold before its audio started never opens the microphone.
+     * Follow call [id] on [bridge]: release the device while held, reopen when
+     * active, stop for good when it ends. Started undispatched with the current
+     * state applied before returning; [start] runs only once the call is not
+     * held, so a call held before its audio started never opens the
+     * microphone.
      */
     fun follow(bridge: TelecomBridge, id: String): Job {
         apply(bridge.calls.value.firstOrNull { it.id == id })
@@ -337,16 +324,16 @@ class CallAudio(
         }
     }
 
-    // -- the device ------------------------------------------------------------
+    // The device
 
     private fun report(transition: AudioTransition) {
         transitionFlow.tryEmit(transition)
     }
 
-    /** Let the streams in use go: stopped here, so that a read or write
-     * blocked in them returns and the device is someone else's at once, and
-     * closed on a thread of their own once neither direction is inside.
-     * Called with [lock] held, which is why nothing here waits. */
+    /** Release the streams in use: stopped here, so a blocked read or write
+     * returns and the device is free at once, and closed on their own thread
+     * once neither direction is inside. Called under [lock], so nothing here
+     * waits. */
     private fun closeCurrent() {
         val streams = current ?: return
         current = null
@@ -357,8 +344,7 @@ class CallAudio(
         try {
             streams.interrupt()
         } catch (_: Exception) {
-            // Stopping a device that failed can fail too; closing it below
-            // is what matters.
+            // stopping a failed device can fail too; closing it is what matters
         }
         Thread({
             synchronized(captureUse) {
@@ -366,7 +352,7 @@ class CallAudio(
                     try {
                         streams.close()
                     } catch (_: Exception) {
-                        // As above: it is let go either way.
+                        // as above: released either way
                     }
                 }
             }
@@ -389,11 +375,10 @@ class CallAudio(
         }
     }
 
-    /** Called with [lock] held. A device that fails again within
-     * [SHORT_LIVED_MILLIS] of opening did not really come back: each such
-     * failure in a row waits one step longer before the next open, so a
-     * device that dies as soon as it starts is retried at the slowest delay
-     * rather than in a tight loop. */
+    /** Called under [lock]. A device failing again within
+     * [SHORT_LIVED_MILLIS] of opening did not really recover: each such
+     * failure in a row waits one step longer, so a device that dies at once is
+     * retried at the slowest delay, not in a tight loop. */
     private fun noteFailure(direction: AudioDirection, code: Int, detail: String?) {
         val now = System.currentTimeMillis()
         if (!failing) {
@@ -407,10 +392,9 @@ class CallAudio(
         retryAt = now + delay
     }
 
-    /** Open the device, outside [lock]: opening can take as long as the
-     * platform's audio server takes to answer, and nothing that pauses or
-     * stops the call's audio waits for that. What it opened is kept only if
-     * the device is still wanted once it has. */
+    /** Open the device outside [lock]: opening takes as long as the
+     * platform's audio server does, and pausing or stopping must not wait for
+     * it. The result is kept only if the device is still wanted. */
     private fun open() {
         val opened = try {
             Result.success(device.open(sampleRate, frameSamples))
@@ -457,8 +441,7 @@ class CallAudio(
                 when {
                     pauseSet.isNotEmpty() -> changed.await()
                     open != null && open.capturing -> return Next.Read(open)
-                    // Open, with no microphone to read: nothing to do until
-                    // something changes.
+                    // open with no microphone to read: wait for a change
                     open != null -> changed.await()
                     else -> {
                         val wait = retryAt - System.currentTimeMillis()
@@ -492,8 +475,8 @@ class CallAudio(
             when {
                 read > 0 -> send(if (muted) silence.copyOf(read) else buffer.copyOf(read))
                 read < 0 -> failed(streams, AudioDirection.CAPTURE, read)
-                // A read that blocks is what paces this thread; one that
-                // answers nothing at once would otherwise spin it.
+                // a blocking read paces this thread; one that returns nothing at once
+                // would spin it
                 else -> Thread.sleep(frameMillis)
             }
         }

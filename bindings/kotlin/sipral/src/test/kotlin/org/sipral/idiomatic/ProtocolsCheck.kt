@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Real-time text, RTCP feedback, linear audio and a conference's focus
-// between two clients on 127.0.0.1; a conference's picture and presence
-// against a notifier and a compositor played on a socket of this check's
-// own; and a call recorded to a recording server played on a TCP port. Run
-// by IdiomaticCheck.kt's main under -Xcheck:jni.
+// Real-time text, RTCP feedback, linear audio and conference focus between
+// two clients on 127.0.0.1; conference state and presence against a
+// notifier and compositor played on a local socket; and recording to a
+// SIPREC server on a TCP port. Run by IdiomaticCheck.kt's main under
+// -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -145,10 +145,10 @@ private suspend fun linearAudioIsOfferedWhenACallNamesIt(): String = betweenTwo(
     "L16 at 16 kHz agreed when both ends name it"
 }
 
-// Both clients offer and take PCMU alone, so PCMA is there only when a call
+// Both clients offer and take PCMU alone, so PCMA appears only when a call
 // names it. An answer keeps the offer's order (RFC 3264 §6.1): placed with
-// PCMA first, the call settles on PCMA however the answer lists the two;
-// answered with PCMA,PCMU, it takes the PCMA the client alone refuses.
+// PCMA first the call settles on PCMA; answered with PCMA,PCMU it takes the
+// PCMA the client alone would refuse.
 private suspend fun aCallsOwnCodecsSettleOnPcma(): String {
     val pcma = SipralCodec.PCMA.value.toLong()
     val placed = { client: SipralClient, account: SipralAccount ->
@@ -381,15 +381,16 @@ private suspend fun aWatchedPresentityIsToldWithItsActivityAndNote(): String = F
 }
 
 /**
- * A recording server (SIPREC, RFC 7866) on a TCP port of the loopback: it
- * answers the recording session's INVITE with one receive-only stream per
- * party, on the two ports it is given, and every BYE with 200.
+ * A recording server (SIPREC, RFC 7866) on a loopback TCP port: answers the
+ * recording INVITE with one receive-only stream per party on the given
+ * ports, and every BYE with 200.
  */
 private class FakeRecordingServer(private val streams: Pair<Int, Int>) : AutoCloseable {
     private val listener = ServerSocket(0, 4, InetAddress.getLoopbackAddress())
     val address: String = "127.0.0.1:${listener.localPort}"
 
-    /** Written by the server's thread: read it through `toList()`, which copies it under its lock. */
+    /** Written by the server thread; read via `toList()`, which copies under
+     * the lock. */
     val requests: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     private val open: MutableList<Socket> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -553,11 +554,10 @@ private suspend fun aCallIsRecordedToARecordingServerOverItsOwnConnection(): Str
 }
 
 /**
- * The recording session's offer for a call keyed with SDES (RFC 4568),
- * placed from an account that does or does not let its encrypted calls be
- * recorded in the clear; its connection bound under [link] when one is
- * given, as a client that has opened that many connections already binds
- * it.
+ * The recording offer for an SDES-keyed call (RFC 4568), from an account
+ * that does or does not allow recording its encrypted calls in the clear;
+ * bound under [link] when given, as a client that has already opened that
+ * many connections would.
  */
 private suspend fun recordingOfferOfAnEncryptedCall(recordingInClear: Boolean, link: Long? = null): String {
     val first = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0)).apply { soTimeout = 1 }
@@ -621,10 +621,9 @@ private suspend fun anAccountThatAllowsItRecordsAnEncryptedCallInTheClear(): Str
     return "an account that allows it records an encrypted call in the clear"
 }
 
-/** A client that has made a thousand recordings still reaches the server of
- * the next: its connection's transport id is past where the ids of the
- * connections opened for requests too large for a datagram once began, and
- * what the stack sends on it goes to the recording server all the same. */
+/** After a thousand recordings the next one still reaches its server: its
+ * transport id is past where oversized-request connections once started
+ * counting, and the stack's traffic on it still goes to the recorder. */
 private suspend fun aRecordingPastAThousandConnectionsStillReachesItsServer(): String {
     val offer = recordingOfferOfAnEncryptedCall(recordingInClear = false, link = 1_100)
     assertTrue(offer.startsWith("INVITE sip:srs@127.0.0.1"), offer)

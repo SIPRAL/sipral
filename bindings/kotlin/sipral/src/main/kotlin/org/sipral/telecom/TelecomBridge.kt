@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The logic of the Android ConnectionService helper, with no Android in it:
-// the telecom framework behind TelecomPlatform/TelecomConnection, the SIP
-// side behind SipCalls, and in between the sequence docs/15-mobile.md's
-// "C2" asks for --
+// The Android ConnectionService helper's logic, with no Android in it: the
+// telecom framework behind TelecomPlatform/TelecomConnection, SIP behind
+// SipCalls, and between them the sequence docs/15-mobile.md ("C2") asks for:
 //
-//   push -> report to the framework -> announce (which refreshes the
-//   binding) -> match the INVITE -> answer
+//   push -> report to the framework -> announce -> match the INVITE -> answer
 //
-// -- plus the other direction, the framework's answer/reject/hold/DTMF/
-// disconnect carried onto the call. Audio routing is not here at all: a
-// self-managed connection leaves it to the platform, and the adapter only
-// surfaces what the platform offers. The call's audio device follows the
-// phase published here, through CallAudio.follow.
+// plus the framework's answer/reject/hold/DTMF/disconnect carried onto the
+// call. Audio routing is left to the platform; the call's audio device
+// follows the phase published here, through CallAudio.follow.
 
 package org.sipral.telecom
 
@@ -36,8 +32,8 @@ enum class TelecomDirection { INCOMING, OUTGOING }
 
 /** Where a call stands, from the framework's side. */
 enum class TelecomPhase {
-    /** Incoming and ringing -- including a call a push announced whose
-     * INVITE has not arrived yet, which is ringing all the same. */
+    /** Incoming and ringing, including a pushed call whose INVITE has not
+     * arrived yet. */
     RINGING,
 
     /** Outgoing, and waiting for the framework to allow it. */
@@ -66,22 +62,20 @@ data class TelecomCall(
 
 /**
  * The ConnectionService helper's logic: every call the telecom framework
- * knows about, keyed by an id this class mints and the framework carries in
- * its extras, tied to the SIP call handle once there is one.
+ * knows, keyed by an id minted here and carried in the framework's
+ * extras, tied to the SIP call handle once there is one.
  *
- * Feed it the client's events with [collect] (or [onEvent] one at a time),
- * the framework's callbacks with [connectionCreated], [connectionFailed],
- * [answer], [reject], [disconnect], [hold], [unhold] and [playDtmf], and a
- * push with [pushArrived]. Before closing the client, call [endAll].
+ * Feed it events with [collect] (or [onEvent]), the framework's callbacks
+ * with [connectionCreated], [connectionFailed], [answer], [reject],
+ * [disconnect], [hold], [unhold] and [playDtmf], and pushes with
+ * [pushArrived]. Call [endAll] before closing the client.
  *
- * Every entry point is safe from any thread, and each holds one monitor
- * for its whole length, calls out included. That is deliberate: the
- * events are read on another thread than the framework's callbacks, and
- * an INVITE handled between `announce` returning and its answer being
- * written down would be reported as a second call. Nothing waits behind
- * the monitor for long -- every ABI call answers at once or is retried for
- * at most half a second -- and nothing it calls out to calls back into
- * this class on another thread while waiting.
+ * Every entry point is thread-safe and holds one monitor for its whole
+ * length, calls out included. Deliberate: events and framework callbacks
+ * come on different threads, and an INVITE handled between `announce`
+ * returning and its result being recorded would show as a second call.
+ * Nothing waits long under the monitor (ABI calls retry at most half a
+ * second), and nothing called out calls back in from another thread.
  */
 class TelecomBridge(
     private val platform: TelecomPlatform,
@@ -116,16 +110,15 @@ class TelecomBridge(
         var announced = false
         var answered = false
 
-        /** The user declined before the INVITE came, and the announcement
-         * could no longer be forgotten: the INVITE is refused with this on
-         * arrival. */
+        /** The user declined before the INVITE came and the announcement could
+         * no longer be forgotten: refuse the INVITE with this on arrival. */
         var refuseWith: Long = 0
         var endedLocally = false
         var confirmed = false
         var remoteHold = false
 
-        /** Hold or unhold asked for through [hold] or [unhold] and not yet
-         * agreed by the dialog; null once it is, and the dialog followed. */
+        /** Hold or unhold asked through [hold]/[unhold] and not yet agreed by
+         * the dialog; null once it is. */
         var holdWanted: Boolean? = null
     }
 
@@ -135,9 +128,8 @@ class TelecomBridge(
     private val announcedCalls = HashSet<Long>()
 
     /** Calls that ended while the framework was still creating their
-     * connection, and why: the connection it creates afterwards is told
-     * this. The framework answers every request once, by creating the
-     * connection or refusing to, and the answer takes the line out. */
+     * connection, and why. The framework answers each request exactly once,
+     * so the late connection is told this and the entry removed. */
     private val endedBeforeConnection = HashMap<String, TelecomDisconnect>()
     private var sequence = 0L
 
@@ -149,28 +141,24 @@ class TelecomBridge(
     /** The SIP call handle behind [id], or zero. */
     fun callHandleOf(id: String): Long = synchronized(lock) { entries[id]?.call ?: 0L }
 
-    /**
-     * Subscribe to [events] and hand each to [onEvent]. Started undispatched,
-     * so the subscription exists before this returns and no event emitted
-     * after it can be missed.
-     */
+    /** Subscribe to [events] and hand each to [onEvent]. Started undispatched,
+     * so no event emitted after this returns is missed. */
     fun collect(scope: CoroutineScope, events: Flow<SipralEvent>): Job =
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             events.collect { onEvent(it) }
         }
 
-    // -- a push --------------------------------------------------------------
+    // A push
 
     /**
      * A push said [caller] is calling on [account]. Returns the id the
-     * framework will know the call by.
+     * framework knows the call by.
      *
-     * The framework is told first, before anything that could take time:
-     * the platform's rule is that the application presents a ringing call
-     * before the network session exists. Then the call is announced, which
-     * refreshes the binding at once. A call from the same caller already
-     * ringing on this account -- its INVITE beat the push -- is not
-     * reported a second time: its id is the answer.
+     * The framework is told first: the platform requires a ringing call to be
+     * presented before the network session exists. Then the call is announced,
+     * which refreshes the binding. A call from the same caller already ringing
+     * on this account (its INVITE beat the push) is not reported again; its id
+     * is returned.
      */
     fun pushArrived(account: Long, caller: String, displayName: String? = null): String = settle {
         val existing = entries.values.firstOrNull {
@@ -180,8 +168,8 @@ class TelecomBridge(
         }
         if (existing != null) {
             existing.announced = true
-            // Announced all the same, so the library's record of the pairing
-            // is complete; it answers Arrived with this same call.
+            // announced anyway, so the library's pairing record is complete; it
+            // answers Arrived with this same call
             quietly { sip.announce(account, caller) }
             return@settle existing.id
         }
@@ -193,8 +181,8 @@ class TelecomBridge(
         try {
             platform.reportIncomingCall(entry.id, caller, displayName)
         } catch (refused: RuntimeException) {
-            // No screen, so nothing to announce for: the push handler hears
-            // why, and the INVITE, if it comes, is an ordinary call.
+            // no screen, so nothing to announce: the push handler hears why, and an
+            // INVITE that comes is an ordinary call
             entry.awaitingConnection = false
             forget(entry)
             throw refused
@@ -214,9 +202,8 @@ class TelecomBridge(
             is SipralAnnounced.Arrived -> {
                 val other = byCall[answer.call]
                 if (other != null) {
-                    // Reported already, as an INVITE nobody had announced, by
-                    // a path the look above did not match: that screen is the
-                    // call, and this one a duplicate of it.
+                    // already reported, as an unannounced INVITE matched by another path:
+                    // that screen is the call, and this one a duplicate
                     other.announced = true
                     end(entry, TelecomDisconnect.CANCELED)
                     return@settle other.id
@@ -227,7 +214,7 @@ class TelecomBridge(
         entry.id
     }
 
-    // -- an outgoing call ----------------------------------------------------
+    // An outgoing call
 
     /** Ask the framework for a call to [target] on [account]; the INVITE
      * goes out once it has created the connection. */
@@ -246,17 +233,14 @@ class TelecomBridge(
     }
 
     /**
-     * End every call this bridge knows, for an application about to close
-     * the client under it: once the client is closed no event will ever end
-     * them, and a connection nobody ends stays up in the framework -- and in
-     * the system's own call screens -- for as long as the process lives.
+     * End every call, before the client is closed: afterwards no event will
+     * end them, and a connection nobody ends stays in the framework and the
+     * system's call screens for the life of the process.
      *
-     * Each connection is disconnected, as ended by this end. On the SIP
-     * side a call still ringing here is turned away as busy, any other is
-     * hung up, and each is let go at once rather than on the event that
-     * would have said it ended; an announcement still waiting is forgotten.
-     * A connection the framework creates afterwards for one of these calls
-     * is disconnected the moment it exists.
+     * Each connection is disconnected as ended locally. On the SIP side a
+     * ringing call is refused busy, any other hung up, and each is released at
+     * once; a waiting announcement is forgotten. A connection the framework
+     * creates afterwards for one of these calls is disconnected immediately.
      */
     fun endAll(): Unit = settle {
         for (entry in entries.values.toList()) {
@@ -272,22 +256,19 @@ class TelecomBridge(
                             sip.hangup(call)
                         }
                     } catch (_: Exception) {
-                        // Ended already, or never got this far: letting go
-                        // of it below is all that is left to do.
+                        // ended already, or never got this far: only releasing it is left
                     }
                     try {
                         sip.release(call)
                     } catch (_: Exception) {
-                        // Nothing more can be done for this call, and the
-                        // others still have to be ended.
+                        // nothing more to do for this call; the others still have to end
                     }
                 }
                 entry.announcement != 0L -> {
                     try {
                         sip.forgetAnnouncement(entry.announcement)
                     } catch (_: Exception) {
-                        // Already matched or expired: the client is about to
-                        // be closed, and the INVITE with it.
+                        // already matched or expired; the INVITE goes with the client
                     }
                 }
             }
@@ -296,20 +277,16 @@ class TelecomBridge(
         announcedCalls.clear()
     }
 
-    // -- the framework's side ------------------------------------------------
+    // The framework's side
 
-    /**
-     * The framework created the connection for [id]. It is brought up to
-     * where the call already is; for an outgoing call, this is when the
-     * INVITE is sent.
-     */
+    /** The framework created the connection for [id]. It is brought up to the
+     * call's current state; for an outgoing call, the INVITE goes now. */
     fun connectionCreated(id: String, connection: TelecomConnection): Unit = settle {
         val entry = entries[id]
         val endedAlready = endedBeforeConnection.remove(id)
         if (entry == null || entry.closedForTelecom) {
-            // The call ended while the framework was still creating its
-            // connection, which is told why. An id nothing was ever asked
-            // for is an error.
+            // the call ended while the connection was being created: tell it why.
+            // An id never asked for is an error.
             connection.setDisconnected(entry?.closedWith ?: endedAlready ?: TelecomDisconnect.ERROR)
             entry?.awaitingConnection = false
             return@settle
@@ -335,7 +312,7 @@ class TelecomBridge(
         val entry = entries[id] ?: return@settle
         entry.awaitingConnection = false
         if (entry.closedForTelecom) {
-            // Ended already, and what ending it started is under way.
+            // ended already, and its ending is under way
             return@settle
         }
         entry.closedForTelecom = true
@@ -350,8 +327,8 @@ class TelecomBridge(
         }
     }
 
-    /** The user answered. Before the INVITE has come, the answer is kept
-     * and given the moment it does. */
+    /** The user answered. Before the INVITE has come, the answer is kept and
+     * given when it arrives. */
     fun answer(id: String): Unit = settle {
         val entry = entries[id] ?: return@settle
         if (entry.closedForTelecom || entry.direction != TelecomDirection.INCOMING || entry.answered) {
@@ -369,8 +346,8 @@ class TelecomBridge(
         decline(entry)
     }
 
-    /** The user hung up -- from the application's own screen, a headset
-     * button, a watch. A call still ringing is declined instead. */
+    /** The user hung up (app screen, headset, watch). A ringing call is
+     * declined instead. */
     fun disconnect(id: String): Unit = settle {
         val entry = entries[id] ?: return@settle
         if (entry.direction == TelecomDirection.INCOMING && !entry.answered) {
@@ -387,18 +364,14 @@ class TelecomBridge(
     }
 
     /**
-     * The framework asked for hold -- the user answered a cellular call or
-     * another application's over this one, or pressed hold on a headset,
-     * a car or this application's own screen.
+     * The framework asked for hold: a cellular or other app's call was
+     * answered, or hold was pressed somewhere.
      *
-     * A live call says held at once, before the re-INVITE that tells the
-     * far end has been answered: `Connection.onHold` documents that the
-     * connection must call `setOnHold` within it, and that one which has
-     * not reached `STATE_HOLDING` within two seconds is disconnected
-     * (developer.android.com/reference/android/telecom/Connection#onHold()).
-     * The call stays held here until [unhold], whatever the far end makes
-     * of the re-INVITE: the framework has given the call's audio to
-     * someone else, and a refused re-INVITE does not give it back.
+     * A live call reports held at once, before the far end answers the
+     * re-INVITE: `Connection.onHold` requires `setOnHold`, and a connection not
+     * `STATE_HOLDING` within two seconds is disconnected. It stays held until
+     * [unhold] whatever the far end says, since the framework has given the
+     * audio to someone else.
      */
     fun hold(id: String): Unit = settle {
         val entry = liveEntry(id) ?: return@settle
@@ -410,10 +383,8 @@ class TelecomBridge(
         quietly { sip.hold(entry.call) }
     }
 
-    /** The framework asked to take the call off hold. Active at once, as
-     * `ConnectionService`'s own guide asks ("When your app receives an
-     * `onUnhold()` it must call `setActive()`"), with the re-INVITE that
-     * resumes the far end sent after. */
+    /** The framework asked to unhold. Active at once, as `ConnectionService`'s
+     * guide requires for `onUnhold()`, with the resuming re-INVITE after. */
     fun unhold(id: String): Unit = settle {
         val entry = liveEntry(id) ?: return@settle
         if (entry.confirmed) {
@@ -429,7 +400,7 @@ class TelecomBridge(
         quietly { sip.sendDtmf(call, digit.toString()) }
     }
 
-    // -- the SIP side --------------------------------------------------------
+    // The SIP side
 
     /** One event off the client's stream. Events for calls this bridge does
      * not know are ignored. */
@@ -457,7 +428,7 @@ class TelecomBridge(
         val wasAnnounced = announcedCalls.remove(event.call)
         val known = byCall[event.call]
         if (known != null) {
-            // Bound already, by an announce that answered Arrived.
+            // bound already, by an announce that answered Arrived
             if (known.displayName == null) {
                 known.displayName = who.displayName
             }
@@ -485,10 +456,9 @@ class TelecomBridge(
         try {
             platform.reportIncomingCall(entry.id, caller, who.displayName)
         } catch (_: RuntimeException) {
-            // The framework would not take the call (on Android, a
-            // SecurityException for an account it does not know). Nobody can
-            // see it ring, so it is turned away rather than left ringing --
-            // and this runs on the event stream, which a throw would end.
+            // the framework refused the call (on Android, a SecurityException for an
+            // unknown account); nobody can see it ring, so refuse it rather than
+            // throw, which would end the event stream
             entry.awaitingConnection = false
             entry.closedForTelecom = true
             entry.closedWith = TelecomDisconnect.ERROR
@@ -498,9 +468,8 @@ class TelecomBridge(
         }
     }
 
-    /** Announcements expire in the order they were made -- the window is
-     * one for the whole stack -- so the oldest still waiting is the one
-     * that has run out. */
+    /** Announcements expire in creation order (one window for the whole
+     * stack), so the oldest still waiting is the one that ran out. */
     private fun missing() {
         val entry = entries.values.filter { it.announcement != 0L }.minByOrNull { it.announcedAt } ?: return
         entry.announcement = 0L
@@ -511,8 +480,7 @@ class TelecomBridge(
         val entry = byCall[call] ?: return
         entry.confirmed = true
         if (entry.closedForTelecom) {
-            // Hung up here while the confirmation was on its way: the call
-            // is ending, and the framework was told so already.
+            // hung up here while the confirmation was in flight; the framework knows
             return
         }
         entry.phase = TelecomPhase.ACTIVE
@@ -529,8 +497,8 @@ class TelecomBridge(
         } catch (_: SipralException) {
             return
         }
-        // What the framework asked for stands until the dialog agrees with
-        // it; after that, a hold made on the call directly is followed too.
+        // the framework's request stands until the dialog agrees; after that, a
+        // hold made on the call directly is followed too
         if (entry.holdWanted == here) {
             entry.holdWanted = null
         }
@@ -542,7 +510,7 @@ class TelecomBridge(
         }
     }
 
-    // -- the pieces ------------------------------------------------------------
+    // The pieces
 
     private fun decline(entry: Entry) {
         entry.endedLocally = true
@@ -573,10 +541,9 @@ class TelecomBridge(
         }
     }
 
-    /** Forget an announcement nothing has matched. When the library says
-     * it was already fulfilled or had expired, the INVITE or the "missing"
-     * is already on its way: the entry stays, so that the INVITE is
-     * refused with [code] on arrival and a "missing" removes it quietly. */
+    /** Forget an unmatched announcement. If the library says it was already
+     * fulfilled or expired, the INVITE or "missing" is in flight: keep the
+     * entry so the INVITE is refused with [code] and a "missing" removes it. */
     private fun withdraw(entry: Entry, code: Long) {
         try {
             sip.forgetAnnouncement(entry.announcement)
@@ -650,11 +617,9 @@ class TelecomBridge(
     }
 
     /**
-     * Run [action] under the monitor, then publish what it left -- under the
-     * same monitor, and whether it returned or threw, so that two entry
-     * points finishing together cannot publish their snapshots out of order
-     * and leave the older one standing. Setting a `StateFlow` never waits on
-     * its collectors, so the monitor is not held for them.
+     * Run [action] under the monitor, then publish the result under the same
+     * monitor whether it returned or threw, so two entry points cannot publish
+     * snapshots out of order. Setting a `StateFlow` never waits on collectors.
      */
     private inline fun <T> settle(action: () -> T): T = synchronized(lock) {
         try {
@@ -685,15 +650,15 @@ class TelecomBridge(
         try {
             action()
         } catch (_: SipralException) {
-            // The call moved on under this request -- it ended, or never got
-            // this far -- and the event that says so is what settles it.
+            // the call moved on under this request (ended, or never got this far);
+            // the event that says so settles it
         }
     }
 }
 
-/** The status code of a response, zero for a request or no message. The
- * message a `SIPRAL_EVENT_KIND_CALL_ENDED` carries is the final response
- * that ended the call, when one did. */
+/** The status code of a response; zero for a request or no message. A
+ * `CALL_ENDED` message is the final response that ended the call, if
+ * any. */
 internal fun statusOf(message: ByteArray?): Int {
     if (message == null || message.size < 12) {
         return 0

@@ -17,24 +17,20 @@ import org.sipral.SipralVerificationStage
 import org.sipral.SipralVerstat
 
 /**
- * What one account holds its calls to, and signs them with, beyond what the
- * client does: the `srtp` and `stir_*` members of `sipral_account_config_t`,
- * given to [SipralClient.addAccount].
+ * One account's call security beyond the client's: the `srtp` and `stir_*`
+ * members of `sipral_account_config_t`, for [SipralClient.addAccount].
  *
- * [srtp] is the account's own SRTP policy over the client's (null keeps the
- * client's); a call it places may ask for more and never less. [srtpSuites]
- * are the suites it runs, most preferred first, by their RFC 4568 and RFC
- * 7714 names; RFC 7714's GCM ones only if named. [stirVerification] is what
- * the account does with the `Identity` of the calls it receives, once
- * [SipralClient.stir] gave the stack trust anchors. [stirKey] (a P-256 key:
- * the bare 32 bytes, or SEC1 or PKCS #8 in DER or PEM) with
- * [stirCertificateUrl] signs every call the account places (RFC 8224), as
- * [stirOrig] or the number in the AOR, claiming [stirAttestation] (null is A)
- * and [stirOrigid] (one drawn for the account when null). A PASSporT carries
- * the time, which [SipralClient.stir] gives the stack: call it first, with
- * no anchors on a client that only signs. [recordingInClear] lets the
- * account's encrypted calls be recorded to a recording server as plain RTP;
- * otherwise their copies go as SRTP or not at all (RFC 7866 §12.2).
+ * [srtp] overrides the client's policy (null keeps it); a call may ask for
+ * more, never less. [srtpSuites] are its suites, most preferred first, by
+ * RFC 4568 and RFC 7714 names; GCM only if named. [stirVerification] is
+ * what it does with incoming `Identity` once [SipralClient.stir] set trust
+ * anchors. [stirKey] (P-256: raw 32 bytes, or SEC1/PKCS #8 in DER or PEM)
+ * with [stirCertificateUrl] signs every outgoing call (RFC 8224) as
+ * [stirOrig] or the AOR's number, claiming [stirAttestation] (null is A)
+ * and [stirOrigid] (drawn when null). A PASSporT carries the time, which
+ * [SipralClient.stir] supplies: call it first, without anchors on a
+ * sign-only client. [recordingInClear] lets encrypted calls be recorded as
+ * plain RTP; otherwise copies go as SRTP or not at all (RFC 7866 §12.2).
  */
 class SipralAccountSecurity(
     val srtp: SipralSrtp? = null,
@@ -48,9 +44,9 @@ class SipralAccountSecurity(
     val recordingInClear: Boolean = false,
 )
 
-/** How one stream of a call is protected: a `sipral_stream_encryption_t`
- * read out ([SipralMedia.encryption]). [awaitingKeys] is a stream that will
- * be encrypted once its DTLS-SRTP handshake ends. */
+/** How one stream is protected: a `sipral_stream_encryption_t`
+ * ([SipralMedia.encryption]). [awaitingKeys] marks a stream encrypted once
+ * its DTLS-SRTP handshake ends. */
 data class SipralStreamProtection(
     val media: SipralMediaKind,
     val encrypted: Boolean,
@@ -61,12 +57,12 @@ data class SipralStreamProtection(
 )
 
 /**
- * What a `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` carries. At
- * [SipralVerificationStage.CERTIFICATE_WANTED] the application fetches
- * [certificateUrl] and hands the chain to [SipralClient.stirCertificate]; at
- * [SipralVerificationStage.VERIFIED] the rest is the verdict, announced just
- * before the call it is about, which [refused] says a strict account turned
- * away with [responseCode].
+ * A `SIPRAL_EVENT_KIND_CALLER_VERIFICATION` payload. At
+ * [SipralVerificationStage.CERTIFICATE_WANTED] fetch [certificateUrl] and
+ * pass the chain to [SipralClient.stirCertificate]; at
+ * [SipralVerificationStage.VERIFIED] the rest is the verdict, raised just
+ * before its call, with [refused] and [responseCode] when a strict account
+ * turned the call away.
  */
 data class SipralVerification(
     val stage: SipralVerificationStage,

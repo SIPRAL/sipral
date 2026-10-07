@@ -14,10 +14,9 @@ import org.sipral.idiomatic.SipralClient
  * [SipCalls] over [org.sipral.idiomatic]: the accounts [TelecomBridge] may
  * name, by handle, on one [SipralClient].
  *
- * A call answered or placed through here is a [SipralCall] with its own
- * media socket bound on [mediaHost] -- on a device, the address of the
- * network the signalling socket is on -- and [call] hands it to whatever
- * moves its audio to and from the device.
+ * Each call answered or placed here is a [SipralCall] with its own media
+ * socket on [mediaHost] (on a device, the signalling network's address);
+ * [call] hands it to whatever moves its audio.
  */
 class IdiomaticSipCalls(
     private val client: SipralClient,
@@ -40,9 +39,9 @@ class IdiomaticSipCalls(
      * placed here and until it ends. */
     fun call(handle: Long): SipralCall? = calls[handle]
 
-    /** The client's own audio engine, when it runs the calls' audio itself
-     * ([org.sipral.idiomatic.SipralAudioMode.Device]); null when the
-     * application does. */
+    /** The client's audio engine in
+     * [org.sipral.idiomatic.SipralAudioMode.Device]; null when the application
+     * runs the audio. */
     val audio: SipralAudioDevices? get() = client.audio
 
     private fun account(handle: Long): SipralAccount =

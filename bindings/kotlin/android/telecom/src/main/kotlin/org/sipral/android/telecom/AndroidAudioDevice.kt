@@ -16,19 +16,15 @@ import org.sipral.telecom.AudioDevice
 import org.sipral.telecom.AudioStreams
 
 /**
- * [AudioDevice] over `AudioRecord` and `AudioTrack`, both voice-communication
- * streams: the platform applies its own echo cancellation to them and
- * routes them wherever the telecom framework routed the call, so nothing
- * here picks a device. The `ConnectionService` guide asks a self-managed
- * call's media to be a voice-call stream
- * (developer.android.com/develop/connectivity/telecom/selfManaged, "Manage
- * call audio endpoints"), which `USAGE_VOICE_COMMUNICATION` is.
+ * [AudioDevice] over `AudioRecord` and `AudioTrack` as voice-communication
+ * streams: the platform applies its echo cancellation and routes them with
+ * the call, so nothing here picks a device. The ConnectionService guide
+ * asks for a voice-call stream, which `USAGE_VOICE_COMMUNICATION` is.
  *
- * Each [open] builds both from nothing, which is what recovering from
- * `ERROR_DEAD_OBJECT` takes: a stream whose audio server died is never
- * usable again, and only a new one reaches the server that replaced it.
- * The microphone is opened only once `RECORD_AUDIO` is granted; before
- * that the far end hears silence.
+ * Each [open] builds both from scratch, as recovering from
+ * `ERROR_DEAD_OBJECT` requires: a stream whose audio server died never
+ * works again. The microphone opens only once `RECORD_AUDIO` is granted;
+ * until then the far end hears silence.
  */
 class AndroidAudioDevice(private val context: Context) : AudioDevice {
     override fun open(sampleRate: Int, frameSamples: Int): AudioStreams {
@@ -66,8 +62,8 @@ class AndroidAudioDevice(private val context: Context) : AudioDevice {
             .setBufferSizeInBytes(maxOf(outMin, frame * 2 * 4))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        // A builder that could not reach the audio server hands back an
-        // uninitialised track rather than throwing.
+        // a builder that cannot reach the audio server returns an uninitialised
+        // track instead of throwing
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             throw IllegalStateException("AudioTrack did not initialise")
@@ -97,18 +93,16 @@ class AndroidAudioDevice(private val context: Context) : AudioDevice {
     private class Streams(private val track: AudioTrack, private val record: AudioRecord?) : AudioStreams {
         override val capturing: Boolean get() = record != null
 
-        // Both answer a count or one of the negative ERROR_* codes -- among
-        // them ERROR_DEAD_OBJECT, the audio server gone -- which CallAudio
-        // takes as the streams failing.
+        // both return a count or a negative ERROR_* code (ERROR_DEAD_OBJECT when
+        // the audio server is gone), which CallAudio treats as failure
         override fun read(buffer: ShortArray): Int = record?.read(buffer, 0, buffer.size) ?: 0
 
         override fun write(frame: ShortArray): Int = track.write(frame, 0, frame.size)
 
-        // Stopping is what unblocks a read or write another thread is inside:
-        // AudioRecord.stop and AudioTrack.pause interrupt a blocked transfer,
-        // and the track is flushed so that nothing queued plays later. Both
-        // are safe beside a transfer in progress, and release is not, which
-        // is why CallAudio calls close only once neither is inside.
+        // Stopping unblocks another thread's read or write: AudioRecord.stop and
+        // AudioTrack.pause interrupt a blocked transfer, and the flush drops
+        // anything queued. Both are safe beside a transfer; release is not, which
+        // is why CallAudio closes only once neither side is inside.
         override fun interrupt() {
             try {
                 record?.stop()

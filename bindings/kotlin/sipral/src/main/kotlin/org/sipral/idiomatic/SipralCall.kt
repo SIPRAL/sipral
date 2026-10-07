@@ -39,25 +39,22 @@ import org.sipral.SipralToneRegion
 /**
  * A `sipral_handle_t` naming one call, and the actions it takes.
  *
- * Built by [SipralClient.placeCall] for one this stack placed, and by
- * [SipralClient.answerCall] for one that came in; either way it is
- * registered with its client before the caller ever sees it, so
- * [deliver] always has somewhere to put an event that names this call.
+ * Built by [SipralClient.placeCall] or [SipralClient.answerCall], and
+ * registered with its client before the caller sees it, so [deliver] always
+ * has a target for an event naming this call.
  */
 class SipralCall internal constructor(
     val client: SipralClient,
     val handle: Long,
-    /** The socket the call was placed or answered on: the call's until
-     * [media] exists, [SipralMedia]'s from then on -- and whichever socket
-     * [moveMedia] puts in its place. */
+    /** The socket the call was placed or answered on; [SipralMedia] owns it
+     * once [media] exists. [moveMedia] replaces it. */
     private val mediaSocket: DatagramSocket,
     mediaAddress: String,
     /** The `SIPRAL_EVENT_KIND_INCOMING_CALL` payload this call was answered
      * from, for [identity] and [answering]; null for a call this end placed. */
     private val incoming: SipralCallEvent? = null,
-    /** The socket this call's real-time text travels on, when it was placed
-     * or answered with `text = true`: the call's until [media] exists, and
-     * the media's from then on. */
+    /** The real-time text socket, when placed or answered with `text = true`;
+     * [SipralMedia] owns it once [media] exists. */
     private val textSocket: DatagramSocket? = null,
 ) : AutoCloseable {
     /** The call's real-time text socket, as `host:port`, when it has one. */
@@ -69,17 +66,13 @@ class SipralCall internal constructor(
     var recordingSession: SipralRecordingSession? = null
         private set
 
-    /** The call's media socket, as `host:port`: the name
-     * `sipral_stack_nat_map` gave it, and so of its connection to a TURN
-     * server; after [moveMedia], the new one. */
+    /** The media socket as `host:port`, the name `sipral_stack_nat_map` gave
+     * it (and its TURN connection); after [moveMedia], the new one. */
     @Volatile
     internal var mediaAddress: String = mediaAddress
         private set
-    /**
-     * This call's audio, once `SIPRAL_EVENT_KIND_MEDIA_STARTED` has minted
-     * it. Null before then and after the call has ended and [close] has
-     * run.
-     */
+    /** This call's audio once `SIPRAL_EVENT_KIND_MEDIA_STARTED` minted it;
+     * null before, and after the call ended and [close] ran. */
     @Volatile
     var media: SipralMedia? = null
         private set
@@ -90,37 +83,25 @@ class SipralCall internal constructor(
         private set
 
     /**
-     * What the call's media cost in the end: the record
-     * `SIPRAL_EVENT_KIND_MEDIA_STATISTICS` carries, kept from the moment it
-     * arrives -- right after `SIPRAL_EVENT_KIND_CALL_ENDED` -- and null before
-     * that or for a call whose media never started. [SipralMedia.statistics]
-     * answers with it too once the stream is gone.
+     * The final media statistics from `SIPRAL_EVENT_KIND_MEDIA_STATISTICS`,
+     * which arrives right after `SIPRAL_EVENT_KIND_CALL_ENDED`. Null before
+     * that, or when media never started.
      */
     @Volatile
     var finalStatistics: SipralStreamStats? = null
         private set
 
-    // Guards every read-then-act on [media] that [close] and [deliver] each
-    // do, and the [closing] flag [close] sets under it before doing
-    // anything else. Without this, close() reading `media == null` and
-    // deliver() minting one for the same MEDIA_STARTED race exactly the way
-    // any check-then-act does: close() finds nothing to release and closes
-    // the raw socket out from under deliver()'s still-running mint, which
-    // then either throws (uncaught, since neither call site expects it) or
-    // hands back a SipralMedia nothing ever closes -- a `sipral_call_media`
-    // handle minted and never released, the one failure mode
-    // docs/08-ffi.md's "Handles" section exists to rule out.
+    // Guards the check-then-act on [media] in [close] and [deliver], and the
+    // [closing] flag. Without it, close() can see `media == null` while
+    // deliver() is minting for MEDIA_STARTED, close the socket under it, and
+    // leak a `sipral_call_media` handle nothing releases (docs/08-ffi.md,
+    // "Handles").
     private val mediaLock = Any()
     private var closing = false
 
-    // A SharedFlow, not a Channel: a Channel is single-consumer, and an
-    // application reasonably wants more than one concurrent reader of one
-    // call's events -- a coroutine counting digits and another waiting for
-    // the call to end, the way bindings/kotlin/examples/Agent.kt runs both
-    // at once. Two concurrent collectors of one Channel-backed Flow race
-    // for every element instead of each seeing all of them, which is a
-    // silent, sporadic way to lose exactly the event a second collector was
-    // waiting for.
+    // A SharedFlow, not a Channel: a Channel's collectors race for elements,
+    // and an application often runs two readers on one call (digits, and a
+    // wait for the end), each of which must see every event.
     private val eventsFlow = MutableSharedFlow<SipralEvent>(
         replay = 0,
         extraBufferCapacity = 4096,
@@ -130,34 +111,26 @@ class SipralCall internal constructor(
     /**
      * Every event this call's handle names, decoded whole, in order.
      *
-     * Bounded at 4096 unread events per collector, `DROP_OLDEST`: a
-     * collector more than 4096 events behind the poll thread silently loses
-     * its oldest unread ones rather than block delivery or grow without
-     * bound -- the same trade-off [SipralClient.events] documents, and for
-     * the same reason. Keep per-event work in a `collect` short (as
-     * [digits] and `Agent.kt`'s own handling both do).
+     * Same bound as [SipralClient.events]: a collector more than 4096 events
+     * behind silently loses the oldest. Keep per-event work short.
      */
     val events: SharedFlow<SipralEvent> = eventsFlow
 
     /**
-     * Every `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` this call has heard. [digitOf]
-     * reads the character off each one, an RFC 4733 (RTP) digit the same way
-     * as either INFO form, off `event.payload.media.digit` -- the generated
-     * JNI shim carries the whole payload union now, not only the head of the
-     * event.
+     * Every `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` this call heard; [digitOf]
+     * reads the character, RFC 4733 and INFO alike.
      */
     val digits: Flow<SipralEvent> = events.filter { it.kind == SipralEventKind.DIGIT_RECEIVED.value.toLong() }
 
     /**
-     * The real-time text the far end types (RFC 4103): each
-     * `SIPRAL_EVENT_KIND_TEXT_RECEIVED`'s [textOf], in order, for a call
-     * placed or answered with `text = true` whose far end agreed a text
-     * stream. The same rules as [events].
+     * The real-time text the far end types (RFC 4103), as [textOf] of each
+     * `SIPRAL_EVENT_KIND_TEXT_RECEIVED`, for a call with an agreed text
+     * stream. Same rules as [events].
      */
     val text: Flow<SipralTextEvent> = events.mapNotNull { textOf(it) }
 
-    /** `sipral_call_state`, read fresh -- not cached from the last event,
-     * which a status query between events would otherwise miss. */
+    /** `sipral_call_state`, read fresh rather than cached from the last
+     * event. */
     val state: SipralCallState
         get() = SipralCallState.of(retryBusy { Sipral.callState(client.handle, handle) }.toInt())
             ?: SipralCallState.UNKNOWN
@@ -168,15 +141,13 @@ class SipralCall internal constructor(
         get() = retryBusy { Sipral.callHoldState(client.handle, handle) }
             .let { (here, there) -> (here != 0L) to (there != 0L) }
 
-    /** Called by [SipralClient] on its own poll thread. Not for application
-     * use. */
+    /** Called by [SipralClient] on its poll thread. */
     internal fun deliver(event: SipralEvent) {
         if (event.kind == SipralEventKind.MEDIA_STARTED.value.toLong()) {
             synchronized(mediaLock) {
                 if (media == null && !closing) {
-                    // Behind a NAT the poll thread has been reading this
-                    // socket for the stack until now; from the media handle
-                    // on, SipralMedia does.
+                    // Behind a NAT the poll thread read this socket for the stack until now;
+                    // from the media handle on, SipralMedia does.
                     client.mediaSocketTaken(mediaAddress)
                     media = mintMedia()
                 }
@@ -194,21 +165,12 @@ class SipralCall internal constructor(
     }
 
     /**
-     * `SipralMedia`'s own constructor mints through `sipral_call_media`,
-     * unguarded by [retryBusy] the way every other signalling call in this
-     * layer is, because minting normally runs from inside the poll thread's
-     * own event callback (docs/08-ffi.md, "re-entry rules") where the
-     * ordinary contention `retryBusy` waits out cannot arise on its own.
-     * The one way it still can is a second thread's own signalling call --
-     * [SipralCall.hangup] from [close], most often -- landing on the stack's
-     * lock at the same moment, which is ordinary contention by the same
-     * definition and deserves the same retry rather than a mint this method
-     * lets escape uncaught out of the poll thread's own delivery loop. A
-     * call that has ended in the meantime is not ordinary: `WRONG_STATE` or
-     * `STALE_HANDLE` here means the session this event announced is already
-     * gone, which [close] running concurrently already accounts for by way
-     * of [closing], so there is nothing left to mint and null is the answer
-     * rather than a throw.
+     * Mint through `sipral_call_media`, with [retryBusy]. Minting usually runs
+     * inside the poll thread's event callback, where no contention arises on
+     * its own, but another thread's call ([hangup] from [close]) can still
+     * hold the stack's lock. `WRONG_STATE` or `STALE_HANDLE` means the call
+     * already ended, which [closing] covers, so the answer is null rather than
+     * a throw out of the poll loop.
      */
     private fun mintMedia(): SipralMedia? = try {
         SipralMedia(
@@ -223,10 +185,10 @@ class SipralCall internal constructor(
         }
     }
 
-    // -- actions -------------------------------------------------------------
+    // Actions
 
-    /** `sipral_call_answer_media`: accept, with this stack running the
-     * audio through the media socket this call already opened. */
+    /** `sipral_call_answer_media`: accept, with this stack running the audio
+     * on the call's media socket. */
     internal fun answer(address: String) {
         retryBusy { Sipral.callAnswerMedia(client.handle, handle, address, client.nowMs()) }
     }
@@ -245,22 +207,19 @@ class SipralCall internal constructor(
         retryBusy { Sipral.callAnswerWith(client.handle, handle, config, client.nowMs()) }
     }
 
-    // -- conferences ---------------------------------------------------------
+    // Conferences
 
     /**
-     * `sipral_call_set_focus`: say (true) or stop saying that this end is
-     * the focus of a conference the call belongs to (RFC 4579 §4.2):
-     * `isfocus` on the `Contact` of every message the call sends from here
-     * on -- the answer, for a call not answered yet, and the next re-INVITE
-     * or UPDATE for one that is up.
+     * `sipral_call_set_focus`: say whether this end is the conference focus
+     * (RFC 4579 §4.2), as `isfocus` on the `Contact` of every message from now
+     * on: the answer if not yet answered, else the next re-INVITE or UPDATE.
      */
     fun setFocus(focus: Boolean) {
         retryBusy { Sipral.callSetFocus(client.handle, handle, if (focus) 1L else 0L) }
     }
 
-    /** `sipral_call_conference_uri`: the conference this call belongs to,
-     * when its far end said it is a focus (`isfocus` on its `Contact`), and
-     * null when it said nothing of the kind. */
+    /** `sipral_call_conference_uri`: the conference this call belongs to when
+     * the far end said it is a focus (`isfocus`), else null. */
     fun conferenceUri(): String? = try {
         protocolText { buffer -> retryBusy { Sipral.callConferenceUri(client.handle, handle, buffer) } }
     } catch (none: SipralException) {
@@ -283,19 +242,18 @@ class SipralCall internal constructor(
         return SipralSubscription(client, made, "conference")
     }
 
-    // -- a recording server --------------------------------------------------
+    // A recording server
 
     /**
-     * `sipral_call_record_to`: record this call to the recording server
-     * [server] (SIPREC, RFC 7866). The recording session -- an INVITE with
-     * `Require: siprec`, the metadata (RFC 7865) and one send-only stream per
-     * party -- goes from the call's account: to [destination] (`host:port`)
-     * over a TCP connection this client opens for it, or, with no
-     * [destination], where the account sends -- which RFC 3261 does not let
-     * an INVITE this large reach over UDP, so the client must then signal
-     * over TCP or TLS. Two sockets are bound at [host] for the copies of the
-     * audio. `WRONG_STATE` before `SIPRAL_EVENT_KIND_MEDIA_STARTED`, and for
-     * a call already recorded.
+     * `sipral_call_record_to`: record this call to [server] (SIPREC, RFC
+     * 7866). The recording session (INVITE with `Require: siprec`, RFC 7865
+     * metadata, one send-only stream per party) goes from the call's account,
+     * to [destination] (`host:port`) over a TCP connection opened for it.
+     * With no [destination] it goes where the account sends, which RFC 3261
+     * forbids over UDP at this size, so the client must signal over TCP or
+     * TLS. Two sockets are bound at [host] for the audio copies.
+     * `WRONG_STATE` before `SIPRAL_EVENT_KIND_MEDIA_STARTED`, or when already
+     * recorded.
      */
     fun recordTo(server: String, destination: String? = null, host: String = "127.0.0.1"): SipralRecordingSession {
         val current = synchronized(mediaLock) { media }
@@ -358,11 +316,10 @@ class SipralCall internal constructor(
     }
 
     /**
-     * `sipral_call_hangup_for`: end the call as [hangup] does, and say why
-     * with a `Reason` (RFC 3326) on the BYE, or on the CANCEL a call still
-     * ringing turns into. A call that came in and was never answered is
-     * refused with only the Q.850 value (RFC 6432): a SIP one would repeat
-     * the refusal's own status.
+     * `sipral_call_hangup_for`: hang up with a `Reason` (RFC 3326) on the BYE,
+     * or on the CANCEL of a ringing call. An unanswered incoming call is
+     * refused with only the Q.850 value (RFC 6432), since a SIP one would
+     * repeat the status.
      */
     fun hangup(reason: SipralHangupReason) {
         retryBusy {
@@ -374,21 +331,18 @@ class SipralCall internal constructor(
     }
 
     /**
-     * `sipral_call_redirect`: answer a call that came in, and is still
-     * ringing, with a 3xx (RFC 3261 §21.3) naming where to try instead, in
-     * order of preference -- 302 is call forwarding. [reason] --
-     * `no-answer`, `user-busy`, `unconditional`, `deflection`,
-     * `do-not-disturb` or any other token -- adds a `Diversion` (RFC 5806)
-     * naming the address that was called.
+     * `sipral_call_redirect`: answer a ringing incoming call with a 3xx (RFC
+     * 3261 §21.3) naming where to try instead, in order; 302 is call
+     * forwarding. [reason] adds a `Diversion` (RFC 5806) naming the called
+     * address.
      */
     fun redirect(targets: List<String>, status: Int = 302, reason: String? = null) {
         client.redirect(handle, targets, status, reason)
     }
 
-    /** Who is calling, beyond the `From`: for a call that came in, what the
-     * network asserted behind the account's trust gate, the caller's
-     * `Privacy` and where the call was diverted from. Empty for a call this
-     * end placed. */
+    /** Who is calling, beyond the `From`: what the network asserted past the
+     * account's trust gate, the caller's `Privacy`, and diversions. Empty for
+     * a call this end placed. */
     fun identity(): SipralCallerIdentity = IdentityReader.identity(client, handle, incoming)
 
     /** How a call that came in asked to be answered (RFC 5373) and rung
@@ -396,20 +350,18 @@ class SipralCall internal constructor(
     fun answering(): SipralAnswering = IdentityReader.answering(client, handle, incoming)
 
     /**
-     * Offer this call at a socket on the network the device is on now: what
-     * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks for once
-     * [SipralClient.networkChanged] has said the old one is gone.
+     * Offer this call at a socket on the current network, as
+     * `SIPRAL_EVENT_KIND_CALL_ADDRESS_WANTED` asks after
+     * [SipralClient.networkChanged].
      *
-     * A socket is bound at [host] -- the new network's address,
-     * [SipralClient.networkChanged]'s own by default -- asked where it
-     * appears from when the client has a STUN server, and the call offered
-     * there with `sipral_call_media_readdress`: a re-INVITE with only `c=`
-     * and the port moved (RFC 3264 §8.3.1), carrying the account's new
-     * `Contact`. The new socket carries the call from then on, whatever the
-     * far end answers; the answer arrives as
+     * A socket is bound at [host] (default: the new network's address),
+     * mapped via STUN if configured, and offered with
+     * `sipral_call_media_readdress`: a re-INVITE moving only `c=` and the port
+     * (RFC 3264 §8.3.1), with the account's new `Contact`. The new socket
+     * carries the call whatever the far end answers; the answer arrives as
      * `SIPRAL_EVENT_KIND_SESSION_CHANGED`, a refusal as
-     * `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`. A call under ICE is refused
-     * with `WRONG_STATE`: [restartIce] moves it.
+     * `SIPRAL_EVENT_KIND_SESSION_CHANGE_FAILED`. Under ICE this throws
+     * `WRONG_STATE`; use [restartIce].
      */
     fun moveMedia(host: String? = null, port: Int = 0) {
         val bindOn = host ?: client.currentHost
@@ -444,21 +396,19 @@ class SipralCall internal constructor(
     }
 
     /**
-     * `sipral_call_transfer`: ask the far end to call [target] instead, a
-     * blind transfer (RFC 3515). This end stays in the call until the far
-     * end reports the new call up; `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS`
-     * and then `SIPRAL_EVENT_KIND_TRANSFER_DONE` arrive on [events], read
-     * with [transferOf].
+     * `sipral_call_transfer`: blind transfer to [target] (RFC 3515). This end
+     * stays in the call until the far end reports the new call up;
+     * `SIPRAL_EVENT_KIND_TRANSFER_PROGRESS` then `TRANSFER_DONE` arrive on
+     * [events], read with [transferOf].
      */
     fun transfer(target: String) {
         retryBusy { Sipral.callTransfer(client.handle, handle, target, client.nowMs()) }
     }
 
     /**
-     * `sipral_call_restart_ice`: offer the call again with new ICE
-     * credentials (RFC 8445 §9) and check every pair again once the far end
-     * answers, while the path it has carries the audio. The new path arrives
-     * as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`.
+     * `sipral_call_restart_ice`: re-offer with new ICE credentials (RFC 8445
+     * §9) and recheck every pair, while the current path keeps carrying audio.
+     * The new path arrives as another `SIPRAL_EVENT_KIND_MEDIA_PATH_CHOSEN`.
      */
     fun restartIce() {
         retryBusy { Sipral.callRestartIce(client.handle, handle, client.nowMs()) }
@@ -469,28 +419,25 @@ class SipralCall internal constructor(
         retryBusy { Sipral.callSetHeaders(client.handle, handle, headers) }
     }
 
-    /** `sipral_call_send_dtmf`. `via` is a `SipralDtmf` value; RTP (1) is
-     * the default and the one every gateway on the path carries end to end,
-     * and sends the tones in the audio on a call that negotiated no
-     * telephone event; `IN_BAND` (4) sends the tones on any call. */
+    /** `sipral_call_send_dtmf`. `via` is a `SipralDtmf` value. RTP (1), the
+     * default, survives every gateway and falls back to in-band tones on a
+     * call without telephone-event; `IN_BAND` (4) always sends tones. */
     fun sendDtmf(digits: String, via: Long = 1, durationMs: Long = 100) {
         retryBusy { Sipral.callSendDtmf(client.handle, handle, digits, via, durationMs, client.nowMs()) }
     }
 
-    /** `sipral_call_dtmf_detection`: when this call listens for digits in
-     * the far end's audio. One heard there is a
-     * `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, read with [digitOf] like any
-     * other. */
+    /** `sipral_call_dtmf_detection`: when this call listens for digits in the
+     * far end's audio. Each one is a `SIPRAL_EVENT_KIND_IN_BAND_DIGIT`, read
+     * with [digitOf]. */
     fun setDtmfDetection(mode: SipralDtmfDetection) {
         retryBusy { Sipral.callDtmfDetection(client.handle, handle, mode.value.toLong()) }
     }
 
     /**
-     * `sipral_call_detect_progress`: listen for the network's tones, decide
-     * who answered and listen for the machine's beep, as [options] say.
-     * Call it straight after [SipralClient.placeCall], before the far end
-     * answers; each thing heard is a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`,
-     * read with [progressOf].
+     * `sipral_call_detect_progress`: listen for network tones, answering
+     * party and the machine's beep, as [options] say. Call it right after
+     * [SipralClient.placeCall]; results arrive as
+     * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED`, read with [progressOf].
      */
     fun detectProgress(options: SipralProgressOptions = SipralProgressOptions()) {
         val config = SipralProgressConfig(
@@ -548,11 +495,9 @@ class SipralCall internal constructor(
     }
 
     /**
-     * Suspend until this call reaches `CONFIRMED` or ends -- the ABI
-     * completing through `SIPRAL_EVENT_KIND_CALL_CONFIRMED` /
-     * `SIPRAL_EVENT_KIND_CALL_ENDED` rather than through `sipral_call_place`'s
-     * own return, which only hands back the handle before anything has
-     * happened on the wire.
+     * Suspend until this call is `CONFIRMED` or ends. `sipral_call_place`
+     * returns only a handle; the outcome comes through
+     * `SIPRAL_EVENT_KIND_CALL_CONFIRMED` or `CALL_ENDED`.
      */
     suspend fun waitConfirmed(timeoutMs: Long = 30_000) {
         awaitEvent(
@@ -572,18 +517,15 @@ class SipralCall internal constructor(
     }
 
     /**
-     * Suspend until [settled] holds or one of [kinds] is delivered. The
-     * subscription is made before [settled] is read, never after: [events]
-     * replays nothing, so an event delivered between reading the state and
-     * subscribing would otherwise be missed, and the wait would run out
-     * over a call that had long since moved on.
+     * Suspend until [settled] holds or one of [kinds] is delivered. Subscribes
+     * before reading [settled]: [events] replays nothing, so an event between
+     * the read and the subscription would be missed.
      */
     private suspend fun awaitEvent(timeoutMs: Long, settled: () -> Boolean, vararg kinds: SipralEventKind) {
         val wanted = kinds.map { it.value.toLong() }.toSet()
         withTimeout(timeoutMs) {
             coroutineScope {
-                // Undispatched: the collector has subscribed by the time
-                // async returns, before [settled] is asked.
+                // undispatched: subscribed before async returns
                 val seen = async(start = CoroutineStart.UNDISPATCHED) { events.first { it.kind in wanted } }
                 if (settled()) {
                     seen.cancel()
@@ -595,16 +537,13 @@ class SipralCall internal constructor(
     }
 
     /**
-     * Hang up if this call is still up, release its media, forget it with
-     * the client. Idempotent, and safe to call from a `finally` or from
-     * `use { }` regardless of how the call ended.
+     * Hang up if still up, release the media, forget the call. Idempotent,
+     * safe from `finally` or `use { }`.
      */
     override fun close() {
-        // Claimed before anything else, and under the same lock [deliver]
-        // mints media under: once this is true, a MEDIA_STARTED that
-        // deliver() has not yet started handling mints nothing, and one it
-        // is already in the middle of minting is still finished and handed
-        // back below rather than raced past -- see [mediaLock]'s own note.
+        // Claimed first, under the lock [deliver] mints under: a MEDIA_STARTED
+        // not yet handled mints nothing, and one mid-mint is finished and
+        // released below.
         synchronized(mediaLock) { closing = true }
         if (!ended) {
             try {
@@ -623,10 +562,9 @@ class SipralCall internal constructor(
         client.forgetCall(handle)
     }
 
-    /** Writes to this call's media socket: what `sipral_stack_poll_farewell`
-     * hands [SipralClient] once signalling has already ended, and the
-     * packets the library's engine encodes in device mode. Through [media]
-     * once it exists, which owns the socket then. */
+    /** Write to this call's media socket: farewells from
+     * `sipral_stack_poll_farewell` after signalling ended, and device-mode
+     * packets. Through [media] once it exists, as it owns the socket. */
     internal fun sendOnMediaSocket(payload: ByteArray, address: InetSocketAddress) {
         val owner = media
         if (owner != null) {
@@ -642,13 +580,10 @@ class SipralCall internal constructor(
 }
 
 /**
- * The key `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` carries, off
- * `payload.media.digit`: an RFC 4733 (RTP) digit and either INFO form all
- * read the same way, since the library already tells the two apart and
- * writes the character either way (`payload.media.source` says which
- * reported it). Null for an RFC 4733 event code no keypad has a key for --
- * `payload.media.eventCode` is sixteen or above -- which is the only zero
- * `digit` reads as, since no key this ABI names is the null character.
+ * The key a `SIPRAL_EVENT_KIND_DIGIT_RECEIVED` carries
+ * (`payload.media.digit`), the same for RFC 4733 and INFO;
+ * `payload.media.source` says which. Null for an RFC 4733 event code of 16
+ * or above, which has no key.
  */
 fun digitOf(event: SipralEvent): Char? {
     val digit = event.payload.media.digit
@@ -656,18 +591,14 @@ fun digitOf(event: SipralEvent): Char? {
 }
 
 /**
- * What a call told to listen heard, off `payload.progress` of a
- * `SIPRAL_EVENT_KIND_PROGRESS_DETECTED` -- a network's tone, who answered,
- * or the machine's beep, `what` saying which -- and null for any other
- * kind, whose bytes in that arm are another arm's.
+ * What a `SIPRAL_EVENT_KIND_PROGRESS_DETECTED` heard (`payload.progress`):
+ * a tone, who answered, or the beep, per `what`. Null for any other kind.
  */
 fun progressOf(event: SipralEvent): SipralProgressEvent? =
     if (event.kind == SipralEventKind.PROGRESS_DETECTED.value.toLong()) event.payload.progress else null
 
-/** How [SipralCall.detectProgress] listens: the network's tones, whether
- * to decide who answered and whether to listen for the machine's beep, and
- * every limit of `sipral_progress_config_t`, each zero for the library's
- * default. */
+/** How [SipralCall.detectProgress] listens, with every limit of
+ * `sipral_progress_config_t`; zero means the library's default. */
 data class SipralProgressOptions(
     val region: SipralToneRegion = SipralToneRegion.EUROPE,
     val answeringMachine: Boolean = true,

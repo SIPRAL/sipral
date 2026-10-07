@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// SIP over TCP and TLS through org.sipral.idiomatic's SipralClient.open
-// (signalling = ...): the counterpart of
-// bindings/python/tests/test_signalling.py. The registrar is this check's
-// own, on loopback, and its certificates are made with the JDK's keytool,
-// one of them expired before the run began. Run by IdiomaticCheck.kt's
-// main, under -Xcheck:jni.
+// SIP over TCP and TLS through SipralClient.open(signalling = ...), the
+// counterpart of bindings/python/tests/test_signalling.py. The registrar
+// runs on loopback with certificates made by keytool, one already expired.
+// Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 
@@ -203,9 +201,9 @@ private fun over(
     tlsTrust = trust,
 )
 
-/** The next `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: the first attempt's
- * failure is raised by the poll that follows `open`, and every attempt to
- * connect again that fails raises another, a second later at most. */
+/** The next `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`: the first failure is
+ * raised by the poll after `open`, and each failed reconnect raises
+ * another within a second. */
 private suspend fun refusal(client: SipralClient): org.sipral.SipralTransportFailedEvent {
     val (_, event) = client.events.awaitNext(SipralEventKind.TRANSPORT_FAILED, timeoutMs = 10_000) { }
     assertFalse(client.connected)
@@ -269,8 +267,8 @@ private suspend fun thePinnedCertificateIsTrustedWhateverItsNameAndSigner(good: 
     return "a pinned certificate is trusted whatever its name and signer, and any other refused"
 }
 
-/** Every line of bindings/fixtures/pin-forms.txt, the list each layer's
- * parser is held to, found from the directory the JVM runs in. */
+/** Every line of bindings/fixtures/pin-forms.txt, the forms every layer's
+ * parser must accept, located from the JVM's working directory. */
 private fun everyFormAnAdministratorCopiesIsRead(): String {
     var at: File? = File(System.getProperty("user.dir")).absoluteFile
     while (at != null && !File(at, "bindings/fixtures/pin-forms.txt").isFile) {
@@ -385,9 +383,9 @@ private suspend fun aConnectionLostIsMadeAgainAndTheAccountRegistersOnIt(): Stri
     return "a lost connection is made again and the account registers on it"
 }
 
-/** The stack retires the main connection on its own when a flow that
- * answered keep-alives stops answering them (RFC 5626 §4.4.1), with the
- * socket still open here; said here the way it says it. */
+/** The stack retires the main connection itself when a flow stops
+ * answering keep-alives (RFC 5626 §4.4.1), with the socket still open
+ * here. */
 private suspend fun aConnectionTheStackLetGoOfIsMadeAgain(): String {
     Registrar().use { registrar ->
         over(registrar.address, signalling = SipralTransport.TCP, name = null).use { client ->
@@ -420,8 +418,8 @@ private suspend fun aConnectionTheStackLetGoOfIsMadeAgain(): String {
     return "a connection the stack let go of is made again and the account registers on it"
 }
 
-/** Twenty INVITEs from one address at once: how many were answered 480,
- * each counted once however often its refusal is sent again. */
+/** Twenty INVITEs from one address at once: how many got 480, each
+ * counted once however often its refusal is retransmitted. */
 private fun rush(limit: SipralInviteLimit?): Int {
     SipralClient.open(audio = SipralAudioMode.Application, inviteLimit = limit).use { client ->
         client.addAccount(aor = "sip:bob@sipral.invalid", registrarAddress = "127.0.0.1:9")
@@ -469,10 +467,10 @@ private fun theVoiceAgentPresetTakesARushTheDefaultAnswers480(): String {
     return "the voice-agent preset takes a rush the default answers 480"
 }
 
-/** ABI 0.35: an account on a TLS connection of its own beside one on the
- * client's UDP socket, each registered with its own loopback registrar and
- * each placing a call through it, with `streamFallback` off, which leaves
- * an account's own connection alone. */
+/** An account on its own TLS connection beside one on the client's UDP
+ * socket, each registering and calling through its own loopback registrar,
+ * with `streamFallback` off (which leaves an account's own connection
+ * alone). */
 private suspend fun anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good: Credential): String {
     val pin = "sha256 Fingerprint=" + java.security.MessageDigest.getInstance("SHA-256").digest(good.certificate.encoded)
         .joinToString(":") { "%02X".format(it) }
@@ -527,9 +525,8 @@ private suspend fun anAccountOverTlsAndOneOverUdpEachReachTheirOwnServer(good: C
     return "an account over TLS and one over UDP each reached their own server"
 }
 
-/** ABI 0.35: an account on a TCP connection of its own registers again
- * over a new one when its server drops it; anything but TCP or TLS is
- * refused. */
+/** An account on its own TCP connection re-registers over a new one when
+ * the server drops it; anything but TCP or TLS is refused. */
 private suspend fun anAccountOverTcpIsOpenedAgainWhenItsServerDropsIt(): String {
     Registrar().use { registrar ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { client ->

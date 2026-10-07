@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// org.sipral.idiomatic as a Java caller reaches it. Most of that layer is
-// already plain methods Java calls as they are -- hangup, hold, resume,
-// close, the state and statistics getters. What Java cannot reach is the
-// rest: factories whose every optional argument is a Kotlin default, suspend
-// functions, and events as a Flow. Each has a counterpart here: overloads
-// for the arguments a server sets, a blocking call and a CompletableFuture
-// for every wait, and a listener for a flow.
+// org.sipral.idiomatic for Java callers. Plain methods (hangup, hold,
+// close, getters) need nothing; what Java cannot reach is Kotlin default
+// arguments, suspend functions and Flows. Here they become overloads,
+// blocking calls plus CompletableFutures, and listeners.
 
 package org.sipral.jvm
 
@@ -80,9 +77,9 @@ object SipralJava {
     fun open(bindHost: String, bindPort: Int, userAgent: String?, audio: SipralAudioMode): SipralClient =
         SipralClient.open(bindHost = bindHost, bindPort = bindPort, userAgent = userAgent, audio = audio)
 
-    /** [SipralClient.open] in application mode, a party this end holds
-     * sent [heldAudio]: silence by default, or what the application sends
-     * -- hold music, an announcement, a voice agent's own speech. */
+    /** [SipralClient.open] in application mode, a held party being sent
+     * [heldAudio]: silence by default, or the application's frames (hold
+     * music, an announcement). */
     @JvmStatic
     fun open(bindHost: String, bindPort: Int, userAgent: String?, heldAudio: SipralHeldAudio): SipralClient =
         SipralClient.open(
@@ -90,11 +87,10 @@ object SipralJava {
             heldAudio = heldAudio,
         )
 
-    /** [SipralClient.open] in application mode, holding up to [maxDialogs]
-     * calls at once (0 for 128; past it a call that arrives is answered 503
-     * with `Retry-After: 2`) and working on up to [maxServerTransactions]
-     * requests from other ends (0 for 256): what a server raises past a
-     * hundred calls, the second to three a call and 256 more. */
+    /** [SipralClient.open] in application mode with at most [maxDialogs]
+     * calls (0 for 128; past it an incoming call gets 503 with
+     * `Retry-After: 2`) and [maxServerTransactions] requests in progress (0
+     * for 256). A server past a hundred calls raises both. */
     @JvmStatic
     fun open(bindHost: String, bindPort: Int, userAgent: String?, maxDialogs: Long, maxServerTransactions: Long): SipralClient =
         SipralClient.open(
@@ -105,14 +101,11 @@ object SipralJava {
     /**
      * [SipralClient.addAccount]: [registrarAddress] is where requests go,
      * `host:port`; with [registrar] the account can register there, as
-     * [authUser] with [authPassword] when challenged. [streamProtocol]
-     * (`SipralTransport.TCP` or `TLS`) puts the account on a connection of
-     * its own to that server, beside accounts on the client's UDP socket to
-     * others; a TLS one is held to [tlsPin] when given. [realms] are the
-     * realms the password answers, for a server whose calls are challenged
-     * under a realm its REGISTERs never meet; a challenge under any other is
-     * not answered, and `CHALLENGE_DECLINED` ([declinedChallengeOf]) says
-     * so.
+     * [authUser] with [authPassword]. [streamProtocol] (`SipralTransport.TCP`
+     * or `TLS`) puts the account on its own connection, held to [tlsPin] if
+     * given. [realms] are the realms the password answers, for a server that
+     * challenges calls under a realm REGISTER never sees; other challenges go
+     * unanswered and raise `CHALLENGE_DECLINED` ([declinedChallengeOf]).
      */
     @JvmStatic
     @JvmOverloads
@@ -143,25 +136,20 @@ object SipralJava {
     fun declinedChallengeOf(event: SipralEvent): SipralDeclinedChallenge? =
         org.sipral.idiomatic.declinedChallengeOf(event)
 
-    /** What a `TOKEN_REQUIRED` [event] says -- an account's server asking
-     * for an OAuth 2.0 access token (RFC 8898), with the authorization
-     * server and the scope -- or null for any other event
-     * ([org.sipral.idiomatic.tokenRequiredOf]). The token goes in with
-     * [setAccessToken]. */
+    /** A `TOKEN_REQUIRED` [event]'s request for an OAuth 2.0 token (RFC 8898)
+     * with authorization server and scope, or null for another event. The
+     * token goes in with [setAccessToken]. */
     @JvmStatic
     fun tokenRequiredOf(event: SipralEvent): SipralTokenRequired? =
         org.sipral.idiomatic.tokenRequiredOf(event)
 
-    /** What a `NETWORK_TEST` [event] found -- every part of a network test
-     * and its verdict -- or null for any other event
-     * ([org.sipral.idiomatic.networkTestOf]). */
+    /** A `NETWORK_TEST` [event]'s findings, or null for another event. */
     @JvmStatic
     fun networkTestOf(event: SipralEvent): SipralNetworkTest? =
         org.sipral.idiomatic.networkTestOf(event)
 
-    /** [SipralClient.networkTest]: test the network before a call --
-     * [account]'s server, and [echoCall] measured and hung up -- and return
-     * the test's number. */
+    /** [SipralClient.networkTest]: test [account]'s server and measure
+     * [echoCall], then hang it up. Returns the test's number. */
     @JvmStatic
     @JvmOverloads
     fun networkTest(
@@ -177,9 +165,8 @@ object SipralJava {
     @JvmStatic
     fun setAccessToken(account: SipralAccount, token: String?) = account.setAccessToken(token)
 
-    /** [SipralClient.placeCall] to [target], its media socket bound on
-     * [mediaHost]; [codecs] -- `"PCMA,PCMU"` -- is what this call offers and
-     * in what order, in place of the client's. */
+    /** [SipralClient.placeCall] to [target], media bound on [mediaHost];
+     * [codecs] (`"PCMA,PCMU"`) replaces the client's order. */
     @JvmStatic
     @JvmOverloads
     fun placeCall(
@@ -190,10 +177,9 @@ object SipralJava {
         codecs: String? = null,
     ): SipralCall = client.placeCall(account, target, mediaHost = mediaHost, codecs = codecs)
 
-    /** [SipralClient.answerCall] for the `INCOMING_CALL` [event], its media
-     * socket bound on [mediaHost]; [codecs] is what this call takes, in place
-     * of the client's -- an answer keeps the offer's order, so it chooses
-     * which codecs rather than which comes first. */
+    /** [SipralClient.answerCall] for an `INCOMING_CALL` [event], media bound
+     * on [mediaHost]. An answer keeps the offer's order, so [codecs] chooses
+     * which codecs, not which comes first. */
     @JvmStatic
     @JvmOverloads
     fun answerCall(client: SipralClient, event: SipralEvent, mediaHost: String = "127.0.0.1", codecs: String? = null): SipralCall =
@@ -245,10 +231,9 @@ object SipralJava {
         later("the call's end") { call.waitEnded(timeoutMs) }
 
     /**
-     * Subscribe to [events], run [action], and block until the first event
-     * of one of [kinds] arrives: the subscription is live before [action]
-     * runs, so the event [action] itself causes is never missed
-     * ([org.sipral.idiomatic.awaitNext]).
+     * Subscribe to [events], run [action], and block until the first event of
+     * one of [kinds]. The subscription is live before [action] runs, so its
+     * own event is never missed ([org.sipral.idiomatic.awaitNext]).
      */
     @JvmStatic
     @Throws(TimeoutException::class)
@@ -263,11 +248,10 @@ object SipralJava {
     }
 
     /**
-     * Hand every event of [events] to [listener], in order, on a thread of
-     * the library's own rather than the stack's poll thread, until the
-     * returned handle is closed. The subscription is live once this
-     * returns. An exception [listener] throws goes to the thread's
-     * uncaught-exception handler and the next event is still delivered.
+     * Hand every event of [events] to [listener], in order, on a library
+     * thread (never the poll thread), until the returned handle is closed.
+     * Live once this returns. A throwing [listener] goes to the uncaught
+     * exception handler and delivery continues.
      */
     @JvmStatic
     fun subscribe(events: Flow<SipralEvent>, listener: Consumer<SipralEvent>): AutoCloseable {

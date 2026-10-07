@@ -42,9 +42,8 @@ private suspend fun blindTransfer(): String {
                         assertEquals(target, request.target, "Bob was asked to call somebody else")
                         assertEquals(0L, request.attended, "a blind transfer names no dialog to replace")
 
-                        // Subscribed before Bob takes it, for the reason
-                        // awaitNext gives: Alice's report can arrive while
-                        // Carol's phone is still being answered.
+                        // subscribed before Bob accepts (see awaitNext): Alice's report can arrive
+                        // while Carol is still answering
                         val outcome = coroutineScope {
                             val done = async(start = CoroutineStart.UNDISPATCHED) {
                                 withTimeout(15_000) {

@@ -2,12 +2,11 @@
 // Copyright (c) 2026 Sytek
 //
 // The log, the state snapshot and the RTP port range through
-// org.sipral.idiomatic -- the Kotlin counterpart of
-// bindings/python/tests/test_logging.py. A handler that hears a refused call
-// with nobody named in it and hears nothing once turned off; a state text for
-// a crash report with the account in it and not the person; two clients on
-// loopback whose call is carried on even media ports out of each one's
-// range; and a range with no pair left that says so. Run by
+// org.sipral.idiomatic, the counterpart of
+// bindings/python/tests/test_logging.py: a handler hearing a refused call
+// with nobody named and nothing once off; a crash-report state naming the
+// account, not the person; two loopback clients carrying a call on even
+// ports from their ranges; and an exhausted range saying so. Run by
 // IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
@@ -138,8 +137,8 @@ private class Caught : Handler() {
     override fun close() {}
 }
 
-/** The state text once it holds [expected]: a stack the poll thread held
- * when asked answers with the last snapshot a poll kept. */
+/** The state text once it holds [expected]: a stack busy in a poll
+ * answers with the last snapshot. */
 private fun stateOnceSettled(client: SipralClient, expected: String): String {
     val deadline = System.currentTimeMillis() + 3_000
     var text = client.state()

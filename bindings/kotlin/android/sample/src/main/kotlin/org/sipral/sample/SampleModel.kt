@@ -45,13 +45,12 @@ import org.sipral.telecom.TelecomCall
 import org.sipral.telecom.TelecomPhase
 
 /**
- * The sample's whole state: one stack, one account, and whatever calls the
- * telecom framework is showing. Every call action goes through the
- * [TelecomBridge], the same one the framework's own callbacks reach, so a
- * headset button and a button on this screen do the same thing.
+ * The sample's state: one stack, one account, and the calls the telecom
+ * framework shows. Every call action goes through the [TelecomBridge], as
+ * the framework's callbacks do, so a headset button and an on-screen button
+ * behave the same.
  *
- * A `ViewModel`, so that the stack outlives the activity being recreated
- * (a rotation) and is closed only when the activity is gone for good.
+ * A `ViewModel`, so the stack survives activity recreation (rotation).
  */
 class SampleModel(application: Application) : AndroidViewModel(application) {
     private val context: Context get() = getApplication()
@@ -114,24 +113,20 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
         scope.launch {
             try {
                 val host = withContext(Dispatchers.IO) { localAddress() }
-                // Sockets are opened and the first REGISTER goes out here, so
-                // off the main thread, which Android does not let touch the
-                // network.
-                // A STUN server makes the Contact the registrar stores, and
-                // the SDP of every call, name the address this device appears
-                // from beyond its NAT. A TURN server adds a relay, which only
-                // an ICE call can use, so ICE is offered when one is given.
+                // Sockets open and the first REGISTER goes out here, so off the main
+                // thread, which Android forbids from touching the network.
+                // A STUN server makes the registered Contact and every call's SDP name the
+                // address seen beyond the NAT. A TURN relay is usable only under ICE, so
+                // ICE is offered when one is given.
                 val stun = stunServer.trim().ifEmpty { null }
                 val turn = turnServer.trim().ifEmpty { null }?.let {
                     SipralTurnServer(it, turnUser.trim(), turnPassword)
                 }
                 val (opened, added) = withContext(Dispatchers.IO) {
-                    // The library's engine carries the calls over AAudio
-                    // where the phone allows (API level 28 and later), and
-                    // opens the devices only when the framework's call is
-                    // active: manual activation, driven by SipralCallAudios.
-                    // An older phone pumps the frames through AudioRecord
-                    // and AudioTrack instead.
+                    // The engine carries calls over AAudio where the phone allows (API 28+),
+                    // opening devices only while the framework's call is active (manual
+                    // activation, driven by SipralCallAudios). Older phones pump frames
+                    // through AudioRecord and AudioTrack.
                     val audio = if (SipralAudioMode.platformDefault is SipralAudioMode.Device) {
                         SipralAudioMode.Device(SipralAudioActivation.MANUAL)
                     } else {
@@ -160,10 +155,9 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
                 bridge = wired
                 SipralTelecom.install(wired) { id, _ -> notifyIncoming(id) }
                 wired.collect(scope, opened.events)
-                // Every call's microphone and speaker are the library's: it
-                // opens them when a call's media starts, keeps them through
-                // whatever the platform does, and lets them go when the call
-                // ends. The sample only shows what happens to them.
+                // The library opens each call's microphone and speaker when media starts,
+                // keeps them through whatever the platform does, and releases them at the
+                // end; the sample only displays what happens.
                 val audios = SipralCallAudios(context, wired, calls, opened.events, scope)
                 audio = audios
                 val engine = opened.audio
@@ -208,8 +202,8 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Placing and answering wait for the STUN server to map the call's
-    // media socket when one is configured, so both run off the main thread.
+    // with STUN, placing and answering wait for the media socket's mapping,
+    // so both run off the main thread
     fun call() {
         val account = account ?: return
         val dialled = target.trim()
@@ -225,10 +219,9 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * What a push handler does on a real device -- `FirebaseMessagingService
-     * .onMessageReceived`, reading the caller out of the push -- without a
-     * push service: the call is reported to the framework, then announced,
-     * and the INVITE that follows is matched to the screen already up.
+     * What a push handler (`FirebaseMessagingService.onMessageReceived`) does
+     * on a device, without a push service: report the call to the framework,
+     * announce it, and match the following INVITE to the screen already up.
      */
     fun simulatePush() {
         val account = account ?: return
@@ -281,10 +274,9 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * The incoming-call screen a self-managed call owes the user
+     * The incoming-call UI a self-managed call owes the user
      * (`Connection.onShowIncomingCallUi`): a notification whose full-screen
-     * intent opens this activity over the lock screen, where the call is
-     * answered or declined.
+     * intent opens this activity over the lock screen.
      */
     private fun notifyIncoming(id: String) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -335,8 +327,8 @@ class SampleModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         audio?.close()
         audio = null
-        // Before the client goes: once it has, nothing would ever end the
-        // calls the framework is still showing.
+        // before the client goes: afterwards nothing would end the calls the
+        // framework still shows
         bridge?.endAll()
         bridge = null
         client?.close()

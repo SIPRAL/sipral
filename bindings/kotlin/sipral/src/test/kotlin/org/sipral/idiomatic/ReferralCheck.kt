@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// A REFER outside any dialog through org.sipral.idiomatic -- the Kotlin
-// counterpart of bindings/python/tests/test_referral.py. The referrer is a
-// plain DatagramSocket writing RFC 3515 §4.1's own REFER by hand: a
-// switchboard asking Bob's line to ring Carol, a second client that answers.
-// Refused 403 by a client that was not told to take referrals; with it
-// told, the application asked, a 202, NOTIFYs carrying message/sipfrag, and
-// the call placed. Run by IdiomaticCheck.kt's main, under -Xcheck:jni.
+// A REFER outside any dialog through org.sipral.idiomatic, the counterpart
+// of bindings/python/tests/test_referral.py. The referrer is a plain
+// DatagramSocket writing RFC 3515 §4.1's REFER by hand: a switchboard
+// asking Bob's line to ring Carol, a second client that answers. Refused
+// 403 unless referrals are enabled; then the application is asked, a 202,
+// NOTIFYs with message/sipfrag, and the call placed. Run by
+// IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
 

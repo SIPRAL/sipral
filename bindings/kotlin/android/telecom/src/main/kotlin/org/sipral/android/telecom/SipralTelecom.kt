@@ -16,12 +16,11 @@ import org.sipral.telecom.CallAudio
 import org.sipral.telecom.TelecomBridge
 
 /**
- * The process-wide wiring between an application and the telecom framework.
+ * Process-wide wiring between an application and the telecom framework.
  *
- * The framework creates [SipralConnectionService] itself, with no way to
- * hand it anything, so what the service needs -- the [TelecomBridge] and
- * whoever raises the incoming-call screen -- is installed here by the
- * application once, before the first call:
+ * The framework creates [SipralConnectionService] itself and cannot pass
+ * it anything, so the application installs the [TelecomBridge] and its
+ * incoming-call UI here once, before the first call:
  *
  * ```kotlin
  * val handle = SipralTelecom.registerAccount(context, "Acme Phone")
@@ -30,8 +29,8 @@ import org.sipral.telecom.TelecomBridge
  * bridge.collect(scope, client.events)
  * ```
  *
- * and, when the application closes the client, `bridge.endAll()` first, so
- * that no connection outlives the calls it was showing.
+ * Before closing the client, call `bridge.endAll()` so no connection
+ * outlives its call.
  */
 object SipralTelecom {
     /** The key a call's id travels under in the framework's extras. */
@@ -54,9 +53,9 @@ object SipralTelecom {
      * by call id: what an application reads audio routes from. */
     val connections: StateFlow<Map<String, SipralConnection>> = connectionsFlow
 
-    /** Install the bridge the service hands every connection to, and what
-     * the service calls when the framework says the application may show
-     * its incoming-call screen (`Connection.onShowIncomingCallUi`). */
+    /** Install the bridge the service hands each connection to, and the
+     * callback for when the framework lets the app show its incoming-call UI
+     * (`Connection.onShowIncomingCallUi`). */
     fun install(bridge: TelecomBridge, incomingUi: IncomingCallUi) {
         this.bridge = bridge
         this.incomingUi = incomingUi
@@ -72,13 +71,10 @@ object SipralTelecom {
      * on. A self-managed account needs no user consent to enable, and
      * registering it again replaces it.
      */
-    // The platform marks CAPABILITY_SELF_MANAGED deprecated from API 37
-    // (platforms/android-37.0/data/api-versions.xml); its newer route for a
-    // calling application is the transactional one
-    // (CAPABILITY_SUPPORTS_TRANSACTIONAL_OPERATIONS, API 34). The capability
-    // is still what a self-managed ConnectionService needs on every release
-    // this library supports, 8.0 to 17, and an adapter over the
-    // transactional API would sit over the same TelecomBridge.
+    // CAPABILITY_SELF_MANAGED is deprecated from API 37 in favour of the
+    // transactional API (API 34), but it is still what a self-managed
+    // ConnectionService needs on every release this library supports (8.0 to
+    // 17); a transactional adapter would sit over the same TelecomBridge.
     @Suppress("DEPRECATION")
     fun registerAccount(context: Context, label: CharSequence): PhoneAccountHandle {
         val handle = accountHandle(context)
@@ -93,13 +89,13 @@ object SipralTelecom {
     private val callFocusFlow = MutableStateFlow(true)
     private val audios = ConcurrentHashMap.newKeySet<CallAudio>()
 
-    /** Whether this application's `ConnectionService` has the call focus:
-     * true until the framework says otherwise, and on releases before
-     * Android 9, which has no call focus, true throughout. */
+    /** Whether this app's `ConnectionService` has call focus: true until the
+     * framework says otherwise, and always before Android 9, which has no
+     * call focus. */
     val callFocus: StateFlow<Boolean> = callFocusFlow
 
-    /** The framework moved the call focus. Every call's audio is let go, or
-     * taken back, before this returns. */
+    /** The framework moved call focus. Every call's audio is released or
+     * retaken before this returns. */
     internal fun callFocusChanged(has: Boolean) {
         callFocusFlow.value = has
         for (audio in audios) {

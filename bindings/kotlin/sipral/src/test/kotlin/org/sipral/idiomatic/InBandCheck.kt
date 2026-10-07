@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// What a call carries inside its audio, and how it is recorded, through
-// org.sipral.idiomatic: a digit written into the audio and heard there by a
-// call told to listen always, a caller told to listen for who answered, the
-// beep that says a call is recorded, and the WAV file a recording writes.
-// Two clients on 127.0.0.1, run by IdiomaticCheck.kt's main under
+// In-band signals and recording through org.sipral.idiomatic: a digit
+// written into the audio and detected by a call told to always listen,
+// answering-party detection, the recording beep, and the WAV a recording
+// writes. Two clients on 127.0.0.1, run by IdiomaticCheck.kt's main under
 // -Xcheck:jni.
 
 package org.sipral.idiomatic
@@ -71,8 +70,7 @@ private suspend fun <T> overACall(
 
 private suspend fun aDigitWrittenInTheAudioIsHeardThere(): String = overACall { callA, callB ->
     // both ends negotiated named events, so the far end listens in the audio
-    // only because it is told to, and the key crosses only because it is
-    // written there
+    // only because told to, and the key is there only because written there
     callB.setDtmfDetection(SipralDtmfDetection.ALWAYS)
     delay(200)
     val (_, heard) = callB.events.awaitNext(SipralEventKind.IN_BAND_DIGIT, timeoutMs = 10_000) {

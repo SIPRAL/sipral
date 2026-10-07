@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// The ConnectionService helper: org.sipral.telecom's TelecomBridge (inside
-// sipral.aar, and tested on a plain JVM by scripts/check.sh) put behind
-// android.telecom -- a self-managed PhoneAccount, a ConnectionService, and a
-// Connection per call.
+// The ConnectionService helper: TelecomBridge (in sipral.aar, tested on a
+// plain JVM) behind android.telecom, with a self-managed PhoneAccount, a
+// ConnectionService and a Connection per call.
 
 plugins {
     id("com.android.library")
 }
 
-// The one version this workspace has, read where it is kept rather than
-// written again here.
+// the workspace's single version, read from where it is kept
 val sipralVersion: String = rootDir.resolve("../../../Cargo.toml").readLines()
     .dropWhile { it.trim() != "[workspace.package]" }
     .first { it.trim().startsWith("version") }
@@ -22,8 +20,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        // Self-managed connections (PhoneAccount.CAPABILITY_SELF_MANAGED)
-        // exist from Android 8.0.
+        // self-managed connections exist from Android 8.0
         minSdk = 26
     }
 
@@ -32,9 +29,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // The connection's callbacks, run on the JVM against the platform's
-    // stub jar with every method answering its default. TestNG rather than
-    // JUnit, whose licence (EPL) is not one this repository takes.
+    // The connection's callbacks on the JVM against the stub jar, every method
+    // returning its default. TestNG rather than JUnit, whose EPL licence this
+    // repository does not accept.
     testOptions {
         unitTests {
             isReturnDefaultValues = true
@@ -46,6 +43,6 @@ android {
 dependencies {
     api("org.sipral:sipral:$sipralVersion")
     api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    // Newest stable release on Maven Central, checked 2026-09-23. Test only.
+    // newest stable on Maven Central, checked 2026-09-23; test only
     testImplementation("org.testng:testng:7.12.0")
 }

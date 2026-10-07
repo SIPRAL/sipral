@@ -22,16 +22,14 @@ import org.sipral.SipralToggle
 /**
  * Who runs a client's audio: `sipral_stack_config_t::audio`.
  *
- * [Device] has the library open the platform's own devices -- the
- * voice-processing unit on macOS, communications streams on Windows,
- * AAudio voice-communication streams on Android -- and pump every call from
- * the moment its media starts to the moment it ends, with nothing for the
- * application to do but choose devices through [SipralClient.audio] (on
- * Android, after [SipralAndroidAudio.attach]). [Application] is the client
- * as it was before: [SipralMedia.frames] carries the far end's audio and
- * [SipralMedia.sendAudio] takes the microphone's, for an application that
- * runs its own audio -- a voice agent, a recorder, a test, and an Android
- * phone below API level 28, whose calls the telecom helper carries over
+ * [Device] has the library open the platform's devices (voice-processing
+ * unit on macOS, communications streams on Windows, AAudio
+ * voice-communication on Android) and pump every call from media start to
+ * end; the application only picks devices through [SipralClient.audio]
+ * (on Android, after [SipralAndroidAudio.attach]). [Application] hands
+ * frames to the application through [SipralMedia.frames] and
+ * [SipralMedia.sendAudio]: for a voice agent, a recorder, a test, or an
+ * Android phone below API 28, whose calls the telecom helper carries over
  * `AudioRecord` and `AudioTrack`.
  */
 sealed class SipralAudioMode {
@@ -43,12 +41,9 @@ sealed class SipralAudioMode {
 
     companion object {
         /**
-         * What a client is opened with unless it says otherwise: [Device]
-         * with automatic activation wherever the library has an engine for
-         * the platform -- macOS, Windows, and Android from API level 28 --
-         * and [Application] where it has none: Linux, and an older Android
-         * phone, whose calls the telecom helper carries itself. On Android
-         * the answer is the phone's, not the build's.
+         * The default: [Device] with automatic activation where the library has an
+         * engine (macOS, Windows, Android API 28+), else [Application] (Linux,
+         * older Android). On Android this depends on the phone, not the build.
          */
         val platformDefault: SipralAudioMode
             get() = if (Sipral.capabilities().features and Sipral.FEATURE_AUDIO_DEVICE != 0L) {
@@ -61,9 +56,9 @@ sealed class SipralAudioMode {
 
 /** One audio device, as `sipral_audio_device_at` lists it. */
 data class SipralAudioDeviceInfo(
-    /** The engine's name for it: stable across refreshes and unplugging,
-     * never reused, never zero -- what [SipralAudioDevices.select] takes,
-     * and what an application saves as a person's choice. */
+    /** The engine's id for it: stable across refreshes and unplugging, never
+     * reused, never zero. What [SipralAudioDevices.select] takes and what an
+     * application saves as a user's choice. */
     val id: Long,
     /** What the platform calls it. */
     val name: String,
@@ -74,8 +69,8 @@ data class SipralAudioDeviceInfo(
     val outputChannels: Int,
     val isDefaultInput: Boolean,
     val isDefaultOutput: Boolean,
-    /** Whether the last refresh still found it. A device that went keeps
-     * its row and its id, so a selection saved against it still names it. */
+    /** Whether the last refresh still found it. A removed device keeps its
+     * row and id, so a saved selection still names it. */
     val isPresent: Boolean,
 ) {
     /** Whether it can serve [role]: a microphone needs input channels, a
@@ -91,9 +86,9 @@ data class SipralAudioSelection(val selected: Long?, val running: Long?)
 /** What the engine is doing (`sipral_audio_info_t`). */
 data class SipralAudioStatus(
     val isActive: Boolean,
-    /** Whether the platform's own processing sits behind the microphone:
-     * the voice-processing unit on macOS, which cancels the echo; a
-     * communications stream on Windows, which runs the endpoint's own. */
+    /** Whether the platform's processing sits behind the microphone (the
+     * voice-processing unit on macOS, which cancels echo; a communications
+     * stream on Windows). */
     val systemEchoCancellation: Boolean,
     /** The loudspeaker-to-microphone delay the devices report. */
     val renderDelayMs: Long,
@@ -107,11 +102,10 @@ data class SipralAudioStatus(
 )
 
 /**
- * The `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` payload -- what changed and
- * who changed it: `SipralAudioOrigin.SYSTEM` for the operating system,
- * `SipralAudioOrigin.ENGINE` for the library doing what it was asked or
- * what a lost device made it do, which an application never re-applies its
- * own choice on -- or null for an event of any other kind.
+ * The `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED` payload, or null for
+ * another kind. Origin `SYSTEM` is the operating system; `ENGINE` is the
+ * library acting on a request or a lost device, on which an application
+ * should not re-apply its own choice.
  */
 fun audioOf(event: SipralEvent): SipralAudioEvent? =
     if (event.kind == SipralEventKind.AUDIO_DEVICES_CHANGED.value.toLong()) event.payload.audio else null
@@ -126,27 +120,24 @@ val SipralAudioEvent.originKind: SipralAudioOrigin? get() = SipralAudioOrigin.of
 val SipralAudioEvent.roleKind: SipralAudioRole? get() = SipralAudioRole.of(role.toInt())
 
 /**
- * The library's own audio engine for one client opened in
- * [SipralAudioMode.Device]: the devices listed, chosen per role, their
- * gain, mute and level, the ring, and when they are open.
- * [SipralClient.audio].
+ * The library's audio engine for a client in [SipralAudioMode.Device]:
+ * devices per role, gain, mute, level, the ring, and when devices are
+ * open. Reached as [SipralClient.audio].
  *
- * Every member calls the C ABI directly and may be called from any thread;
- * none takes the stack's own lock, so a level meter read on a UI timer
- * never waits for signalling. A platform that stops answering is a
- * [SipralException] with `SipralStatus.DEVICE_TIMED_OUT` after the probe
- * interval, never a hang.
+ * Every member is thread-safe and never takes the stack's lock, so a UI
+ * level meter never waits on signalling. A platform that stops answering
+ * throws `SipralStatus.DEVICE_TIMED_OUT` after the probe interval rather
+ * than hanging.
  */
 class SipralAudioDevices internal constructor(private val client: SipralClient) {
     private val stack: Long get() = client.handle
 
     /**
-     * Ask the platform again, and return the list. A device seen before
-     * keeps its id; one that has gone stays, `isPresent` false; a new one
-     * gets the next id. The engine refreshes by itself when the platform
-     * announces a change, and says so with
-     * `SIPRAL_EVENT_KIND_AUDIO_DEVICES_CHANGED`, so this is for a settings
-     * screen opening rather than for polling.
+     * Re-enumerate and return the list. Known devices keep their id, removed
+     * ones stay with `isPresent` false, new ones get the next id. The engine
+     * refreshes on its own when the platform reports a change (and raises
+     * `AUDIO_DEVICES_CHANGED`), so call this when a settings screen opens, not
+     * on a timer.
      */
     fun refresh(): List<SipralAudioDeviceInfo> {
         Sipral.audioRefresh(stack)
@@ -157,10 +148,9 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     fun devices(): List<SipralAudioDeviceInfo> =
         (0 until Sipral.audioDeviceCount(stack)).map { deviceAt(it) }
 
-    /** One row, its name read into a buffer that grows to what the library
-     * says it needs: `sipral_audio_device_at` hands the length back even
-     * when the name does not fit, which the generated wrapper, throwing on
-     * anything but success, would not. */
+    /** One row. `sipral_audio_device_at` returns the needed length even when
+     * the name does not fit, which the generated wrapper (throwing on any
+     * non-success) would hide, so this grows the buffer itself. */
     private fun deviceAt(index: Long): SipralAudioDeviceInfo {
         var buffer = ByteArray(256)
         val slots = LongArray(SipralAudioDevice.SLOTS)
@@ -187,16 +177,14 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     }
 
     /**
-     * Put [role] on [device], or back on the system's route with null.
+     * Put [role] on [device], or back on the system route with null.
      *
-     * The microphone, the speaker and the ringer are chosen separately.
-     * Refused before anything is opened: `NO_SUCH_DEVICE` for an id the list
-     * never held, `DEVICE_UNUSABLE` for a device with no channels for the
-     * role or one that is not plugged in, and `NOT_SUPPORTED` where the
-     * platform cannot put the role on a device of its own -- on iOS, whose
-     * route is the audio session's, the microphone and the ringer.
-     * While the engine is active the role moves at once, with its
-     * direction's gain and mute carried over.
+     * Microphone, speaker and ringer are chosen separately. Refused before
+     * anything opens: `NO_SUCH_DEVICE` for an unknown id, `DEVICE_UNUSABLE`
+     * for a device lacking channels for the role or unplugged,
+     * `NOT_SUPPORTED` where the platform cannot route the role on its own (on
+     * iOS, the microphone and ringer). While active the role moves at once,
+     * keeping its gain and mute.
      */
     fun select(role: SipralAudioRole, device: Long?) {
         Sipral.audioSelect(stack, role.value.toLong(), device ?: 0L)
@@ -212,10 +200,9 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     }
 
     /**
-     * The gain of a direction as a factor: 1 leaves the audio as it is, 0.5
-     * halves it, 2 doubles it. The input direction is the microphone's gain.
-     * Kept by the engine and applied to whatever device the direction runs
-     * on, so a headset unplugged mid-call comes back as loud as it was.
+     * A direction's gain as a factor: 1 unchanged, 0.5 half, 2 double. Kept by
+     * the engine across device changes, so a headset re-plugged mid-call is as
+     * loud as before.
      */
     fun setGain(direction: SipralAudioDirection, gain: Double) {
         Sipral.audioSetGain(stack, direction.value.toLong(), Math.round(maxOf(gain, 0.0) * UNITY))
@@ -233,32 +220,26 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     fun isMuted(direction: SipralAudioDirection): Boolean = Sipral.audioMuted(stack, direction.value.toLong()) != 0L
 
     /**
-     * Turn the platform's own echo cancellation on or off on the running
-     * client (ABI 1.1): what `systemEchoCancellation` chose at [SipralClient.open].
-     * While the devices are open they are reopened at once with or without
-     * the platform's processing -- the voice-processing unit on macOS, the
-     * communications stream on Windows, the voice-communication preset on
-     * Android -- on the devices they were on, with the gain and the mute; a
-     * call keeps its media through a gap as long as the reopen. [status]
-     * says what the platform did, and `SipralClient.settings()` what is asked.
+     * Turn the platform's echo cancellation on or off on a running client
+     * (the `systemEchoCancellation` chosen at [SipralClient.open]). Open
+     * devices are reopened at once on the same devices with gain and mute
+     * kept; a call keeps its media across the short gap. [status] says what
+     * the platform did, `SipralClient.settings()` what was asked.
      */
     fun setSystemEchoCancellation(on: Boolean) {
         Sipral.audioSetSystemEchoCancellation(stack, (if (on) SipralToggle.ON else SipralToggle.OFF).value.toLong())
     }
 
-    /** The meter: the recent peak of a direction, 0 for silence to 1 for
-     * full scale, after the gain and the mute. Cheap enough for a UI timer;
-     * zero while the engine is not active. */
+    /** The meter: a direction's recent peak, 0 to 1, after gain and mute.
+     * Cheap enough for a UI timer; zero while inactive. */
     fun level(direction: SipralAudioDirection): Double =
         Sipral.audioLevel(stack, direction.value.toLong()) / Short.MAX_VALUE.toDouble()
 
     /**
-     * One call's own gain in one direction, as a factor, on top of the
-     * direction's ([setGain]): the input direction is what the microphone
-     * sends that call alone, the output how loud that call is in the
-     * loudspeaker beside the others. Kept while the call is held or in a
-     * local conference and back, and gone when it ends; `WRONG_STATE` before
-     * the call's media starts and after it ends.
+     * One call's gain in one direction, on top of the direction's
+     * ([setGain]): input is what that call alone receives from the microphone,
+     * output how loud that call plays. Kept across hold and local conferences,
+     * dropped when the call ends; `WRONG_STATE` outside the call's media.
      */
     fun setGain(call: SipralCall, direction: SipralAudioDirection, gain: Double) {
         Sipral.audioCallSetGain(stack, call.handle, direction.value.toLong(), Math.round(maxOf(gain, 0.0) * UNITY))
@@ -268,9 +249,8 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     fun gain(call: SipralCall, direction: SipralAudioDirection): Double =
         Sipral.audioCallGain(stack, call.handle, direction.value.toLong()) / UNITY
 
-    /** Mute or unmute one call in one direction while every other call goes
-     * on: the far end of that call alone hears silence, or that call alone
-     * is silent in the loudspeaker. Kept and refused as the call's gain is. */
+    /** Mute one call in one direction while the others go on. Kept and
+     * refused like the call's gain. */
     fun setMuted(call: SipralCall, direction: SipralAudioDirection, muted: Boolean) {
         Sipral.audioCallSetMuted(stack, call.handle, direction.value.toLong(), if (muted) 1L else 0L)
     }
@@ -283,18 +263,18 @@ class SipralAudioDevices internal constructor(private val client: SipralClient) 
     fun level(call: SipralCall, direction: SipralAudioDirection): Double =
         Sipral.audioCallLevel(stack, call.handle, direction.value.toLong()) / Short.MAX_VALUE.toDouble()
 
-    /** Open the devices, under `SipralAudioActivation.MANUAL`: what the
-     * telecom framework's audio focus, or CallKit's `didActivate`, is for.
-     * Calls whose media started before this are carried from here on. */
+    /** Open the devices under `SipralAudioActivation.MANUAL`, on the telecom
+     * framework's audio focus or CallKit's `didActivate`. Calls whose media
+     * already started are carried from now on. */
     fun activate() = Sipral.audioActivate(stack)
 
     /** Close the devices; calls stay attached and are heard again at the
      * next [activate]. */
     fun deactivate() = Sipral.audioDeactivate(stack)
 
-    /** Play [tone] -- 16-bit mono PCM at [sampleRateHz] -- on the ringer's
-     * device until [stopRinging], over and over when [looped]. Under
-     * automatic activation the ring opens the devices itself. */
+    /** Play [tone] (16-bit mono PCM at [sampleRateHz]) on the ringer device
+     * until [stopRinging], repeating when [looped]. Under automatic activation
+     * the ring opens the devices itself. */
     fun ring(tone: ShortArray, sampleRateHz: Int, looped: Boolean = true) {
         Sipral.audioRing(stack, tone, sampleRateHz.toLong(), if (looped) 1L else 0L)
     }

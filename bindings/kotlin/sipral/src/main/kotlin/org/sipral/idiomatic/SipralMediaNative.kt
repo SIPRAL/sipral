@@ -1,25 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Hand-written, beside bindings/kotlin/sipral/src/main/jni/idiomatic_media.c:
-// what SipralAbi.kt cannot print for sipral_media_packet_t, the struct a
-// caller "part-fills with buffers" that a caller here has no way to build
-// (bindings/kotlin/README.md). The four entry points this exposes are
-// declared in the same native library the generated shim loads --
-// "sipral_jni" -- built from both C files together, so nothing here asks
-// for a second System.loadLibrary the way the generated one already does
-// not.
+// Hand-written, beside idiomatic_media.c: entry points for the structs a
+// caller part-fills with buffers, which SipralAbi.kt cannot build
+// (bindings/kotlin/README.md). They live in the same "sipral_jni" library
+// as the generated shim, so no second System.loadLibrary is needed.
 
 package org.sipral.idiomatic
 
 /**
- * The ABI calls SipralAbi.kt cannot print a usable signature for, because
- * each takes a `sipral_media_packet_t *` (or, for the last, a
- * `sipral_path_candidate_t *`) and the generator has no way to build one
- * from Kotlin (docs/08-ffi.md, "The conventions are
- * load-bearing now"; bindings/kotlin/README.md names the gap). Package-
- * private: [SipralMedia] is the only caller, and it is the one place that
- * owns buffers the right size to hand these.
+ * ABI calls taking a `sipral_media_packet_t *` (or
+ * `sipral_path_candidate_t *`), which the generator cannot build from
+ * Kotlin (docs/08-ffi.md). Internal: [SipralMedia] is the only caller and
+ * owns correctly sized buffers.
  */
 internal object SipralMediaNative {
     init {
@@ -41,12 +34,9 @@ internal object SipralMediaNative {
 
     /**
      * `sipral_media_mix`: one frame of `mic` mixed into each of two joined
-     * calls, with what the far ends sent written into `local`. Each call's
-     * packet is filled the way [mediaCapture] fills one: `outDataA`,
-     * `outDestinationA` and `outLenA` for `mediaA`, the `B` three for
-     * `mediaB`. The generated binding hands the two packets over as bare
-     * addresses and has no way to build either, so this is the only way to
-     * reach the call from Kotlin.
+     * calls, with what the far ends sent written into `local`. Each packet is
+     * filled like [mediaCapture]'s: `outDataA`, `outDestinationA`, `outLenA`
+     * for `mediaA`, the `B` three for `mediaB`.
      */
     external fun mediaMix(
         mediaA: Long,
@@ -127,11 +117,9 @@ internal object SipralMediaNative {
     ): Int
 
     /**
-     * `sipral_media_path_candidate_at`, whose `sipral_path_candidate_t` a
-     * caller part-fills with two address buffers the same way. `outLocal`
-     * and `outRemote` are filled in place; `outNumbers` comes back as
-     * `[priority, kind, outcome, code, local_kind, remote_kind, local_len,
-     * remote_len]`.
+     * `sipral_media_path_candidate_at`: `outLocal` and `outRemote` are filled
+     * in place; `outNumbers` comes back as `[priority, kind, outcome, code,
+     * local_kind, remote_kind, local_len, remote_len]`.
      */
     external fun mediaPathCandidateAt(
         media: Long,

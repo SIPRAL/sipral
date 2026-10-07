@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Where the jar's natives come from. bindings/kotlin loads its shim with
-// System.loadLibrary("sipral_jni"), which only ever searches
-// java.library.path; this build rewrites each such call to [SipralNatives.load]
-// (bindings/jvm/pom.xml), which takes the pair for the running JVM out of the
-// jar, writes it to a private directory, loads it by absolute path and
-// removes the files again. A library already mapped stays loaded once its
-// file is gone, so nothing is left behind in the temporary directory.
+// Where the jar's natives come from. bindings/kotlin calls
+// System.loadLibrary("sipral_jni"), which searches only java.library.path;
+// this build rewrites those calls to [SipralNatives.load] (pom.xml), which
+// extracts the running platform's pair to a private directory, loads it by
+// absolute path, and deletes the files. A mapped library stays loaded, so
+// nothing is left in the temporary directory.
 
 package org.sipral.jvm
 
@@ -37,14 +36,13 @@ enum class SipralPlatform(
 }
 
 /**
- * Loads `libsipral_ffi.so` and `libsipral_jni.so` for the running JVM, once.
+ * Loads `libsipral_ffi.so` and `libsipral_jni.so` for the running JVM,
+ * once.
  *
- * Every class of the binding that has native methods calls [load] as it is
- * initialised, so an application never has to; calling it first is how a
- * server finds out at start-up rather than at its first call that a native
- * does not load here. The system property [DIRECTORY_PROPERTY] names a
- * directory to load the pair from instead of the jar, for a library built
- * locally.
+ * Every binding class with native methods calls [load] during
+ * initialisation; a server can call it first to fail at start-up rather
+ * than on its first call. The system property [DIRECTORY_PROPERTY] names a
+ * directory to load from instead of the jar, for a local build.
  */
 object SipralNatives {
     /** Where the natives sit inside the jar. */
@@ -70,9 +68,9 @@ object SipralNatives {
     private var failure: UnsatisfiedLinkError? = null
 
     /**
-     * The platform `os.name` and `os.arch` name, or null where the jar carries
-     * nothing that would run. `os.arch` is spelled `amd64` by most JVMs and
-     * `x86_64` by some; `aarch64` by all current ones, `arm64` by a few.
+     * The platform for `os.name` and `os.arch`, or null where the jar has
+     * nothing that runs. `os.arch` may be `amd64` or `x86_64`, `aarch64` or
+     * `arm64`.
      */
     @JvmStatic
     fun platformOf(osName: String, osArch: String): SipralPlatform? {
@@ -96,9 +94,8 @@ object SipralNatives {
     fun loaded(): SipralPlatform? = loadedPlatform
 
     /**
-     * Load the pair, once per class loader; every later call returns at
-     * once, and one that failed throws the same [UnsatisfiedLinkError] again
-     * rather than trying a second time.
+     * Load the pair, once per class loader. Later calls return at once; after
+     * a failure they rethrow the same [UnsatisfiedLinkError] without retrying.
      */
     @JvmStatic
     fun load() {

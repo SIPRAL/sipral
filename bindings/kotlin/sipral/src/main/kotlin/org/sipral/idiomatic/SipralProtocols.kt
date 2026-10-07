@@ -18,41 +18,34 @@ import org.sipral.SipralSubscriptionState
 import org.sipral.SipralTextEvent
 
 /**
- * What a `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED` carries, off
- * `payload.conference`: which subscription, whether the document was merged
- * or the conference ended, its version and how many users the picture
- * holds. Null for any other kind. [SipralSubscription.conference] reads the
- * picture.
+ * A `SIPRAL_EVENT_KIND_CONFERENCE_CHANGED`'s `payload.conference`: the
+ * subscription, merged or ended, version and user count. Null for any
+ * other kind. [SipralSubscription.conference] reads the picture.
  */
 fun conferenceOf(event: SipralEvent): SipralConferenceEvent? =
     if (event.kind == SipralEventKind.CONFERENCE_CHANGED.value.toLong()) event.payload.conference else null
 
 /**
- * What a `SIPRAL_EVENT_KIND_TEXT_RECEIVED` carries, off `payload.text`: the
- * real-time text the far end typed (RFC 4103), with a REPLACEMENT CHARACTER
- * where a block was lost past recovery, and how many were. Null for any
- * other kind.
+ * A `SIPRAL_EVENT_KIND_TEXT_RECEIVED`'s `payload.text`: the far end's
+ * real-time text (RFC 4103), with U+FFFD where a block was lost beyond
+ * recovery, and how many were. Null for any other kind.
  */
 fun textOf(event: SipralEvent): SipralTextEvent? =
     if (event.kind == SipralEventKind.TEXT_RECEIVED.value.toLong()) event.payload.text else null
 
 /**
- * What a `SIPRAL_EVENT_KIND_PRESENCE_CHANGED` carries, off
- * `payload.presence`: for `kind` `WATCHED` a presentity a `presence`
- * subscription watches (`basic`, `activity`, `entity`, `note`), for
- * `PUBLICATION` this account's own published presence (`publicationState`,
- * `failure`, `statusCode`, `expiresMs`, `refreshInMs`). Null for any other
- * kind.
+ * A `SIPRAL_EVENT_KIND_PRESENCE_CHANGED`'s `payload.presence`: for `kind`
+ * `WATCHED` a watched presentity (`basic`, `activity`, `entity`, `note`);
+ * for `PUBLICATION` this account's own publication (`publicationState`,
+ * `failure`, `statusCode`, `expiresMs`, `refreshInMs`). Null otherwise.
  */
 fun presenceOf(event: SipralEvent): SipralPresenceEvent? =
     if (event.kind == SipralEventKind.PRESENCE_CHANGED.value.toLong()) event.payload.presence else null
 
 /**
- * This account's presence as [SipralAccount.publishPresence] publishes it
- * (RFC 3903, a PIDF document for the address of record): reachable or not,
- * what the person is doing (`NONE` publishes no person at all; `OTHER` has
- * no name to publish under and is refused), and a note a buddy list shows
- * beside the name, on one line.
+ * This account's presence for [SipralAccount.publishPresence] (RFC 3903,
+ * PIDF): reachable or not, the activity (`NONE` publishes no person;
+ * `OTHER` has no name and is refused), and a one-line note.
  */
 data class SipralPublishedPresence(
     val basic: SipralBasic,
@@ -100,12 +93,11 @@ data class SipralConferencePicture(
  * One subscription (RFC 6665): [SipralAccount.subscribe],
  * [SipralAccount.watchPresence] or [SipralCall.subscribeConference].
  *
- * The client keeps it -- refreshes it, subscribes again after a notifier's
- * `deactivated` -- until [end]; what it learns arrives on
- * [SipralClient.events]: `SIPRAL_EVENT_KIND_SUBSCRIPTION_CHANGED` and
- * `NOTIFIED` for every package, `PRESENCE_CHANGED` ([presenceOf]) for
- * `presence` and `CONFERENCE_CHANGED` ([conferenceOf]) for `conference`,
- * each naming this [handle].
+ * The client refreshes it, and resubscribes after `deactivated`, until
+ * [end]. Its events arrive on [SipralClient.events] naming this [handle]:
+ * `SUBSCRIPTION_CHANGED` and `NOTIFIED` for every package,
+ * `PRESENCE_CHANGED` ([presenceOf]) and `CONFERENCE_CHANGED`
+ * ([conferenceOf]) for theirs.
  */
 class SipralSubscription internal constructor(
     val client: SipralClient,
@@ -172,11 +164,8 @@ private fun flag(raw: Long): Boolean? = when (raw) {
     else -> null
 }
 
-/**
- * One piece of text the ABI copies into a caller's buffer, read with a
- * buffer large enough for any the library holds, and a second, larger one
- * for the rare piece that is not.
- */
+/** Text the ABI copies into a caller's buffer: read with a buffer large
+ * enough for nearly all, and a larger second one for the rest. */
 internal fun protocolText(fill: (ByteArray) -> Long): String {
     for (capacity in intArrayOf(1024, 65536)) {
         val buffer = ByteArray(capacity)
@@ -208,13 +197,11 @@ data class SipralRtcpFeedback(
  * A recording session to a recording server (SIPREC, RFC 7866), from
  * [SipralCall.recordTo].
  *
- * It is a call of its own on the client -- [handle] is the one its
- * `SIPRAL_EVENT_KIND_CALL_CONFIRMED` and `CALL_ENDED` name on
- * [SipralClient.events] -- kept in step with the recorded call by the
- * stack: the metadata follows a hold or a transfer, and it ends when the
- * recorded call does. The copies of both parties' audio leave from two
- * sockets of their own, [thisEnd] (what this end sent, the stream labelled
- * `1`) and [farEnd] (what it heard, labelled `2`).
+ * A call of its own on the client: [handle] is what its `CALL_CONFIRMED`
+ * and `CALL_ENDED` name. The stack keeps it in step with the recorded call
+ * (metadata follows hold and transfer; it ends with the call). The copies
+ * leave from [thisEnd] (what this end sent, stream label `1`) and [farEnd]
+ * (what it heard, label `2`).
  */
 class SipralRecordingSession internal constructor(
     val handle: Long,

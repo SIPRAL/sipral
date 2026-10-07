@@ -14,26 +14,21 @@ import org.sipral.SipralTransport
 import org.sipral.SipralTurnStreamEvent
 
 /**
- * A TURN server (RFC 8656) and the long-term credential it knows this end
- * by: `sipral_stack_config_t::turn_server`, `turn_username` and
- * `turn_password`, for [SipralClient.open].
+ * A TURN server (RFC 8656) and this end's long-term credential:
+ * `sipral_stack_config_t::turn_server`, `turn_username`, `turn_password`,
+ * for [SipralClient.open].
  *
- * `address` is `host:port`, an address and not a name. Not a data class:
- * [toString] leaves the password out, since a TURN credential that reaches
- * a log is a relay somebody else can use, and a generated `toString`,
- * `equals` or `component3` would hand it to whatever prints or destructures
- * one.
+ * `address` is `host:port`, an address, not a name. Not a data class:
+ * [toString] omits the password, since a leaked TURN credential is a relay
+ * anyone can use, and a generated `toString` or `component3` would expose
+ * it.
  *
- * [transport] is how every media socket reaches it (RFC 8656 §3.1):
- * `SipralTransport.UDP` by default, `TCP` for a network that lets no UDP
- * out, `TLS` for one that lets one port out -- 5349 is TURN's -- or for an
- * application that wants the server checked. Over either the client opens
- * a connection per media socket itself and carries everything for the
- * relay on it; over TLS that is an `SSLSocket` from [sslSocketFactory] --
- * the platform default when null, one built over a `TrustManagerFactory`
- * of the application's own for a private CA or a self-signed server --
- * with the server's name, [serverName] or the host part of [address],
- * checked against its certificate. Nothing here turns checking off.
+ * [transport] is how media sockets reach it (RFC 8656 §3.1): `UDP` by
+ * default, `TCP` where UDP is blocked, `TLS` where one port (5349) is open
+ * or the server must be authenticated. Over TCP/TLS the client opens one
+ * connection per media socket. TLS uses [sslSocketFactory] (platform
+ * default when null; supply one for a private CA) and checks [serverName]
+ * (default: the host of [address]). Checking cannot be turned off.
  */
 class SipralTurnServer(
     val address: String,
@@ -48,44 +43,42 @@ class SipralTurnServer(
 }
 
 /**
- * The `SIPRAL_EVENT_KIND_NAT_MAPPING` payload -- which socket a STUN server
- * answered for (`signalling` nonzero for this client's own, zero for a
- * call's media socket) and the public address it saw it from -- or null
- * for an event of any other kind, whose `payload.nat` carries nothing.
+ * The `SIPRAL_EVENT_KIND_NAT_MAPPING` payload (which socket STUN answered
+ * for, `signalling` nonzero for the client's own, and the public address),
+ * or null for any other kind.
  */
 fun natOf(event: SipralEvent): SipralNatEvent? =
     if (event.kind == SipralEventKind.NAT_MAPPING.value.toLong()) event.payload.nat else null
 
 /**
- * The `SIPRAL_EVENT_KIND_NAT_RELAY` payload -- whether the TURN server
- * allocated a relay for a media socket, and where -- or null for an event
- * of any other kind. Nothing of the credential is in it.
+ * The `SIPRAL_EVENT_KIND_NAT_RELAY` payload (whether and where a relay was
+ * allocated), or null for any other kind. It holds nothing of the
+ * credential.
  */
 fun relayOf(event: SipralEvent): SipralNatRelayEvent? =
     if (event.kind == SipralEventKind.NAT_RELAY.value.toLong()) event.payload.relay else null
 
 /**
- * The `SIPRAL_EVENT_KIND_TURN_STREAM` payload -- open a media socket's
- * connection to a TURN server reached over TCP or TLS, or close it, which
- * [SipralClient] does itself -- or null for an event of any other kind.
+ * The `SIPRAL_EVENT_KIND_TURN_STREAM` payload (open or close a media
+ * socket's TCP/TLS connection to TURN, which [SipralClient] does itself),
+ * or null for any other kind.
  */
 fun turnStreamOf(event: SipralEvent): SipralTurnStreamEvent? =
     if (event.kind == SipralEventKind.TURN_STREAM.value.toLong()) event.payload.turnStream else null
 
 /**
- * The `SIPRAL_EVENT_KIND_STUN_SERVER` payload -- the STUN server in use
- * moved to another in [SipralClient.open]'s list, or every one of them
- * failed -- or null for an event of any other kind.
+ * The `SIPRAL_EVENT_KIND_STUN_SERVER` payload (the STUN server in use
+ * moved along [SipralClient.open]'s list, or all failed), or null for any
+ * other kind.
  */
 fun stunServerOf(event: SipralEvent): SipralStunServerEvent? =
     if (event.kind == SipralEventKind.STUN_SERVER.value.toLong()) event.payload.stunServer else null
 
 /**
- * The network the device is on, in as much detail as the stack's decision
- * needs (`sipral_stack_network_changed`), for [SipralClient.networkChanged]:
- * the kind of link, the local address -- an IPv4 literal, no port -- the
- * platform's own name for the interface, never parsed, and whether names
- * resolve there.
+ * The device's network, as much as the stack needs
+ * (`sipral_stack_network_changed`) for [SipralClient.networkChanged]: link
+ * kind, local IPv4 literal without port, the platform's interface name
+ * (opaque), and whether names resolve.
  */
 data class SipralNetwork(
     val link: SipralLink,

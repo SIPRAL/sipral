@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Versions checked 2026-09-23: the Android Gradle Plugin's newest stable
-// release on Google's Maven, and the Kotlin release the image's kotlinc is,
-// so that the classes in sipral.aar and the ones compiled here come from
-// one compiler version. The Android Gradle Plugin 9 compiles Kotlin itself;
-// the Kotlin plugin is named here only to pin which compiler that is.
+// Versions checked 2026-09-23: the newest stable AGP, and the Kotlin
+// release matching the image's kotlinc, so sipral.aar and this build share
+// one compiler. AGP 9 compiles Kotlin itself; the Kotlin plugin is named
+// only to pin that compiler.
 
 plugins {
     id("com.android.application") version "9.4.1" apply false

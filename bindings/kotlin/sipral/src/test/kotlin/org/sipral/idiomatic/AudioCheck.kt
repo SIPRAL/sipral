@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// SipralAudioMode.Device on this machine's real devices, through
-// org.sipral.idiomatic: the library's engine listed, chosen, turned up and
-// down, opened and closed, and carrying a call against a client in
-// application mode on 127.0.0.1. Run by IdiomaticCheck.kt's main, under
-// -Xcheck:jni.
+// SipralAudioMode.Device on this machine's real devices: the engine
+// listed, chosen, adjusted, opened and closed, and carrying a call to an
+// application-mode client on 127.0.0.1. Run by IdiomaticCheck.kt's main,
+// under -Xcheck:jni.
 //
-// The list, the choices and the settings are asked of the platform without
-// opening anything, and run wherever the library has an engine. What opens
-// the devices -- activation, the ring, a call -- runs the voice-processing
-// unit, which on macOS needs the microphone granted to the process: without
-// the grant the unit fails inside the framework, and the JVM with it. Those
-// run only with SIPRAL_AUDIO_DEVICES=1, from a Terminal the system has asked
-// about the microphone once (bindings/kotlin/README.md, "Build and test").
-// One client in device mode at a time: two voice-processing units in one
-// process do not survive on macOS.
+// Listing, choosing and settings open nothing and run wherever there is an
+// engine. Opening the devices (activation, ring, a call) starts the
+// voice-processing unit, which on macOS crashes the JVM without the
+// microphone grant; those run only with SIPRAL_AUDIO_DEVICES=1 from a
+// Terminal that has the grant (bindings/kotlin/README.md). One device-mode
+// client at a time: two voice-processing units in one process do not
+// survive on macOS.
 
 package org.sipral.idiomatic
 
@@ -45,10 +42,9 @@ private val opensDevices: Boolean get() = System.getenv("SIPRAL_AUDIO_DEVICES") 
 private fun deviceClient(activation: SipralAudioActivation = SipralAudioActivation.MANUAL) =
     SipralClient.open(audio = SipralAudioMode.Device(activation), bindHost = "127.0.0.1")
 
-/** The virtual loopback device a check that opens the devices plays and
- * records on when the machine has one: it plays nowhere and hands back what it
- * was given, so that a run never sounds through the machine's loudspeaker.
- * Without it the check runs on the system's route, as it always did. */
+/** A virtual loopback device to play and record on when present, so a run
+ * never sounds through the loudspeaker. Without it the system route is
+ * used. */
 internal const val QUIET_DEVICE = "BlackHole 2ch"
 
 private val everyRole = listOf(SipralAudioRole.SPEAKER, SipralAudioRole.MICROPHONE, SipralAudioRole.RINGER)
@@ -124,8 +120,8 @@ private fun theListKeepsItsIdsAndEachRoleIsRefusedByStatus(): String {
         audio.select(SipralAudioRole.SPEAKER, null as SipralAudioDeviceInfo?)
         assertNull(audio.selection(SipralAudioRole.SPEAKER).selected)
         if (System.getProperty("os.name").lowercase().contains("mac")) {
-            // the microphone is named apart from the loudspeaker, on the one
-            // voice-processing unit's other element
+            // the microphone is listed apart from the loudspeaker, as the other
+            // element of the same voice-processing unit
             val microphone = assertNotNull(first.firstOrNull { it.isPresent && it.canServe(SipralAudioRole.MICROPHONE) })
             audio.select(SipralAudioRole.MICROPHONE, microphone)
             assertEquals(microphone.id, audio.selection(SipralAudioRole.MICROPHONE).selected)
@@ -225,10 +221,9 @@ private suspend fun aCallInDeviceModeIsPumpedByTheEngine(): String {
     return "a call in device mode was pumped by the engine both ways"
 }
 
-/** A call's own gain and mute: held by the engine from the moment its media
- * starts -- the devices left closed under manual activation -- to the
- * moment it ends, beside the client's own, and refused outside that and in
- * application mode. */
+/** A call's own gain and mute: held by the engine from media start (with
+ * devices closed under manual activation) to the call's end, beside the
+ * client's, and refused outside that and in application mode. */
 private suspend fun aCallsOwnGainAndMuteLastFromItsMediaToItsEnd(): String {
     deviceClient().use { alice ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
@@ -273,8 +268,8 @@ private suspend fun aCallsOwnGainAndMuteLastFromItsMediaToItsEnd(): String {
     return "a call's own gain and mute last from its media to its end"
 }
 
-/** ABI 1.1: the platform's echo cancellation switched on a running client is
- * refused in application mode, where the library opens no device. */
+/** Switching echo cancellation on a running client is refused in
+ * application mode, where the library opens no device. */
 private fun theEchoCancellationSwitchIsRefusedInApplicationMode(): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { pumped ->
         val refused = assertFailsWith<SipralException> {

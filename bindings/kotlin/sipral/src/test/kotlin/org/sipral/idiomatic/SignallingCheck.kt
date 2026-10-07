@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// ABI 0.29's signalling surface through org.sipral.idiomatic, between two
-// clients on 127.0.0.1: why a call ended (RFC 3326) both ways, who is
-// calling behind the trust gate (RFC 3325, 3323, 5806, 7044), how the call
-// asked to be answered (RFC 5373, Alert-Info), a 3xx answer, the account's
-// session timer, the SRTP suite a call is keyed with, and a call moved to a
-// new socket after the network changed, the signalling port kept across
-// such a change, and a clock reading the poll overtook retried. Run by
+// The signalling surface through org.sipral.idiomatic between two clients
+// on 127.0.0.1: end reasons (RFC 3326) both ways, caller identity behind
+// the trust gate (RFC 3325, 3323, 5806, 7044), answer mode (RFC 5373,
+// Alert-Info), a 3xx answer, the session timer, the SRTP suite, a call
+// moved to a new socket after a network change, the signalling port kept
+// across it, and a clock reading the poll overtook being retried. Run by
 // IdiomaticCheck.kt's main, under -Xcheck:jni.
 
 package org.sipral.idiomatic
@@ -292,8 +291,8 @@ private fun aRoamThatKeepsTheAddressMovesNothing(): String {
     return "a roam that kept the address moved nothing"
 }
 
-/** The address the route to the rest of the world leaves from: this
- * machine's other address beside loopback, which these checks need. */
+/** This machine's non-loopback address, on the route to the outside,
+ * which these checks need. */
 private fun otherAddress(): String {
     val host = routeHost("192.0.2.1:5060")
     check(host != "127.0.0.1") { "this machine has no address but loopback, and the port checks need one" }
@@ -360,10 +359,9 @@ private fun aMoveToAnAddressThisMachineLacksKeepsTheSocketItHad(): String {
     return "a move to an address this machine lacks kept the socket it had"
 }
 
-/** A client bound on every interface keeps picking its own address across
- * a move: its socket stays where it was, on its port, and what it advertises
- * is the route toward each account's server again rather than the address
- * the platform named, taken as fixed from then on. */
+/** A client bound on every interface keeps picking its address across a
+ * move: the socket and port stay, and it advertises the route toward each
+ * account's server again rather than the platform's address. */
 private fun aClientOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove(): String {
     val elsewhere = otherAddress()
     SipralClient.open(audio = SipralAudioMode.Application).use { client ->
@@ -390,8 +388,8 @@ private fun aClientOnEveryInterfaceKeepsChoosingItsRouteAcrossAMove(): String {
     return "a client on every interface kept choosing its route across a move"
 }
 
-/** A clock reading the poll thread overtook is read again, as a collision
- * with it is; anything else goes straight through. */
+/** A clock reading the poll thread overtook is retried like a collision;
+ * anything else passes through. */
 private fun aClockBehindIsRetriedLikeABusy(): String {
     for (status in listOf(SipralStatus.BUSY, SipralStatus.CLOCK_BEHIND)) {
         var attempts = 0
@@ -413,7 +411,7 @@ private fun aClockBehindIsRetriedLikeABusy(): String {
     return "a clock behind was retried like a busy"
 }
 
-/** Everything above, for IdiomaticCheck.kt's main. */
+/** With maxDialogs at one, a second call is refused with `LIMIT_REACHED`. */
 private fun aCallPlacedPastMaxDialogsIsRefused(): String {
     SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1", maxDialogs = 1).use { alice ->
         SipralClient.open(audio = SipralAudioMode.Application, bindHost = "127.0.0.1").use { bob ->
@@ -429,6 +427,7 @@ private fun aCallPlacedPastMaxDialogsIsRefused(): String {
     return "a call past maxDialogs was refused"
 }
 
+/** Everything above, for IdiomaticCheck.kt's main. */
 internal suspend fun signallingChecks(): String = listOf(
     aHangupWithAReasonReachesTheFarEnd(),
     aCancelAsCompletedElsewhereIsNoMissedCall(),

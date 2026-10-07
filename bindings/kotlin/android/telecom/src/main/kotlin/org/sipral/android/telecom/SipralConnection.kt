@@ -22,17 +22,14 @@ import org.sipral.telecom.TelecomDisconnect
 /**
  * One self-managed call, as the telecom framework sees it.
  *
- * What the framework asks of the call -- answer, reject, disconnect, hold,
- * unhold, a DTMF tone -- goes to the [TelecomBridge] by call id; what the
- * bridge says about the call reaches the framework through [port], on the
- * main thread. Audio routing is the platform's: this class only reports the
- * routes the platform offers ([routes], [route]) and the mute it applied
- * ([muted]), and passes a choice back ([requestRoute]); it never touches
- * `AudioManager`, which the framework's own guide warns against ("Don't use
- * the `AudioManager#setCommunicationDevice` or
- * `AudioManager#startBluetoothSco` APIs to manage audio routes when using
- * Telecom", developer.android.com/develop/connectivity/telecom/selfManaged).
- * [SipralCallAudio] is what follows all three with the call's device.
+ * The framework's requests (answer, reject, disconnect, hold, unhold,
+ * DTMF) go to the [TelecomBridge] by call id; what the bridge says reaches
+ * the framework through [port], on the main thread. Routing is the
+ * platform's: this class only reports the offered routes ([routes],
+ * [route]) and mute ([muted]) and passes a choice back ([requestRoute]).
+ * It never touches `AudioManager`, which the framework's guide warns
+ * against under Telecom (developer.android.com/develop/connectivity/telecom/selfManaged).
+ * [SipralCallAudio] follows all three with the call's device.
  */
 class SipralConnection internal constructor(
     val id: String,
@@ -52,9 +49,8 @@ class SipralConnection internal constructor(
 
     private val mutedFlow = MutableStateFlow(false)
 
-    /** Whether the platform has muted this call -- from a Bluetooth
-     * headset's or a car's own control, which reach the call through the
-     * framework and nowhere else. */
+    /** Whether the platform muted this call, e.g. from a Bluetooth headset or
+     * car control, which reach the call only through the framework. */
     val muted: StateFlow<Boolean> = mutedFlow
 
     init {
@@ -63,12 +59,11 @@ class SipralConnection internal constructor(
         audioModeIsVoip = true
     }
 
-    // The connection itself, named for the object below, whose own methods
-    // share these names.
+    // named for the object below, whose methods share these names
     private val self: SipralConnection get() = this
 
-    /** What [TelecomBridge] tells this call, marshalled onto the main
-     * thread the framework's own callbacks arrive on. */
+    /** What [TelecomBridge] tells this call, posted to the main thread the
+     * framework's callbacks arrive on. */
     internal val port: TelecomConnection = object : TelecomConnection {
         override fun setRinging() = onMain { self.setRinging() }
         override fun setDialing() = onMain { self.setDialing() }
@@ -76,8 +71,8 @@ class SipralConnection internal constructor(
         override fun setOnHold() = onMain { self.setOnHold() }
 
         override fun setRemoteHold(held: Boolean) = onMain {
-            // A connection event, not a state: the framework has no state for
-            // "the far end is holding", and before Android 9 not even the event.
+            // an event, not a state: the framework has no "far end holding" state, and
+            // before Android 9 not even the event
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 sendConnectionEvent(if (held) EVENT_CALL_REMOTELY_HELD else EVENT_CALL_REMOTELY_UNHELD, null)
             }
@@ -85,10 +80,9 @@ class SipralConnection internal constructor(
 
         override fun setDisconnected(cause: TelecomDisconnect) = onMain {
             self.setDisconnected(DisconnectCause(codeOf(cause)))
-            // Destroyed on the main thread's next turn, never inside this
-            // one: the bridge can say "disconnected" from inside
-            // onCreateIncomingConnection, before the service has taken the
-            // connection and started listening for its destruction.
+            // destroyed on the main thread's next turn, never inside this one: the
+            // bridge can say "disconnected" from inside onCreateIncomingConnection,
+            // before the service is listening for the destruction
             main.post {
                 destroy()
                 SipralTelecom.destroyed(id)
@@ -104,7 +98,7 @@ class SipralConnection internal constructor(
         }
     }
 
-    // -- the framework's side ------------------------------------------------
+    // The framework's side
 
     override fun onAnswer() = bridge.answer(id)
 
@@ -112,11 +106,9 @@ class SipralConnection internal constructor(
 
     override fun onReject() = bridge.reject(id)
 
-    // The framework reaches a connection through these two as well -- a
-    // reason from Android 10's Call.reject(int), a text reply from
-    // Call.reject(boolean, String) -- and Connection's own versions do
-    // nothing, which would leave the call ringing. There is no reply to send
-    // here, so each is the same decline.
+    // The framework also rejects through these two (Android 10's
+    // Call.reject(int), and Call.reject(boolean, String)); Connection's own
+    // versions do nothing, which would leave the call ringing. Both decline.
     override fun onReject(rejectReason: Int) = bridge.reject(id)
 
     override fun onReject(replyMessage: String?) = bridge.reject(id)
@@ -135,7 +127,7 @@ class SipralConnection internal constructor(
         SipralTelecom.incomingUi?.show(id, this)
     }
 
-    // -- audio routes, as the platform offers them ---------------------------
+    // Audio routes, as the platform offers them
 
     /** Ask the platform for [route]. The platform may refuse; [route] says
      * what it settled on. */

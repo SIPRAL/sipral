@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// SipralConnection on a plain JVM, against the Android platform's stub jar
-// with every method answering its default (testOptions.unitTests
-// .isReturnDefaultValues): what the connection says to the framework cannot
-// be observed there, but what the framework asks of it can. Every callback
-// the framework may use to answer, turn away, hang up, hold or send a digit
-// through has to reach the bridge -- one that is left to Connection's own
-// empty default leaves the call ringing on a screen nobody can clear.
+// SipralConnection on a plain JVM against Android's stub jar, every method
+// returning its default (isReturnDefaultValues): what the connection tells
+// the framework is invisible, but what the framework asks is not. Every
+// callback for answering, rejecting, hanging up, holding or a digit must
+// reach the bridge; one left to Connection's empty default leaves the call
+// ringing on a screen nobody can clear.
 
 package org.sipral.android.telecom
 
@@ -146,9 +145,8 @@ class SipralConnectionTest {
 
     @Test
     fun aHoldFromTheFrameworkHoldsAtOnce() {
-        // Connection.onHold: a connection that has not reached STATE_HOLDING
-        // within two seconds is disconnected, so held cannot wait for the
-        // far end to answer the re-INVITE.
+        // Connection.onHold: a connection not STATE_HOLDING within two seconds is
+        // disconnected, so held cannot wait for the re-INVITE's answer.
         val rig = Rig()
         val connection = rig.confirmed(1)
         connection.onHold()
@@ -195,8 +193,8 @@ class SipralConnectionTest {
             waitFor { audio.state.value == AudioState.RUNNING }
             val service = SipralConnectionService()
             service.onConnectionServiceFocusLost()
-            // Stopped before the service told the framework it had released
-            // it, and released right after.
+            // stopped before the service told the framework it released, and
+            // released right after
             assertEquals(stopped.get(), 1)
             waitFor { closed.get() == 1 }
             assertEquals(audio.pauses.value, setOf(AudioPause.CALL_FOCUS_LOST))

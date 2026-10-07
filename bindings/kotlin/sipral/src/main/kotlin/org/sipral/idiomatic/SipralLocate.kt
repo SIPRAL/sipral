@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Where a client is reached, and where a server named by a name is: the
-// address a socket bound on every interface advertises toward a peer
-// (`sipral_advertised_address`), and the resolver that answers
-// SIPRAL_EVENT_KIND_LOOKUP_WANTED for an account added with a server URI.
+// The address a socket bound on every interface advertises toward a peer
+// (`sipral_advertised_address`), and the resolver answering
+// SIPRAL_EVENT_KIND_LOOKUP_WANTED for accounts added with a server URI.
 
 package org.sipral.idiomatic
 
@@ -22,10 +21,10 @@ import org.sipral.SipralException
 import org.sipral.SipralLocateEvent
 
 /**
- * What a resolver said to one lookup: a [SipralDnsAnswer], and with
- * `RECORDS` the records of the kind asked for, each its time-to-live in
- * seconds and then its data as a zone file writes it -- `300 192.0.2.40`,
- * `300 10 60 5060 sip1.example.com` (`sipral_account_looked_up`).
+ * A resolver's answer to one lookup (`sipral_account_looked_up`): a
+ * [SipralDnsAnswer] and, with `RECORDS`, each record as TTL in seconds
+ * then its zone-file data (`300 192.0.2.40`,
+ * `300 10 60 5060 sip1.example.com`).
  */
 data class SipralLookup(val answer: SipralDnsAnswer, val records: List<String> = emptyList()) {
     companion object {
@@ -38,32 +37,28 @@ data class SipralLookup(val answer: SipralDnsAnswer, val records: List<String> =
 }
 
 /**
- * Answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for the accounts a client added
- * with a `serverUri`: the name and the kind of record asked for, and what
- * the DNS said. Called on a thread of its own, one per lookup, and may block.
+ * Answers `SIPRAL_EVENT_KIND_LOOKUP_WANTED` for accounts added with a
+ * `serverUri`, given the name and record type. Runs on its own thread per
+ * lookup and may block.
  */
 typealias SipralResolver = (name: String, record: SipralDnsRecordType) -> SipralLookup
 
 /**
- * The resolver a [SipralClient] uses when it is given none.
+ * The resolver a [SipralClient] uses when given none.
  *
- * Addresses are asked of [InetAddress], which reads the hosts file as well,
- * with a time-to-live of [ADDRESS_TTL], the platform's lookup not saying
- * what the zone's was. SRV and NAPTR are asked of the JDK's DNS provider
- * (JNDI's `dns:`, the system's resolvers) where the platform has it, with
- * that same time-to-live, the provider not reporting one either; Android has
- * no JNDI, and there every SRV or NAPTR query is answered `NOTHING`, which
- * RFC 3263's procedure takes as a domain that publishes none, going on to
- * the host's own addresses. An Android application whose server publishes
- * SRV records passes a resolver built on `android.net.DnsResolver` (API 29)
- * instead.
+ * Addresses come from [InetAddress] (hosts file included) with TTL
+ * [ADDRESS_TTL], since the platform does not report one. SRV and NAPTR go
+ * to JNDI's `dns:` provider where it exists, same TTL. Android has no JNDI,
+ * so there SRV and NAPTR answer `NOTHING`, which RFC 3263 treats as none
+ * published and falls back to addresses. An Android app whose server uses
+ * SRV should pass a resolver built on `android.net.DnsResolver` (API 29).
  */
 object SipralDns {
-    /** The time-to-live given a record whose own the platform did not say,
-     * in seconds: how soon a moved server is looked up again. */
+    /** The TTL, in seconds, for records whose own TTL the platform hides:
+     * how soon a moved server is looked up again. */
     const val ADDRESS_TTL = 60L
 
-    /** The platform's resolver, as the object documentation describes. */
+    /** The platform's resolver, as described above. */
     val platform: SipralResolver = { name, record ->
         when (record) {
             SipralDnsRecordType.A -> addresses(name, v6 = false)
@@ -120,11 +115,10 @@ object SipralDns {
     }
 
     /**
-     * One record as the JDK's DNS provider prints it, written as
-     * `sipral_account_looked_up` takes it: [ADDRESS_TTL], then priority,
-     * weight, port and target for SRV; order, preference, flags, service and
-     * replacement for NAPTR, the regular expression left out since RFC 3263
-     * follows none. Null for text that is not one.
+     * One record as JNDI prints it, rewritten for `sipral_account_looked_up`:
+     * [ADDRESS_TTL], then priority, weight, port, target for SRV; order,
+     * preference, flags, service, replacement for NAPTR (the regexp dropped,
+     * as RFC 3263 uses none). Null for unparseable text.
      */
     fun zoneText(record: SipralDnsRecordType, printed: String): String? {
         val words = Regex("\"[^\"]*\"|\\S+").findAll(printed).map { it.value.trim('"') }.toList()
@@ -140,10 +134,9 @@ object SipralDns {
 }
 
 /**
- * The `SIPRAL_EVENT_KIND_LOOKUP_WANTED`, `LOCATED` or `LOCATE_FAILED`
- * payload -- the DNS query an account's server is located with, every
- * address it was located at, or why not and when it is asked again -- or
- * null for an event of any other kind.
+ * The `LOOKUP_WANTED`, `LOCATED` or `LOCATE_FAILED` payload (the query,
+ * the addresses found, or why not and when it retries), or null for any
+ * other kind.
  */
 fun locateOf(event: SipralEvent): SipralLocateEvent? = when (event.kind) {
     SipralEventKind.LOOKUP_WANTED.value.toLong(),
@@ -155,10 +148,10 @@ fun locateOf(event: SipralEvent): SipralLocateEvent? = when (event.kind) {
 
 /**
  * `sipral_advertised_address`: the `host:port` to advertise for a socket
- * bound at [bound] whose traffic goes to [peer]. A wildcard bind
- * (`0.0.0.0:5060`) gives the address of the route toward [peer]; a loopback
- * bind toward a peer that is not throws `UNREACHABLE_ADDRESS`, and no route
- * at all `TRANSPORT_DOWN`. Both are addresses, not names.
+ * bound at [bound] talking to [peer]. A wildcard bind gives the route
+ * toward [peer]; a loopback bind toward a remote peer throws
+ * `UNREACHABLE_ADDRESS`, and no route `TRANSPORT_DOWN`. Both arguments
+ * are addresses, not names.
  */
 fun advertisedAddress(bound: String, peer: String): String {
     val buffer = ByteArray(128)
@@ -167,11 +160,10 @@ fun advertisedAddress(bound: String, peer: String): String {
 }
 
 /**
- * The address of this machine's route toward [peer] (`host:port`), the one
- * a socket bound on every interface is reached at from there; `127.0.0.1`
- * when there is no peer, it is a name rather than an address, or no route
- * reaches it -- the address that works for a peer on this machine and that
- * the library refuses to advertise to any other.
+ * This machine's address on the route toward [peer] (`host:port`).
+ * `127.0.0.1` when there is no peer, it is a name, or nothing routes to
+ * it; that works for a local peer, and the library refuses to advertise it
+ * to any other.
  */
 fun routeHost(peer: String?): String {
     if (peer == null || !isAddress(peer)) {

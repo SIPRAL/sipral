@@ -1,24 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// Who is calling, read out of an INVITE, and whether two caller URIs name
-// the same caller by docs/15-mobile.md's matching rule.
+// The caller read from an INVITE, and whether two caller URIs match by
+// docs/15-mobile.md's rule.
 //
-// The library already matched the INVITE to an announcement by that rule;
-// what it cannot yet tell a Kotlin caller is *which* announcement, because
-// the event payload that names it does not cross the generated JNI shim
-// (docs/08-ffi.md, "Kotlin"). With one announcement outstanding there is
-// nothing to choose. With several, TelecomBridge chooses among its own by
-// the same rule the library applied, oldest first on a tie, which is the
-// library's own tie-break -- so the two agree whenever the two readings of
-// the URI do.
+// The library already matched the INVITE to an announcement, but which one
+// does not cross the generated JNI shim (docs/08-ffi.md, "Kotlin"). With
+// one outstanding there is nothing to choose; with several, TelecomBridge
+// applies the same rule with the library's tie-break (oldest first), so the
+// two agree whenever their URI readings do.
 
 package org.sipral.telecom
 
 import java.net.InetAddress
 
-/** The `From` header's URI and display name, or nulls when the message
- * carries none. */
+/** The `From` URI and display name, or nulls when absent. */
 internal data class CallerId(val uri: String?, val displayName: String?)
 
 internal fun callerOf(message: ByteArray?): CallerId {
@@ -27,7 +23,7 @@ internal fun callerOf(message: ByteArray?): CallerId {
     }
     val text = String(message, Charsets.UTF_8)
     val head = text.substringBefore("\r\n\r\n")
-    // Unfold continuation lines (RFC 3261 §7.3.1) before reading any header.
+    // unfold continuation lines (RFC 3261 §7.3.1) before reading headers
     val lines = mutableListOf<String>()
     for (line in head.split("\r\n")) {
         if (line.isNotEmpty() && (line[0] == ' ' || line[0] == '\t') && lines.isNotEmpty()) {
@@ -58,8 +54,8 @@ private fun parseNameAddr(value: String): CallerId {
         val name = value.substring(0, open).trim().removeSurrounding("\"").trim()
         return CallerId(uri.trim(), name.ifEmpty { null })
     }
-    // addr-spec: whatever follows the first ';' is a header parameter
-    // (`;tag=`), not part of the URI (RFC 3261 §20.10).
+    // addr-spec: after the first ';' come header parameters (`;tag=`), not
+    // the URI (RFC 3261 §20.10)
     return CallerId(value.substringBefore(';').trim(), null)
 }
 
@@ -117,7 +113,7 @@ private fun sameHost(a: String, b: String): Boolean {
         return a.equals(b, ignoreCase = true)
     }
     return try {
-        // Literals only, so this parses and never resolves a name.
+        // literals only: parsed, never resolved
         InetAddress.getByName(a.removeSurrounding("[", "]")) == InetAddress.getByName(b.removeSurrounding("[", "]"))
     } catch (_: Exception) {
         a.equals(b, ignoreCase = true)

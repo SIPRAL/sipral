@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// SIP over TCP or TLS for SipralClient: which authorities a TLS connection
-// trusts, the one connection a client signals on, and what a refused
-// connection is called. The TLS is javax.net.ssl's own, on the JVM and on
-// Android alike (docs/22-tls.md); nothing here turns its check off.
+// SIP over TCP or TLS for SipralClient: TLS trust, the client's single
+// signalling connection, and how a refused connection is classified. TLS is
+// javax.net.ssl's, on the JVM and Android (docs/22-tls.md); nothing here
+// turns its check off.
 
 package org.sipral.idiomatic
 
@@ -47,15 +47,12 @@ import org.sipral.SipralTransportFailure
 import org.sipral.SipralTransportWantedEvent
 
 /**
- * Which authorities a TLS connection to the SIP server trusts -- the three
- * answers `docs/22-tls.md` gives for every platform: [Platform] (the
- * JVM's or Android's own store, what a public server's certificate is
- * checked against), [PrivateAuthority] (a private CA beside the
- * platform's) and [OnlyAuthority] (that authority and no other: pinning
- * it). The name is checked against the server name the client was given,
- * by the HTTPS rules `SSLSocket` applies; none of them turns a check off.
- * [Pinned] trusts one certificate by its SHA-256 fingerprint instead, for a
- * PBX that signed its own.
+ * Which authorities a TLS connection to the SIP server trusts
+ * (`docs/22-tls.md`): [Platform] (the JVM's or Android's store),
+ * [PrivateAuthority] (a private CA beside the platform's) or
+ * [OnlyAuthority] (that CA alone). The name is always checked by the HTTPS
+ * rules `SSLSocket` applies. [Pinned] instead trusts one certificate by
+ * SHA-256 fingerprint, for a self-signed PBX.
  */
 sealed class SipralTlsTrust {
     /** The platform's own trust anchors. */
@@ -64,23 +61,19 @@ sealed class SipralTlsTrust {
     /** The platform's anchors, and [authority] beside them. */
     class PrivateAuthority(val authority: X509Certificate) : SipralTlsTrust()
 
-    /** [authority] and nothing else: a certificate any other authority
-     * signed is refused, the platform's included. */
+    /** [authority] alone: certificates from any other CA, the platform's
+     * included, are refused. */
     class OnlyAuthority(val authority: X509Certificate) : SipralTlsTrust()
 
     /**
-     * The one certificate whose SHA-256 fingerprint is [fingerprint], and
-     * nothing else, written as `openssl x509 -fingerprint -sha256` (`sha256
-     * Fingerprint=`, or `SHA256 Fingerprint=` before OpenSSL 3) or RFC 8122
-     * prints it: 64 hexadecimal digits, either case, colons and spaces
-     * between them ignored, optionally after `sha-256 `, `SHA256=` or
-     * `SHA256 Fingerprint=`, in any case; anything else throws
-     * [IllegalArgumentException] (`bindings/fixtures/pin-forms.txt` lists
-     * what every layer takes). The fingerprint is the whole
-     * verdict: no authority, host name or date is consulted, and a
-     * certificate with any other fingerprint is refused as untrusted
-     * (`docs/22-tls.md`). Compared in constant time, over the DER bytes of
-     * the certificate the server presented first.
+     * The one certificate whose SHA-256 fingerprint is [fingerprint]: 64 hex
+     * digits in either case, colons and spaces ignored, optionally after
+     * `sha-256 `, `SHA256=` or `SHA256 Fingerprint=` (as OpenSSL or RFC 8122
+     * print it). Anything else throws [IllegalArgumentException]
+     * (`bindings/fixtures/pin-forms.txt` lists the accepted forms). The
+     * fingerprint is the whole verdict: no authority, name or date is checked,
+     * and any other certificate is refused as untrusted. Compared in constant
+     * time over the DER of the server's first certificate.
      */
     class Pinned(fingerprint: String) : SipralTlsTrust() {
         /** The 32 bytes the fingerprint names. */
@@ -107,8 +100,8 @@ sealed class SipralTlsTrust {
         private val PIN_PREFIXES = listOf("sha256 fingerprint=", "sha-256 ", "sha256=")
     }
 
-    /** The trust managers a handshake is checked with, the platform's
-     * first where it counts at all. */
+    /** The trust managers a handshake is checked with, the platform's first
+     * where it applies. */
     internal fun trustManagers(): List<X509ExtendedTrustManager> {
         fun of(store: KeyStore?): X509ExtendedTrustManager {
             val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -130,13 +123,11 @@ sealed class SipralTlsTrust {
 }
 
 /**
- * How fast one address may ring a client: [burst] INVITEs at once, then one
- * more every [everyMs] (`sipral_stack_invite_limit`). [DEFAULT] is what
- * every client starts with -- ten, then one every two seconds, past which a
- * call is answered 480 -- and [VOICE_AGENT] the preset for a headless
- * service taking a trunk's calls, a hundred and twenty-eight at once and
- * then twenty a second (`docs/08-ffi.md`, "How fast one address may ring
- * this stack").
+ * How fast one address may ring a client: [burst] INVITEs at once, then
+ * one every [everyMs] (`sipral_stack_invite_limit`); past it a call is
+ * answered 480. [DEFAULT] is ten then one per two seconds; [VOICE_AGENT],
+ * for a headless service on a trunk, is 128 then twenty a second
+ * (`docs/08-ffi.md`).
  */
 data class SipralInviteLimit(val burst: Long, val everyMs: Long) {
     companion object {
@@ -150,19 +141,18 @@ data class SipralInviteLimit(val burst: Long, val everyMs: Long) {
 }
 
 /**
- * The `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` payload -- which transport, what
- * it spoke, what went wrong and, when TLS refused the connection, why
- * (`tls`, a [SipralTlsFailure] number) with the TLS library's own `detail`
- * -- or null for an event of any other kind.
+ * The `SIPRAL_EVENT_KIND_TRANSPORT_FAILED` payload (transport, protocol,
+ * error and, when TLS refused, `tls` as a [SipralTlsFailure] with the TLS
+ * library's `detail`), or null for another kind.
  */
 fun transportFailedOf(event: SipralEvent): SipralTransportFailedEvent? =
     if (event.kind == SipralEventKind.TRANSPORT_FAILED.value.toLong()) event.payload.transportFailed else null
 
 /**
- * The `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` payload -- a request too large for
- * a datagram (RFC 3261 §18.1.1), where it was going, its size and the limit
- * -- or null for an event of any other kind. A client opened with
- * `streamFallback` opens the stream itself.
+ * The `SIPRAL_EVENT_KIND_TRANSPORT_WANTED` payload (a request too large
+ * for a datagram, RFC 3261 §18.1.1: destination, size, limit), or null for
+ * another kind. A client opened with `streamFallback` opens the stream
+ * itself.
  */
 fun transportWantedOf(event: SipralEvent): SipralTransportWantedEvent? =
     if (event.kind == SipralEventKind.TRANSPORT_WANTED.value.toLong()) event.payload.transportWanted else null
@@ -175,11 +165,10 @@ internal class SignallingRefused(
 ) : Exception(detail)
 
 /**
- * What a failed connection was, as the stack names it. A certificate the
- * trust managers refused is expired, a name mismatch or untrusted by what
- * refused it; any other TLS failure during the handshake is a handshake
- * refused. A server nothing answered for is refused, a network with no way
- * through unreachable, silence timed out.
+ * Classify a failed connection the way the stack names it. A refused
+ * certificate is expired, name mismatch or untrusted; any other handshake
+ * failure is a refused handshake. No answer is refused, no route
+ * unreachable, silence timed out.
  */
 internal fun classify(failure: Throwable, handshaking: Boolean): SignallingRefused {
     val causes = generateSequence(failure) { it.cause }.toList()
@@ -215,9 +204,8 @@ internal fun sentence(text: String): String {
 private class PinMismatch : CertificateException("the server's certificate is not the pinned one")
 
 /**
- * The pin as the whole verdict: SHA-256 over the DER bytes of the
- * certificate the server presented first against [digest], compared in
- * constant time, and nothing else -- no chain, name or date.
+ * The pin as the whole verdict: SHA-256 of the server's first certificate
+ * against [digest], in constant time; no chain, name or date.
  */
 private class PinChecking(private val digest: ByteArray) : X509ExtendedTrustManager() {
     override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket?) {
@@ -245,18 +233,16 @@ private class PinChecking(private val digest: ByteArray) : X509ExtendedTrustMana
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 }
 
-/** A certificate trusted and naming another server, told apart from one
- * nobody trusts, which `SSLSocket` reports with the same exception type. */
+/** A trusted certificate naming another server, which `SSLSocket` reports
+ * with the same exception type as an untrusted one. */
 private class NameMismatch(cause: CertificateException) : CertificateException(cause.message, cause)
 
 /**
- * The trust managers, one after another: the first that accepts the chain
- * decides, and the error each would give is kept apart for the reason.
- * The name is checked here, once the chain is trusted, by the HTTPS rules,
- * so a trusted certificate naming another server reads as a name mismatch
- * rather than as untrusted; and every certificate's dates are checked, an
- * authority pinned as the only anchor included, which PKIX alone does not
- * look at.
+ * The trust managers in turn: the first that accepts the chain decides,
+ * and each one's error is kept for the reason. The name is checked here
+ * after the chain is trusted, so a wrong name reads as a mismatch rather
+ * than untrusted; and dates are checked on every certificate, including an
+ * authority pinned as sole anchor, which PKIX alone does not.
  */
 private class Checking(
     private val trust: List<X509ExtendedTrustManager>,
@@ -303,9 +289,9 @@ private class Checking(
 }
 
 /**
- * The HTTPS name rules (RFC 6125 as `SSLSocket` applies them): a `dNSName`
- * in `subjectAltName` equal to [name], case aside, a wildcard allowed in its
- * leftmost label only; an IP address against an `iPAddress` entry.
+ * The HTTPS name rules (RFC 6125, as `SSLSocket` applies them): a
+ * `dNSName` equal to [name] ignoring case, wildcard only in the leftmost
+ * label; an IP address against an `iPAddress` entry.
  */
 private fun checkName(certificate: X509Certificate, name: String) {
     val entries = certificate.subjectAlternativeNames ?: emptyList()
@@ -334,9 +320,9 @@ private fun dnsMatches(pattern: String, name: String): Boolean {
 }
 
 /**
- * The one connection a [SipralClient] signals on over TCP or TLS: made
- * again, backing off, whenever it is lost, and every loss told to the stack
- * with its reason (`sipral_stack_transport_failed_with`), which says so as
+ * The one TCP/TLS connection a [SipralClient] signals on. Reconnected with
+ * back-off whenever lost; each loss is reported to the stack
+ * (`sipral_stack_transport_failed_with`), which raises
  * `SIPRAL_EVENT_KIND_TRANSPORT_FAILED`.
  */
 internal class SignallingLink(
@@ -357,9 +343,8 @@ internal class SignallingLink(
         val output: OutputStream = socket.getOutputStream()
     }
 
-    /** The client this connection signals for, set once it exists: the
-     * first connection is made before the stack is, so that its address is
-     * the one the stack is created with. */
+    /** The client this connection serves. Set late: the first connection is
+     * made before the stack, whose address it supplies. */
     lateinit var owner: SipralClient
 
     private val client: SipralClient
@@ -368,8 +353,8 @@ internal class SignallingLink(
     private val current = AtomicReference<Open?>(null)
     private val reconnecting = AtomicBoolean(false)
 
-    /** Where the connection is made from; null for the address of the
-     * route toward the server. */
+    /** The local address to connect from; null for the route toward the
+     * server. */
     @Volatile
     var bindHost: String? = null
 
@@ -381,8 +366,7 @@ internal class SignallingLink(
     val contactParameters: String
         get() = if (protocol == SipralTransport.TLS) ";transport=tls" else ";transport=tcp"
 
-    /** One connection from [host]; `local` and `remote` beside it, or the
-     * refusal. */
+    /** One connection from [host], with `local` and `remote`, or the refusal. */
     fun connect(host: String?): Pair<Socket, Pair<String, String>> {
         val raw = Socket()
         var handshaking = false
@@ -418,8 +402,8 @@ internal class SignallingLink(
         }
     }
 
-    /** Tell the stack a connection is open, naming both ends, and read it
-     * on a thread of its own. */
+    /** Tell the stack a connection is open, naming both ends, and read it on
+     * its own thread. */
     fun install(socket: Socket, local: String, remote: String) {
         try {
             retryBusy { Sipral.stackTransportBind(client.handle, 0, protocol.value.toLong(), local, remote, client.nowMs()) }
@@ -456,8 +440,7 @@ internal class SignallingLink(
         }
     }
 
-    /** Write one message on the connection, whole; a write that fails loses
-     * it. */
+    /** Write one message whole; a failed write loses it. */
     fun write(payload: ByteArray, len: Int) {
         val open = current.get() ?: return
         try {
@@ -494,18 +477,17 @@ internal class SignallingLink(
                 refused.status == SipralStatus.BUSY || refused.status == SipralStatus.CLOCK_BEHIND
             }
             if (!kept) {
-                // the framing is lost: the stack retired the transport and
-                // said so itself
+                // framing lost: the stack retired the transport and reported it
                 lose(open, null, tell = false)
                 return
             }
         }
     }
 
-    /** Close [open] if it is still the connection, tell the stack how it
-     * ended -- `sipral_stack_stream_closed` for an orderly close ([refused]
-     * null), `sipral_stack_transport_failed_with` otherwise, nothing when not
-     * [tell] -- and connect again. */
+    /** Close [open] if it is still current, report how it ended
+     * (`sipral_stack_stream_closed` for an orderly close, else
+     * `sipral_stack_transport_failed_with`; nothing unless [tell]), and
+     * reconnect. */
     private fun lose(open: Open, refused: SignallingRefused?, tell: Boolean) {
         if (!current.compareAndSet(open, null)) {
             return
@@ -530,9 +512,8 @@ internal class SignallingLink(
         reconnectLater()
     }
 
-    /** Close the connection the stack let go of, if it is still the one
-     * held here, and connect again: the stack already knows, so nothing more
-     * is said to it. */
+    /** Close the connection the stack let go of, if still current, and
+     * reconnect; the stack already knows. */
     fun letGo() {
         current.get()?.let { lose(it, null, tell = false) }
     }
@@ -578,9 +559,8 @@ internal class SignallingLink(
         }
     }
 
-    /** The connection made again from [host], for a network change; when
-     * the new one cannot be made, the stack hears why and this keeps
-     * trying. The local address it was made from, or null. */
+    /** Reconnect from [host] after a network change; if that fails the stack
+     * hears why and retries continue. Returns the local address, or null. */
     fun move(host: String): String? {
         bindHost = host
         current.getAndSet(null)?.let { old ->
@@ -615,8 +595,8 @@ internal class SignallingLink(
     companion object {
         /** How long one attempt may take, the TLS handshake included. */
         const val PATIENCE_MS = 5_000
-        /** The wait before the first attempt to connect again, doubled after
-         * every one that fails, up to [MOST_MS]. */
+        /** The wait before the first reconnect, doubled per failure up to
+         * [MOST_MS]. */
         const val FIRST_MS = 1_000L
         const val MOST_MS = 30_000L
     }
