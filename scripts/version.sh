@@ -119,6 +119,7 @@ SIMPLE_CARRIERS=(
     'Cargo.toml|[workspace.package]|version = "|"'
     'crates/sipral-aec-webrtc/Cargo.toml|[package]|version = "|"'
     'bindings/dotnet/Sipral/Sipral.csproj||    <Version>|</Version>'
+    'bindings/dotnet/Sipral.Maui/Sipral.Maui.csproj||    <Version>|</Version>'
     'bindings/dotnet/Sipral/SipralInfo.cs||    public const string Version = "|";'
     'bindings/python/pyproject.toml|[project]|version = "|"'
     'bindings/python/sipral/__init__.py||__version__ = "|"'

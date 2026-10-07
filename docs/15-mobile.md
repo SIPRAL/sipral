@@ -915,3 +915,37 @@ phone.
 The same goes for `C5`'s measurements: what runs while the application is
 backgrounded with no call is a property of the whole process, and the polled
 core is what makes it *possible* to answer, not the answer.
+
+## .NET MAUI
+
+`bindings/dotnet/Sipral.Maui` is the .NET binding compiled for
+`net10.0-ios` and `net10.0-android`, packed by `scripts/package/maui.sh`
+with the iOS XCFramework above and `libsipral_ffi.so` built for Android API
+21 with the Mac's own NDK (`bindings/dotnet/README.md`, ".NET MAUI on iOS
+and Android", says what the package carries and how each platform loads
+it). On iOS every P/Invoke names `__Internal`, since the library is linked
+into the application; on Android it is loaded from the APK by name.
+
+`SipralAppLifecycle` applies `C3` and the suspend and resume calls to a
+MAUI application: entering the background (iOS) or the activity stopping
+(Android) writes down every kept account with `sipral_account_freeze` into
+the platform's secure storage, **then** calls `sipral_stack_suspending` --
+in that order, since a registration no longer counts as bound once the
+stack is told it is suspending, and there would be nothing to freeze.
+Coming back calls `sipral_stack_resumed`; a process the system ended thaws
+the stored snapshot on its new account, with the time it sat unused as
+`asleep_ms`. On iOS the audio session is the application's, as for the
+Swift package: `SipralAudioSession` sets play-and-record in voice-chat mode
+for an application without CallKit.
+
+**Run on the iOS 26.5 simulator and an Android 16 emulator.**
+`samples/Sipral.Sample.Maui` was built for both and started on each, its
+first screen showing the feature bits read through the native library, so
+the static link and `__Internal` on iOS and the `.so` lookup on Android are
+proven at start. The suspend, freeze and thaw sequence is tested on the
+desktop binding against a simulated registrar
+(`bindings/dotnet/Sipral.Tests/LifecycleTests.cs`). Not yet run: an
+application built from the packed `.nupkg` rather than the project, a
+physical iPhone or Android phone, armeabi-v7a and x86_64, the background
+and foreground events delivered by the system to `SipralAppLifecycle`, the
+microphone prompt, and any registration or call through this layer.

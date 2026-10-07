@@ -328,6 +328,47 @@ public sealed class Account
         }
     }
 
+    /// <summary><c>sipral_account_freeze</c>: this account's registration
+    /// written down, so a process started later carries it on through
+    /// <see cref="Thaw"/> without a full handshake. The bytes are opaque and
+    /// name an address of record: storing and protecting them is the
+    /// application's. Throws <see cref="SipralStatus.WrongState"/> when there
+    /// is no registration worth keeping, as after
+    /// <see cref="SipralStack.Suspending"/>: write it down first.</summary>
+    public byte[] Freeze()
+    {
+        var now = _stack.NowMs;
+        nuint needed = 0;
+        SipralErrors.Call(
+            () =>
+            {
+                var status = NativeMethods.sipral_account_freeze(_stack.Handle, Handle, Array.Empty<byte>(), 0, out needed, now);
+                return status == SipralStatus.BufferTooSmall ? SipralStatus.Ok : status;
+            },
+            "sipral_account_freeze");
+        var snapshot = new byte[(int)needed];
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_freeze(_stack.Handle, Handle, snapshot, (nuint)snapshot.Length, out needed, now),
+            "sipral_account_freeze");
+        return snapshot;
+    }
+
+    /// <summary><c>sipral_account_thaw</c>: a <see cref="Freeze"/> snapshot
+    /// read back, on an account just added that has not registered.
+    /// <paramref name="asleepMs"/> is how long the snapshot sat unused, which
+    /// only the application knows. The account comes up
+    /// <see cref="SipralRegistrationState.Restored"/> until the refresh this
+    /// books confirms it. Refused, the account unchanged, for bytes of
+    /// another address of record, damaged bytes, or a newer build's.</summary>
+    public void Thaw(byte[] snapshot, ulong asleepMs)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        SipralErrors.Call(
+            () => NativeMethods.sipral_account_thaw(_stack.Handle, Handle, snapshot, (nuint)snapshot.Length, asleepMs, _stack.NowMs),
+            "sipral_account_thaw");
+        WantsRegistration = true;
+    }
+
     /// <summary><c>sipral_account_set_access_token</c>: set or replace the
     /// OAuth 2.0 token (RFC 8898), <c>null</c> to remove it. Answers
     /// <see cref="SipralEventKind.TokenRequired"/> and installs renewals; the

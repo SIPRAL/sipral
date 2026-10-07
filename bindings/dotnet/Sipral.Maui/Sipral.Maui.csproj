@@ -1,0 +1,69 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The .NET MAUI package: the same binding as bindings/dotnet/Sipral,
+       compiled again for iOS and Android with the native library each one
+       needs, plus what a mobile application adds around it (the
+       microphone permission and the suspend/resume wiring). Its assembly is
+       still Sipral, so code written against the desktop package compiles
+       unchanged; an application references one package or the other.
+       scripts/package/maui.sh builds the natives and packs it. -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-android;net10.0-ios</TargetFrameworks>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Sipral</AssemblyName>
+    <RootNamespace>Sipral</RootNamespace>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
+    <PackageId>Sipral.Maui</PackageId>
+    <Version>1.1.0</Version>
+    <Authors>Sytek</Authors>
+    <Copyright>Copyright (c) 2026 Sytek</Copyright>
+    <Description>Sipral - Session Initiation Protocol Rust Audio Layer. The .NET binding for .NET MAUI on iOS and Android, with the native library for both inside the package, the microphone permission and the suspend/resume wiring. Licensed under AGPL-3.0-only, or under the Sipral commercial licence for closed-source products: https://sipral.org/terms/</Description>
+    <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <PackageProjectUrl>https://sipral.org</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SIPRAL/sipral</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>sip;voip;rtp;telephony;softphone;maui;ios;android</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PathMap>$(MSBuildProjectDirectory)=/_/</PathMap>
+    <Deterministic>true</Deterministic>
+    <!-- where scripts/package/maui.sh leaves the natives; another place is
+         given with -p:SipralNatives=DIR -->
+    <SipralNatives Condition="'$(SipralNatives)' == ''">$(MSBuildProjectDirectory)/../../../target/maui/natives</SipralNatives>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- the version the maui-ios and maui-android workloads install -->
+    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.110" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../Sipral/**/*.cs" Exclude="../Sipral/bin/**;../Sipral/obj/**;../Sipral/InternalsVisible.cs" LinkBase="Sipral" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../Sipral/icon.png" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- iOS: one static archive per slice, linked into the application, not
+       into this assembly, by buildTransitive/Sipral.Maui.targets, which
+       every application referencing the package imports. -->
+  <ItemGroup>
+    <None Include="$(SipralNatives)/CSipral.xcframework/**" Pack="true" PackagePath="runtimes/ios/native/CSipral.xcframework/" />
+    <None Include="buildTransitive/Sipral.Maui.targets" Pack="true" PackagePath="buildTransitive/" />
+  </ItemGroup>
+
+  <!-- Android: one shared library per ABI, under runtimes/android-*/native,
+       which the Android SDK copies into lib/<abi>/ of the application. -->
+  <ItemGroup>
+    <None Include="$(SipralNatives)/android/arm64-v8a/libsipral_ffi.so" Pack="true" PackagePath="runtimes/android-arm64/native/" />
+    <None Include="$(SipralNatives)/android/armeabi-v7a/libsipral_ffi.so" Pack="true" PackagePath="runtimes/android-arm/native/" />
+    <None Include="$(SipralNatives)/android/x86_64/libsipral_ffi.so" Pack="true" PackagePath="runtimes/android-x64/native/" />
+  </ItemGroup>
+
+  <Target Name="SipralNativesPresent" BeforeTargets="Build;Pack">
+    <Error Condition="!Exists('$(SipralNatives)/CSipral.xcframework') Or !Exists('$(SipralNatives)/android/arm64-v8a/libsipral_ffi.so')"
+           Text="No Sipral natives at $(SipralNatives): run scripts/package/maui.sh, or pass -p:SipralNatives=DIR." />
+  </Target>
+</Project>

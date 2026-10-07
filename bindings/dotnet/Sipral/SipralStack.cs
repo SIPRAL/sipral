@@ -507,6 +507,17 @@ public sealed partial class SipralStack : IDisposable
     /// does not wrap. Valid until the stack is disposed.</summary>
     public ulong Handle => _handle.Value;
 
+    /// <summary><c>sipral_stack_suspending</c>: the operating system says
+    /// this process stops shortly (an app moving to the background). Nothing
+    /// is sent and nothing stays scheduled; calls are left as they are. The
+    /// report counts what was standing (<c>docs/16-lifecycle.md</c>).</summary>
+    public SipralSuspending Suspending() => global::Sipral.Sipral.StackSuspending(Handle, NowMs);
+
+    /// <summary><c>sipral_stack_resumed</c>: the process is awake again, after
+    /// an unknown time. Registrations and transports are proved again. Safe
+    /// without a matching <see cref="Suspending"/>.</summary>
+    public void Resumed() => global::Sipral.Sipral.StackResumed(Handle, NowMs);
+
     /// <summary>The RTP port range media sockets are bound in, or
     /// <see langword="null"/> when the operating system picks.</summary>
     public (ushort Min, ushort Max)? RtpPorts { get; }

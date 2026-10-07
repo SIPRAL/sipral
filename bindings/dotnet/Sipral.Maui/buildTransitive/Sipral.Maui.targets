@@ -1,0 +1,19 @@
+<Project>
+  <!-- Imported into every iOS application that references Sipral.Maui,
+       directly or through another package: the static library is linked
+       into the application itself, which is where the binding's
+       P/Invokes to __Internal find it. samples/Sipral.Sample.Maui imports
+       this file by path, with SipralXcframework set, since a project
+       reference does not import a package's buildTransitive. -->
+  <PropertyGroup>
+    <SipralXcframework Condition="'$(SipralXcframework)' == ''">$(MSBuildThisFileDirectory)../runtimes/ios/native/CSipral.xcframework</SipralXcframework>
+  </PropertyGroup>
+  <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+    <NativeReference Include="$(SipralXcframework)">
+      <Kind>Static</Kind>
+      <ForceLoad>true</ForceLoad>
+      <SmartLink>false</SmartLink>
+      <Frameworks>AudioToolbox AVFAudio CoreAudio CoreFoundation</Frameworks>
+    </NativeReference>
+  </ItemGroup>
+</Project>

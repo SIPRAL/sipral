@@ -608,6 +608,70 @@ what it hears. `SipralEventKind.LocalConferenceChanged`, with
 is talking. `LocalConferenceTests.cs` bridges two calls between three
 stacks on loopback.
 
+## .NET MAUI on iOS and Android
+
+`Sipral.Maui` is the same binding compiled again for `net10.0-ios` and
+`net10.0-android`, its assembly still `Sipral`, so code written against the
+desktop package compiles unchanged; an application references one package or
+the other. `scripts/package/maui.sh` builds and packs it on a Mac with Xcode,
+the Android NDK and the `maui-ios` and `maui-android` workloads (.NET MAUI
+10.0.110):
+
+```sh
+dotnet workload install maui-ios maui-android
+scripts/package/maui.sh            # target/maui/Sipral.Maui.1.1.0.nupkg
+scripts/package/maui.sh --natives-only   # only target/maui/natives
+```
+
+What the package carries, and how each platform loads it:
+
+| Platform | Native library | Loaded |
+|---|---|---|
+| iOS device, arm64 | `runtimes/ios/native/CSipral.xcframework`, static, from `scripts/package/xcframework.sh` | linked into the application: `buildTransitive/Sipral.Maui.targets`, which NuGet imports into every application referencing the package, adds it as a force-loaded `NativeReference` with AudioToolbox, AVFAudio, CoreAudio and CoreFoundation; every P/Invoke names `__Internal` (`NativeMethods.Library` under `IOS`) |
+| iOS simulator, arm64 and x86_64 | the same XCFramework's simulator slice | the same |
+| Android arm64-v8a, armeabi-v7a, x86_64 | `runtimes/android-arm64`, `android-arm`, `android-x64`/`native/libsipral_ffi.so`, built with the NDK for API 21 | copied into the APK's `lib/<abi>/` and loaded by name |
+
+`NativeLibraryLoader` does nothing on iOS and Android: the library is where
+the runtime looks already. Beside the binding, the package adds:
+
+- `SipralMicrophone.RequestAsync()` asks for the microphone on the main
+  thread. On Android the package's manifest declares `RECORD_AUDIO`,
+  `MODIFY_AUDIO_SETTINGS`, `INTERNET` and `ACCESS_NETWORK_STATE`, merged into
+  the application's. On iOS the application's `Info.plist` must carry
+  `NSMicrophoneUsageDescription`, and `UIBackgroundModes` `audio` for a call
+  to go on in the background.
+- `SipralAudioSession` (iOS only): the audio session is the application's
+  on iOS, not the library's (`docs/15-mobile.md`, "C4"). `Activate()` sets
+  play-and-record in voice-chat mode and activates it, for an application
+  without CallKit; one on CallKit calls `Configure()` and lets the system
+  activate it.
+- `builder.UseSipral(out var lifecycle)` in `MauiProgram` adds one
+  `SipralAppLifecycle` to the services and wires it to the platform: on iOS
+  entering the background and the foreground, on Android the activity
+  stopping and restarting. Its `Stack` is set once a stack exists. On the
+  way out it writes down each account given to `Keep(account, key)` with
+  `Account.Freeze()` into `SecureStorage` (the Keychain, the Android
+  Keystore), then calls `SipralStack.Suspending()`, in that order: once
+  suspending, no registration counts as bound and there is nothing to
+  write. On the way back it calls `SipralStack.Resumed()`. After the system
+  ended the process, `await lifecycle.RestoreAsync(account, key)` on a new
+  account thaws what was written (`Account.Thaw`, with the time it sat
+  unused) and returns `false` when there was nothing, for the application to
+  call `Register()` instead.
+
+`SipralStack.Suspending`/`Resumed` and `Account.Freeze`/`Thaw` are in the
+desktop package too, for an application that wires its own lifecycle.
+
+What has been run, and what has not: the package and
+`samples/Sipral.Sample.Maui` build for the iOS simulator and Android on a Mac,
+and the sample starts and calls into the native library on the iOS 26.5
+simulator (iPhone 17, arm64) and an Android 16 emulator (API 36, arm64-v8a)
+(`docs/15-mobile.md`, ".NET MAUI"). The sample takes the library through a
+project reference; an application built against the packed `.nupkg` has not
+been run. Nothing has run on a physical iPhone or Android phone, on
+armeabi-v7a or x86_64, and no registration or call through the MAUI layer has
+been made.
+
 ## Samples
 
 `samples/Sipral.Sample.Agent` — a headless voice agent (answers, echoes,
@@ -616,6 +680,14 @@ targets. It is both a runnable example of the layer above and the agent
 `scripts/lab.sh`'s own `csharp_agent` runs in the lab, headless, as
 `labuser-agent-csharp` — in application mode on purpose, a voice agent's
 frames being its whole job and a container having no sound device.
+
+`samples/Sipral.Sample.Maui` — the smallest phone over `Sipral.Maui`:
+register, call and hang up in device mode, the microphone asked for first,
+the iOS audio session set up, the registration carried across the
+background with `SipralAppLifecycle`. `net10.0-ios` and `net10.0-android`,
+after `scripts/package/maui.sh --natives-only`:
+`dotnet build -f net10.0-ios -p:RuntimeIdentifier=iossimulator-arm64` or
+`dotnet build -c Release -f net10.0-android`.
 
 `samples/Sipral.Sample.Wpf` — a softphone window with no audio code of its
 own: the stack runs in device mode, the microphone, speaker and ringer lists

@@ -87,6 +87,14 @@ public static class SipralDns
     /// <c>/etc/resolv.conf</c>.</summary>
     public static IReadOnlyList<IPEndPoint> Servers()
     {
+#if ANDROID
+        // Android names no DNS server per interface and has no resolv.conf
+        // an application may read: the active network's link says them,
+        // from Android 6 (API 23); before it, none is known
+        return OperatingSystem.IsAndroidVersionAtLeast(23)
+            ? AndroidServers().Distinct().Select(one => new IPEndPoint(one, 53)).ToList()
+            : new List<IPEndPoint>();
+#else
         var found = new List<IPAddress>();
         try
         {
@@ -114,7 +122,30 @@ public static class SipralDns
             }
         }
         return found.Distinct().Select(one => new IPEndPoint(one, 53)).ToList();
+#endif
     }
+
+#if ANDROID
+    [System.Runtime.Versioning.SupportedOSPlatform("android23.0")]
+    private static IEnumerable<IPAddress> AndroidServers()
+    {
+        var manager = Android.App.Application.Context.GetSystemService(Android.Content.Context.ConnectivityService)
+            as Android.Net.ConnectivityManager;
+        var network = manager?.ActiveNetwork;
+        var link = network is null ? null : manager!.GetLinkProperties(network);
+        if (link is null)
+        {
+            yield break;
+        }
+        foreach (var server in link.DnsServers)
+        {
+            if (IPAddress.TryParse((server.HostAddress ?? "").Split('%')[0], out var one))
+            {
+                yield return one;
+            }
+        }
+    }
+#endif
 
     /// <summary>One SRV or NAPTR query, to each of
     /// <paramref name="servers"/> in turn until one answers. A reply counts

@@ -285,8 +285,14 @@ fn native(surface: &Surface) -> Result<String, Refused> {
          /// </summary>\n\
          internal static class NativeMethods\n{\n\
          \x20   /// <summary>What the native library is called, before the\n\
-         \x20   /// platform puts its own prefix and suffix on it.</summary>\n\
-         \x20   internal const string Library = \"sipral_ffi\";\n\n",
+         \x20   /// platform puts its own prefix and suffix on it. On iOS the\n\
+         \x20   /// library is static, linked into the application itself, and\n\
+         \x20   /// the runtime binds such calls only under this name.</summary>\n\
+         #if IOS || MACCATALYST\n\
+         \x20   internal const string Library = \"__Internal\";\n\
+         #else\n\
+         \x20   internal const string Library = \"sipral_ffi\";\n\
+         #endif\n\n",
     );
     for (function, read) in functions(surface)? {
         let parts = roles(surface, &read);

@@ -31,6 +31,13 @@ internal static class NativeLibraryLoader
         {
             return;
         }
+        // A mobile application carries the library itself: linked in on iOS
+        // and Mac Catalyst, under lib/<abi>/ of the APK on Android, where the
+        // runtime finds it unaided and no checkout exists to search.
+        if (OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst() || OperatingSystem.IsAndroid())
+        {
+            return;
+        }
         NativeLibrary.SetDllImportResolver(typeof(NativeLibraryLoader).Assembly, Resolve);
     }
 

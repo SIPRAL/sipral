@@ -715,6 +715,12 @@ either pulls in (`xunit.core`, `xunit.assert`, `xunit.extensibility.core`,
 `xunit.extensibility.execution`, `xunit.analyzers`, `xunit.abstractions`), all
 Apache-2.0, plus `Microsoft.NET.Test.Sdk` 18.10.1, MIT.
 
+`bindings/dotnet/Sipral.Maui` and its sample build with `UseMaui`, which makes
+the `Sipral.Maui` package depend on .NET MAUI 10.0.110 (`Microsoft.Maui.Controls`,
+`Microsoft.Maui.Core`, `Microsoft.Maui.Essentials` and what they pull in),
+MIT, Copyright (c) .NET Foundation and Contributors. Nothing of it is
+carried inside the package: an application that uses MAUI already has it.
+
 The RFC 4475 torture test corpus under `fixtures/rfc4475/` is IETF Trust
 material, reproduced under the IETF Trust Legal Provisions.
 

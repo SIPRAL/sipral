@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A minimal phone over Sipral.Maui: register, call, hang up, in device
+       mode, the microphone asked for first and the registration carried
+       across the background. Builds for the iOS simulator and Android once
+       scripts/package/maui.sh has left the natives in target/maui. -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-android;net10.0-ios</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Sipral.Sample.Maui</RootNamespace>
+    <ApplicationTitle>Sipral</ApplicationTitle>
+    <ApplicationId>org.sipral.sample.maui</ApplicationId>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
+    <IsPackable>false</IsPackable>
+    <SipralNatives Condition="'$(SipralNatives)' == ''">$(MSBuildProjectDirectory)/../../../../target/maui/natives</SipralNatives>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.110" />
+    <ProjectReference Include="../../Sipral.Maui/Sipral.Maui.csproj" />
+  </ItemGroup>
+
+  <!-- A project reference carries neither the package's runtimes/ folder
+       nor its buildTransitive targets, so both are named here; an
+       application that takes the Sipral.Maui package needs none of this. -->
+  <PropertyGroup>
+    <SipralXcframework>$(SipralNatives)/CSipral.xcframework</SipralXcframework>
+  </PropertyGroup>
+  <Import Project="../../Sipral.Maui/buildTransitive/Sipral.Maui.targets" />
+  <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+    <AndroidNativeLibrary Include="$(SipralNatives)/android/arm64-v8a/libsipral_ffi.so" Abi="arm64-v8a" />
+    <AndroidNativeLibrary Include="$(SipralNatives)/android/armeabi-v7a/libsipral_ffi.so" Abi="armeabi-v7a" />
+    <AndroidNativeLibrary Include="$(SipralNatives)/android/x86_64/libsipral_ffi.so" Abi="x86_64" />
+  </ItemGroup>
+</Project>

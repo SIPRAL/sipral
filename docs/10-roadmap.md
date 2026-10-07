@@ -84,7 +84,7 @@ November 2026, planned.
 Q1 2027, planned.
 
 - Node.js and TypeScript package *(done)*
-- .NET MAUI package for iOS and Android *(in progress)*
+- .NET MAUI package for iOS and Android *(done)*
 - A network test before the call *(done)*
 - Answering-machine detection on calls the agent places *(done)*
 - SIP over WebSocket with the connection made by the stack (RFC 7118) *(done)*

@@ -8259,8 +8259,14 @@ public sealed class SipralException : Exception
 internal static class NativeMethods
 {
     /// <summary>What the native library is called, before the
-    /// platform puts its own prefix and suffix on it.</summary>
+    /// platform puts its own prefix and suffix on it. On iOS the
+    /// library is static, linked into the application itself, and
+    /// the runtime binds such calls only under this name.</summary>
+#if IOS || MACCATALYST
+    internal const string Library = "__Internal";
+#else
     internal const string Library = "sipral_ffi";
+#endif
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_last_error_message(sbyte[] buffer, nuint capacity, out nuint needed);
