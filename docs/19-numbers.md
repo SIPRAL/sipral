@@ -1365,8 +1365,14 @@ minutes, so the stack registers again every minute or two throughout. Each minut
 the application's resident memory, processor time, open descriptors, threads, calls ended,
 registrations and errors to `samples.csv`. Started on 6 October at 21:16 UTC on the second
 lab machine; its first half hour read 5.7 MB resident and flat, 8 descriptors, 3 threads,
-about 2 % of one core, a call every 3 min 10 s, 23 registrations and no error. The day's
-result is added here when the run ends.
+about 2 % of one core, a call every 3 min 10 s, 23 registrations and no error.
+
+The day, 1,441 samples to 7 October 21:16 UTC: 476 calls and 971 registrations, no error.
+Descriptors stayed between 7 and 8 and threads at 3; processor time averaged 2.2 % of one
+core, never above 2.8 %. Resident memory went from 4.7 MB idle to 5.8 MB within the first
+six hours and ended at 5.9 MB: 72 KB more over the last fifteen hours, in steps of 4 KB a
+few hours apart. That is small, and it is not flat either; whether it levels off is what
+the week-long run, started on 7 October at 21:58 UTC on the same machine, is for.
 
 ## What would make these numbers worse
 

@@ -235,6 +235,12 @@ VERDICT_SECTIONS = {
         "STUN failover, the first server dead, C calling and Rust answering",
     ),
     "FusionPBX's own echo, *9196": ("fusionpbx", "a call to FusionPBX's own echo"),
+    "the bridge to a voice agent, called by Asterisk": ("asterisk", "the bridge to a voice agent, called by Asterisk"),
+    "SIP over a WebSocket the stack opened -- straight at Asterisk": ("asterisk", "SIP over a WebSocket"),
+    "SIP over a secure WebSocket the stack opened -- straight at Asterisk's 8089": (
+        "asterisk",
+        "SIP over a secure WebSocket",
+    ),
 }
 # The steps lab.sh prints before any flow runs: builds and container
 # readiness. Their `ok` lines are notes, not results, and are the only ones
@@ -242,6 +248,7 @@ VERDICT_SECTIONS = {
 SETUP_SECTIONS = {
     "the harness",
     "the harness, in C",
+    "the agent bridge",
     "the socket-framed agent",
     "the Swift binding's lab agent",
     "the lab",

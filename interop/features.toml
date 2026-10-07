@@ -370,3 +370,15 @@ name = "A 3xx redirect followed, when the call asks for it"
 implemented = true
 unit_tested = true
 flows = ["a 302 followed by the stack"]
+
+[[feature]]
+name = "SIP over WebSocket, the connection made by the stack (RFC 7118)"
+implemented = true
+unit_tested = true
+flows = ["SIP over a WebSocket", "SIP over a secure WebSocket"]
+
+[[feature]]
+name = "A PBX line bridged to a voice agent that answers SIP"
+implemented = true
+unit_tested = true
+flows = ["the bridge to a voice agent, called by Asterisk"]
