@@ -65,7 +65,7 @@ October 2026, released.
 
 ### 1.2 — Voice agents and the enterprise
 
-Q2 2027, planned.
+November 2026, planned.
 
 - A SIP bridge from a PBX line to any voice agent that answers SIP, the outcome handed back to the PBX *(done)*
 - Call audio at the rate a speech service asks for, in every language *(done)*
@@ -81,7 +81,7 @@ Q2 2027, planned.
 
 ### 1.3 — More platforms
 
-Q3 2027, planned.
+Q1 2027, planned.
 
 - Node.js and TypeScript package *(in progress)*
 - .NET MAUI package for iOS and Android
@@ -92,7 +92,7 @@ Q3 2027, planned.
 
 ### 2.0 — Beyond audio
 
-2027, planned.
+Mid 2027, planned.
 
 - Video with VP8, VP9 and AV1, with RTCP feedback for pictures
 - ZRTP end-to-end key agreement
