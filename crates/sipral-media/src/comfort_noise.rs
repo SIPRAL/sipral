@@ -3,19 +3,10 @@
 
 //! Comfort noise, RFC 3389.
 //!
-//! A codec with no silence suppression of its own — G.711 among them — needs
-//! somewhere to put "nothing was said here, but here is roughly what the line
-//! sounded like" so the far end does not hear dead air. RFC 3389 defines the
-//! payload for that: a noise level, in negative dBov, and an optional
-//! spectral envelope as reflection coefficients, carried on payload type 13
-//! at the 8 kHz clock G.711 shares with it (§4). What the RFC does not
-//! define is the comfort noise generator itself — §5 says so outright, "the
-//! comfort noise analysis and synthesis... are unspecified and left
-//! implementation-specific" — so what is built here generates flat-spectrum
-//! noise at the level a payload states and stops there. The reflection
-//! coefficients are decoded and held for a caller that wants them; nothing
-//! here applies them as a spectral shaping filter, because that synthesis
-//! step is exactly the part the RFC declined to pin down.
+//! The payload is a noise level in -dBov and optional reflection
+//! coefficients, on payload type 13 at 8 kHz (§4). Synthesis is "unspecified
+//! and left implementation-specific" (§5): this generates flat-spectrum noise
+//! at the stated level. Coefficients are decoded and held, not applied.
 //!
 //! [`ComfortNoise`] is one parsed or constructed payload. [`Generator`] turns
 //! a stream of those — arriving far less often than once a frame, per §5 —
@@ -230,16 +221,9 @@ impl ComfortNoise {
     /// Parse one payload as §3.3 packs it: a level byte followed by zero or
     /// more reflection coefficient indices.
     ///
-    /// §3.1's eighth bit is unused and meant to always be zero; a sender
-    /// that set it anyway is not followed off the edge of the payload for
-    /// one stray bit, so it is masked rather than rejected. An index of 255
-    /// (§3.2's reservation) decodes as no tilt at that position, keeping the
-    /// coefficients that follow it at the order they arrived in rather than
-    /// shifting them down. A payload offering more terms than
-    /// [`MAX_MODEL_ORDER`] holds is the situation §3 already describes for a
-    /// receiver — "may reduce the model order... by setting higher order
-    /// reflection coefficients to zero" — so the excess is dropped rather
-    /// than refused.
+    /// §3.1's unused eighth bit is masked, not rejected. Index 255 (reserved,
+    /// §3.2) decodes as zero in place. Terms beyond [`MAX_MODEL_ORDER`] are
+    /// dropped, as §3 allows ("may reduce the model order").
     ///
     /// # Errors
     /// [`ComfortNoiseError::Empty`] for a payload with no level byte.
@@ -264,9 +248,7 @@ impl ComfortNoise {
     /// reflection coefficients, most significant first. Returns the number
     /// of bytes written, `1 + order`.
     ///
-    /// Refuses a buffer that cannot hold the whole payload rather than
-    /// writing part of one, the same convention
-    /// [`crate::resample::Resampler::process`] uses for a short output.
+    /// Nothing is written into a buffer too short for the whole payload.
     ///
     /// # Errors
     /// [`BufferTooShort`] naming how many bytes were needed.
@@ -413,12 +395,7 @@ impl Generator {
 
     /// Fill `out` with one frame of comfort noise at the level of the last
     /// payload received, or with digital silence if none has arrived yet.
-    /// Generating noise at a level nobody sent would invent a background the
-    /// far end never had.
-    ///
-    /// The spectral envelope a payload's reflection coefficients describe is
-    /// not applied — see the module docs for why — so what is written is
-    /// flat-spectrum noise scaled to the payload's level, not shaped by it.
+    /// The noise is flat-spectrum (see the module docs).
     pub fn fill(&mut self, out: &mut [i16]) {
         let Some(noise) = self.noise else {
             out.fill(0);

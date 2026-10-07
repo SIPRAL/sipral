@@ -4,11 +4,8 @@
 //! L16: sixteen-bit linear PCM on RTP, RFC 3551 §4.5.11 and the `audio/L16`
 //! media type of RFC 2586.
 //!
-//! Nothing is compressed. Each sample is a sixteen-bit two's complement
-//! value from -32768 to 32767, sent most significant octet first, "network
-//! byte order" in the words of §4.5.11, which is the opposite of what this
-//! crate's samples and a WAV file hold on every common machine. That is the
-//! whole codec, and getting it backwards is the whole way to break it.
+//! Each sample is sixteen-bit two's complement in "network byte order"
+//! (§4.5.11), the reverse of WAV and of memory on common machines.
 //!
 //! What varies is the rate and the channel count. `audio/L16` requires a
 //! `rate` and takes an optional `channels` defaulting to one (RFC 2586), and

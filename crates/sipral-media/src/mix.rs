@@ -4,24 +4,13 @@
 //! Summing streams: the legs of a conference, and the tones a client plays
 //! into a call that is already running.
 //!
-//! Adding two samples together needs more room than either of them has, and
-//! what happens when the sum does not fit is the only real decision here. The
-//! rule is: sum in thirty-two bits, clamp to the sixteen the stream carries,
-//! and report both how many samples were clamped and how far the sum reached
-//! before clamping. Clamping flattens the peaks of a mix that is too loud,
-//! which is a distortion everybody can still talk through; wrapping, which is
-//! what `i16 + i16` does on its own, turns the loudest moment of the call into
-//! a burst of noise. Nothing here rides the gain by itself, because an
-//! attenuation applied the instant a mix clips pumps audibly:
-//! [`Clipping::gain_to_fit`] says what would have fitted and the caller
-//! decides how fast to move towards it.
+//! Sums are taken in 32 bits and clamped to 16 (wrapping would turn a peak
+//! into noise), reporting how many samples clamped and how far the sum went.
+//! No automatic gain here, since an instant attenuation pumps;
+//! [`Clipping::gain_to_fit`] tells the caller what would have fitted.
 //!
-//! A mix of several sources is formed once, in the wider accumulator, and
-//! clipped once, which is what [`sum_into`] does. [`add_into`] folds one more
-//! source into a buffer that already holds a mix, and it can only clamp at
-//! every step: once a sum has been clamped, a later source that would have
-//! brought it back inside the range no longer can. Where both are possible,
-//! sum once.
+//! Prefer [`sum_into`], which clamps once against the real total, over
+//! repeated [`add_into`], which clamps at every step.
 
 use core::fmt;
 
@@ -425,14 +414,8 @@ mod tests {
         i16::try_from(i32::from(unsigned) - 32_768).unwrap_or(0)
     }
 
-    /// `sum_into`'s whole reason to exist over folding one source at a time is
-    /// that it clips once, against the real total, rather than once per
-    /// source against a running one. This checks that promise directly:
-    /// recompute the same sum independently in an accumulator wide enough
-    /// that it cannot itself overflow, and require `sum_into` to agree with
-    /// it sample for sample, for an arbitrary number of arbitrary sources —
-    /// including sources shorter than the mix, which contribute silence past
-    /// their own end.
+    /// `sum_into` clips once against the real total: it must match a wide
+    /// independent sum for any sources, including ones shorter than the mix.
     #[test]
     fn sum_into_agrees_with_an_independent_wide_accumulator() {
         let mut seed = 0x5111_C0DE_A55E_55ED_u64;

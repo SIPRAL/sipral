@@ -12,16 +12,10 @@
 //! It works in two stages, one sample at a time:
 //!
 //! 1. **Gain riding.** An envelope follows the magnitude of the input. It
-//!    rises with a time constant of [`ATTACK_MS`] and falls with a time
-//!    constant of [`RELEASE_MS`]: a step up in level is 63% followed after one
-//!    millisecond and fully followed after about five; a step down is 63%
-//!    followed after eighty milliseconds, and the gain is back at unity once
-//!    the envelope has fallen under the ceiling again. Whenever the envelope
-//!    is above [`CEILING`] the sample is scaled by `CEILING / envelope`, so
-//!    material that stays loud settles with its peaks at the ceiling. The
-//!    envelope never exceeds the largest magnitude it has been fed, so
-//!    material whose peaks stay at or under the ceiling passes through
-//!    untouched, sample for sample.
+//!    rises with time constant [`ATTACK_MS`] and falls with [`RELEASE_MS`].
+//!    Above [`CEILING`] the sample is scaled by `CEILING / envelope`. The
+//!    envelope never exceeds the largest input, so material under the
+//!    ceiling passes untouched.
 //! 2. **Soft clipping.** The attack is not instant, so the first peaks of a
 //!    loud onset reach the output before the gain has come down. Above the
 //!    ceiling, magnitudes are bent onto a curve that starts with a slope of
@@ -30,13 +24,8 @@
 //!    and `u` how far the sample went past the ceiling. The curve has no
 //!    corner, so it adds far fewer harmonics than a clamp.
 //!
-//! [`mix::clip`] comes last and never has anything to do: the soft clipper's
-//! output stays at least one step inside either rail. It is there so that the
-//! narrowing to sixteen bits is the crate's one clipping rule, not a second
-//! one.
-//!
-//! The arithmetic is integer throughout, like the rest of the crate, so a
-//! limited mix is the same samples on every platform.
+//! [`mix::clip`] runs last but never acts; it keeps one narrowing rule for
+//! the crate. Integer arithmetic throughout.
 
 use crate::mix;
 

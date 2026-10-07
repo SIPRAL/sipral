@@ -18,10 +18,8 @@
 //! Talkers are ranked by a smoothed level, the per-tick energy averaged with
 //! a time constant of [`SMOOTHING_TICKS`] ticks, loudest first.
 //!
-//! The levels are absolute rather than relative to a noise floor: every leg
-//! of a conference arrives decoded and, in practice, with its own noise
-//! suppression, and an absolute level is what lets two legs be compared at
-//! all.
+//! Levels are absolute, not relative to a noise floor, so legs can be
+//! compared with each other.
 
 /// Mean-square energy a tick needs to count towards starting: an RMS of 328,
 /// 40 dB below full scale.

@@ -3,76 +3,34 @@
 
 //! Voice activity detection: is a frame of decoded PCM speech or a pause.
 //!
-//! Two consumers need this one bit and neither cares how it was made. The
-//! jitter buffer only moves its target delay in a pause, because moving it
-//! during speech is audible; and comfort noise is only worth sending while
-//! nobody is talking. Both are wrong in different directions if the bit is
-//! wrong: a pause misread as speech costs one missed buffer adjustment, or
-//! one wasted twenty milliseconds of real audio sent instead of a small SID
-//! packet. Speech misread as a pause is worse either way it lands — a word
-//! clipped by a buffer move, or a word replaced by noise. The detector is
-//! built to lean toward [`Activity::Speech`] whenever the evidence is
-//! ambiguous, because that is the cheap mistake.
+//! Used by the jitter buffer (it adapts only in pauses) and by silence
+//! suppression. Speech misread as a pause clips a word, the reverse costs
+//! little, so ambiguity resolves to [`Activity::Speech`].
 //!
-//! Two features, both classical and neither needing a transform: short-term
-//! energy, measured against an adaptive estimate of the noise floor rather
-//! than a fixed threshold, and the zero-crossing rate, which catches the
-//! unvoiced consonants that energy alone misses — a fricative is quiet but
-//! broadband, and a broadband signal crosses zero often. Either feature
-//! voting for speech is enough.
+//! Two features, either of which votes speech: energy against an adaptive
+//! noise floor, and zero-crossing rate, which catches quiet broadband
+//! fricatives.
 //!
 //! # The noise floor
 //!
-//! Once there is a floor to compare against, it only moves on a frame read as
-//! a pause, and it moves at two different speeds depending on which way:
-//! slowly when the background is getting louder, quickly when it is getting
-//! quieter. That asymmetry is deliberate and in the same direction as the
-//! feature bias above. A floor that rises fast would let a transient burst of
-//! non-speech noise — a door, a keyboard — get absorbed as the new baseline
-//! and raise the bar for real speech sitting just above it; letting it rise
-//! slowly means a burst has to persist for a while before it is trusted. A
-//! floor that falls slowly would leave the bar for speech too high for a
-//! while after the background actually got quieter, which is exactly the
-//! expensive mistake this module exists to avoid. So it falls fast.
-//!
-//! The one exception is the very first frame processed after construction or
-//! [`Vad::reset`]: there is nothing yet to compare it against, so its own
-//! level becomes the starting floor outright, whatever that frame's own
-//! verdict turns out to be. Without this, a background any louder than
-//! `MIN_FLOOR` allows for — an ordinary room, not a silent one — would
-//! score as speech against the floor's cold-start value forever, because the
-//! comparison that would let the floor learn where it actually sits never
-//! returns a pause to learn from. This is a bounded departure from the
-//! speech-biased default, not a contradiction of it: calibrating a floor from
-//! nothing is a different question from reading one frame's own activity, and
-//! a stream that happens to open mid-word pays for the assumption with an
-//! inflated floor that the fast-fall rate above corrects at the first real
-//! pause.
+//! The floor moves only on pause frames: slowly up, so a door or keyboard is
+//! not absorbed at once, and quickly down, so the bar for speech does not stay
+//! too high. The first frame after construction or [`Vad::reset`] sets the
+//! floor outright; otherwise a room louder than `MIN_FLOOR` would read as
+//! speech forever. A stream opening mid-word is corrected at the first pause.
 //!
 //! # Hangover
 //!
-//! A word is not one continuous sound: stop consonants have a closure that is
-//! close to silent in the middle of a syllable, and reading that closure as
-//! the end of the word chops it. So a frame that scored as speech holds the
-//! verdict at [`Activity::Speech`] for [`DEFAULT_HANGOVER_MS`] after the
-//! score itself drops, and only reports [`Activity::Silence`] once that has
-//! run out. The floor is not adapted during a hangover either, for the same
-//! reason a closure should not set it: a few quiet samples in the middle of a
-//! word are far more likely to be that than genuine background.
+//! A speech verdict holds for [`DEFAULT_HANGOVER_MS`] after the score drops,
+//! so stop-consonant closures do not chop words, and the floor does not adapt
+//! meanwhile.
 //!
-//! Everything here is integer arithmetic on the PCM samples handed in — no
-//! transform, no allocation, and nothing that depends on the sample rate
-//! except how many samples the configured hangover spans.
+//! Integer arithmetic, no allocation.
 
 /// Whether a frame of decoded audio was speech or a pause.
 ///
-/// This is the flag [crate-level docs](crate) describe crossing into
-/// `sipral-rtp`'s adaptive jitter buffer. The two crates do not depend on
-/// each other — media and RTP sit on either side of a seam a caller wires up
-/// — so this is not literally the same type `sipral-rtp` matches its buffer
-/// against; it is the value a caller reads here and passes across as that
-/// crate's own `Speech` or `Silence`, which is why the two enums happen to
-/// share both a shape and a name.
+/// The caller maps it onto `sipral-rtp`'s own `Activity`; the crates do not
+/// depend on each other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     /// The evidence favoured speech, or there was not enough of it to be

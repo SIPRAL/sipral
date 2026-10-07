@@ -21,19 +21,12 @@
 //!
 //! # Four gibibytes
 //!
-//! RIFF's chunk sizes are 32 bits, which stops a file at four gibibytes: six
-//! hours and a quarter of 48 kHz stereo, which a recorded conference line
-//! can reach. Past that point the writer does not stop. It finishes the file
-//! as RF64 instead, the extension of EBU Tech 3306 made for exactly this:
-//! the `RIFF` identifier becomes `RF64`, the `JUNK` chunk that was reserved
-//! for it becomes `ds64` and carries the 64-bit RIFF size, data size and
-//! sample count, and the two 32-bit sizes it replaces are set to all ones.
-//! A file that stayed under the limit stays a plain WAV file that every
-//! reader opens, with a `JUNK` chunk in it that every reader skips.
-//!
-//! The switch happens when the RIFF size, everything after its own size
-//! field, would no longer fit below 0xFFFFFFFF, which RF64 reserves as its
-//! "see ds64" marker. [`Form::for_data`] is that decision on its own.
+//! RIFF sizes are 32 bits (about 6.25 hours of 48 kHz stereo). Past that the
+//! file is finished as RF64 (EBU Tech 3306): `RIFF` becomes `RF64`, the
+//! reserved `JUNK` chunk becomes `ds64` with the 64-bit sizes, and the 32-bit
+//! sizes are set to all ones. Smaller files stay plain WAV. The switch happens
+//! when the RIFF size would reach 0xFFFFFFFF, RF64's marker; see
+//! [`Form::for_data`].
 
 use core::fmt;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -360,12 +353,8 @@ impl<W: Write + Seek> Writer<W> {
     /// Write the sizes the file has reached into the header without ending
     /// it, and flush the sink.
     ///
-    /// What makes a long recording survive the process that writes it: a
-    /// file checkpointed every few seconds and then abandoned — a crash, a
-    /// power cut — opens in any player with everything up to the last
-    /// checkpoint, where one that was only ever finished at the end says it
-    /// holds nothing. Samples written after it are still in the file, past
-    /// the length the header states.
+    /// After a crash, a checkpointed file still opens with everything up to
+    /// the last checkpoint.
     ///
     /// # Errors
     ///

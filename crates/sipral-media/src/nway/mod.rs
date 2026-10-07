@@ -24,21 +24,11 @@
 //! contribution — everybody but itself, the "minus-one" mix — scaled by its
 //! output gain, held under full scale by its own [`Limiter`], and resampled
 //! down to its own rate. Forming one sum and subtracting is linear in the
-//! number of participants rather than quadratic, and the sum is wide enough
-//! that it cannot saturate at [`MAX_PARTICIPANTS`] legs at the highest gain
-//! a [`Gain`](crate::mix::Gain) allows, so the subtraction is exact.
+//! number of participants, and the sum cannot saturate at
+//! [`MAX_PARTICIPANTS`] legs and maximum gain, so the subtraction is exact.
 //!
-//! The resampling is [`crate::resample`]'s and the levels are
-//! [`crate::mix`]'s [`Gain`](crate::mix::Gain), so a conference leg sounds
-//! like a two-party call at the same rates.
-//!
-//! [`Controls`] hold what can be changed per participant, from the next
-//! tick: a gain in and a gain out, a mute each way, and listen-only. A
-//! muted participant's input is still read and thrown away every tick, so
-//! unmuting does not play back what was said while muted; a listen-only
-//! participant's input is not even queued, and missing input from it is not
-//! an underrun. Muting out still queues a tick of silence every tick, so the
-//! participant's playout clock keeps running.
+//! [`Controls`] change per participant from the next tick: gain in and out,
+//! mute each way, and listen-only (see [`Mixer`] for their exact effects).
 //!
 //! # Who is talking
 //!
@@ -57,40 +47,22 @@
 //!
 //! # Latency
 //!
-//! A tick consumes one tick of queued input from every participant and queues
-//! one tick of output for every participant, so audio pushed before a tick is
-//! ready to pull right after it: the mixer adds no buffering beyond the tick
-//! itself, plus the delay of the resampling filters between the mix and a
-//! participant not at 48 kHz: 4 ms each way at 8 kHz, 2 ms at 16 kHz, 1 ms at
-//! 32 kHz and none at 48 kHz, so 8 ms from one 8 kHz participant to another.
-//! The queues on both sides hold one frame (at least one tick) beyond the
-//! tick being mixed and no more: a writer that runs ahead loses its oldest
-//! samples, and they are counted in [`ParticipantStats`], so latency cannot
-//! build up behind a participant whose clock runs fast. A participant whose
-//! clock runs slow underruns, and the missing samples are mixed as silence
-//! and counted too. Keeping the two clocks in step is [`crate::drift`]'s job,
-//! in front of the mixer.
+//! Audio pushed before a tick can be pulled right after it. Added delay is
+//! only the resampling filters: 4 ms each way at 8 kHz, 2 at 16, 1 at 32,
+//! none at 48. Queues hold one frame beyond the tick; overruns drop the oldest
+//! samples and underruns mix silence, both counted in [`ParticipantStats`].
+//! Legs on another clock go through [`crate::drift`] first.
 //!
 //! # Allocation
 //!
-//! [`Mixer::new`] allocates the places and the shared scratch,
-//! [`Mixer::join`] the participant's queues and filters, and
-//! [`Mixer::start_recording`] the recording's. Nothing else allocates:
-//! pushing, pulling, mixing, reading the talkers and changing controls are
-//! allocation-free, and every per-tick cost is bounded by the number of
-//! participants. Leaving frees what joining allocated.
-//!
-//! All the arithmetic is integer, so the same input produces the same output
-//! on every platform.
+//! Only [`Mixer::new`], [`Mixer::join`] and [`Mixer::start_recording`]
+//! allocate. Integer arithmetic throughout.
 //!
 //! # Wiring it to calls
 //!
-//! One [`Mixer`] is one conference, driven from one thread. Each call leg
-//! joins at the rate its codec decodes to; what its jitter buffer releases is
-//! pushed, and what is pulled goes to its encoder. The tick comes from
-//! whatever clock the conference is to run on, and each leg whose far end
-//! runs on another clock goes through [`crate::drift`] on the way in and on
-//! the way out, or its queue slowly fills or runs dry.
+//! One [`Mixer`] per conference, driven from one thread. Each leg joins at its
+//! codec's decode rate; push what its jitter buffer releases and send what is
+//! pulled to its encoder.
 
 mod convert;
 pub mod limiter;

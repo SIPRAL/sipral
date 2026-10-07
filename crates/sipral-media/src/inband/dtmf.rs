@@ -29,43 +29,22 @@
 //!
 //! # Talk-off
 //!
-//! Speech that happens to put energy at a row and a column frequency must
-//! not dial. Three tests stand in its way besides the ones above. The two
-//! tones have to carry nearly all of the power in the window — ten times
-//! what is left over, by default — which a voice with a dozen harmonics
-//! across the band cannot. Neither tone may have a strong second harmonic,
-//! which a voiced sound always has and a generator conforming to Q.23 does
-//! not: that Recommendation holds unwanted components 20 dB under the
-//! fundamental, and the default here refuses anything within 15. And a tone
-//! has to hold still, in frequency as well as level. Each window's
-//! frequency is measured afresh, and a window that hears the same digit as
-//! the one a hop before it counts only if neither tone has moved further
-//! than a steady rate of crossing its whole acceptance band in the shortest
-//! digit would take it. Without that, a pair gliding through both bands
-//! together, inside them for 20 ms, was a digit: every 20 ms window that
-//! overlaps those 20 ms reads the tones inside the band, and the windows
-//! together cover more than the shortest digit.
+//! Speech must not dial. Besides the limits above: the two tones must carry
+//! ten times the remaining power; neither may have a second harmonic within
+//! 15 dB (Q.23 holds them 20 dB down, voices do not); and the frequency may
+//! not move between hops faster than crossing its whole band in the shortest
+//! digit, which stops a gliding pair.
 //!
 //! # How it listens
 //!
-//! A 20 ms Hann window slides along the audio 5 ms at a time. Twenty
-//! milliseconds is the shortest window that still resolves the two closest
-//! frequencies of a group — 697 and 770 Hz are 1.46 bins apart, and the
-//! lower one leaks into the upper's filter 14 dB down — and the 5 ms hop
-//! does three things: it places each edge of a tone within a hop before the
-//! energy of that hop narrows it further, it keeps a 23 ms tone and a 40 ms
-//! one several hops apart, and it lets the phase each filter turns through
-//! between windows read frequency unambiguously within ±100 Hz, beyond the
-//! ±57 Hz that 3.5 % of the highest frequency, 1633 Hz, amounts to. The
-//! window and hop are the same length of time at 8 and 16 kHz, so the
-//! behaviour is too; see the `analysis` module for the arithmetic.
+//! A 20 ms Hann window, the shortest that resolves 697 from 770 Hz, slides by
+//! 5 ms. The hop places edges, separates 23 from 40 ms tones, and keeps the
+//! phase-derived frequency unambiguous within ±100 Hz (3.5 % of 1633 Hz is
+//! 57). Same timing at 8 and 16 kHz; see `analysis`.
 //!
 //! # A digit that also arrived as an event
 //!
-//! A gateway that sends a key as an RFC 4733 event does not always take the
-//! tone out of the audio, so the same press can arrive twice. The detector
-//! reports each digit's start and end on the stream's own sample clock, and
-//! [`KeyPress`] puts that and a telephone event side by side:
+//! A gateway may send both an RFC 4733 event and the tone.
 //! [`KeyPress::is_same_press`] says whether two reports are one key.
 
 use super::analysis::{Analyzer, Claim, Hop, HopTracker, Window, end_edge, start_edge};

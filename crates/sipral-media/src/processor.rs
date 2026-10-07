@@ -3,50 +3,23 @@
 
 //! The seam echo cancellation, gain control and noise suppression attach at.
 //!
-//! `docs/05-media.md` is explicit that these are attached here rather than
-//! implemented here: each is a field of signal processing research on its
-//! own, each already exists under a permissive licence, and rewriting one
-//! from an RFC would buy this project nothing a customer pays for — unlike
-//! the jitter buffer or the codecs, where the implementation itself is the
-//! product. What belongs in this crate is only the shape a processor takes,
-//! so a caller can wire a real one in, or wire nothing in, without either
-//! choice touching anything else in the pipeline.
-//!
-//! The three concerns share a seam rather than getting one each because a
-//! real implementation usually is one component: gain control needs to run
-//! on what echo cancellation left behind, not on the raw capture, and noise
-//! suppression the same. [`Processor`] is that single attachment point.
-//! [`NoProcessor`] is what a build with nothing attached runs — every frame
-//! passes through unchanged, so the pipeline compiles, runs and does nothing
-//! extra whether or not a real processor is ever wired in.
+//! Attached, not implemented here (`docs/05-media.md`): permissive
+//! implementations exist. One seam for all three, since gain control and
+//! noise suppression run on what echo cancellation left. [`NoProcessor`]
+//! passes frames through unchanged.
 
 /// Where echo cancellation, gain control and noise suppression attach.
 ///
-/// A call has one of these per direction that needs processing, and it owns
-/// whatever state a real implementation keeps between frames — an echo path
-/// estimate, a noise spectrum, an automatic gain's current level. Nothing
-/// in this crate reads that state; the trait only says how frames go in and
-/// come out.
+/// One per processed direction; it owns its state between frames.
 ///
-/// `Send`, because the call it belongs to is. Its frames are handed over by
-/// whichever thread carries the call's audio, and the session that owns the
-/// processor is reached from those threads as well as from the one that runs
-/// signalling, so the processor has to be able to move between them. The
-/// alternative was the library asserting that of an implementation somebody
-/// else wrote, which is a promise it has no way to keep; an implementation
-/// that cannot move is one no real audio device API could drive anyway.
+/// `Send`: frames come from the audio thread and the session is also reached
+/// from the signalling thread.
 ///
-/// **Never call back into the engine that owns this session, from inside
-/// [`Processor::process`] or [`Processor::reset`].** Both run with that
-/// session's own lock already held, and only the two calls that hand back a
-/// reach into one specific session — the equivalent of the C ABI's own media
-/// handle — check whether the calling thread is already inside it before
-/// they wait: everything else that walks every session in turn to do its own
-/// work, a timeout tick or a scheduled report among them, takes each one's
-/// lock without asking who already holds it, and none of it returns a status
-/// the way the C ABI's own re-entry guard does. A processor that closes over
-/// its call's engine and reaches back into it from here waits for a lock it
-/// is itself holding, on the very thread that would have to let it go.
+/// **Never call back into the engine that owns this session from inside
+/// [`Processor::process`] or [`Processor::reset`].** Both run with the
+/// session's lock held, and most engine paths (timeouts, scheduled reports)
+/// take that lock without a re-entry check, so the call deadlocks on its own
+/// thread.
 pub trait Processor: Send {
     /// Process one frame of near-end audio in place: the signal captured
     /// from the microphone, about to be encoded and sent.
@@ -54,10 +27,7 @@ pub trait Processor: Send {
     /// `reference` is the far-end audio rendered to the speaker over the
     /// same span of time — what an echo canceller correlates `near_end`
     /// against to know what echo to remove. A processor with nothing to
-    /// cancel, gain control alone say, is free to ignore it. Both frames
-    /// cover the same span of time; aligning them to the sample is the
-    /// business of whichever device I/O crate produced them, which knows the
-    /// render-to-capture delay of the hardware, not this trait's.
+    /// cancel may ignore it. Sample alignment is the device I/O crate's job.
     fn process(&mut self, near_end: &mut [i16], reference: &[i16]);
 
     /// Forget whatever state this processor holds.

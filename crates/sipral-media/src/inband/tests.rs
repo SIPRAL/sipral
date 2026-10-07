@@ -381,14 +381,9 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// What a frame of the DTMF detector costs, as `docs/19-numbers.md`
 /// publishes it: `DtmfDetector::process` on ten seconds of silence, of the
 /// crate's speech at −20 dBm0 with its pauses, and of white noise at
-/// −10 dBm0, in 20 ms frames at 8 kHz. Each of 41 rounds times the
-/// yardstick, the detector and the yardstick again over the same audio; the
-/// line printed carries the median of the detector's time over the
-/// yardstick's for each signal, which `scripts/check.sh --only numbers`
-/// turns into microseconds on the machine the figures were published from,
-/// and the best time in microseconds a frame this machine read. Ignored by
-/// a plain `cargo test`: a time read in a debug build says nothing. Run
-/// with `cargo test --release -p sipral-media --lib -- --ignored --exact
+/// −10 dBm0, in 20 ms frames at 8 kHz. Prints the median ratio to a
+/// yardstick over 41 rounds, which `scripts/check.sh --only numbers` converts.
+/// Run with `cargo test --release -p sipral-media --lib -- --ignored --exact
 /// inband::tests::published_cost_of_a_frame --nocapture`.
 #[test]
 #[ignore = "a measurement in a release build, run by scripts/check.sh --only numbers"]

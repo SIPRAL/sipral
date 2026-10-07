@@ -24,19 +24,12 @@
 //!
 //! # Latency
 //!
-//! [`Writer`] holds the most recent packet back until the next one arrives,
-//! because only then does it know that packet is not the last one and does
-//! not need the end trimming. Every other packet goes onto a page, and a
-//! page is written out as soon as the audio on it reaches the configured
-//! duration, one second unless [`Writer::set_max_page_duration`] says
-//! otherwise. A packet therefore reaches the sink at most that duration plus
-//! one packet after it was handed over, which bounds both what a crash can
-//! lose and what a reader following the file live has to wait for.
+//! [`Writer`] holds back the latest packet in case it is the last and needs
+//! trimming. Pages go out when they hold [`Writer::set_max_page_duration`]
+//! of audio (one second by default), which bounds what a crash loses.
 //!
-//! The packets come from elsewhere, already encoded, with their durations;
-//! in this crate that is `opus::Encoder`, whose `FrameDuration` gives the
-//! 48 kHz duration of a packet as `timestamp_increment`. Nothing here needs
-//! the `opus` feature.
+//! Packets arrive already encoded with their 48 kHz durations; this module
+//! does not need the `opus` feature.
 
 use super::ogg::{self, PageWriter};
 use core::fmt;

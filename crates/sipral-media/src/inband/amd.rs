@@ -4,14 +4,9 @@
 //! Answering-machine detection: after an outbound call is answered, is a
 //! person on the line or a recording?
 //!
-//! Nothing in the signalling says. What differs is how each speaks first. A
-//! person picking up says one or two words — "hello?", "Ann speaking" — and
-//! stops, waiting to hear who called. A machine plays a greeting written to
-//! be complete without an answer: many words, several seconds of them,
-//! before the beep. So the decision is read from the pattern of speech and
-//! silence in the first seconds after answer, and nothing else: no words
-//! are recognised, and the level only matters to [`Vad`], which this
-//! builds on.
+//! A person says one or two words and waits; a machine plays a long greeting.
+//! The decision is read only from the pattern of speech and silence after
+//! answer; no words are recognised.
 //!
 //! # The rules
 //!
@@ -40,39 +35,20 @@
 //!
 //! # The defaults
 //!
-//! Chosen from how people and machines behave, not from a standard, since
-//! none sets them. A person's first words take well under a second and a
-//! half; the shortest machine greetings, a bare "please leave a message",
-//! take about two, so the greeting limit sits at 1.6 s. Four words is more
-//! than a person's answer and less than any greeting's. 700 ms of silence
-//! is longer than the pauses between the phrases of a recorded greeting
-//! and shorter than the silence a person leaves waiting for a reply. A
-//! word is at least 120 ms, a syllable's length, so a click or a breath is
-//! not one, and 60 ms of silence separates two, less than the pause
-//! between words of normal speech. Three seconds without a word is longer
-//! than a person takes to bring the phone to their ear, and six seconds
-//! is about as long as anyone stays on a line that has not answered them.
+//! Chosen from observed behaviour; no standard sets them. A person's answer
+//! takes well under 1.5 s and the shortest greetings about two, hence 1.6 s.
+//! 700 ms of silence is longer than pauses inside a greeting and shorter than
+//! a person waiting for a reply. A word is at least 120 ms (a click or breath
+//! is not) and 60 ms of silence separates words.
 //!
-//! What the rules cannot see is meaning. A recording that opens with one
-//! word and 700 ms of silence — "Hello … you've reached …" — is read as a
-//! person, and a person who answers with a long sentence as a machine;
-//! the timing is the whole of the evidence, and those two are timed like
-//! the other.
+//! Timing is the only evidence: "Hello … you've reached …" reads as a person,
+//! and a person answering with a long sentence reads as a machine.
 //!
 //! # The voice activity detector
 //!
-//! [`Vad`] is built to call a frame speech whenever in doubt, because the
-//! jitter buffer and comfort noise it serves lose more by clipping a word
-//! than by keeping a pause; so a quiet broadband frame just above its floor
-//! is speech to it, which is right for a fricative. Counting words wants
-//! the opposite bias — the hiss of a quiet line read as speech half the
-//! time runs into one endless word — so a frame counts here only when it
-//! also clears the floor by a margin, 6 dB by default. The floor is
-//! [`Vad::noise_floor`], learned from the first frame heard: on a call just
-//! answered that is almost always the line's silence before anyone speaks,
-//! which is what it should learn, and a greeting that starts in the very
-//! first frame is heard once the floor has fallen at the first pause, as
-//! [`Vad`]'s own docs describe.
+//! [`Vad`] leans toward speech, which here would let line hiss merge into one
+//! endless word, so a frame also has to clear [`Vad::noise_floor`] by a
+//! margin (6 dB by default).
 
 use crate::vad::{Activity, Vad};
 

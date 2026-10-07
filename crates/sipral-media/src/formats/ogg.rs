@@ -13,10 +13,8 @@
 //! [`PageWriter`] does the cutting for one logical bitstream: packets go in
 //! with the granule position they end at, and pages come out onto any
 //! [`Write`] whenever the segment table fills, the caller flushes, or the
-//! stream ends. [`Page::parse`] and [`read_packets`] go the other way, and
-//! refuse anything whose checksum, sequence or continuation does not hold:
-//! they exist to prove what the writer wrote, not to recover what somebody
-//! else damaged.
+//! stream ends. [`Page::parse`] and [`read_packets`] verify what the writer
+//! wrote and refuse any damage rather than recover from it.
 //!
 //! Multiplexing several logical bitstreams into one physical one (§4) is not
 //! done here: a call recording is one stream.

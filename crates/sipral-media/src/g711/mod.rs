@@ -23,11 +23,8 @@ pub mod mu_law;
 /// (RFC 3551 §6), and the rate written after the encoding name on an
 /// `a=rtpmap` line for them.
 ///
-/// Not a property of the law. Table 1 of §4.5 gives the sampling rate for both
-/// as "var.", and §6's own example of a dynamic binding is "payload type 96
-/// indicates PCMU encoding, 8,000 Hz sampling rate, 2 channels" — so an
-/// encoding bound dynamically may say something else, and a caller that reads
-/// an `a=rtpmap` should believe it rather than this.
+/// Not a property of the law: §4.5 Table 1 says "var.", so a dynamic
+/// `a=rtpmap` may state another rate and wins.
 pub const CLOCK_RATE: u32 = 8_000;
 
 /// One, which is how the static payload types are registered (RFC 3551 §6).

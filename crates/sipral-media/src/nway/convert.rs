@@ -7,12 +7,8 @@ use crate::resample::{RateError, Resampler};
 
 /// A [`Resampler`] that produces exactly one tick per tick.
 ///
-/// Between any two of 8, 16, 24, 32 and 48 kHz a tick of a whole number of
-/// milliseconds is a whole number of samples at both rates, so once the
-/// filter is full every tick in produces exactly one tick out. The first tick
-/// after a reset produces less, because half the filter is still waiting for
-/// input; that tick is completed with silence in front of what there is, and
-/// from then on the stream carries the filter's delay and no more.
+/// The first tick after a reset is short while the filter fills, so it is
+/// padded with leading silence; after that, one tick in gives one tick out.
 #[derive(Debug)]
 pub struct Converter {
     resampler: Resampler,

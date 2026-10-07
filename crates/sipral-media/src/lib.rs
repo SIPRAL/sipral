@@ -32,13 +32,10 @@ builds it this way and why.\n"
 //! buffer's adjustment schedule and [`comfort_noise`]'s silence suppression
 //! both need. [`comfort_noise`] is RFC 3389: the payload a carrier expects
 //! during a suppressed silence, and the noise generated from it on receive.
-//! [`processor`] is the seam echo cancellation, gain control and noise
-//! suppression attach at — not implemented in this crate, and the module
-//! docs say why.
+//! [`processor`] is where echo cancellation, gain control and noise
+//! suppression attach.
 //!
-//! Nothing here opens a device or a socket, and nothing allocates once it has
-//! been built. Samples arrive in a slice and leave in one, so the whole crate
-//! is testable without either.
+//! No device, no socket, and no allocation after construction.
 
 #![doc(
     html_logo_url = "https://sipral.org/brand/sipral-mark-256.png",

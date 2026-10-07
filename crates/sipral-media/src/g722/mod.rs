@@ -21,10 +21,8 @@
 //! **The trap worth knowing before wiring this up:** RFC 3551 §4.5.2 fixes
 //! G.722's RTP clock rate at 8000 even though it samples at 16000, "for
 //! historical reasons". So a twenty-millisecond frame advances the RTP
-//! timestamp by 160 while carrying 320 samples. [`SAMPLE_RATE`] and
-//! [`CLOCK_RATE`] are separate constants here for exactly that reason, and a
-//! caller that uses one where it means the other gets audio at half or twice
-//! the speed with nothing to say it went wrong.
+//! timestamp by 160 while carrying 320 samples. Mixing up [`SAMPLE_RATE`] and
+//! [`CLOCK_RATE`] silently plays audio at half or twice the speed.
 
 mod band;
 mod qmf;
@@ -107,11 +105,8 @@ impl Encoder {
     /// Encode a frame, two samples to an octet.
     ///
     /// Converts as many whole sample pairs as both buffers allow and returns
-    /// the octets written, so a caller that sized the two from
-    /// [`frame_samples`] and [`frame_octets`] gets the whole frame and one
-    /// that did not gets a number it can check. An odd trailing sample is
-    /// left alone: half an octet cannot be written, and dropping it silently
-    /// would put the two ends half a sample apart for the rest of the call.
+    /// the octets written (size them with [`frame_samples`] and
+    /// [`frame_octets`]). An odd trailing sample is left unconsumed.
     pub fn encode_into(&mut self, samples: &[i16], octets: &mut [u8]) -> usize {
         let pairs = (samples.len() / 2).min(octets.len());
         for (pair, octet) in samples

@@ -4,42 +4,21 @@
 //! Keeping two clocks that both claim to run at the same rate from drifting
 //! apart over the length of a call.
 //!
-//! The capture device counts out 8000 samples and calls it a second. So does
-//! the far end. Neither is exactly right, and neither is wrong in the same
-//! direction: a crystal that is fifty parts per million fast delivers four
-//! hundred samples too many in an hour, which is half a second of audio that
-//! has to go somewhere. Left alone it goes into a buffer that grows until it
-//! is dropped in one piece, or into one that empties until it underruns. Both
-//! are audible, and the underrun is the one users report.
+//! A 50 ppm crystal gains 400 samples an hour at 8 kHz; left alone, a buffer
+//! overflows or underruns.
 //!
-//! What is tracked here is the long-term ratio between what was produced and
-//! what was consumed, in two parts. The rate — how many samples per frame the
-//! two clocks differ by — is filtered over about sixty frames and paces the
-//! corrections, so that in the steady state one is made exactly as often as
-//! the drift calls for one. The level — how far the buffer has already moved
-//! from where it started — is added on top with a much longer time constant,
-//! which is what brings the buffer back rather than holding it wherever the
-//! drift left it. The pace is accumulated as a fraction of a sample and acted
-//! on when it reaches a whole one.
+//! Two terms drive the correction: the rate difference, filtered over about
+//! sixty frames, and the level the buffer has already moved, with a much
+//! longer time constant so the buffer returns to where it started. Their sum
+//! accumulates in fractions of a sample and acts on each whole one.
 //!
-//! When it does act, it does not step the stream, because a step is a click.
-//! It warps one window of the frame instead, resampling it to one sample more
-//! or one sample fewer with the endpoints left exactly where they were, so the
-//! seam has no discontinuity at either end and the only trace is a pitch shift
-//! of a percent or two lasting a few milliseconds. The window is placed where
-//! the frame is quietest, which is where nobody can hear it happen.
+//! A correction warps the quietest window of a frame by one sample, keeping
+//! its endpoints, so there is no click, only a brief pitch shift. One sample
+//! per frame (6000 ppm at 20 ms) is the ceiling; [`Drift::excess`] reports
+//! when more is needed.
 //!
-//! One sample per frame is the ceiling, since a frame has one window in it. At
-//! twenty milliseconds that is six thousand parts per million, twelve times
-//! what a bad crystal manages, and a stream that needs more than that has
-//! something else wrong with it — [`Drift::excess`] says so rather than
-//! pretending otherwise.
-//!
-//! The tracker is deliberately separate from the warp. A jitter buffer that
-//! already stretches its own silence can take the decision from [`Drift`] and
-//! act on it its own way; a caller with nothing but a device callback can hand
-//! frames to [`Drift::process`] and never think about it again. Neither
-//! allocates.
+//! The tracker is separate from the warp, so a jitter buffer can act on
+//! [`Drift`]'s decision its own way. Nothing allocates.
 
 use crate::mix;
 use core::fmt;
@@ -255,14 +234,9 @@ impl Drift {
     /// stood when the first frame arrived, counting what has been added or
     /// removed on the way.
     ///
-    /// Counted from the start rather than from zero, because a pipeline
-    /// normally holds a frame or two and that standing amount is not drift. It
-    /// also swings by a whole frame within each cycle, since a frame goes in
-    /// before the far end takes one out, so a caller watching it should read
-    /// it at the same point every time. What it should then do is hold within
-    /// a sample or two; if it walks away steadily, the correction is not
-    /// keeping up and the clocks are further apart than one sample a frame can
-    /// fix.
+    /// It swings by a frame within each cycle, so read it at the same point
+    /// each time. It should hold within a sample or two; a steady walk means
+    /// the drift is beyond one sample a frame.
     #[must_use]
     pub fn excess(&self) -> i64 {
         self.difference() + self.applied - self.origin
@@ -279,10 +253,7 @@ impl Drift {
     /// per million, straight from the two counts.
     ///
     /// Positive means the producer is fast. Zero until anything has been
-    /// consumed. It takes a while to mean much: a minute of a fifty part
-    /// per million drift is twenty-four samples at 8 kHz, so a reading taken
-    /// after a few seconds is mostly the difference in where the two counts
-    /// started.
+    /// consumed; only meaningful after a minute or so.
     #[must_use]
     pub fn drift_ppm(&self) -> i32 {
         if self.consumed == 0 {
@@ -375,12 +346,9 @@ pub fn quietest(input: &[i16], span: usize) -> usize {
 /// Writes `input` into `output` as one sample fewer, by compressing it in
 /// time.
 ///
-/// The first and last samples come through exactly, so the ends of the window
-/// still line up with whatever surrounds them and there is no step at either
-/// seam. Everything between is interpolated, which for a window of any decent
-/// length is a pitch shift of a fraction of a percent. Returns how many
-/// samples were written, or zero if the slices are too short to warp: it takes
-/// three samples in, and room for one less than the input holds.
+/// The first and last samples come through exactly, so neither seam steps.
+/// Returns how many samples were written, or zero if the slices are too short
+/// (three in, room for one fewer out).
 pub fn compress(input: &[i16], output: &mut [i16]) -> usize {
     let Some(produce) = input.len().checked_sub(1) else {
         return 0;
@@ -412,13 +380,9 @@ pub fn stretch(input: &[i16], output: &mut [i16]) -> usize {
 
 /// Resamples `input` to fill `output` exactly, whatever the two lengths are.
 ///
-/// Positions are exact rationals, so the first output sample sits on the first
-/// input sample and the last on the last, both of them reproduced bit for bit.
-/// In between it is a Catmull-Rom interpolation: it passes through the samples
-/// it is given rather than smoothing them, which is what keeps the warp from
-/// dulling the window it lands on. At the two ends the missing neighbour is
-/// the end sample repeated, which nudges the second and second-last samples by
-/// a fraction of a step and leaves the ends themselves exact.
+/// Exact rational positions keep both end samples bit for bit. Catmull-Rom in
+/// between, which passes through the samples rather than smoothing them; the
+/// missing neighbour at each end is the end sample repeated.
 fn stretch_into(input: &[i16], output: &mut [i16]) {
     let (Some(last_in), Some(steps)) = (input.len().checked_sub(1), output.len().checked_sub(1))
     else {

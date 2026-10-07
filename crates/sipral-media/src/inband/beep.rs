@@ -12,26 +12,15 @@
 //! # A sine predicts itself
 //!
 //! One sine of angular frequency `ω` obeys `x[n] = 2cos(ω)·x[n-1] − x[n-2]`
-//! exactly. Fitting that one coefficient to a block of audio by least
-//! squares gives the frequency, from the coefficient, and how much of the
-//! block the rule explains, from what it leaves over. A lone sine leaves
-//! nothing but the noise under it; a voice, with a dozen harmonics and
-//! formants that move, leaves most of itself. No filter bank, no search
-//! over frequency: a few running sums per sample, which is why this
-//! detector costs almost nothing beside the others.
+//! exactly. A least-squares fit of that coefficient gives the frequency, and
+//! the residual says how much of the block one sine explains: little for a
+//! voice. A few running sums per sample, no filter bank.
 //!
-//! Two sines close together are the hard case: a digit's pair, 941 and
-//! 1209 Hz, is so near one sine to the rule that it leaves only a fortieth
-//! of itself over at 8 kHz, and less at 16 kHz, where both frequencies are
-//! half as far round the circle. The same rule holds across any stride
-//! `s`, `x[n] = 2cos(sω)·x[n-s] − x[n-2s]`, and a stride multiplies the
-//! angle between two sines by `s`. So the rule is also fitted across the
-//! stride that puts 2 kHz, the top of the band, at half the circle — two
-//! samples at 8 kHz, four at 16 — where the same pair leaves a sixth of
-//! itself over at either rate. A stride cannot tell a frequency from its
-//! mirror images, 800 Hz from 3200 at these strides, and the fit across
-//! adjacent samples can, and reads the frequency: both have to explain the
-//! block.
+//! Two close sines (a DTMF pair) nearly fit one sine. The rule also holds at
+//! stride `s`, `x[n] = 2cos(sω)·x[n-s] − x[n-2s]`, which multiplies their
+//! separation by `s`, so it is fitted again at the stride that puts 2 kHz at
+//! half the circle. The stride fit cannot tell mirror frequencies apart and
+//! the adjacent fit can; both must explain the block.
 //!
 //! A block is 10 ms. A beep is a run of blocks each explained this well, at
 //! a frequency inside the band, that stay within a narrow drift of where

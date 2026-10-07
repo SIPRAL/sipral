@@ -15,11 +15,8 @@
 //! those indices; the decoder ([`Decoder`]) rebuilds the excitation, runs it
 //! through the filter, and postfilters what comes out.
 //!
-//! Everything is sixteen- and thirty-two-bit fixed point, because the
-//! Recommendation is defined that way (§2.4) and a codec that rounds
-//! anywhere else produces a different stream or a different signal. The
-//! operators are in `arith`; each module after that is one part of §3 and
-//! §4, named for what it does: `analysis` (the input filter, the LP analysis
+//! Fixed point throughout, as the Recommendation defines it (§2.4). The
+//! operators are in `arith`; each other module is one part of §3 and §4: `analysis` (the input filter, the LP analysis
 //! and the LP → LSP conversion), `lsp` (the LSP quantizer both ways, and the
 //! LSP → LP conversion), `pitch` (the open-loop and closed-loop pitch
 //! searches and the adaptive codebook), `acelp` (the fixed codebook and its
@@ -57,10 +54,8 @@
 //!
 //! # Conformance
 //!
-//! The ITU publishes conformance streams for Annex A and for Annex B over
-//! it with the Recommendation. They are not in this repository: they are
-//! part of the publication, which reserves all rights, so they are used
-//! where they were obtained and never committed. The tests in `conformance`
+//! The ITU conformance streams for Annex A and Annex B are all-rights-reserved
+//! and never committed. The tests in `conformance`
 //! read them from the directory named by `SIPRAL_G729_VECTORS` — the
 //! `G729_Release3` directory of the ITU's archive, holding
 //! `g729AnnexA/test_vectors` and `g729AnnexB/test_vectors` — or, without it,

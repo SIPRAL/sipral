@@ -32,10 +32,8 @@
 //!   400 Hz at 0.4 s on, 0.35 s off, 0.225 s on and 0.525 s off, and call
 //!   waiting a 0.1 s burst of 400 Hz.
 //!
-//! Where an administration's entry lists a range or several variants, the
-//! value here is the one most of that region's networks play. A network
-//! with a tone of its own is a [`ToneSpec`] away: the fields are public and
-//! the detector takes any slice of them.
+//! Where an entry lists variants, the most common is used. Other tones are
+//! just another [`ToneSpec`].
 //!
 //! # The special information tone
 //!
@@ -44,11 +42,8 @@
 //! [`SIT_SILENCE_MS`] of silence, to say that a call failed for a reason an
 //! announcement usually follows with. E.180 allows each frequency ±50 Hz,
 //! each tone 330 ± 70 ms, and up to 30 ms of silence between the tones.
-//! North American networks send the same three tones slightly moved and
-//! lengthened or shortened to say which reason; every one of those
-//! variants falls inside E.180's tolerances, and [`ProgressEvent`] carries
-//! the frequencies and durations it measured for a caller that wants to
-//! tell them apart.
+//! North American variants encode the reason within those tolerances;
+//! [`ProgressEvent`] carries the measured values to tell them apart.
 
 use std::collections::VecDeque;
 

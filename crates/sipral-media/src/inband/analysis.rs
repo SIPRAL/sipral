@@ -113,14 +113,10 @@ const LANES: usize = 8;
 
 /// A sliding Hann-windowed Goertzel bank.
 ///
-/// Sliding it is cheap; evaluating the filters over a window is what costs,
-/// and it is done only for a window somebody reads, through
-/// [`Analyzer::window`]. A detector that can tell from the energy alone that
-/// a window holds nothing for it ([`Analyzer::quieter_than`]) skips the
-/// filters for it altogether. The phase a filter turns through needs the
-/// window one hop earlier as well, so the samples of that window are kept,
-/// and its filters run when they are first needed: the readings are the
-/// same whichever windows were skipped.
+/// Filters are evaluated only for a window someone reads
+/// ([`Analyzer::window`]), and can be skipped when
+/// [`Analyzer::quieter_than`] says it is empty. The previous window's samples
+/// are kept for the phase, so readings do not depend on what was skipped.
 #[derive(Clone, Debug)]
 pub(crate) struct Analyzer {
     rate: f64,
@@ -270,11 +266,8 @@ impl Analyzer {
     /// measure it, is certainly under `power`, read from the energy of the
     /// hops it covers without weighting a sample.
     ///
-    /// The window weights every sample by at most one, so the hops' own
-    /// energy bounds what it measures. That energy is exact, and the margin
-    /// taken off `power` is far wider than the rounding the weighted sum can
-    /// gather, so a window this says is quieter is one the weighted
-    /// measurement would say is too.
+    /// Window weights are at most one, so the hop energy bounds the weighted
+    /// power; the margin exceeds any rounding, so the answer never disagrees.
     pub(crate) fn quieter_than(&self, power: f64) -> bool {
         let energy: f64 = self.recent.iter().sum();
         energy < power * self.window_square_sum * (1.0 - 1e-9)
@@ -472,11 +465,8 @@ impl Window<'_> {
     /// as [`Window::reading`] states it, the last of equal ones; `None`
     /// when the range holds none.
     ///
-    /// The squared magnitudes, which cost no square root, rule out every
-    /// filter clearly weaker than the strongest; the margin is far wider
-    /// than their rounding, so only filters within it of the strongest are
-    /// compared by magnitude, and the answer is the one comparing every
-    /// magnitude would give.
+    /// Squared magnitudes rule out clear losers first, with a margin wide
+    /// enough that the answer matches a full comparison.
     pub(crate) fn strongest(&self, from: usize, to: usize) -> Option<usize> {
         let outputs = self.bank.outputs.get(from..to)?;
         let squared = |&(re, im): &(f64, f64)| re * re + im * im;

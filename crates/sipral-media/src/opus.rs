@@ -3,20 +3,13 @@
 
 //! Opus, the one codec in this crate that is linked rather than written.
 //!
-//! Everything else here is ours. This is not: libopus is built from vendored
-//! source by `opusic-sys` and reached through the `opus` crate's safe
-//! bindings. Writing a competitive Opus encoder is years of signal-processing
-//! work, the reference implementation is BSD-3-Clause, and the patent grants
-//! that matter are royalty-free, so the commercial arm survives the link.
-//! `THIRD-PARTY-NOTICES.md` at the root carries the chain and the patent
-//! position; `docs/05-media.md` carries the reason it is a link at all.
+//! libopus is built from vendored source by `opusic-sys` and reached through
+//! the `opus` crate. It is BSD-3-Clause with royalty-free patent grants; see
+//! `THIRD-PARTY-NOTICES.md` and `docs/05-media.md`.
 //!
-//! What this module is, then, is that library in the shape the rest of the
-//! stack wants: one channel, one of the five sampling rates Opus runs at, one
-//! of the six frame durations it encodes, and a typed error for everything
-//! the C layer would otherwise decide on its own. Nothing from the bindings
-//! appears in a signature — a caller never handles an `opus::Error`, and a
-//! frame that is the wrong length is refused here rather than in C.
+//! This module wraps it as one channel, one of Opus's five rates and six frame
+//! durations, with typed errors. No binding type appears in a signature, and
+//! wrong-length frames are refused here rather than in C.
 //!
 //! # Two rules of RFC 7587 that are easy to get wrong
 //!
@@ -34,22 +27,12 @@
 //!
 //! # Loss
 //!
-//! `docs/05-media.md` says to use what Opus has rather than what
-//! [`crate::plc`] does for G.711, and there are two of them.
-//! [`Decoder::conceal`] runs Opus's own concealment for a gap nothing can
-//! fill. [`Decoder::recover`] is the better one: when the packet after the
-//! lost one has already arrived, it decodes the in-band FEC copy of the lost
-//! frame out of it, which is a coarse version of what was really said rather
-//! than an extrapolation of what came before. A jitter buffer that holds one
-//! packet of depth can always try [`Decoder::recover`] first.
+//! [`Decoder::recover`] decodes the in-band FEC copy of a lost frame from the
+//! packet after it; [`Decoder::conceal`] extrapolates when there is none. On
+//! the encoder, [`Encoder::set_inband_fec`] does nothing until
+//! [`Encoder::set_expected_loss`] reports loss.
 //!
-//! The encoder side of that is [`Encoder::set_inband_fec`], and it does
-//! nothing on its own: libopus only spends bits on FEC once
-//! [`Encoder::set_expected_loss`] tells it there is loss to spend them on.
-//!
-//! Nothing here allocates after construction. Samples and packets arrive in
-//! caller slices and leave in caller slices, so a call costs two codec states
-//! and no per-frame memory at all.
+//! Nothing allocates after construction.
 
 use ::opus as libopus;
 use core::fmt;
@@ -459,10 +442,7 @@ impl Encoder {
     /// is in, which is what a decoder has to discard from the front of the
     /// stream to line the audio back up.
     ///
-    /// Asked of libopus rather than assumed, because it is not one number:
-    /// it depends on the rate and on the mode the encoder was built in, and
-    /// a file that trims a guessed figure starts a few milliseconds early or
-    /// late.
+    /// Asked of libopus because it depends on rate and mode.
     ///
     /// # Errors
     ///
@@ -500,9 +480,7 @@ impl Encoder {
     /// # Errors
     ///
     /// [`CodecError::UnsupportedBitrate`] outside [`MIN_BITRATE`] to
-    /// [`MAX_BITRATE`]. libopus clamps silently instead, which hides a
-    /// configuration mistake until somebody wonders why the calls sound the
-    /// way they do.
+    /// [`MAX_BITRATE`], where libopus would clamp silently.
     pub fn set_bitrate(&mut self, bits_per_second: u32) -> Result<(), CodecError> {
         let out_of_range = CodecError::UnsupportedBitrate { bits_per_second };
         if !(MIN_BITRATE..=MAX_BITRATE).contains(&bits_per_second) {
@@ -575,9 +553,7 @@ impl Encoder {
     /// `samples` must be exactly [`frame_samples`](Self::frame_samples) long
     /// on a mono encoder, and that many interleaved pairs on a stereo one.
     /// `packet` should be [`FrameDuration::max_packet_bytes`] long: libopus
-    /// treats a shorter one as a ceiling on the instant bitrate and quietly
-    /// encodes worse rather than failing, so a buffer sized by guess is a
-    /// quality bug that never reports itself.
+    /// silently lowers quality to fit a shorter one.
     ///
     /// A return of one or two octets means DTX decided the frame was not
     /// worth sending; see [`set_dtx`](Self::set_dtx).
@@ -705,10 +681,8 @@ impl Decoder {
     ///
     /// [`CodecError::InvalidPacket`] for a payload that is empty or does not
     /// decode, and [`CodecError::BufferTooSmall`] when `samples` has less
-    /// room than the packet needs. An empty payload is refused rather than
-    /// passed on: libopus reads one as a lost packet and conceals, so
-    /// letting it through would turn a malformed packet into audio that
-    /// sounds fine and a gap nobody counted.
+    /// room than the packet needs. An empty payload is refused because libopus
+    /// would silently conceal it.
     pub fn decode(&mut self, packet: &[u8], samples: &mut [i16]) -> Result<usize, CodecError> {
         if packet.is_empty() {
             return Err(CodecError::InvalidPacket);

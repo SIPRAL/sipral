@@ -3,56 +3,28 @@
 
 //! Packet loss concealment for a G.711 stream.
 //!
-//! G.711 carries no redundancy of any kind, so a lost packet is twenty
-//! milliseconds that nobody sent twice and the only material left to build
-//! them from is the audio that arrived before them. Voiced speech is nearly
-//! periodic over a few tens of milliseconds, which is the one property worth
-//! leaning on: the concealer estimates the pitch period of the last audio it
-//! saw, repeats it, attenuates it a little on every repetition, and cross-fades
-//! back into the real stream when it resumes. Past [`MAX_GAP_MS`] it stops and
-//! says so, because a repeated period that far from the last real sample has
-//! nothing to do with what the far end said and comfort noise is the better
-//! thing to play.
+//! G.711 has no redundancy, so a lost frame is rebuilt from the audio before
+//! it: the concealer finds the pitch period of the last audio, repeats it with
+//! a little attenuation each time, and cross-fades back when the stream
+//! resumes. Past [`MAX_GAP_MS`] it stops and says so; comfort noise is better
+//! there.
 //!
-//! Samples in and out are linear PCM at [`g711::CLOCK_RATE`], which is what
-//! comes out of either companding law. The concealer does not decode anything
-//! itself and holds no buffer per frame: the history is one fixed array, the
-//! period being repeated is another, and a concealed frame is written straight
-//! into the caller's slice. All of it is integer arithmetic, gains and
-//! cross-fade weights in Q15, so a build with no floating point unit and a
-//! build with one produce the same samples.
+//! Linear PCM at [`g711::CLOCK_RATE`], fixed buffers, integer Q15 arithmetic,
+//! so every build produces the same samples.
 //!
 //! # What is forced and what was chosen
 //!
-//! Forced, in the sense that any other answer would be wrong: the pitch is the
-//! lag that maximises the normalised autocorrelation of the last window of
-//! audio, and the splice adds the difference between the last real sample and
-//! its counterpart one period earlier, which is the only correction that
-//! continues a signal drifting under the periodicity — on a straight line it
-//! reproduces the next sample exactly. The Q15 arithmetic is exact where it
-//! matters: at the first concealed sample the gain is one and the correction
-//! is whole, so that sample is determined, not approximated.
+//! The pitch is the lag maximising normalised autocorrelation. The splice adds
+//! the difference between the last real sample and its counterpart one period
+//! earlier, which continues a drifting signal (exact on a straight line). That
+//! same constant is re-added, never accumulated, at every loop point, so the
+//! step into each repeat matches the source's even when the lag is only the
+//! pitch to the nearest sample.
 //!
-//! The same constant is added again at every loop point, and what it does
-//! there is worth stating exactly, because a lag is only ever the pitch to the
-//! nearest sample and the arithmetic looks the same whether or not that is
-//! true. With it, the step into the first sample of a repeat is the step the
-//! source itself made into that sample. Without it, the step is whatever
-//! separates the two ends of the lag, which is the same number only when the
-//! lag is the true period exactly. The correction is re-applied, never
-//! summed: an extension that kept accumulating the drift would walk away from
-//! the voice it was measured on well before the sixty millisecond bound.
-//!
-//! Chosen here, from the behaviour wanted rather than from any published
-//! table: the search range of 50 to 400 Hz, the preference for the longest lag
-//! within five percent of the best score, the two and a half millisecond
-//! shortest correlation window, the pitch carried across a gap to a history
-//! too short to measure it again, the four millisecond cross-fade, the
-//! smoothstep shape of it, the sixty millisecond bound, and the amplitude ramp
-//! to zero at that bound with the gain held constant across each period and
-//! the last four milliseconds faded out so the ramp lands on silence rather
-//! than near it. A reader who wants to retune any of them should measure
-//! rather than assume they came from somewhere authoritative.
+//! Chosen by measurement, not from any standard: the 50 to 400 Hz range, the
+//! preference for the longest lag within 5 % of the best, the 2.5 ms minimum
+//! window, carrying the pitch across a gap, the 4 ms smoothstep cross-fade, the
+//! 60 ms bound and the ramp to silence at it. Retune by measuring.
 
 use crate::g711;
 use core::fmt;
@@ -154,24 +126,14 @@ impl Concealer {
 
     /// Take a frame that really arrived.
     ///
-    /// If it is the first frame after a gap, its opening samples are
-    /// cross-faded with the extension that was being played, in place, because
-    /// splicing two waveforms that were never in phase clicks. The frame is
-    /// remembered as the material for the next gap as it arrived, before
-    /// that cross-fade: the fade's samples are partly the extension's, which
-    /// is invented.
+    /// After a gap the opening samples are cross-faded in place with the
+    /// extension, to avoid a click. The frame is remembered as it arrived,
+    /// before the fade.
     ///
-    /// The first frame after a gap starts the history again rather than
-    /// joining it. What was remembered before the gap is no longer next to
-    /// it in time — the gap's own samples are never remembered, below — and
-    /// a history joined across one reads as periodic where it is not: after
-    /// four lost frames of the lab's 350 + 440 Hz tone, whose period is five
-    /// frames, the frame that ended the gap matched the one before the gap
-    /// exactly, one frame back in the history, and the next gap repeated it
-    /// as a one-frame period, opening on its first sample instead of the one
-    /// after its last — a jump of up to the tone's whole amplitude. The pitch
-    /// measured before the gap is kept, for the next gap to use while the
-    /// history is still too short to measure it again.
+    /// The first frame after a gap restarts the history: one joined across a
+    /// gap can look periodic where it is not (the lab's 350 + 440 Hz tone did)
+    /// and the next gap then jumps. The pitch measured before the gap is kept
+    /// until the history can measure it again.
     ///
     /// A gap made only of [`stretch`](Self::stretch)es is no hole: the frame
     /// after it is the one the far end sent next, and it joins the history.
@@ -403,24 +365,13 @@ impl Gap {
 /// window is highest, preferring the longest lag that scores within
 /// [`MARGIN_NUMERATOR`]/[`MARGIN_DENOMINATOR`] of it.
 ///
-/// Longer is preferred because a lag of half the true period correlates almost
-/// as well as the period itself, and repeating half a cycle buzzes where
-/// repeating the whole one does not. The energy of the recent window is a
-/// factor common to every lag, so it is left out of the comparison rather than
-/// divided away.
+/// Longer wins because half the true period correlates almost as well and
+/// buzzes. The recent window's energy is common to every lag and left out.
 ///
-/// The window is [`WINDOW`] long when the history allows it and shrinks,
-/// down to [`MIN_WINDOW`], before the lag range does, so one short frame
-/// after a gap is still searched over every voice pitch rather than only
-/// the highest. A history too short even for that — one ten millisecond
-/// frame holds a single cycle of a voice at 100 Hz — cannot tell a period
-/// from anything else, and there the pitch last measured over the whole
-/// range stands in, as the longest whole number of its cycles the history
-/// holds. A cycle of it longer than the history says every lag the search
-/// could reach is too short to be the voice's period, and so does less than
-/// one short window beyond the shortest lag: either way what there is is
-/// repeated whole. With no pitch known, the search covers the lags it can
-/// reach.
+/// The window shrinks from [`WINDOW`] to [`MIN_WINDOW`] before the lag range
+/// does, so a short frame after a gap still reaches every voice pitch. A
+/// history too short even for that uses the last measured pitch, as many whole
+/// cycles as fit; if none fits, the history is repeated whole.
 fn estimate_period(history: &[i16], pitch: Option<Pitch>) -> Option<Estimate> {
     if history.is_empty() {
         return None;
@@ -856,14 +807,10 @@ mod tests {
     }
 
     /// The shape the lab's audio gate caught on a lossy link: four frames of
-    /// the 350 + 440 Hz tone lost, one received, one more lost. The tone's
-    /// period is five frames, so the frame that ended the first gap matched
-    /// the one before it exactly, one frame back in a history joined across
-    /// the gap, and the second gap repeated that frame as a one-frame period:
-    /// it opened on the frame's first sample, not on the one after its last.
-    /// The lab measured a jump of 6 396 against a tone whose steepest step is
-    /// 3 027; every phase of the tone is tried here, and none may open further
-    /// from the last sample than the tone itself ever moves in one.
+    /// the 350 + 440 Hz tone lost, one received, one more lost (the lab saw a
+    /// jump of 6 396 against a steepest step of 3 027). At every phase, the
+    /// second gap may not open further from the last sample than the tone
+    /// ever moves in one.
     #[test]
     fn a_gap_after_a_gap_continues_the_tone_and_not_the_history() {
         let rate = f64::from(g711::CLOCK_RATE);
@@ -1048,14 +995,8 @@ mod tests {
 
     /// One sample of a smooth wave whose cycle is 149.3 samples long.
     ///
-    /// The three shapes above are all exactly periodic at an integer lag,
-    /// which is the one case where the seam correction is zero and any
-    /// arithmetic for it looks right. This one is not: whatever whole number
-    /// of samples the search settles on, it is a fraction of a cycle away
-    /// from the truth, so a period back from the last real sample is a long
-    /// way from it and the correction is doing visible work. Integer
-    /// throughout — a phase accumulator and the same smoothstep the module
-    /// uses for its fades — so the wave is bit-identical everywhere.
+    /// Not periodic at an integer lag, so the seam correction does visible
+    /// work. Integer throughout, so bit-identical everywhere.
     fn near_periodic(index: usize) -> i16 {
         let phase = (i64::try_from(index).unwrap() * 655_360 / 1_493) % 65_536;
         let rising = phase < 32_768;
@@ -1159,13 +1100,8 @@ mod tests {
     /// The same ten millisecond loss pattern as
     /// [`one_ten_millisecond_frame_between_two_gaps_keeps_the_voice_pitch`],
     /// but with [`reset`](Concealer::reset) called first, so no pitch is
-    /// carried across the gap and the widened window alone has to do the
-    /// work: this is the shape a stretch or a silence gap leaves behind it,
-    /// the far end resuming into a call the concealer has no memory of yet.
-    /// A search still halved into window and lag range reaches only 133 Hz
-    /// and down, scoring -5 dB worst and -3 dB mean on these voices; the
-    /// window shrinking first reaches every one of them, worst -2.5, mean
-    /// 8.3, even with no period carried over to help.
+    /// carried across the gap and the shrinking window alone must reach every
+    /// voice (worst -2.5 dB, mean 8.3 dB, against -5 and -3 before).
     #[test]
     fn a_short_history_with_no_pitch_known_still_reaches_low_voices() {
         const SHORT: usize = 80;
@@ -1199,14 +1135,9 @@ mod tests {
     }
 
     /// Ten millisecond frames, which G.711 is offered at as readily as
-    /// twenty: one lost, one received, one lost. The frame that ended the
-    /// first gap is all the history there is when the second opens, eighty
-    /// samples, and a search that halved it into a window and a lag range
-    /// could only reach lags of 20 to 40 — 200 to 400 Hz, above every voice
-    /// here — and repeated a period no voice had: the second gap scored -1
-    /// to -5 dB against what was really said, -3 dB on average. A history
-    /// joined across the gap had averaged 15 dB but fell to 1 dB at 110 Hz.
-    /// Every voice from 110 to 178 Hz must now clear both floors.
+    /// twenty: one lost, one received, one lost. The second gap has only
+    /// eighty samples of history; every voice from 110 to 178 Hz must still
+    /// clear both floors.
     #[test]
     fn one_ten_millisecond_frame_between_two_gaps_keeps_the_voice_pitch() {
         const SHORT: usize = 80;
@@ -1336,11 +1267,7 @@ mod tests {
     /// and content, never panic and never leave the reported state outside
     /// what the module promises: a pitch period inside the search range
     /// whenever there is enough history to have searched, and a gap counter
-    /// that never runs backwards while a gap is open. This is the property
-    /// the individual scenario tests above each check once; here the sizes,
-    /// the content, and the order of `received` against `conceal` are all
-    /// driven by the seed, including empty frames and frames far longer than
-    /// [`HISTORY`].
+    /// that never runs backwards while a gap is open.
     #[test]
     fn arbitrary_traffic_never_panics_and_never_breaks_its_own_invariants() {
         let mut seed = 0x5EED_F00D_1357_9BDF_u64;

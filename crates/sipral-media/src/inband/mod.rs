@@ -4,14 +4,9 @@
 //! Signals carried inside the audio itself: keypad digits, the tones a
 //! network plays to a caller, and whether a person or a machine answered.
 //!
-//! RFC 4733 moves a digit out of the audio and into its own payload, and
-//! most of the time that is where a digit arrives. Not always: a gateway
-//! that never negotiated `telephone-event`, an old private exchange behind
-//! it, or an interactive voice system on the far side of a transcoding hop
-//! all leave the digit where Q.23 put it, as two tones in the voice band.
-//! The same audio carries what the network says about a call it could not
-//! complete — busy, congestion, a special information tone — and, once an
-//! outbound call is answered, the only evidence of who or what picked up.
+//! Digits usually arrive as RFC 4733 events, but some gateways leave them in
+//! the audio as Q.23 tone pairs. The audio also carries call-progress tones
+//! and, after answer, the only evidence of who picked up.
 //!
 //! - [`dtmf`] finds keypad digits in decoded audio, to the acceptance limits
 //!   of ITU-T Q.24, and reports each one as a start and an end on the
@@ -26,12 +21,9 @@
 //!   whether a person or an answering machine is on the line, and
 //!   [`beep`] finds the tone a machine plays before it starts recording.
 //!
-//! Everything here works on 16-bit linear PCM at 8 or 16 kHz, in plain
-//! floating-point arithmetic with no platform-specific instructions. Each
-//! detector allocates once, when it is built, and never again; each takes
-//! samples in slices of any length and reports what it found through a
-//! callback, stamped with the index of the sample it happened at, counted
-//! from the first sample the detector was given.
+//! 16-bit linear PCM at 8 or 16 kHz, plain floating point. Detectors allocate
+//! only when built, take slices of any length and report through a callback
+//! with the sample index, counted from the first sample given.
 //!
 //! # Levels
 //!

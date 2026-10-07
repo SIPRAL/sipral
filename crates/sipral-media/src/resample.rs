@@ -4,41 +4,18 @@
 //! Moving audio between the rate a device runs at and the rate a codec was
 //! negotiated at.
 //!
-//! A softphone has two clocks and they rarely agree: the microphone delivers
-//! 48 kHz because that is what the hardware does, and the call was answered
-//! with G.711 at 8 kHz because that is what the carrier offered. Every sample
-//! has to cross that boundary twice per call, and doing it badly is what makes
-//! a call sound thin — far more often than the codec does.
+//! A polyphase FIR designed once at construction. The rates reduce to `L/M`
+//! in lowest terms and the bank holds `L` phases, so output `n` sits exactly
+//! at input time `n·M/L` with no phase accumulator to drift.
 //!
-//! The filter here is a polyphase FIR, designed once when the resampler is
-//! built and then only ever indexed. Both rates are reduced to a fraction
-//! `L/M` in lowest terms, and the bank holds exactly `L` phases, so output
-//! sample `n` is taken at input time `n·M/L` with no accumulator, no rounding
-//! of the phase and therefore no slow walk off the timeline: 44100 to 48000
-//! is 147/160, and the hundred and sixtieth output lands exactly where the
-//! hundred and forty-seventh input sample is.
+//! The prototype is a Blackman-windowed sinc of [`BASE_TAPS`] taps cut off at
+//! [`CUTOFF_NUMERATOR`]/[`CUTOFF_DENOMINATOR`] of the rate. From 48 to 8 kHz:
+//! within 0.1 dB to 3400 Hz, -3 dB at 3600, -75 dB by 4400. When decimating,
+//! the kernel is stretched by the ratio so it also anti-aliases.
 //!
-//! The prototype is a windowed sinc, cut off at [`CUTOFF_NUMERATOR`] over
-//! [`CUTOFF_DENOMINATOR`] of the sampling rate and windowed by a Blackman of
-//! [`BASE_TAPS`] taps. Measured against the rate that matters most, 48 kHz
-//! down to 8: flat to within a tenth of a decibel through 3400 Hz, which is
-//! the whole band G.711 carries, three decibels down at 3600, and
-//! seventy-five decibels down by 4400, where anything left would fold back
-//! into the speech. When the output rate is the lower of the two the kernel
-//! is stretched by the ratio, so the same shape does the anti-alias filtering
-//! as does the interpolation and the quality does not depend on the
-//! direction.
-//!
-//! All of it is integer arithmetic, including the design: the sine, the
-//! window and the quantisation to Q15 are computed in fixed point from exact
-//! rationals, so the coefficients are the same on every platform and a call
-//! resampled on a phone and the same call resampled on a server are the same
-//! samples. Every phase is normalised to sum to exactly one, which is what
-//! makes a constant come through as itself rather than with a ripple on it.
-//!
-//! There are two allocations and both happen in [`Resampler::new`]: the
-//! coefficient bank and the working buffer. Nothing after that allocates, and
-//! nothing here touches a device, a thread or a clock.
+//! The design is integer throughout, so coefficients are identical on every
+//! platform, and each phase sums to exactly one so a constant passes
+//! unchanged. Only [`Resampler::new`] allocates.
 
 use crate::mix;
 use core::fmt;
@@ -211,9 +188,7 @@ pub struct Resampler {
 impl Resampler {
     /// Builds the filter for a pair of rates.
     ///
-    /// This is where the design happens and where the two allocations happen.
-    /// Once built, a resampler is a fixed cost per sample and no cost per
-    /// frame.
+    /// The only place that allocates.
     ///
     /// # Errors
     ///
@@ -292,13 +267,8 @@ impl Resampler {
 
     /// The delay the filter adds, in output samples.
     ///
-    /// The kernel is symmetric, so output sample `n` carries the input as it
-    /// was at time `n·input/output` and the two streams stay aligned in
-    /// content. What this counts is the wait: half the kernel reaches forward
-    /// in time, so nothing can be produced until that much input has arrived
-    /// past the point being produced. It comes to about four milliseconds at
-    /// 8 kHz and less at every higher rate, and a caller budgeting end-to-end
-    /// latency owes it once in each direction.
+    /// Half the symmetric kernel reaches forward, so output waits that long:
+    /// about 4 ms at 8 kHz, less above. Owed once per direction.
     #[must_use]
     pub const fn latency_samples(&self) -> usize {
         if self.is_passthrough() {
@@ -321,11 +291,8 @@ impl Resampler {
 
     /// Resamples a frame, writing every output sample it produced.
     ///
-    /// The count returned varies by one from call to call even at a fixed
-    /// frame size, because the timeline of an awkward ratio does not divide
-    /// into frames; over any run of frames it converges on the ratio. Input is
-    /// consumed whole, so nothing is left behind between calls but the history
-    /// the next window needs.
+    /// The count may vary by one between calls at a fixed frame size and
+    /// converges on the ratio. Input is always consumed whole.
     ///
     /// # Errors
     ///
