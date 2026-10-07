@@ -29,6 +29,7 @@ use sipral_core::transaction::{
 };
 
 use crate::account::{AccountId, Extra};
+use crate::redirect::Redirection;
 use crate::reliable::Unacknowledged;
 use crate::session::Session;
 use crate::timers::SessionTimer;
@@ -457,6 +458,9 @@ pub(crate) struct Call {
     /// What was dialled, kept so that a 422 can be answered by asking again
     /// with the interval the far end demanded (RFC 4028 §7.3).
     pub(crate) placed: Option<OutgoingCall>,
+    /// Where a 3xx sent the call this end placed, and what it has tried
+    /// (RFC 3261 §8.1.3.4).
+    pub(crate) redirection: Redirection,
     /// And what arrived, for a call that came in: the answer to it has to
     /// know what the INVITE asked for, and it is written later than this.
     pub(crate) invited: Option<OwnedMessage>,
@@ -711,6 +715,7 @@ impl Call {
             consulting_for: None,
             consulting: None,
             placed: None,
+            redirection: Redirection::default(),
             invited: None,
             id: None,
             cseq: 1,
@@ -771,6 +776,7 @@ impl Call {
             consulting_for: None,
             consulting: None,
             placed: None,
+            redirection: Redirection::default(),
             invited: None,
             id: None,
             cseq: 1,
@@ -824,6 +830,7 @@ impl Call {
             // application placed whichever branch ends up being kept: its
             // parties and `Call-ID`, and the session interval it asked for
             placed: other.placed.clone(),
+            redirection: Redirection::default(),
             invited: None,
             id: other.id.clone(),
             cseq: other.cseq,

@@ -183,21 +183,30 @@ impl UserAgent {
         // §4.4 forbids naming a GRUU once the registration that issued it is
         // gone), which is why a 422 asked again on the same handle still comes
         // through here rather than repeating a value from the first attempt
-        let (call_id, cseq, asked, signed) = {
+        let (call_id, cseq, asked, signed, request_uri) = {
             let held = self.calls.get(&call).ok_or(UaError::NoSuchCall)?;
-            (held.id.clone(), held.cseq, held.asked, held.signed.clone())
+            (
+                held.id.clone(),
+                held.cseq,
+                held.asked,
+                held.signed.clone(),
+                // where a 3xx sent the call, once one did (RFC 3261 §8.1.3.4)
+                held.redirection
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| outgoing.target.clone()),
+            )
         };
         let contact = self.current_contact(call, now);
-        let mut request =
-            OutgoingRequest::new(Method::Invite, outgoing.target.clone(), transport, remote)
-                .to(&bracketed(&outgoing.target))
-                .from(&from)
-                .contact(&contact)
-                // RFC 3311 §4: "a UAC compliant to this specification SHOULD
-                // also include an Allow header field in the INVITE request,
-                // listing the method UPDATE"
-                .header(HeaderName::Allow, ALLOW)
-                .cseq(cseq);
+        let mut request = OutgoingRequest::new(Method::Invite, request_uri, transport, remote)
+            .to(&bracketed(&outgoing.target))
+            .from(&from)
+            .contact(&contact)
+            // RFC 3311 §4: "a UAC compliant to this specification SHOULD
+            // also include an Allow header field in the INVITE request,
+            // listing the method UPDATE"
+            .header(HeaderName::Allow, ALLOW)
+            .cseq(cseq);
         if let Some(call_id) = call_id {
             request = request.call_id(call_id);
         }
@@ -2032,6 +2041,13 @@ impl UserAgent {
                     waiting_for_stream: false,
                 },
             );
+            return None;
+        }
+        // RFC 3261 §8.1.3.4: a 3xx names where to ask instead, and a target
+        // that then fails is followed by the next one the 3xx named
+        if let Some(call) = self.by_invite.get(&invite).copied()
+            && self.follow_redirect(call, invite, status, response, now)
+        {
             return None;
         }
         self.end_branches(invite, ended, status, response, now)

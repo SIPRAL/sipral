@@ -7116,6 +7116,124 @@ fn a_422_asks_again_with_the_interval_that_was_demanded() {
     );
 }
 
+/// The INVITEs among what the agent sent, in order.
+fn invites_sent(agent: &mut UserAgent) -> Vec<Vec<u8>> {
+    transmits(agent)
+        .into_iter()
+        .filter(|bytes| bytes.starts_with(b"INVITE "))
+        .collect()
+}
+
+#[test]
+fn a_302_is_followed_to_its_targets_best_first_and_the_next_one_tried_when_one_fails() {
+    // RFC 3261 §8.1.3.4: the Contact values of a 3xx are a target set, tried
+    // in order of q, each as a new INVITE of the same call
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            302,
+            "Moved Temporarily",
+            "Contact: <sip:carol@example.com>;q=0.5, <tel:+15550001111>, \
+             <sip:dave@example.com?Subject=x>;q=0.9\r\n",
+        ),
+        t0,
+    );
+    let to_dave = invites_sent(&mut agent);
+    assert_eq!(to_dave.len(), 1, "one INVITE, to the best target");
+    let to_dave = &to_dave[0];
+    assert!(
+        to_dave.starts_with(b"INVITE sip:dave@example.com SIP/2.0\r\n"),
+        "{}",
+        String::from_utf8_lossy(to_dave)
+    );
+    assert_eq!(header(to_dave, HeaderName::CSeq), b"2 INVITE");
+    assert_eq!(
+        header(to_dave, HeaderName::CallId),
+        header(&first, HeaderName::CallId)
+    );
+    assert_eq!(
+        header(to_dave, HeaderName::To),
+        header(&first, HeaderName::To),
+        "To is still who was called"
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Calling));
+    assert!(
+        events(&mut agent)
+            .iter()
+            .all(|event| !matches!(event, UaEvent::CallEnded { .. }))
+    );
+
+    // the first target refuses, and the next is asked; the tel: one is not
+    // a URI this end can send an INVITE to by itself
+    deliver(&mut agent, &reply(to_dave, 486, "Busy Here", ""), t0);
+    let to_carol = invites_sent(&mut agent);
+    assert_eq!(to_carol.len(), 1);
+    assert!(to_carol[0].starts_with(b"INVITE sip:carol@example.com SIP/2.0\r\n"));
+    assert_eq!(header(&to_carol[0], HeaderName::CSeq), b"3 INVITE");
+
+    deliver(
+        &mut agent,
+        &answered(&to_carol[0], 200, "OK", "carol", Some(ANSWER)),
+        t0,
+    );
+    assert_eq!(agent.call_state(call), Some(CallState::Confirmed));
+}
+
+#[test]
+fn a_redirect_back_to_a_target_already_tried_or_a_6xx_ends_the_call() {
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            302,
+            "Moved Temporarily",
+            "Contact: <sip:bob@example.com>\r\n",
+        ),
+        t0,
+    );
+    assert!(invites_sent(&mut agent).is_empty(), "the loop ends at once");
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Refused)
+    );
+
+    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let second = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(
+            &second,
+            301,
+            "Moved Permanently",
+            "Contact: <sip:carol@example.com>, <sip:dave@example.com>\r\n",
+        ),
+        t0,
+    );
+    let to_carol = invites_sent(&mut agent);
+    assert_eq!(to_carol.len(), 1);
+    deliver(&mut agent, &reply(&to_carol[0], 603, "Decline", ""), t0);
+    assert!(
+        invites_sent(&mut agent).is_empty(),
+        "a global failure ends the search"
+    );
+    assert_eq!(
+        ended(&mut agent).map(|(_, reason)| reason),
+        Some(CallEndReason::Refused)
+    );
+}
+
 #[test]
 fn an_interval_below_the_floor_is_refused_with_the_floor() {
     // 9: a UAS may reject with 422 and MUST say its minimum, which "MUST NOT

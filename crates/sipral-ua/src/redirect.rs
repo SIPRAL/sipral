@@ -11,9 +11,17 @@
 //! the call and says why, so the phone that finally rings can show "forwarded
 //! from Alice, no answer". The `Diversion` values the INVITE already carried
 //! follow this end's own, most recent first (RFC 5806 §3).
+//!
+//! And the other side of it: a call this end placed that comes back 3xx is
+//! sent on to the targets the answer names ([`Redirection`]).
 
-use sipral_core::msg::{StatusCode, Uri};
+use std::time::Instant;
 
+use sipral_core::msg::{Contacts, OwnedMessage, RawMessage, StatusCode, Uri, UriScheme};
+use sipral_core::transaction::{InviteClient, TransactionId};
+
+use crate::agent::UserAgent;
+use crate::call::{CallHandle, CallState};
 use crate::error::UaError;
 
 /// A 3xx answer to a call that came in.
@@ -113,6 +121,157 @@ impl Redirect {
         }
         out.extend_from_slice(b";counter=1");
         Some(out)
+    }
+}
+
+/// How many INVITEs one call places on the strength of redirects before it
+/// gives up: §8.1.3.4 leaves the bound to the client, and it only has to
+/// stop a pair of servers that send a call back and forth between them.
+pub(crate) const MOST_REDIRECTS: usize = 8;
+
+/// Where a 3xx sent a call this end placed (RFC 3261 §8.1.3.4): "the
+/// client SHOULD use the Contact header field values of the response to
+/// generate a new request".
+///
+/// The target set is kept on the call, so a target that fails is followed by
+/// the next one before the call is given up on, and a target already tried
+/// is never tried again — the loop §8.1.3.4 warns of ends at the second
+/// visit, not at the bound.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Redirection {
+    /// The Request-URI the call's INVITE goes to now, once a 3xx moved it.
+    /// `To` stays the address the application called.
+    pub(crate) target: Option<Uri>,
+    /// Every Request-URI already tried, the one placed first among them.
+    tried: Vec<Uri>,
+    /// What is left of the target set, best first.
+    pending: Vec<Uri>,
+}
+
+impl Redirection {
+    /// Add a 3xx's `Contact` addresses to what is left to try, most
+    /// preferred first (§8.1.3.4: "in order of their q-values").
+    fn learn(&mut self, placed: &Uri, response: &RawMessage<'_>) {
+        if self.tried.is_empty() {
+            self.tried.push(placed.clone());
+        }
+        let Ok(Contacts::Addrs(addrs)) = response.contact() else {
+            return;
+        };
+        let mut found: Vec<(u16, Uri)> = Vec::new();
+        for addr in addrs.flatten() {
+            if !matches!(addr.uri().scheme(), UriScheme::Sip | UriScheme::Sips) {
+                continue;
+            }
+            let Some(target) = requestable(&addr.uri().to_string()) else {
+                continue;
+            };
+            let known = |uri: &Uri| uri.as_bytes() == target.as_bytes();
+            if self.tried.iter().any(known)
+                || self.pending.iter().any(known)
+                || found.iter().any(|(_, uri)| known(uri))
+            {
+                continue;
+            }
+            // §20.10: no q is the same as q=1
+            found.push((addr.q().ok().flatten().unwrap_or(1000), target));
+        }
+        // stable, so equal preferences keep the order they were written in
+        found.sort_by_key(|(q, _)| std::cmp::Reverse(*q));
+        self.pending.extend(found.into_iter().map(|(_, uri)| uri));
+    }
+
+    /// The next target, now counted as tried; `None` once the set is spent
+    /// or the bound reached.
+    fn next(&mut self) -> Option<Uri> {
+        if self.pending.is_empty() || self.tried.len() > MOST_REDIRECTS {
+            return None;
+        }
+        let target = self.pending.remove(0);
+        self.tried.push(target.clone());
+        self.target = Some(target.clone());
+        Some(target)
+    }
+}
+
+/// A `Contact` URI as a Request-URI: §8.1.3.4 copies "the entire URI ...
+/// except for the "method-param" and "header" URI parameters".
+fn requestable(contact: &str) -> Option<Uri> {
+    let without_headers = contact.split('?').next().unwrap_or_default();
+    let kept: Vec<&str> = without_headers
+        .split(';')
+        .enumerate()
+        .filter(|(at, part)| *at == 0 || !part.to_ascii_lowercase().starts_with("method="))
+        .map(|(_, part)| part)
+        .collect();
+    Uri::parse_str(&kept.join(";")).ok()
+}
+
+impl UserAgent {
+    /// A call this end placed was refused. Whether the refusal is a
+    /// redirect to follow, or the failure of one target in a set a redirect
+    /// gave with others still to try, and if so the INVITE that goes next:
+    /// the same `Call-ID`, `From` and `To`, the next number, and the target
+    /// as the Request-URI (§8.1.3.4). `true` when one went, and the refusal
+    /// is then not the call's end.
+    ///
+    /// A 380 names its alternative in its body and is not followed; a 6xx
+    /// is a global failure, which §8.1.3.4 has end the search. A call that
+    /// forked is not followed either: its branches are calls of their own
+    /// already. Where the INVITE goes is where every INVITE of the account
+    /// goes — its outbound proxy or server, or the destination the call was
+    /// placed to — since resolving a name is the application's.
+    pub(crate) fn follow_redirect(
+        &mut self,
+        call: CallHandle,
+        invite: TransactionId<InviteClient>,
+        status: Option<StatusCode>,
+        response: Option<&OwnedMessage>,
+        now: Instant,
+    ) -> bool {
+        let code = status.map_or(0, StatusCode::get);
+        if code == 380 || code >= 600 {
+            return false;
+        }
+        let branches = self
+            .calls
+            .values()
+            .filter(|held| held.invite == Some(invite))
+            .count();
+        if branches != 1 {
+            return false;
+        }
+        let (placed, account) = {
+            let Some(held) = self.calls.get_mut(&call) else {
+                return false;
+            };
+            let Some(placed) = held.placed.clone() else {
+                return false;
+            };
+            if (300..400).contains(&code)
+                && let Some(response) = response
+            {
+                held.redirection.learn(&placed.target, &response.as_raw());
+            }
+            if held.redirection.next().is_none() {
+                return false;
+            }
+            held.cseq = held.cseq.saturating_add(1);
+            held.state = CallState::Calling;
+            (placed, held.account)
+        };
+        let Some(account) = account else {
+            return false;
+        };
+        self.by_invite.remove(&invite);
+        if let Some(dialog) = self
+            .calls
+            .get_mut(&call)
+            .and_then(|held| held.dialog.take())
+        {
+            self.by_dialog.remove(&dialog);
+        }
+        self.dial(account, &placed, call, now).is_ok()
     }
 }
 
