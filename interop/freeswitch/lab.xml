@@ -61,13 +61,18 @@ resume need nothing at all, since mod_sofia handles the re-INVITE itself.
        profile's own setting in lab_profile.xml and send_dtmf uses whichever
        method the endpoint is configured for. `silence_stream://1` in place
        of a prompt file: one millisecond of nothing, so the digit is read
-       without a tone playing over it. -->
+       without a tone playing over it. send_dtmf only queues the digit for
+       the media path to send, so the channel then stays up on silence until
+       the caller ends the call: a hangup straight after it ended the call
+       before a single telephone-event packet left (a capture shows the BYE
+       some 85 ms after the answer, and nothing on the event's payload type
+       from this end before it). -->
   <extension name="sipral_lab_dtmf">
     <condition field="destination_number" expression="^9003$">
       <action application="answer"/>
       <action application="read" data="1 1 silence_stream://1 digit 5000 #"/>
       <action application="send_dtmf" data="${digit}"/>
-      <action application="hangup"/>
+      <action application="playback" data="silence_stream://-1"/>
     </condition>
   </extension>
   <!-- DTLS-SRTP (RFC 5764), the same number Asterisk gives it. Secure media

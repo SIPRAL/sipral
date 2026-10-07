@@ -381,13 +381,12 @@ fn main() -> ExitCode {
     ];
     // this lab's own SDES endpoint and codec-change dialplan exist only on
     // Asterisk; see `docs/11-testing.md` for why they are not on FreeSWITCH
-    // or through the proxy. The DTMF check runs there too, for now: the digit
-    // Asterisk names back never came back through the proxy from FreeSWITCH,
-    // and a flow is not run where it is known not to pass until the reason is
-    // found
-    // FusionPBX's 9003 is the lab's own too (interop/fusionpbx), with no
-    // proxy in front of it either
-    if server == "asterisk" || server == "fusionpbx" {
+    // or through the proxy. The DTMF check runs on all three: FreeSWITCH's
+    // 9003, behind the proxy, and FusionPBX's (interop/fusionpbx), with no
+    // proxy in front of it, both keep the call up after `send_dtmf` until
+    // this end hangs up, since a hangup straight after it ended the call
+    // before the digit was ever sent
+    if server == "asterisk" || server == "fusionpbx" || server == "kamailio" {
         flows.push(Flow::Dtmf4733);
     }
     if server == "asterisk" {

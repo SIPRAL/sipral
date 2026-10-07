@@ -7,8 +7,8 @@ The lab's numbers on FusionPBX, written into its own dialplan table
 every dialplan FusionPBX installs by itself. The same numbers, and for the
 same reasons, as interop/freeswitch/lab.xml: 9000 a tone bridged through a
 loopback leg so a transfer has somebody to hand over, 9001 a different tone
-for a transfer to land on, 9003 a digit read and sent straight back -- with
-two seconds before the hangup, since send_dtmf only queues the digit and a
+for a transfer to land on, 9003 a digit read and sent straight back -- then
+silence until the caller hangs up, since send_dtmf only queues the digit and a
 channel hung up at once never sends it -- 9005
 the tone again with DTLS-SRTP required. The echo is FusionPBX's own, *9196,
 which it installs in every domain.
@@ -38,8 +38,7 @@ CONTEXT is replaced by the domain's name when the row is written.
     <action application="answer"/>
     <action application="read" data="1 1 silence_stream://1 digit 5000 #"/>
     <action application="send_dtmf" data="${digit}"/>
-    <action application="sleep" data="2000"/>
-    <action application="hangup"/>
+    <action application="playback" data="silence_stream://-1"/>
   </condition>
 </extension>
 <extension name="sipral_lab_dtls" continue="false">
