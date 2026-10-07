@@ -233,13 +233,20 @@ class SipralReactCore(
         Unit
     }
 
-    fun placeCall(account: String, target: String, destination: String?, codecs: String?): String = guarded {
+    fun placeCall(
+        account: String,
+        target: String,
+        destination: String?,
+        codecs: String?,
+        followRedirects: Boolean = false,
+    ): String = guarded {
         val call = open().placeCall(
             accountOf(account),
             target,
             mediaHost = mediaHost,
             destination = destination,
             codecs = codecs,
+            followRedirects = followRedirects,
         )
         keep(call)
     }

@@ -341,7 +341,9 @@ class BridgedCall:
             self.refer_caller(action.target, "human")
             _log.info(f"referred {self.caller.handle:x} to {action.target}")
         else:
-            self.person = self.stack.place_call(self.cfg.line, action.target)
+            self.person = self.stack.place_call(
+                self.cfg.line, action.target, follow_redirects=True
+            )
             self.watch(self.person, "person")
             self.outcome, self.refer_event = "human", event
             self.stack.accept_transfer_placed(event, self.person)
@@ -357,7 +359,7 @@ class BridgedCall:
         _log.info(f"incoming {self.caller.handle:x}: context {context}")
         try:
             self.agent = self.stack.place_call(
-                self.cfg.agent_account, self.cfg.agent_uri, headers=context
+                self.cfg.agent_account, self.cfg.agent_uri, headers=context, follow_redirects=True
             )
         except SipralError as error:
             _log.info(f"cannot call the agent: {error!r}")

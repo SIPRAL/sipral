@@ -181,6 +181,21 @@ record! {
         /// §3.3): `isfocus` goes on the Contact of every message this call
         /// sends from here on.
         pub focus: u32,
+        /// Nonzero to follow a 3xx to the targets its `Contact` names (RFC
+        /// 3261 §8.1.3.4): each as a new INVITE of the same call, most
+        /// preferred first, the next tried when one refuses, and a target
+        /// already tried, a 380, a 6xx, a forked call and anything past eight
+        /// redirected INVITEs not followed. Zero, as it is by default, ends
+        /// the call with `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx's
+        /// status and its `Contact` addresses readable, for an application
+        /// that redirects by itself. Added in ABI 1.2.
+        pub follow_redirects: u32,
+        /// Zero. Rounds the struct up to a whole multiple of its alignment on
+        /// every target, so that a member a later version appends starts at or
+        /// past the length a caller built against this header declares, never
+        /// in padding inside it. Set it to zero; the library reads nothing from
+        /// it.
+        pub reserved: u32,
     }
 }
 
@@ -657,6 +672,16 @@ unsafe fn outgoing_from(
         outgoing = outgoing.to_address(transport, address);
     }
     outgoing = outgoing.forks(forks);
+    match config.follow_redirects {
+        0 => {}
+        1 => outgoing = outgoing.follow_redirects(),
+        other => {
+            return Err(fail(
+                SipralStatus::InvalidArgument,
+                format!("follow_redirects is {other}, and it is 0 or 1"),
+            ));
+        }
+    }
     if let Some(ref named) = state.user_agent {
         outgoing = outgoing.header(HeaderName::UserAgent, named);
     }
@@ -2383,6 +2408,8 @@ a=recvonly\r\n";
             text_address_len: 0,
             feedback: 0,
             focus: 0,
+            follow_redirects: 0,
+            reserved: 0,
         }
     }
 
@@ -2445,6 +2472,8 @@ a=recvonly\r\n";
             text_address_len: 0,
             feedback: 0,
             focus: 0,
+            follow_redirects: 0,
+            reserved: 0,
         }
     }
 
@@ -5214,6 +5243,57 @@ Alert-Info: <urn:alert:source:external>\r\n";
             field(&bye, HeaderName::Extension("Reason")),
             b"Q.850;cause=16;text=\"Normal call clearing\""
         );
+        assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+    }
+
+    /// A 302 to the call this end placed, naming Carol.
+    fn moved_to_carol(invite: &[u8]) -> Vec<u8> {
+        String::from_utf8_lossy(&answered_with(invite, 302, "Moved Temporarily"))
+            .replace(
+                "Content-Length: 0\r\n",
+                "Contact: <sip:carol@example.com>\r\nContent-Length: 0\r\n",
+            )
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_302_ends_a_call_from_c_unless_it_was_placed_to_follow_one() {
+        for follow in [0, 1] {
+            let mut observed = Observed::default();
+            let (handle, account) = line(&mut observed);
+            let mut config = call_config();
+            config.follow_redirects = follow;
+            let (status, call) = place(handle, account, &config, 1_000);
+            assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+            let invite = one(handle);
+            deliver(handle, &moved_to_carol(&invite), 1_100);
+            poll(handle, 1_100);
+            let invites: Vec<String> = sent(handle)
+                .iter()
+                .map(|bytes| start_line(bytes))
+                .filter(|line| line.starts_with("INVITE "))
+                .collect();
+            let ended = observed
+                .calls
+                .iter()
+                .find(|seen| seen.kind == SipralEventKind::CallEnded && seen.call == call);
+            if follow == 0 {
+                assert!(invites.is_empty(), "followed anyway: {invites:?}");
+                assert_eq!(ended.map(|seen| seen.status_code), Some(302));
+            } else {
+                assert_eq!(invites, ["INVITE sip:carol@example.com SIP/2.0"]);
+                assert!(ended.is_none(), "the call is still being placed");
+            }
+            assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
+        }
+
+        let mut observed = Observed::default();
+        let (handle, account) = line(&mut observed);
+        let mut config = call_config();
+        config.follow_redirects = 2;
+        let (status, _) = place(handle, account, &config, 1_000);
+        assert_eq!(status, SipralStatus::InvalidArgument);
+        assert!(sent(handle).is_empty(), "nothing went");
         assert_eq!(unsafe { sipral_stack_destroy(handle) }, SipralStatus::Ok);
     }
 

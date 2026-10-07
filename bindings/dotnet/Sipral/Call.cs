@@ -756,4 +756,11 @@ public sealed record SipralCallOptions(bool Text = false, bool Feedback = false,
     /// first. A name this build has no encoder for is refused with
     /// <see cref="SipralStatus.InvalidArgument"/>.</summary>
     public string? Codecs { get; init; }
+
+    /// <summary>Placing a call, send it on to the targets a 3xx names (RFC
+    /// 3261 §8.1.3.4), most preferred first, the next tried when one
+    /// refuses. Off by default: a 3xx then ends the call with its status,
+    /// and the <c>Contact</c> it named is the application's to act on. Read
+    /// only by <see cref="SipralStack.PlaceCall"/>.</summary>
+    public bool FollowRedirects { get; init; }
 }

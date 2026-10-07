@@ -1105,6 +1105,7 @@ class Stack:
         focus: bool = False,
         codecs: str | None = None,
         headers=None,
+        follow_redirects: bool = False,
     ) -> Call:
         """`sipral_call_place`, with this stack running the call's audio.
 
@@ -1134,7 +1135,10 @@ class Stack:
         ``codecs`` -- ``"PCMA,PCMU"`` -- is what this call offers and in what
         order, in place of the stack's (`sipral_call_config_t::codecs`).
         ``headers`` -- ``(name, value)`` pairs or a mapping -- go on the
-        INVITE (`sipral_call_config_t::headers`).
+        INVITE (`sipral_call_config_t::headers`). ``follow_redirects`` sends
+        the call on to the targets a 3xx names (RFC 3261 §8.1.3.4); left off,
+        a 3xx ends the call with its status, and the `Contact` it named is the
+        application's to act on.
 
         ``media_host`` left out binds the media socket at the address of the
         route toward ``destination``, or toward the account's server.
@@ -1170,6 +1174,7 @@ class Stack:
             config.text_address_len = len(text_address)
         config.feedback = lib.SIPRAL_TOGGLE_ON if feedback else lib.SIPRAL_TOGGLE_DEFAULT
         config.focus = 1 if focus else 0
+        config.follow_redirects = 1 if follow_redirects else 0
         codecs_buf = None
         if codecs is not None:
             codecs_bytes = codecs.encode("utf-8")

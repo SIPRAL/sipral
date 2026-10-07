@@ -20,7 +20,8 @@ domain. Then three calls from the first, each to a number of
   the callee reads.
 - 9042, which answers 302 with a `Contact` naming 9002, the cadenced tone.
   Nothing else answers 9042: the call coming up at all, with audio, is this
-  stack having followed the redirect (RFC 3261 §8.1.3.4).
+  stack having followed the redirect (RFC 3261 §8.1.3.4), which every call
+  here is placed asking for: it is off by default.
 
 Environment: ``SIPRAL_SERVER`` (``host:port`` of Asterisk),
 ``SIPRAL_PASSWORD``, ``SIPRAL_DWELL_MS``, ``SIPRAL_PATIENCE_MS``.
@@ -164,7 +165,9 @@ async def one_call(
     """Place one call to ``number``, answer whatever reaches the callee,
     and hang up from the calling end once the call has been up for
     ``dwell``."""
-    call = stack.place_call(caller, f"sip:{number}@asterisk", headers=headers)
+    call = stack.place_call(
+        caller, f"sip:{number}@asterisk", headers=headers, follow_redirects=True
+    )
     tasks.append(asyncio.create_task(talk(call)))
     answered: list[Call] = []
     async with asyncio.timeout(patience + dwell):

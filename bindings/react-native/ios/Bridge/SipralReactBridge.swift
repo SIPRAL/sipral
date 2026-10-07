@@ -62,7 +62,8 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) {
             try self.core.placeCall(
                 account, target,
-                destination: options["destination"] as? String, codecs: options["codecs"] as? String
+                destination: options["destination"] as? String, codecs: options["codecs"] as? String,
+                followRedirects: (options["followRedirects"] as? NSNumber)?.boolValue ?? false
             )
         }
     }

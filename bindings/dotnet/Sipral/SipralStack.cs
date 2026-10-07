@@ -1056,8 +1056,9 @@ public sealed partial class SipralStack : IDisposable
     /// a media socket is opened before the INVITE goes out, and its
     /// <c>host:port</c> is offered as <c>media_address</c>.
     /// <paramref name="options"/> adds a real-time text stream on a socket of
-    /// its own, RTCP feedback, this end as a conference's focus, or this
-    /// call's own codec order (<see cref="SipralCallOptions"/>).
+    /// its own, RTCP feedback, this end as a conference's focus, this call's
+    /// own codec order, or a 3xx followed to its targets
+    /// (<see cref="SipralCallOptions"/>).
     /// </summary>
     public Call PlaceCall(Account account, string target, string? mediaHost = null, int mediaPort = 0, string? destination = null, SipralSrtp srtp = 0, SipralIce ice = 0, SipralCallOptions? options = null)
     {
@@ -1096,6 +1097,7 @@ public sealed partial class SipralStack : IDisposable
             config.TextAddressLen = (nuint)(textAddressBytes?.Length ?? 0);
             config.Feedback = (uint)(options is { Feedback: true } ? SipralToggle.On : SipralToggle.Default);
             config.Focus = options is { Focus: true } ? 1u : 0u;
+            config.FollowRedirects = options is { FollowRedirects: true } ? 1u : 0u;
             config.Codecs = codecsPin.Pointer;
             config.CodecsLen = (nuint)(codecsBytes?.Length ?? 0);
 

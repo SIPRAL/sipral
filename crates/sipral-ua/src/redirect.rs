@@ -13,7 +13,8 @@
 //! follow this end's own, most recent first (RFC 5806 §3).
 //!
 //! And the other side of it: a call this end placed that comes back 3xx is
-//! sent on to the targets the answer names ([`Redirection`]).
+//! sent on to the targets the answer names ([`Redirection`]), when it was
+//! placed asking for that.
 
 use std::time::Instant;
 
@@ -215,6 +216,10 @@ impl UserAgent {
     /// as the Request-URI (§8.1.3.4). `true` when one went, and the refusal
     /// is then not the call's end.
     ///
+    /// Only for a call placed with [`crate::OutgoingCall::follow_redirects`];
+    /// any other ends with the 3xx, its `Contact` addresses left for the
+    /// application to read.
+    ///
     /// A 380 names its alternative in its body and is not followed; a 6xx
     /// is a global failure, which §8.1.3.4 has end the search. A call that
     /// forked is not followed either: its branches are calls of their own
@@ -248,6 +253,9 @@ impl UserAgent {
             let Some(placed) = held.placed.clone() else {
                 return false;
             };
+            if !placed.follow_redirects {
+                return false;
+            }
             if (300..400).contains(&code)
                 && let Some(response) = response
             {

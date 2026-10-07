@@ -210,6 +210,35 @@ class AnIncomingCallSaysWhoIsCalling(_WithAFarEnd):
         self.assertIn(";reason=no-answer", diversion)
 
 
+    async def test_a_call_placed_to_follow_redirects_goes_on_to_the_target_a_302_names(
+        self,
+    ) -> None:
+        stack = self.stack()
+        account = stack.add_account("sip:alice@sipral.invalid", registrar_address=self.far.address)
+        call = stack.place_call(account, f"sip:bob@{self.far.address}", follow_redirects=True)
+        self.addAsyncCleanup(asyncio.to_thread, call.close)
+        invite = await self.far.receive("INVITE ")
+        copied = [
+            f"{name}: {_header(name, invite)}" for name in ("Via", "From", "Call-ID", "CSeq")
+        ]
+        moved = "\r\n".join(
+            [
+                "SIP/2.0 302 Moved Temporarily",
+                *copied,
+                f"To: {_header('To', invite)};tag=far",
+                f"Contact: <sip:carol@{self.far.address}>",
+                "Content-Length: 0",
+                "",
+                "",
+            ]
+        )
+        via_port = re.search(r"127\.0\.0\.1:(\d+)", _header("Via", invite)).group(1)
+        self.far.send(moved, f"127.0.0.1:{via_port}")
+        again = await self.far.receive("INVITE ")
+        self.assertTrue(again.startswith(f"INVITE sip:carol@{self.far.address} SIP/2.0\r\n"))
+        self.assertEqual(_header("Call-ID", again), _header("Call-ID", invite))
+        self.assertEqual(_header("CSeq", again), "2 INVITE")
+
 class ACallSaysWhyItEnded(_WithAFarEnd):
     async def test_a_cancel_for_a_call_answered_elsewhere_is_not_a_missed_call(self) -> None:
         stack = self.stack()

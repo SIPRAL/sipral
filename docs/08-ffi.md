@@ -3662,7 +3662,8 @@ stacks, all in application mode, answer with `wrongState`.
 ## What ABI 1.2 added
 
 Grown as 1.1 was: entry points, event kinds with their union arms and
-enumerations added, and nothing else in the header moved. The union keeps its
+enumerations added, two members appended to `sipral_call_config_t` behind its
+`size`, and nothing else in the header moved. The union keeps its
 size, since every new arm is smaller than the largest. A binding printed at 1.1 loads
 against a 1.2 library and works as it did; one printed at 1.2 is refused by
 a 1.1 library, with both versions named.
@@ -3806,3 +3807,18 @@ The facade carries them as `UaEvent::TransferDone`, the `request` of
 `Stack.accept_transfer_placed(event, placed)` and .NET
 `SipralStack.AcceptTransferPlaced(args, placed)`; the other layers reach the
 entry point through their printed bindings.
+
+**Following a 3xx, when a call asks for it.** `sipral_call_config_t` gains
+`follow_redirects` and a `reserved` member that keeps the struct a whole
+multiple of its alignment. Nonzero, a call `sipral_call_place` (or
+`sipral_call_consult`) places that is answered 3xx goes on to the targets the
+`Contact` names, as RFC 3261 §8.1.3.4 describes and `docs/04-ua.md`
+("Following a call sent somewhere else") details. Zero — the default, and what
+a caller built against 1.1 sends, its `size` stopping short of the member —
+leaves the 1.0 contract as it was: `SIPRAL_EVENT_KIND_CALL_ENDED` with the
+3xx's `status_code` and the response in `message`, its `Contact` read with
+`sipral_message_header`, for an application that redirects by itself. Any
+value other than 0 or 1 is `SIPRAL_STATUS_INVALID_ARGUMENT`. The layers place
+calls with it as `followRedirects` (Swift, Kotlin, Dart, Node.js, React
+Native), `follow_redirects` (Python) and `SipralCallOptions.FollowRedirects`
+(.NET); the voice-agent bridge and the lab's identity flows turn it on.

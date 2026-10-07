@@ -3460,7 +3460,7 @@ public enum Sipral {
         ("sipral_stack_settings_t", MemoryLayout<sipral_stack_settings_t>.size, 136, 128, 136),
         ("sipral_header_t", MemoryLayout<sipral_header_t>.size, 32, 16, 16),
         ("sipral_account_config_t", MemoryLayout<sipral_account_config_t>.size, 464, 256, 264),
-        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 152, 84, 84),
+        ("sipral_call_config_t", MemoryLayout<sipral_call_config_t>.size, 160, 92, 92),
         ("sipral_codec_info_t", MemoryLayout<sipral_codec_info_t>.size, 32, 28, 28),
         ("sipral_codec_candidate_t", MemoryLayout<sipral_codec_candidate_t>.size, 24, 20, 20),
         ("sipral_path_candidate_t", MemoryLayout<sipral_path_candidate_t>.size, 88, 60, 64),

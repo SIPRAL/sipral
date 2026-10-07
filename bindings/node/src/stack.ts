@@ -99,6 +99,12 @@ export interface CallOptions {
   destination?: string;
   /** What this call offers or takes, in place of the stack's: `'PCMA,PCMU'`. */
   codecs?: string;
+  /**
+   * Placing a call, send it on to the targets a 3xx names (RFC 3261
+   * §8.1.3.4). Off by default: a 3xx then ends the call with its status, and
+   * the `Contact` it named is the application's to act on.
+   */
+  followRedirects?: boolean;
 }
 
 /** What a stack emits. */
@@ -344,6 +350,7 @@ export class Stack extends EventEmitter<StackEvents> {
       destination_len: destinationLength,
       codecs,
       codecs_len: codecsLength,
+      follow_redirects: options.followRedirects === true ? 1 : 0,
     });
     const out = new BigUint64Array(1);
     try {

@@ -1636,6 +1636,9 @@ public final class SipralStack: @unchecked Sendable {
     /// offers RTP/AVPF with Generic NACKs and reduced-size RTCP (RFC 4585,
     /// RFC 5506), which a far end knowing only RTP/AVP refuses; `focus`
     /// says this end is a conference's focus (`isfocus`, RFC 4579).
+    /// `followRedirects` sends the call on to the targets a 3xx names (RFC
+    /// 3261 §8.1.3.4); left off, a 3xx ends the call with its status, and
+    /// the `Contact` it named is the application's to act on.
     public func placeCall(
         account: Account,
         target: String,
@@ -1648,7 +1651,8 @@ public final class SipralStack: @unchecked Sendable {
         codecs: String? = nil,
         text: Bool = false,
         feedback: Bool = false,
-        focus: Bool = false
+        focus: Bool = false,
+        followRedirects: Bool = false
     ) throws -> Call {
         let mediaHost = self.mediaHost(mediaHost, account: account, destination: destination)
         let mediaSocket = try openMediaSocket(host: mediaHost, port: mediaPort)
@@ -1685,6 +1689,7 @@ public final class SipralStack: @unchecked Sendable {
                 config.text_address_len = parts[4].count
                 config.feedback = feedback ? SipralToggle.on.rawValue : 0
                 config.focus = focus ? 1 : 0
+                config.follow_redirects = followRedirects ? 1 : 0
                 return try retryingBusy {
                     try Sipral.callPlace(
                         stack: stackHandle, account: account.handle, config: config, configHeaders: headers, nowMs: now

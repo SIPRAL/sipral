@@ -266,6 +266,12 @@ export interface PlaceCallOptions {
   destination?: string;
   /** This call's codecs, in place of the client's. */
   codecs?: string;
+  /**
+   * Send the call on to the targets a 3xx names (RFC 3261 §8.1.3.4). Off by
+   * default: a 3xx then ends the call with its status, and where it pointed
+   * is the application's to act on.
+   */
+  followRedirects?: boolean;
 }
 
 export interface AnswerOptions {

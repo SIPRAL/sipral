@@ -257,7 +257,7 @@ _Static_assert(offsetof(sipral_account_config_t, realms) == SIPRAL_LAYOUT(448, 2
 _Static_assert(offsetof(sipral_account_config_t, realms_len) == SIPRAL_LAYOUT(456, 252, 260), "sipral_account_config_t::realms_len");
 _Static_assert(offsetof(sipral_account_config_t, recording_in_clear) + sizeof(((sipral_account_config_t *)0)->recording_in_clear) == SIPRAL_LAYOUT(392, 208, 216), "sipral_account_config_t is pinned through recording_in_clear");
 
-_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t");
+_Static_assert(sizeof(sipral_call_config_t) == SIPRAL_LAYOUT(160, 92, 92), "sipral_call_config_t");
 _Static_assert(offsetof(sipral_call_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_call_config_t::size");
 _Static_assert(offsetof(sipral_call_config_t, target) == SIPRAL_LAYOUT(8, 4, 4), "sipral_call_config_t::target");
 _Static_assert(offsetof(sipral_call_config_t, target_len) == SIPRAL_LAYOUT(16, 8, 8), "sipral_call_config_t::target_len");
@@ -279,6 +279,8 @@ _Static_assert(offsetof(sipral_call_config_t, text_address) == SIPRAL_LAYOUT(128
 _Static_assert(offsetof(sipral_call_config_t, text_address_len) == SIPRAL_LAYOUT(136, 72, 72), "sipral_call_config_t::text_address_len");
 _Static_assert(offsetof(sipral_call_config_t, feedback) == SIPRAL_LAYOUT(144, 76, 76), "sipral_call_config_t::feedback");
 _Static_assert(offsetof(sipral_call_config_t, focus) == SIPRAL_LAYOUT(148, 80, 80), "sipral_call_config_t::focus");
+_Static_assert(offsetof(sipral_call_config_t, follow_redirects) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t::follow_redirects");
+_Static_assert(offsetof(sipral_call_config_t, reserved) == SIPRAL_LAYOUT(156, 88, 88), "sipral_call_config_t::reserved");
 _Static_assert(offsetof(sipral_call_config_t, focus) + sizeof(((sipral_call_config_t *)0)->focus) == SIPRAL_LAYOUT(152, 84, 84), "sipral_call_config_t is pinned through focus");
 
 _Static_assert(sizeof(sipral_codec_info_t) == SIPRAL_LAYOUT(32, 28, 28), "sipral_codec_info_t");

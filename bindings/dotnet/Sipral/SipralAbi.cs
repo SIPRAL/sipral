@@ -5660,6 +5660,25 @@ public struct SipralCallConfig
     /// sends from here on.
     /// </summary>
     public uint Focus;
+    /// <summary>
+    /// Nonzero to follow a 3xx to the targets its `Contact` names (RFC
+    /// 3261 §8.1.3.4): each as a new INVITE of the same call, most
+    /// preferred first, the next tried when one refuses, and a target
+    /// already tried, a 380, a 6xx, a forked call and anything past eight
+    /// redirected INVITEs not followed. Zero, as it is by default, ends
+    /// the call with `SIPRAL_EVENT_KIND_CALL_ENDED` carrying the 3xx's
+    /// status and its `Contact` addresses readable, for an application
+    /// that redirects by itself. Added in ABI 1.2.
+    /// </summary>
+    public uint FollowRedirects;
+    /// <summary>
+    /// Zero. Rounds the struct up to a whole multiple of its alignment on
+    /// every target, so that a member a later version appends starts at or
+    /// past the length a caller built against this header declares, never
+    /// in padding inside it. Set it to zero; the library reads nothing from
+    /// it.
+    /// </summary>
+    public uint Reserved;
 
     /// <summary>A zeroed one with its size filled in, which is
     /// what every struct here has to be handed over as.</summary>
@@ -10894,7 +10913,7 @@ public static partial class Sipral
         ("sipral_stack_settings_t", Marshal.SizeOf<SipralStackSettings>(), 136, 128, 136),
         ("sipral_header_t", Marshal.SizeOf<SipralHeader>(), 32, 16, 16),
         ("sipral_account_config_t", Marshal.SizeOf<SipralAccountConfig>(), 464, 256, 264),
-        ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 152, 84, 84),
+        ("sipral_call_config_t", Marshal.SizeOf<SipralCallConfig>(), 160, 92, 92),
         ("sipral_codec_info_t", Marshal.SizeOf<SipralCodecInfo>(), 32, 28, 28),
         ("sipral_codec_candidate_t", Marshal.SizeOf<SipralCodecCandidate>(), 24, 20, 20),
         ("sipral_path_candidate_t", Marshal.SizeOf<SipralPathCandidate>(), 88, 60, 64),

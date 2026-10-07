@@ -167,6 +167,9 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   NSMutableDictionary *given = [NSMutableDictionary dictionary];
   put(given, @"destination", options.destination());
   put(given, @"codecs", options.codecs());
+  if (options.followRedirects().has_value()) {
+    put(given, @"followRedirects", @(options.followRedirects().value()));
+  }
   [_bridge placeCall:account target:target options:given resolve:resolve reject:reject];
 }
 

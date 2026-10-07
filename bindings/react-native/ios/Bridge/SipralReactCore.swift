@@ -291,11 +291,13 @@ public final class SipralReactCore: @unchecked Sendable {
         }
     }
 
-    public func placeCall(_ account: String, _ target: String, destination: String?, codecs: String?) throws -> String {
+    public func placeCall(
+        _ account: String, _ target: String, destination: String?, codecs: String?, followRedirects: Bool = false
+    ) throws -> String {
         try guarded {
             keep(try open().placeCall(
                 account: try accountOf(account), target: target, mediaHost: mediaHost,
-                destination: destination, codecs: codecs
+                destination: destination, codecs: codecs, followRedirects: followRedirects
             ))
         }
     }

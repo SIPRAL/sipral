@@ -1216,7 +1216,10 @@ class SipralClient private constructor(
      * which the text stream would leave in the clear. [feedback] offers
      * RTP/AVPF with Generic NACKs and reduced-size RTCP (RFC 4585, RFC 5506),
      * which a far end knowing only RTP/AVP refuses; [focus] says this end is
-     * a conference's focus (`isfocus`, RFC 4579).
+     * a conference's focus (`isfocus`, RFC 4579). [followRedirects] sends
+     * the call on to the targets a 3xx names (RFC 3261 §8.1.3.4); left off,
+     * a 3xx ends the call with its status, and the `Contact` it named is the
+     * application's to act on.
      */
     fun placeCall(
         account: SipralAccount,
@@ -1231,6 +1234,7 @@ class SipralClient private constructor(
         text: Boolean = false,
         feedback: Boolean = false,
         focus: Boolean = false,
+        followRedirects: Boolean = false,
     ): SipralCall {
         val mediaHost = mediaHostFor(mediaHost, account, destination)
         val mediaSocket = openMediaSocket(mediaHost, mediaPort)
@@ -1252,6 +1256,7 @@ class SipralClient private constructor(
             textAddress = textSocket?.let { formatAddress(it.localAddress.hostAddress, it.localPort) },
             feedback = if (feedback) SipralToggle.ON.value.toLong() else 0L,
             focus = if (focus) 1L else 0L,
+            followRedirects = if (followRedirects) 1L else 0L,
         )
         val callHandle = try {
             mapMediaSocket(mediaSocket, mediaAddress)

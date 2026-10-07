@@ -7125,13 +7125,54 @@ fn invites_sent(agent: &mut UserAgent) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn a_302_ends_a_call_placed_without_asking_to_follow_it_and_leaves_its_targets_readable() {
+    // the contract of ABI 1.0 and 1.1: the application is told, and an
+    // application that redirects by itself reads where to from the Contact
+    let t0 = Instant::now();
+    let mut agent = agent(t0);
+    let id = agent.add_account(account());
+    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let first = sent(&mut agent);
+    deliver(
+        &mut agent,
+        &reply(
+            &first,
+            302,
+            "Moved Temporarily",
+            "Contact: <sip:carol@example.com>\r\n",
+        ),
+        t0,
+    );
+    assert!(invites_sent(&mut agent).is_empty(), "nothing is followed");
+    let said = events(&mut agent);
+    let Some((status, response)) = said.iter().find_map(|event| match event {
+        UaEvent::CallEnded {
+            call: ended,
+            status,
+            response,
+            ..
+        } if *ended == call => Some((*status, response.clone())),
+        _ => None,
+    }) else {
+        panic!("the call ends: {said:?}");
+    };
+    assert_eq!(status.map(StatusCode::get), Some(302));
+    let response = response.expect("the 302 is kept whole");
+    assert!(
+        String::from_utf8_lossy(&response.bytes()).contains("Contact: <sip:carol@example.com>")
+    );
+}
+
+#[test]
 fn a_302_is_followed_to_its_targets_best_first_and_the_next_one_tried_when_one_fails() {
     // RFC 3261 §8.1.3.4: the Contact values of a 3xx are a target set, tried
     // in order of q, each as a new INVITE of the same call
     let t0 = Instant::now();
     let mut agent = agent(t0);
     let id = agent.add_account(account());
-    let call = agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    let call = agent
+        .call(id, &outgoing().follow_redirects(), t0)
+        .expect("the INVITE goes");
     let first = sent(&mut agent);
 
     deliver(
@@ -7191,7 +7232,9 @@ fn a_redirect_back_to_a_target_already_tried_or_a_6xx_ends_the_call() {
     let t0 = Instant::now();
     let mut agent = agent(t0);
     let id = agent.add_account(account());
-    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    agent
+        .call(id, &outgoing().follow_redirects(), t0)
+        .expect("the INVITE goes");
     let first = sent(&mut agent);
     deliver(
         &mut agent,
@@ -7209,7 +7252,9 @@ fn a_redirect_back_to_a_target_already_tried_or_a_6xx_ends_the_call() {
         Some(CallEndReason::Refused)
     );
 
-    agent.call(id, &outgoing(), t0).expect("the INVITE goes");
+    agent
+        .call(id, &outgoing().follow_redirects(), t0)
+        .expect("the INVITE goes");
     let second = sent(&mut agent);
     deliver(
         &mut agent,

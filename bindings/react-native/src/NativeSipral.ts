@@ -100,6 +100,7 @@ export type NativeSettings = {
 export type NativeCallOptions = {
   destination?: string;
   codecs?: string;
+  followRedirects?: boolean;
 };
 
 export type NativeAnswerOptions = {

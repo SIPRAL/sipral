@@ -909,13 +909,17 @@ final class SipralStack {
   /// the INVITE goes out. [destination] sends the INVITE somewhere other than
   /// the account's registrar address. [codecs] -- `'PCMA,PCMU'` -- is what
   /// this call offers and in what order, in place of the stack's
-  /// (`sipral_call_config_t::codecs`).
+  /// (`sipral_call_config_t::codecs`). [followRedirects] sends the call on
+  /// to the targets a 3xx names (RFC 3261 §8.1.3.4); left off, a 3xx ends
+  /// the call with its status, and the `Contact` it named is the
+  /// application's to act on.
   Future<SipralCall> placeCall(
     SipralAccount account,
     String target, {
     String? mediaHost,
     String? destination,
     String? codecs,
+    bool followRedirects = false,
   }) async {
     _ensureOpen();
     final media = await RawDatagramSocket.bind(
@@ -940,7 +944,8 @@ final class SipralStack {
           ..destination = destinationText.$1
           ..destinationLen = destinationText.$2
           ..codecs = codecsText.$1
-          ..codecsLen = codecsText.$2;
+          ..codecsLen = codecsText.$2
+          ..followRedirects = followRedirects ? 1 : 0;
         final out = arena<SipralHandle>();
         _checkNow(
           _sipral,

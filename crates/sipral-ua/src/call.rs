@@ -232,6 +232,9 @@ pub struct OutgoingCall {
     /// The recording metadata of a recording session, written
     /// ([`OutgoingCall::recording_session`]).
     pub(crate) metadata: Option<Arc<str>>,
+    /// Whether a 3xx is followed to its targets
+    /// ([`OutgoingCall::follow_redirects`]).
+    pub(crate) follow_redirects: bool,
 }
 
 impl OutgoingCall {
@@ -253,6 +256,7 @@ impl OutgoingCall {
             extra: Vec::new(),
             focus: false,
             metadata: None,
+            follow_redirects: false,
         }
     }
 
@@ -318,6 +322,20 @@ impl OutgoingCall {
     #[must_use]
     pub const fn to_address(mut self, transport: TransportId, remote: SocketAddr) -> Self {
         self.destination = Some((transport, remote));
+        self
+    }
+
+    /// Follow a 3xx to the targets it names (RFC 3261 §8.1.3.4): each as a
+    /// new INVITE of the same call, most preferred first, the next one tried
+    /// when one refuses.
+    ///
+    /// Off by default: a 3xx then ends the call, reported with its status and
+    /// its `Contact` addresses for the application to act on itself, which is
+    /// what ABI 1.0 and 1.1 promised and what applications that handle the
+    /// redirect on their own rely on.
+    #[must_use]
+    pub const fn follow_redirects(mut self) -> Self {
+        self.follow_redirects = true;
         self
     }
 

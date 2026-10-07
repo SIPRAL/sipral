@@ -114,7 +114,7 @@ async def dial(
     until the agent joins.
     """
     policy = policy or MachinePolicy()
-    call = stack.place_call(account, target, media_host=media_host)
+    call = stack.place_call(account, target, media_host=media_host, follow_redirects=True)
     agent: AgentCall | None = None
     try:
         call.detect_progress(

@@ -15,7 +15,7 @@ sipral_account_config_t recording_in_clear 392 464 208 256 216 264
 sipral_audio_device_t present 32 32 28 28 28 28
 sipral_audio_info_t reserved 48 48 44 44 48 48
 sipral_audio_transmit_t - - 56 - 36 - 40
-sipral_call_config_t focus 152 152 84 84 84 84
+sipral_call_config_t focus 152 160 84 92 84 92
 sipral_capabilities_t features 24 24 16 16 16 16
 sipral_codec_candidate_t reserved 24 24 20 20 20 20
 sipral_codec_info_t reserved 32 32 28 28 28 28

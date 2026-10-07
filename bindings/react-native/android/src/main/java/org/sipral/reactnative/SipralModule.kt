@@ -85,7 +85,13 @@ class SipralModule(context: ReactApplicationContext) : NativeSipralSpec(context)
     override fun removeAccount(account: String, promise: Promise) = settle(promise) { core.removeAccount(account) }
 
     override fun placeCall(account: String, target: String, options: ReadableMap, promise: Promise) = settle(promise) {
-        core.placeCall(account, target, options.text("destination"), options.text("codecs"))
+        core.placeCall(
+            account,
+            target,
+            options.text("destination"),
+            options.text("codecs"),
+            options.flag("followRedirects") ?: false,
+        )
     }
 
     override fun answer(call: String, options: ReadableMap, promise: Promise) = settle(promise) {

@@ -114,6 +114,25 @@ final class SignallingSurfaceTests: XCTestCase {
         XCTAssertEqual(ended.callData?.statusCode, 302)
     }
 
+    func testACallPlacedToFollowRedirectsGoesOnToTheTargetA302Names() async throws {
+        let pair = try pair()
+        defer { pair.close() }
+        let placed = try pair.alice.placeCall(
+            account: pair.aliceAccount, target: "sip:bob@\(pair.bob.bindAddress)", followRedirects: true
+        )
+        defer { placed.close() }
+        let aliceEvents = Recorder(placed.events())
+        let ringing = try await incoming(pair)
+
+        try pair.bob.redirectCall(ringing, to: ["sip:carol@\(pair.bob.bindAddress)"])
+        let rungAgain = await pair.bobEvents.count(atLeast: 2, within: 5) { $0.kind == .incomingCall }
+        XCTAssertEqual(rungAgain, 2, "the INVITE did not go on to the target the 302 named")
+        XCTAssertNil(
+            aliceEvents.elements.first { $0.kind == .callEnded },
+            "the call ended at the redirect"
+        )
+    }
+
     // MARK: - who is calling, and how to answer
 
     func testACallersAssertedIdentityIsReadOnlyFromATrustedPeer() async throws {
