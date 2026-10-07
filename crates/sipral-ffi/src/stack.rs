@@ -1286,6 +1286,8 @@ pub(crate) struct StackState {
     /// each poll raises, and whose members no pair and no second conference
     /// may take.
     pub(crate) conferences: Vec<(SipralHandle, crate::local_conference::Shared)>,
+    /// The network tests under way (`crate::network_test`).
+    pub(crate) tests: crate::network_test::Tests,
 }
 
 // Safety: the user pointer is the caller's and is only ever handed back to
@@ -1967,6 +1969,7 @@ pub(crate) unsafe fn create_on(
         pseudonyms,
         lost: Vec::new(),
         conferences: Vec::new(),
+        tests: crate::network_test::Tests::default(),
     };
     // the main transport is the first signalling socket kept mapped; its
     // first request is waiting in `sipral_stack_poll_transmit` from here on
@@ -2390,6 +2393,17 @@ fn run(
             _identity: None,
         });
     }
+    // a test is looked at once its parts' own news is in: a mapping or a
+    // relay learned above, an OPTIONS answered in the drain before it
+    for (event, text) in crate::network_test::service(state, stack, now) {
+        raised.push(Delivery {
+            event,
+            _raised: None,
+            _reason: Some(text),
+            _record: None,
+            _identity: None,
+        });
+    }
     // the audio engine's own news: a device gone, a default moved, a role
     // reopened; and the calls whose media started or ended in this poll,
     // taken up or let go of. Its lock is only tried, after the engine's
@@ -2445,6 +2459,7 @@ fn run(
         state.agent.poll_timeout(),
         state.engine.poll_timeout(),
         crate::nat::Nat::poll_timeout(state),
+        state.tests.poll_timeout(),
         audio_busy.then(|| now + AUDIO_BUSY_RETRY),
     ]
     .into_iter()
@@ -2524,6 +2539,12 @@ fn drain(
                 }
                 if let UaEvent::ReferralLapsed { referral, .. } = said {
                     lapsed.push(referral);
+                }
+                // a network test's OPTIONS is the test's to report, inside
+                // its own event, and nothing the application asked about
+                if let UaEvent::ServerProbed { probe, outcome, .. } = said {
+                    state.tests.server_probed(probe, outcome);
+                    continue;
                 }
                 signalling(stack, state, said, raised, unclaimed);
             }

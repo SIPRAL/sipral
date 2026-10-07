@@ -98,6 +98,11 @@ application trusts, fetch the token, and hand it over with
 and a token the server called `'invalidToken'` emits the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+Before a call, `await client.networkTest({account, echoCall})` asks the
+account's server and, given a call placed to an echo service, rates the
+audio that comes back; the client's `networkTest` event carries every part
+and the verdict (`docs/25-network-test.md`).
+
 `bindHost` is the phone's own address on the network the server is reached
 over; the stack signals from it and every call's audio goes out from it. A
 phone has several addresses and only the application knows which one the

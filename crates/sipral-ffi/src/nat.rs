@@ -610,6 +610,31 @@ struct Streams {
 /// The text one event's three addresses are read from, and the event.
 pub(crate) type Raised = (SipralEvent, String);
 
+/// Whether something was asked of a server for a socket, and what came of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+// answered only where there is STUN to ask: a build without it asks nothing
+#[cfg_attr(not(feature = "stun"), allow(dead_code))]
+pub(crate) enum Asked<T> {
+    /// Nothing was asked.
+    #[default]
+    Unasked,
+    /// Asked, and not answered yet.
+    Waiting,
+    /// Answered, or given up on.
+    Answered(T),
+}
+
+/// What a network test reads of its socket.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Tested {
+    /// The STUN server's answer: the public address, or `None` for none.
+    pub(crate) mapping: Asked<Option<SocketAddr>>,
+    /// Whether the TURN server allocated a relay.
+    pub(crate) relay: Asked<bool>,
+    /// The `SipralTransport` the TURN server is reached over, or zero.
+    pub(crate) relay_protocol: u32,
+}
+
 #[cfg(feature = "stun")]
 impl Nat {
     /// Start asking, when the configuration named a server: the signalling
@@ -1071,10 +1096,50 @@ impl Nat {
     #[cfg(not(feature = "ice"))]
     pub(crate) const fn take_back(_state: &mut StackState, _now: Instant) {}
 
+    /// Where a network test stands on the socket `local`: what its STUN
+    /// server said of it, and what its TURN server did, with the protocol
+    /// the TURN server is reached over.
+    pub(crate) fn tested(state: &StackState, local: SocketAddr) -> Tested {
+        let Some(active) = state.nat.active.as_ref() else {
+            return Tested::default();
+        };
+        let mapping = match active.mappings.state(local) {
+            None => Asked::Unasked,
+            Some(sipral::MappingState::Asking) => Asked::Waiting,
+            Some(sipral::MappingState::Mapped(public)) => Asked::Answered(Some(public)),
+            Some(sipral::MappingState::Unmapped) => Asked::Answered(None),
+        };
+        #[cfg(feature = "ice")]
+        let (relay, relay_protocol) =
+            active
+                .relays
+                .as_ref()
+                .map_or((Asked::Unasked, 0), |relays| {
+                    let relay =
+                        if active.streams.connecting.contains(&local) || relays.pending(local) {
+                            Asked::Waiting
+                        } else {
+                            Asked::Answered(relays.holds(local))
+                        };
+                    (relay, protocol_of(relays.transport()))
+                });
+        #[cfg(not(feature = "ice"))]
+        let (relay, relay_protocol) = (Asked::Unasked, 0);
+        Tested {
+            mapping,
+            relay,
+            relay_protocol,
+        }
+    }
+
     /// A media socket named with [`sipral_stack_nat_map`] that will carry no
     /// call after all: it is no longer kept mapped, and its relay goes back
     /// to the server.
-    fn unmap(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
+    pub(crate) fn unmap(
+        state: &mut StackState,
+        local: SocketAddr,
+        now: Instant,
+    ) -> Result<(), Fail> {
         let Some(active) = state.nat.active.as_mut() else {
             return Err(not_asking());
         };
@@ -1165,7 +1230,11 @@ impl Nat {
         }
     }
 
-    fn map_media(state: &mut StackState, local: SocketAddr, now: Instant) -> Result<(), Fail> {
+    pub(crate) fn map_media(
+        state: &mut StackState,
+        local: SocketAddr,
+        now: Instant,
+    ) -> Result<(), Fail> {
         let Some(active) = state.nat.active.as_mut() else {
             return Err(not_asking());
         };
@@ -1502,8 +1571,17 @@ impl Nat {
     /// Without STUN no relay was ever taken, so none comes back.
     pub(crate) const fn take_back(_state: &mut StackState, _now: Instant) {}
 
-    fn unmap(_state: &mut StackState, _local: SocketAddr, _now: Instant) -> Result<(), Fail> {
+    pub(crate) fn unmap(
+        _state: &mut StackState,
+        _local: SocketAddr,
+        _now: Instant,
+    ) -> Result<(), Fail> {
         Err(not_asking())
+    }
+
+    /// Without STUN a test asks nothing of any socket.
+    pub(crate) fn tested(_state: &StackState, _local: SocketAddr) -> Tested {
+        Tested::default()
     }
 
     /// Without STUN a stack names no media socket, so none has a relay.
@@ -1528,7 +1606,11 @@ impl Nat {
         }
     }
 
-    fn map_media(_state: &mut StackState, _local: SocketAddr, _now: Instant) -> Result<(), Fail> {
+    pub(crate) fn map_media(
+        _state: &mut StackState,
+        _local: SocketAddr,
+        _now: Instant,
+    ) -> Result<(), Fail> {
         Err(not_asking())
     }
 
@@ -2287,7 +2369,61 @@ mod tests {
             };
             STREAMS.with(|all| all.borrow_mut().push(said));
         }
+        if seen.kind == SipralEventKind::NetworkTest {
+            let payload = unsafe { seen.payload.network_test };
+            let said = NetworkSaid {
+                test: payload.test,
+                verdict: payload.verdict,
+                stun: payload.stun,
+                nat: payload.nat,
+                turn: payload.turn,
+                turn_protocol: payload.turn_protocol,
+                server: payload.server,
+                server_status: payload.server_status,
+                server_round_trip_ms: payload.server_round_trip_ms,
+                echo: payload.echo,
+                echo_verdict: payload.echo_verdict,
+                r_factor: payload.r_factor,
+                mos: payload.mos,
+                local: piece(payload.local, payload.local_len),
+                mapped: piece(payload.mapped, payload.mapped_len),
+                account: seen.account,
+                call: seen.call,
+            };
+            NETWORK.with(|all| all.borrow_mut().push(said));
+        }
         unsafe { record(event, user_data) };
+    }
+
+    /// What one `SIPRAL_EVENT_KIND_NETWORK_TEST` said, copied out inside the
+    /// callback.
+    #[derive(Clone, Debug, PartialEq)]
+    struct NetworkSaid {
+        test: u32,
+        verdict: u32,
+        stun: u32,
+        nat: u32,
+        turn: u32,
+        turn_protocol: u32,
+        server: u32,
+        server_status: u32,
+        server_round_trip_ms: u32,
+        echo: u32,
+        echo_verdict: u32,
+        r_factor: u32,
+        mos: f32,
+        local: String,
+        mapped: String,
+        account: SipralHandle,
+        call: SipralHandle,
+    }
+
+    thread_local! {
+        static NETWORK: RefCell<Vec<NetworkSaid>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn network_said() -> Vec<NetworkSaid> {
+        NETWORK.with(|all| std::mem::take(&mut *all.borrow_mut()))
     }
 
     /// What one `SIPRAL_EVENT_KIND_TURN_STREAM` said, copied out inside the
@@ -5571,5 +5707,293 @@ Content-Type: application/sdp\r\n"
             unsafe { crate::stack::sipral_stack_destroy(stack) },
             SipralStatus::Ok
         );
+    }
+
+    // -- the network test before a call ------------------------------------
+
+    fn network_test(
+        stack: SipralHandle,
+        account: SipralHandle,
+        probe: Option<&str>,
+        echo_call: SipralHandle,
+        timeout_ms: u32,
+        now_ms: u64,
+    ) -> (SipralStatus, u32) {
+        let (probe_socket, probe_socket_len) = probe.map_or((ptr::null(), 0), as_text);
+        let config = crate::network_test::SipralNetworkTestConfig {
+            size: size_of::<crate::network_test::SipralNetworkTestConfig>(),
+            account,
+            probe_socket,
+            probe_socket_len,
+            echo_call,
+            echo_ms: 1_000,
+            timeout_ms,
+        };
+        let mut test = u32::MAX;
+        let status = unsafe {
+            crate::network_test::sipral_stack_network_test(
+                stack,
+                ptr::from_ref(&config),
+                now_ms,
+                &raw mut test,
+            )
+        };
+        (status, test)
+    }
+
+    /// A final answer to `request`, from the request's own Via, From, To,
+    /// Call-ID and CSeq (RFC 3261 section 8.2.6.2).
+    fn answer_sip(request: &[u8], status: &str) -> Vec<u8> {
+        let text = String::from_utf8_lossy(request);
+        let mut out = format!("SIP/2.0 {status}\r\n");
+        for line in text.split("\r\n") {
+            for name in ["Via", "From", "Call-ID", "CSeq"] {
+                if line.starts_with(&format!("{name}: ")) {
+                    out.push_str(line);
+                    out.push_str("\r\n");
+                }
+            }
+            if line.starts_with("To: ") {
+                out.push_str(line);
+                out.push_str(";tag=registrar\r\n");
+            }
+        }
+        out.push_str("Content-Length: 0\r\n\r\n");
+        out.into_bytes()
+    }
+
+    fn from_registrar(stack: SipralHandle, data: &[u8], now_ms: u64) -> SipralStatus {
+        let registrar = "203.0.113.5:5060";
+        unsafe {
+            sipral_stack_receive_datagram(
+                stack,
+                SIPRAL_TRANSPORT_MAIN,
+                data.as_ptr(),
+                data.len(),
+                registrar.as_ptr().cast::<c_char>(),
+                registrar.len(),
+                ptr::null(),
+                0,
+                now_ms,
+            )
+        }
+    }
+
+    fn options_of(out: &[(Vec<u8>, String)]) -> Vec<u8> {
+        out.iter()
+            .find(|(message, _)| message.starts_with(b"OPTIONS "))
+            .map(|(message, _)| message.clone())
+            .expect("the OPTIONS")
+    }
+
+    #[cfg(feature = "ice")]
+    #[test]
+    fn a_network_test_asks_stun_turn_and_the_registrar_and_says_good() {
+        use crate::network_test::{
+            SipralNatKind, SipralNetworkProbe, SipralNetworkVerdict, SipralServerReach,
+        };
+        let mut observed = Observed::default();
+        let _ = network_said();
+        let (status, stack) = create(&relaying(&mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        let _ = poll(stack, 5);
+
+        let (status, test) = network_test(stack, account, Some(MEDIA), SIPRAL_HANDLE_NONE, 0, 10);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let out = stun_out(stack);
+        assert_eq!(
+            out.len(),
+            2,
+            "a Binding request and an Allocate from the probe socket"
+        );
+        assert!(out.iter().all(|(_, _, from)| from == MEDIA));
+        let options = options_of(&signalling_out(stack));
+        assert!(
+            !String::from_utf8_lossy(&options).contains("Authorization"),
+            "a probe spends no credential"
+        );
+        let _ = poll(stack, 12);
+        assert!(network_said().is_empty(), "nothing has answered yet");
+
+        assert_eq!(
+            on_media_socket(stack, &answer(&out[0].0, MEDIA_PUBLIC), SERVER, 20),
+            SipralStatus::Ok
+        );
+        assert_eq!(
+            on_media_socket(
+                stack,
+                &turn_answer(&out[1].0, RELAYED_AT, MEDIA_PUBLIC),
+                SERVER,
+                25
+            ),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 25);
+        assert!(
+            network_said().is_empty(),
+            "the registrar has not answered yet"
+        );
+        assert_eq!(
+            from_registrar(stack, &answer_sip(&options, "200 OK"), 47),
+            SipralStatus::Ok,
+            "{}",
+            last_error_text()
+        );
+        let _ = poll(stack, 47);
+        let said = network_said();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let said = &said[0];
+        assert_eq!(said.test, test);
+        assert_eq!(said.verdict, SipralNetworkVerdict::Good as u32);
+        assert_eq!(said.stun, SipralNetworkProbe::Succeeded as u32);
+        assert_eq!(said.nat, SipralNatKind::PortChanged as u32);
+        assert_eq!(said.turn, SipralNetworkProbe::Succeeded as u32);
+        assert_eq!(
+            said.turn_protocol,
+            crate::stack::SipralTransport::Udp as u32
+        );
+        assert_eq!(said.server, SipralServerReach::Answered as u32);
+        assert_eq!(said.server_status, 200);
+        assert_eq!(said.server_round_trip_ms, 37);
+        assert_eq!(said.echo, SipralNetworkProbe::NotTested as u32);
+        assert_eq!(said.local, MEDIA);
+        assert_eq!(said.mapped, MEDIA_PUBLIC);
+        assert_eq!(said.account, account);
+        assert_eq!(said.call, SIPRAL_HANDLE_NONE);
+
+        // the relay goes back to the server once the test is over
+        let back = stun_out(stack);
+        assert!(
+            back.iter()
+                .any(|(message, _, _)| refresh_lifetime(message) == Some(0)),
+            "a Refresh with a lifetime of zero"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_network_test_nothing_answers_is_poor_at_its_deadline() {
+        use crate::network_test::{SipralNetworkProbe, SipralNetworkVerdict, SipralServerReach};
+        let mut observed = Observed::default();
+        let _ = network_said();
+        let stack = asking_stack(&mut observed);
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        let (status, _) = network_test(stack, account, Some(MEDIA), SIPRAL_HANDLE_NONE, 3_000, 10);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = stun_out(stack);
+        let _ = poll(stack, 2_000);
+        assert!(network_said().is_empty());
+        let _ = poll(stack, 3_010);
+        let said = network_said();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].verdict, SipralNetworkVerdict::Poor as u32);
+        assert_eq!(said[0].stun, SipralNetworkProbe::Failed as u32);
+        assert_eq!(
+            said[0].turn,
+            SipralNetworkProbe::NotTested as u32,
+            "no TURN server"
+        );
+        assert_eq!(said[0].server, SipralServerReach::TimedOut as u32);
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_network_test_without_stun_reads_the_registrars_challenge_as_an_answer() {
+        use crate::network_test::{SipralNetworkProbe, SipralNetworkVerdict, SipralServerReach};
+        let mut observed = Observed::default();
+        let _ = network_said();
+        let (status, stack) = create(&config(listen, &mut observed));
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let account = account_on(stack);
+        let _ = signalling_out(stack);
+        let (status, _) = network_test(stack, account, Some(MEDIA), SIPRAL_HANDLE_NONE, 0, 10);
+        assert_eq!(
+            status,
+            SipralStatus::WrongState,
+            "no STUN server to ask about a socket"
+        );
+        let (status, _) = network_test(stack, account, None, SIPRAL_HANDLE_NONE, 0, 10);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let options = options_of(&signalling_out(stack));
+        assert_eq!(
+            from_registrar(stack, &answer_sip(&options, "401 Unauthorized"), 30),
+            SipralStatus::Ok
+        );
+        let _ = poll(stack, 30);
+        let said = network_said();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].server, SipralServerReach::Answered as u32);
+        assert_eq!(said[0].server_status, 401);
+        assert_eq!(said[0].stun, SipralNetworkProbe::NotTested as u32);
+        assert_eq!(said[0].verdict, SipralNetworkVerdict::Good as u32);
+        assert!(
+            signalling_out(stack)
+                .iter()
+                .all(|(message, _)| !message.starts_with(b"OPTIONS ")),
+            "the challenge is not answered"
+        );
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
+    }
+
+    #[test]
+    fn a_network_test_rates_an_echo_call_and_hangs_it_up() {
+        use crate::media::tests::{FRAME, arrive, media_of, release, rtp};
+        use crate::network_test::{SipralNetworkProbe, SipralNetworkVerdict};
+        let mut observed = Observed::default();
+        let _ = network_said();
+        let (stack, call) = crate::call::tests::media_call_tuned(&mut observed, |config| {
+            config.event_callback = Some(listen);
+        });
+        let media = media_of(stack, call);
+        let (status, _) = network_test(stack, SIPRAL_HANDLE_NONE, None, call, 0, 2_000);
+        assert_eq!(status, SipralStatus::Ok, "{}", last_error_text());
+        let _ = poll(stack, 2_000);
+        // most of the second the echo is listened to, in twenty-millisecond
+        // frames, one of them missing
+        let mut now = 2_000_u64;
+        for sequence in 0..45_u16 {
+            now += 20;
+            if sequence == 24 {
+                continue;
+            }
+            let mut packet = rtp(sequence, u32::from(sequence) * 160);
+            let _ = arrive(media, &mut packet, crate::call::tests::PEER_MEDIA, now);
+            let mut samples = [0_i16; FRAME];
+            let mut written = 0_usize;
+            let mut source = 0_u32;
+            let _ = unsafe {
+                crate::media::sipral_media_playback(
+                    media,
+                    samples.as_mut_ptr(),
+                    samples.len(),
+                    &raw mut written,
+                    &raw mut source,
+                )
+            };
+            let _ = poll(stack, now);
+        }
+        let _ = poll(stack, now + 1_000);
+        let said = network_said();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].echo, SipralNetworkProbe::Succeeded as u32);
+        assert_eq!(said[0].call, call);
+        assert!(said[0].r_factor > 70, "{said:?}");
+        assert!(said[0].mos > 3.6, "{said:?}");
+        assert_ne!(said[0].echo_verdict, SipralNetworkVerdict::Unknown as u32);
+        assert_eq!(
+            said[0].verdict, said[0].echo_verdict,
+            "the echo is the only part"
+        );
+        assert!(
+            signalling_out(stack)
+                .iter()
+                .any(|(message, _)| message.starts_with(b"BYE ")),
+            "the echo call is hung up"
+        );
+        release(media);
+        assert_eq!(unsafe { sipral_stack_destroy(stack) }, SipralStatus::Ok);
     }
 }

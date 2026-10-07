@@ -155,6 +155,40 @@ export type NativeEvent = {
   tokenScope?: string;
   /** The authorization server a token comes from, an https URI. */
   tokenAuthzServer?: string;
+  /** The number of the network test this event is about. */
+  test?: CodegenTypes.Int32;
+  /** A network test's verdict, in lower camel case: "unknown", "good", "acceptable", "poor". */
+  verdict?: string;
+  /** Whether a STUN server answered: "notTested", "succeeded", "failed". */
+  stun?: string;
+  /** What the STUN answer says about the NAT: "unknown", "open", "portPreserved", "portChanged". */
+  nat?: string;
+  /** Whether the TURN server allocated a relay: "notTested", "succeeded", "failed". */
+  turn?: string;
+  /** What the account's server did: "notTested", "answered", "timedOut", "transportFailed". */
+  server?: string;
+  /** The status the server answered with. */
+  serverStatus?: CodegenTypes.Int32;
+  /** From the OPTIONS to its answer, in milliseconds. */
+  serverRoundTripMs?: CodegenTypes.Int32;
+  /** Whether audio came back on the echo call. */
+  echo?: string;
+  /** The echo's own verdict. */
+  echoVerdict?: string;
+  /** Lost or late on the echo call, as a percentage. */
+  lossPercent?: CodegenTypes.Double;
+  /** Interarrival jitter on the echo call, in milliseconds. */
+  jitterMs?: CodegenTypes.Double;
+  /** The round trip RTCP measured on the echo call, when it did. */
+  roundTripMs?: CodegenTypes.Int32;
+  /** G.107's R for the echo call, for concealed G.711. */
+  rFactor?: CodegenTypes.Int32;
+  /** The conversational MOS estimated from it. */
+  mos?: CodegenTypes.Double;
+  /** The socket the STUN answer was about. */
+  local?: string;
+  /** Where the STUN server saw it. */
+  mapped?: string;
 };
 
 export interface Spec extends TurboModule {
@@ -189,6 +223,13 @@ export interface Spec extends TurboModule {
   /** `sipral_audio_set_system_echo_cancellation`: the devices reopened at once with or without the platform's canceller. */
   setSystemEchoCancellation(on: boolean): Promise<void>;
   setDiagnosticTrace(on: boolean): Promise<void>;
+  /** A network test before a call; "" leaves the account or the echo call out. Resolves with the test's number. */
+  networkTest(
+    account: string,
+    echoCall: string,
+    echoMs: CodegenTypes.Double,
+    timeoutMs: CodegenTypes.Double,
+  ): Promise<CodegenTypes.Int32>;
   /** One call's own gain in one direction, "input" or "output", 1 for unity. */
   setCallGain(call: string, direction: string, gain: CodegenTypes.Double): Promise<void>;
   setCallMuted(call: string, direction: string, muted: boolean): Promise<void>;

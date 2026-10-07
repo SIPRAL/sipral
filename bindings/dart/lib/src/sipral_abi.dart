@@ -1538,6 +1538,12 @@ abstract final class SipralEventKind {
   /// with the 401 or 407 — and `sipral_account_register` registers
   /// again at once with the new token. `account` is the account.
   static const int tokenRequired = 59;
+
+  /// A network test `sipral_stack_network_test` started has every
+  /// answer it is going to get (ABI 1.2). `payload.network_test` holds
+  /// each part and the verdict; `account` is the account whose server
+  /// was probed and `call` the echo call, when the test had them.
+  static const int networkTest = 60;
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2959,6 +2965,72 @@ abstract final class SipralTokenError {
 
   /// Another code, as written in `error_code`.
   static const int other = 5;
+}
+
+/// What a network test, or one part of it, comes to. Names for
+/// `sipral_network_test_event_t::verdict` and `echo_verdict`.
+abstract final class SipralNetworkVerdict {
+  /// Nothing was tested.
+  static const int unknown = 0;
+
+  /// Calls should work and sound right.
+  static const int good = 1;
+
+  /// Calls should work, and may not everywhere or may not sound their
+  /// best.
+  static const int acceptable = 2;
+
+  /// Calls are likely to fail or to sound bad.
+  static const int poor = 3;
+}
+
+/// Whether a part of a network test was tried, and how it went. Names
+/// for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+abstract final class SipralNetworkProbe {
+  /// Not part of this test.
+  static const int notTested = 0;
+
+  /// The server answered as hoped; for the echo, audio came back and
+  /// was measured.
+  static const int succeeded = 1;
+
+  /// It did not.
+  static const int failed = 2;
+}
+
+/// What a STUN answer says about the NAT in front of this end. Names for
+/// `sipral_network_test_event_t::nat`. Approximate: one answer shows
+/// whether the address and the port were translated, and nothing about
+/// how the NAT filters what arrives (RFC 4787).
+abstract final class SipralNatKind {
+  /// No answer to read.
+  static const int unknown = 0;
+
+  /// No translation: the server saw the socket's own address.
+  static const int open = 1;
+
+  /// The address was translated and the port kept.
+  static const int portPreserved = 2;
+
+  /// The port was changed too.
+  static const int portChanged = 3;
+}
+
+/// What the account's server did with the test's `OPTIONS`. Names for
+/// `sipral_network_test_event_t::server`.
+abstract final class SipralServerReach {
+  /// Not part of this test.
+  static const int notTested = 0;
+
+  /// It answered: `server_status` with what, `server_round_trip_ms`
+  /// after how long. Any final answer is a server that is there.
+  static const int answered = 1;
+
+  /// No answer before the request, or the test, timed out.
+  static const int timedOut = 2;
+
+  /// The transport refused the request or failed under it.
+  static const int transportFailed = 3;
 }
 
 /// What a party this end holds is sent:
@@ -6579,6 +6651,107 @@ final class SipralTokenEvent extends ffi.Struct {
   external int errorCodeLen;
 }
 
+/// What a SipralEventKind.networkTest
+/// carries: every part of one test, and the verdict (ABI 1.2). The
+/// event's `account` is the account probed and its `call` the echo call,
+/// when there were any. The two addresses are `host:port`, not
+/// NUL-terminated, and the library's: valid for as long as the callback
+/// runs.
+final class SipralNetworkTestEvent extends ffi.Struct {
+  /// The number sipral_stack_network_test gave the test.
+  @ffi.Uint32()
+  external int test;
+
+  /// A SipralNetworkVerdict: the worst of the parts tested.
+  @ffi.Uint32()
+  external int verdict;
+
+  /// A SipralNetworkProbe: whether a STUN server answered.
+  @ffi.Uint32()
+  external int stun;
+
+  /// A SipralNatKind, from that answer.
+  @ffi.Uint32()
+  external int nat;
+
+  /// A SipralNetworkProbe: whether the TURN server allocated a
+  /// relay for the probe socket.
+  @ffi.Uint32()
+  external int turn;
+
+  /// A `SipralTransport`: what the TURN server was reached over, or
+  /// zero when it was not tested.
+  @ffi.Uint32()
+  external int turnProtocol;
+
+  /// A SipralServerReach.
+  @ffi.Uint32()
+  external int server;
+
+  /// The status the server answered with, or zero.
+  @ffi.Uint32()
+  external int serverStatus;
+
+  /// From sending the `OPTIONS` to its answer, in milliseconds.
+  @ffi.Uint32()
+  external int serverRoundTripMs;
+
+  /// A SipralNetworkProbe: whether audio came back on the echo call
+  /// and was measured. Failed for a call whose media never started, or
+  /// that brought nothing back.
+  @ffi.Uint32()
+  external int echo;
+
+  /// A SipralNetworkVerdict for the echo alone.
+  @ffi.Uint32()
+  external int echoVerdict;
+
+  /// Packets lost or too late to play, as a percentage of those due.
+  @ffi.Float()
+  external double lossPercent;
+
+  /// Interarrival jitter (RFC 3550 §6.4.1), in milliseconds.
+  @ffi.Float()
+  external double jitterMs;
+
+  /// Nonzero when RTCP brought a round trip back in time.
+  @ffi.Uint32()
+  external int hasRoundTrip;
+
+  /// That round trip, in milliseconds.
+  @ffi.Uint32()
+  external int roundTripMs;
+
+  /// The one-way delay the rating assumed: half the round trip and the
+  /// jitter buffer's delay, in milliseconds.
+  @ffi.Uint32()
+  external int oneWayDelayMs;
+
+  /// G.107's transmission rating R, 0 to 100, for concealed G.711.
+  @ffi.Uint32()
+  external int rFactor;
+
+  /// The conversational mean opinion score estimated from it, 1.0 to
+  /// 4.5.
+  @ffi.Float()
+  external double mos;
+
+  /// The socket the STUN answer was about: the probe socket, or the
+  /// signalling socket.
+  external ffi.Pointer<ffi.Char> local;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int localLen;
+
+  /// Where the STUN server saw it. Empty without an answer.
+  external ffi.Pointer<ffi.Char> mapped;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int mappedLen;
+}
+
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -6672,6 +6845,9 @@ final class SipralEventPayload extends ffi.Union {
 
   /// For SipralEventKind.tokenRequired.
   external SipralTokenEvent token;
+
+  /// For SipralEventKind.networkTest.
+  external SipralNetworkTestEvent networkTest;
 }
 
 /// Something the library has to tell the application.
@@ -7689,6 +7865,45 @@ final class SipralPinnedCertificate extends ffi.Struct {
   external int reserved;
 }
 
+/// What sipral_stack_network_test tests. Zero in any member but
+/// `size` leaves that part out or takes its default.
+///
+/// Set `size` to `sizeof(sipral_network_test_config_t)` before the call.
+final class SipralNetworkTestConfig extends ffi.Struct {
+  /// `sizeof` this struct, as the caller's header declares it.
+  @ffi.Size()
+  external int size;
+
+  /// The account whose server to probe, on the account's own
+  /// transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+  @ffi.Uint64()
+  external int account;
+
+  /// A UDP socket the application bound for the test, `host:port`,
+  /// asked about as `sipral_stack_nat_map` asks about a media socket;
+  /// null to ask about the signalling socket only, and to test no
+  /// relay. Not NUL-terminated.
+  external ffi.Pointer<ffi.Char> probeSocket;
+
+  /// How many bytes of it.
+  @ffi.Size()
+  external int probeSocketLen;
+
+  /// A call the application placed to an echo service, measured once
+  /// its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+  @ffi.Uint64()
+  external int echoCall;
+
+  /// How long the echo is measured. 8000 by default.
+  @ffi.Uint32()
+  external int echoMs;
+
+  /// How long the whole test may take. 30000 by default; a part that
+  /// has not answered by then counts as failed.
+  @ffi.Uint32()
+  external int timeoutMs;
+}
+
 /// Why the library could not be opened, or cannot serve this binding.
 final class SipralLoadError extends Error {
   SipralLoadError(this.message);
@@ -8170,6 +8385,7 @@ final class Sipral {
         'sipral_locate_event_t': [ffi.sizeOf<SipralLocateEvent>(), 48, 32, 32],
         'sipral_challenge_event_t': [ffi.sizeOf<SipralChallengeEvent>(), 40, 20, 20],
         'sipral_token_event_t': [ffi.sizeOf<SipralTokenEvent>(), 88, 48, 48],
+        'sipral_network_test_event_t': [ffi.sizeOf<SipralNetworkTestEvent>(), 104, 88, 88],
         'sipral_event_payload_t': [ffi.sizeOf<SipralEventPayload>(), 328, 208, 216],
         'sipral_event_t': [ffi.sizeOf<SipralEvent>(), 384, 248, 264],
         'sipral_suspending_t': [ffi.sizeOf<SipralSuspending>(), 32, 16, 16],
@@ -8194,6 +8410,7 @@ final class Sipral {
         'sipral_local_conference_info_t': [ffi.sizeOf<SipralLocalConferenceInfo>(), 56, 48, 48],
         'sipral_local_conference_member_t': [ffi.sizeOf<SipralLocalConferenceMember>(), 40, 36, 40],
         'sipral_pinned_certificate_t': [ffi.sizeOf<SipralPinnedCertificate>(), 40, 36, 40],
+        'sipral_network_test_config_t': [ffi.sizeOf<SipralNetworkTestConfig>(), 48, 36, 40],
       };
 
   /// Copy the calling thread's last error message into `buffer`.
@@ -8853,6 +9070,28 @@ final class Sipral {
   late final int Function(int stack, int account, ffi.Pointer<ffi.Char> token, int tokenLen) accountSetAccessToken = library.lookupFunction<
       ffi.Int32 Function(SipralHandle stack, SipralHandle account, ffi.Pointer<ffi.Char> token, ffi.Size tokenLen),
       int Function(int stack, int account, ffi.Pointer<ffi.Char> token, int tokenLen)>('sipral_account_set_access_token');
+
+  /// Test the network before a call: STUN, TURN, the account's server and,
+  /// with an echo call, the audio path, as `config` says (ABI 1.2). The
+  /// answer arrives from a later `sipral_stack_poll` as one
+  /// `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+  /// has answered or `timeout_ms` has passed. Tests may run side by side.
+  ///
+  /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+  /// no STUN server, and for an account whose server has not been located
+  /// yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+  /// an address or is a signalling socket of the stack's own; a handle
+  /// that names no account or call of this stack is refused as handles are.
+  /// Nothing is started when anything is refused.
+  ///
+  /// Safety
+  ///
+  /// `config` must point at a `sipral_network_test_config_t` whose `size`
+  /// member says how long it is, with `probe_socket` readable for
+  /// `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+  late final int Function(int stack, ffi.Pointer<SipralNetworkTestConfig> config, int nowMs, ffi.Pointer<ffi.Uint32> outTest) stackNetworkTest = library.lookupFunction<
+      ffi.Int32 Function(SipralHandle stack, ffi.Pointer<SipralNetworkTestConfig> config, ffi.Uint64 nowMs, ffi.Pointer<ffi.Uint32> outTest),
+      int Function(int stack, ffi.Pointer<SipralNetworkTestConfig> config, int nowMs, ffi.Pointer<ffi.Uint32> outTest)>('sipral_stack_network_test');
 
   /// Place a call, and write its handle to `out_call`.
   ///

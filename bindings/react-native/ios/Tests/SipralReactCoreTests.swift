@@ -414,6 +414,24 @@ final class SipralReactCoreTests: XCTestCase {
         XCTAssertEqual(token["tokenAuthzServer"] as? String, authz)
         XCTAssertEqual(token["tokenScope"] as? String, scope)
         XCTAssertEqual(token["tokenRealm"] as? String, "")
+
+        var tested = sipral_event_t()
+        tested.size = MemoryLayout<sipral_event_t>.size
+        tested.kind = SipralEventKind.networkTest.rawValue
+        tested.payload.network_test.test = 4
+        tested.payload.network_test.verdict = SipralNetworkVerdict.acceptable.rawValue
+        tested.payload.network_test.stun = SipralNetworkProbe.succeeded.rawValue
+        tested.payload.network_test.nat = SipralNatKind.portChanged.rawValue
+        tested.payload.network_test.server = SipralServerReach.answered.rawValue
+        tested.payload.network_test.server_status = 200
+        let found = SipralReactCore.flatten(SipralEventDecoder.decode(tested))
+        XCTAssertEqual(found["kind"] as? String, "networkTest")
+        XCTAssertEqual(found["test"] as? Int, 4)
+        XCTAssertEqual(found["verdict"] as? String, "acceptable")
+        XCTAssertEqual(found["stun"] as? String, "succeeded")
+        XCTAssertEqual(found["nat"] as? String, "portChanged")
+        XCTAssertEqual(found["server"] as? String, "answered")
+        XCTAssertEqual(found["serverStatus"] as? Int, 200)
     }
 
     /// A call's own gain and mute through the core, on a stack in device mode

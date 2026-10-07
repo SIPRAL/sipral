@@ -83,6 +83,10 @@ export class FakeNative implements Spec {
   setAccessToken(...args: Parameters<Spec['setAccessToken']>) {
     return this.settle('setAccessToken', args, undefined);
   }
+
+  networkTest(...args: Parameters<Spec['networkTest']>) {
+    return this.settle('networkTest', args, 4);
+  }
   removeAccount(...args: Parameters<Spec['removeAccount']>) {
     return this.settle('removeAccount', args, undefined);
   }

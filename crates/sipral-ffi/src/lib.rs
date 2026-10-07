@@ -89,6 +89,7 @@ pub mod media;
 pub mod message;
 mod names;
 pub mod nat;
+pub mod network_test;
 pub mod pin;
 pub mod ports;
 pub mod presence;

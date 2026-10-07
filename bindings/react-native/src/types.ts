@@ -81,6 +81,18 @@ export type TokenError =
   | 'invalidScope'
   | 'other';
 
+/** `sipral_network_verdict_t`: what a network test, or one part of it, came to. */
+export type NetworkVerdict = 'unknown' | 'good' | 'acceptable' | 'poor';
+
+/** `sipral_network_probe_t`: whether one part of a network test was tried, and how it went. */
+export type NetworkProbe = 'notTested' | 'succeeded' | 'failed';
+
+/** `sipral_nat_kind_t`: what a STUN answer says about the NAT in front of this end. */
+export type NatKind = 'unknown' | 'open' | 'portPreserved' | 'portChanged';
+
+/** `sipral_server_reach_t`: what the account's server did with a network test's OPTIONS. */
+export type ServerReach = 'notTested' | 'answered' | 'timedOut' | 'transportFailed';
+
 export interface OpenOptions {
   /**
    * The phone's own address on the network the server is reached over: the

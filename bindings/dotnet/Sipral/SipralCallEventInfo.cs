@@ -480,6 +480,31 @@ public sealed record SipralChallengeEventInfo(
 /// <see cref="SipralTokenError.InvalidToken"/> for a token expired or
 /// revoked; <c>Proxy</c> is whether a proxy asked (407); <c>Server</c> is
 /// where the challenged request went (<c>host:port</c>).</summary>
+/// <summary>What <see cref="SipralEventKind.NetworkTest"/> carries: every
+/// part of one test <see cref="SipralStack.NetworkTest"/> started, and the
+/// verdict, the worst of the parts tested. <c>RoundTripMs</c> is
+/// <see langword="null"/> when RTCP brought none back; <c>Local</c> is the
+/// socket the STUN answer was about and <c>Mapped</c> where the server saw
+/// it.</summary>
+public sealed record SipralNetworkTestEventInfo(
+    uint Test,
+    SipralNetworkVerdict Verdict,
+    SipralNetworkProbe Stun,
+    SipralNatKind Nat,
+    SipralNetworkProbe Turn,
+    SipralServerReach Server,
+    uint ServerStatus,
+    uint ServerRoundTripMs,
+    SipralNetworkProbe Echo,
+    SipralNetworkVerdict EchoVerdict,
+    float LossPercent,
+    float JitterMs,
+    uint? RoundTripMs,
+    uint RFactor,
+    float Mos,
+    string? Local,
+    string? Mapped);
+
 public sealed record SipralTokenEventInfo(
     SipralTokenError Error,
     string? ErrorCode,

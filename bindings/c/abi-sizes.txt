@@ -30,6 +30,7 @@ sipral_local_conference_member_t reserved 40 40 36 36 40 40
 sipral_log_record_t - - 64 - 40 - 48
 sipral_media_info_t reserved 104 104 92 92 96 96
 sipral_media_packet_t reserved 64 64 36 36 36 36
+sipral_network_test_config_t timeout_ms 48 48 36 36 40 40
 sipral_path_candidate_t remote_len 88 88 60 60 64 64
 sipral_pinned_certificate_t reserved 40 40 36 36 40 40
 sipral_poll_result_t next_poll_in_ms 48 48 28 28 32 32

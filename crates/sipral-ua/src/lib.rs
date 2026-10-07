@@ -91,6 +91,7 @@ mod parked;
 /// RFC 4480 — under their own path because `Tuple`, `Note` and `Contact`
 /// are PIDF's vocabulary, not this crate's.
 pub mod presence;
+mod probe;
 mod publish;
 mod publishing;
 mod quality_report;
@@ -157,6 +158,7 @@ pub use message::{MAX_UNSAFE_BODY_BYTES, MessageHandle};
 pub use mwi::{MessageClass, MessageSummary, MessageSummaryError};
 pub use oversize::STREAM_WAIT;
 pub use presence::{Presence, PresenceError};
+pub use probe::{ProbeHandle, ProbeOutcome};
 pub use publish::{
     Publication, PublishError, PublishEvent, PublishFailure, PublishKind, PublishRequest,
 };

@@ -1256,6 +1256,32 @@ public final class SipralStack: @unchecked Sendable {
         natQueue.sync { currentStunServer = servers.first }
     }
 
+    /// `sipral_stack_network_test`: test the network before a call without
+    /// placing one of its own, and return the test's number. What it found
+    /// arrives as `SipralEventKind.networkTest` (`SipralEvent.networkTestData`).
+    /// `account` has its server asked with an `OPTIONS` on its own transport;
+    /// on a stack with a STUN server, the answer the signalling socket was
+    /// last given stands for the STUN part. `echoCall` is a call this stack
+    /// placed to an echo service: its audio is measured for `echoMs` (8000 by
+    /// default) once its media starts, and the test hangs it up. A part that
+    /// has not answered within `timeoutMs` (30000 by default) counts as
+    /// failed.
+    public func networkTest(
+        account: Account? = nil,
+        echoCall: Call? = nil,
+        echoMs: UInt32 = 0,
+        timeoutMs: UInt32 = 0
+    ) throws -> UInt32 {
+        var config = sipral_network_test_config_t.sized()
+        config.account = account?.handle ?? Sipral.handleNone
+        config.echo_call = echoCall?.handle ?? Sipral.handleNone
+        config.echo_ms = echoMs
+        config.timeout_ms = timeoutMs
+        return try retryingBusy {
+            try Sipral.stackNetworkTest(stack: handle, config: config, nowMs: nowMs())
+        }
+    }
+
     /// `sipral_stack_stir`: verify the callers of the calls this stack's
     /// accounts receive against `anchors` (PEM or DER certificates, the
     /// STI-PA's roots in a SHAKEN deployment) from now on (RFC 8224),

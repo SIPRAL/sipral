@@ -24,6 +24,10 @@ import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
 import org.sipral.SipralException
 import org.sipral.SipralHeldAudio
+import org.sipral.SipralNatKind
+import org.sipral.SipralNetworkProbe
+import org.sipral.SipralNetworkVerdict
+import org.sipral.SipralServerReach
 import org.sipral.SipralStatus
 import org.sipral.SipralToggle
 import org.sipral.SipralTokenError
@@ -32,6 +36,7 @@ internal suspend fun challengeChecks(): String =
     listOf(
         aDeclinedChallengeIsReadWithItsRealms(),
         aTokenRequiredIsReadWithWhereATokenComesFrom(),
+        aNetworkTestIsReadWithItsPartsAndItsVerdict(),
         anAccessTokenThatIsNotOneIsRefused(),
         theRealmsReachTheLibraryOnePerLine(),
         aHeldPartyHearsSilenceUnlessTheClientSaysTheApplication(),
@@ -101,6 +106,54 @@ private fun aTokenRequiredIsReadWithWhereATokenComesFrom(): String {
     )
     assertNull(tokenRequiredOf(other))
     return "a token required read with where a token comes from"
+}
+
+private fun aNetworkTestIsReadWithItsPartsAndItsVerdict(): String {
+    val event = SipralEvent(
+        size = 0,
+        stack = 0,
+        kind = SipralEventKind.NETWORK_TEST.value.toLong(),
+        account = 7,
+        call = 0,
+        message = null,
+        payloadNetworkTestLocal = "192.0.2.10:40000",
+        payloadNetworkTestMapped = "203.0.113.7:41002",
+        payloadNetworkTestNumbers = longArrayOf(
+            4,
+            SipralNetworkVerdict.ACCEPTABLE.value.toLong(),
+            SipralNetworkProbe.SUCCEEDED.value.toLong(),
+            SipralNatKind.PORT_CHANGED.value.toLong(),
+            SipralNetworkProbe.FAILED.value.toLong(),
+            0,
+            SipralServerReach.ANSWERED.value.toLong(),
+            200,
+            37,
+            SipralNetworkProbe.NOT_TESTED.value.toLong(),
+            SipralNetworkVerdict.UNKNOWN.value.toLong(),
+            0.0.toRawBits(),
+            0.0.toRawBits(),
+            1,
+            80,
+            0,
+            0,
+            4.25.toRawBits(),
+        ),
+    )
+    val told = assertNotNull(networkTestOf(event))
+    assertEquals(4L, told.test)
+    assertEquals(SipralNetworkVerdict.ACCEPTABLE, told.verdict)
+    assertEquals(SipralNetworkProbe.SUCCEEDED, told.stun)
+    assertEquals(SipralNatKind.PORT_CHANGED, told.nat)
+    assertEquals(SipralNetworkProbe.FAILED, told.turn)
+    assertEquals(SipralServerReach.ANSWERED, told.server)
+    assertEquals(200L, told.serverStatus)
+    assertEquals(37L, told.serverRoundTripMs)
+    assertEquals(80L, told.roundTripMs)
+    assertEquals(4.25, told.mos)
+    assertEquals("192.0.2.10:40000", told.local)
+    assertEquals("203.0.113.7:41002", told.mapped)
+    assertNull(networkTestOf(SipralEvent(size = 0, stack = 0, kind = SipralEventKind.TOKEN_REQUIRED.value.toLong(), account = 0, call = 0, message = null)))
+    return "a network test read with its parts and its verdict"
 }
 
 private fun anAccessTokenThatIsNotOneIsRefused(): String {

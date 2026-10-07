@@ -123,6 +123,45 @@ final class EventDecodingTests: XCTestCase {
         XCTAssertEqual(told.realms, ["sbc.example", "callee, inc."])
     }
 
+    /// A network test's event carries every part and the verdict.
+    func testANetworkTestCarriesItsPartsAndItsVerdict() throws {
+        let local = "192.0.2.10:40000"
+        let mapped = "203.0.113.7:41002"
+        let told = try local.withCString { localText in
+            try mapped.withCString { mappedText in
+                var event = raw(.networkTest)
+                event.payload.network_test.test = 4
+                event.payload.network_test.verdict = SipralNetworkVerdict.acceptable.rawValue
+                event.payload.network_test.stun = SipralNetworkProbe.succeeded.rawValue
+                event.payload.network_test.nat = SipralNatKind.portChanged.rawValue
+                event.payload.network_test.turn = SipralNetworkProbe.failed.rawValue
+                event.payload.network_test.server = SipralServerReach.answered.rawValue
+                event.payload.network_test.server_status = 200
+                event.payload.network_test.server_round_trip_ms = 37
+                event.payload.network_test.has_round_trip = 1
+                event.payload.network_test.round_trip_ms = 80
+                event.payload.network_test.mos = 4.2
+                event.payload.network_test.local = localText
+                event.payload.network_test.local_len = local.utf8.count
+                event.payload.network_test.mapped = mappedText
+                event.payload.network_test.mapped_len = mapped.utf8.count
+                return try XCTUnwrap(SipralEventDecoder.decode(event).networkTestData)
+            }
+        }
+        XCTAssertEqual(told.test, 4)
+        XCTAssertEqual(told.verdict, .acceptable)
+        XCTAssertEqual(told.stun, .succeeded)
+        XCTAssertEqual(told.nat, .portChanged)
+        XCTAssertEqual(told.turn, .failed)
+        XCTAssertEqual(told.server, .answered)
+        XCTAssertEqual(told.serverStatus, 200)
+        XCTAssertEqual(told.serverRoundTripMs, 37)
+        XCTAssertEqual(told.roundTripMs, 80)
+        XCTAssertEqual(told.mos, 4.2, accuracy: 0.001)
+        XCTAssertEqual(told.local, local)
+        XCTAssertEqual(told.mapped, mapped)
+    }
+
     /// An account's server asking for an OAuth access token says where one
     /// comes from, for what scope, and why the last was refused.
     func testATokenRequiredCarriesTheAuthorizationServerAndTheError() throws {

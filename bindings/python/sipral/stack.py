@@ -535,6 +535,8 @@ class Stack:
         #: this and the two dicts below.
         self._nat_lock = threading.Lock()
         self._stun_sockets: dict[str, socket.socket] = {}
+        #: The probe socket of every network test under way, by its number.
+        self._probes: dict[int, tuple[str, socket.socket]] = {}
         #: Per socket, one `threading.Event` for `SIPRAL_EVENT_KIND_NAT_MAPPING`
         #: and one for `SIPRAL_EVENT_KIND_NAT_RELAY` -- a stack built with
         #: `turn_server` waits out both before a call may be placed or
@@ -1914,6 +1916,8 @@ class Stack:
             self._turn_asked.append(
                 (fields["state"], fields["local"], fields["server"], fields["protocol"])
             )
+        if event.kind == lib.SIPRAL_EVENT_KIND_NETWORK_TEST:
+            self._network_tested(event.fields["test"])
         if event.kind in (lib.SIPRAL_EVENT_KIND_NAT_MAPPING, lib.SIPRAL_EVENT_KIND_NAT_RELAY):
             local = event.fields.get("local")
             if local:
@@ -1943,6 +1947,79 @@ class Stack:
             loop.call_soon_threadsafe(self.events.put_nowait, event)
         else:
             self.events.put_nowait(event)
+
+    def network_test(
+        self,
+        account: Account | None = None,
+        *,
+        probe: bool = True,
+        media_host: str | None = None,
+        echo_call: Call | None = None,
+        echo_ms: int = 0,
+        timeout_ms: int = 0,
+    ) -> int:
+        """`sipral_stack_network_test`: test the network before a call,
+        without placing one of its own. Returns the test's number; what it
+        found arrives as `SIPRAL_EVENT_KIND_NETWORK_TEST` on :attr:`events`,
+        whose ``fields["test"]`` is that number and ``fields["verdict"]`` a
+        :class:`sipral.enums.NetworkVerdict`.
+
+        ``account`` has its server asked with an ``OPTIONS`` on its own
+        transport. With ``probe`` on a stack built with ``nat=Nat.STUN``, a
+        socket is opened for the test, asked about as a call's would be --
+        STUN, and a relay from the TURN server when there is one -- and
+        closed when the test ends. ``echo_call`` is a call this stack placed
+        to an echo service: its audio is measured for ``echo_ms`` (8000 by
+        default) once its media starts, and the test hangs it up. A part
+        that has not answered within ``timeout_ms`` (30000 by default)
+        counts as failed.
+        """
+        probe_socket = None
+        probe_address = ""
+        if probe and self._nat == lib.SIPRAL_NAT_STUN:
+            probe_socket = self.open_media_socket(self._media_host(media_host, account, None))
+            probe_address = format_address(*probe_socket.getsockname())
+            with self._nat_lock:
+                self._stun_sockets[probe_address] = probe_socket
+            self._selector.register(probe_socket, selectors.EVENT_READ, data=("stun", probe_address))
+        address_bytes = probe_address.encode("utf-8")
+        address_buf = ffi.new("char[]", address_bytes) if address_bytes else ffi.NULL
+        config = ffi.new("sipral_network_test_config_t *")
+        config.size = ffi.sizeof("sipral_network_test_config_t")
+        config.account = account.handle if account is not None else lib.SIPRAL_HANDLE_NONE
+        config.probe_socket = address_buf
+        config.probe_socket_len = len(address_bytes)
+        config.echo_call = echo_call.handle if echo_call is not None else lib.SIPRAL_HANDLE_NONE
+        config.echo_ms = echo_ms
+        config.timeout_ms = timeout_ms
+        out_test = ffi.new("uint32_t *")
+        try:
+            _retry(
+                lambda: lib.sipral_stack_network_test(self.handle, config, self.now_ms(), out_test),
+                "sipral_stack_network_test",
+            )
+        except Exception:
+            if probe_socket is not None:
+                self._release_stun_socket(probe_address)
+                self._close_socket(probe_socket)
+            raise
+        test = int(out_test[0])
+        if probe_socket is not None:
+            with self._nat_lock:
+                self._probes[test] = (probe_address, probe_socket)
+        return test
+
+    def _network_tested(self, test: int) -> None:
+        """A test is over: the Refresh that gives its relay back goes out
+        from the probe socket before the socket is closed."""
+        with self._nat_lock:
+            probe = self._probes.pop(test, None)
+        if probe is None:
+            return
+        address, sock = probe
+        self._drain_stun()
+        self._release_stun_socket(address)
+        self._close_socket(sock)
 
     def _on_audio_transmit(self, raw, _user_data: object) -> None:
         """`audio_transmit_callback`, in device mode: one packet the engine

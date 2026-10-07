@@ -78,6 +78,12 @@ the application trusts, fetch the token, and hand it over with
 a token the server called `TokenError.INVALID_TOKEN` raises the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+Before a call, `stack.network_test(account, echo_call=call)` asks the
+STUN and TURN servers (from a socket it opens and closes itself), the
+account's server and, given a call placed to an echo service, the audio
+that comes back; `SIPRAL_EVENT_KIND_NETWORK_TEST` carries every part and
+`fields["verdict"]`, a `NetworkVerdict` (`docs/25-network-test.md`).
+
 `stack.ring_call(event)` sends a 180 for an incoming call (`media=True`, a 183
 with this stack's audio) and `stack.answer_call(event)` answers it later;
 `stack.place_call(..., headers={"X-Ticket": "42"})` puts fields on the

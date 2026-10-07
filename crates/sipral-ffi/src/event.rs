@@ -51,6 +51,7 @@ use crate::names::Names;
 use crate::nat::{
     SipralNatEvent, SipralNatRelayEvent, SipralStunServerEvent, SipralTurnStreamEvent,
 };
+use crate::network_test::SipralNetworkTestEvent;
 use crate::presence::SipralPresenceEvent;
 use crate::realtime_text::SipralTextEvent;
 use crate::security::{
@@ -765,6 +766,11 @@ event_kinds! {
         /// with the 401 or 407 — and `sipral_account_register` registers
         /// again at once with the new token. `account` is the account.
         59 = TokenRequired, c"token required";
+        /// A network test `sipral_stack_network_test` started has every
+        /// answer it is going to get (ABI 1.2). `payload.network_test` holds
+        /// each part and the verdict; `account` is the account whose server
+        /// was probed and `call` the echo call, when the test had them.
+        60 = NetworkTest, c"network test";
     }
 }
 
@@ -845,6 +851,7 @@ pub const EVENT_KIND_ARMS: &[(SipralEventKind, &str)] = &[
     (SipralEventKind::LocateFailed, "locate"),
     (SipralEventKind::ChallengeDeclined, "challenge"),
     (SipralEventKind::TokenRequired, "token"),
+    (SipralEventKind::NetworkTest, "network_test"),
 ];
 
 // every live kind is here exactly once, in `SipralEventKind::ALL`'s own
@@ -1886,6 +1893,8 @@ record! {
         pub challenge: SipralChallengeEvent,
         /// For [`SipralEventKind::TokenRequired`].
         pub token: SipralTokenEvent,
+        /// For [`SipralEventKind::NetworkTest`].
+        pub network_test: SipralNetworkTestEvent,
     }
 }
 
@@ -2104,6 +2113,16 @@ pub(crate) fn transport_failed(
         stack,
         SipralEventKind::TransportFailed,
         payload!(transport_failed: payload),
+    )
+}
+
+/// A network test finished, as C reads it. The pointers in `payload` point
+/// into text the caller keeps beside the event.
+pub(crate) fn network_tested(stack: SipralHandle, payload: SipralNetworkTestEvent) -> SipralEvent {
+    SipralEvent::of(
+        stack,
+        SipralEventKind::NetworkTest,
+        payload!(network_test: payload),
     )
 }
 
@@ -4154,7 +4173,8 @@ mod tests {
         assert_eq!(SipralEventKind::LocateFailed as u32, 57);
         assert_eq!(SipralEventKind::ChallengeDeclined as u32, 58);
         assert_eq!(SipralEventKind::TokenRequired as u32, 59);
-        assert_eq!(SipralEventKind::ALL.len(), 57, "and there are no others");
+        assert_eq!(SipralEventKind::NetworkTest as u32, 60);
+        assert_eq!(SipralEventKind::ALL.len(), 58, "and there are no others");
     }
 
     /// The numbers this DTMF surface and the media one before it took were
@@ -4267,7 +4287,8 @@ mod tests {
             "58 is live"
         );
         assert_eq!(name(59).as_deref(), Some("token required"), "59 is live");
-        assert_eq!(name(60), None, "past the last kind");
+        assert_eq!(name(60).as_deref(), Some("network test"), "60 is live");
+        assert_eq!(name(61), None, "past the last kind");
         assert_eq!(name(0), None, "no kind is zero");
         assert_eq!(name(u32::MAX), None);
     }

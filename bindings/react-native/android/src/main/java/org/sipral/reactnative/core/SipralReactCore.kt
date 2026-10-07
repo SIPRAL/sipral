@@ -40,6 +40,7 @@ import org.sipral.idiomatic.SipralTlsTrust
 import org.sipral.idiomatic.digitOf
 import org.sipral.idiomatic.declinedChallengeOf
 import org.sipral.idiomatic.locateOf
+import org.sipral.idiomatic.networkTestOf
 import org.sipral.idiomatic.tokenRequiredOf
 import org.sipral.idiomatic.transferOf
 
@@ -315,6 +316,18 @@ class SipralReactCore(
 
     fun setDiagnosticTrace(on: Boolean) = guarded { open().setDiagnosticTrace(on) }
 
+    /** A network test before a call: [account]'s server, and [echoCall]
+     * measured and hung up, either "" to leave it out. Returns the test's
+     * number, which its `networkTest` event carries. */
+    fun networkTest(account: String, echoCall: String, echoMs: Int, timeoutMs: Int): Int = guarded {
+        open().networkTest(
+            account.takeIf { it.isNotEmpty() }?.let { accountOf(it) },
+            echoCall.takeIf { it.isNotEmpty() }?.let { callOf(it) },
+            echoMs.toLong(),
+            timeoutMs.toLong(),
+        ).toInt()
+    }
+
     /** One call's own gain in one direction, "input" or "output". */
     fun setCallGain(call: String, direction: String, gain: Double) = guarded {
         devices().setGain(callOf(call), direction(direction), gain)
@@ -506,6 +519,26 @@ class SipralReactCore(
                     challenge.refusal?.let { flat["challengeRefusal"] = camel(it.name) }
                     challenge.server?.let { flat["challengeServer"] = it }
                     flat["challengeRealms"] = challenge.realms.joinToString("\n")
+                }
+                networkTestOf(event) != null -> {
+                    val found = networkTestOf(event)!!
+                    flat["test"] = found.test.toInt()
+                    found.verdict?.let { flat["verdict"] = camel(it.name) }
+                    found.stun?.let { flat["stun"] = camel(it.name) }
+                    found.nat?.let { flat["nat"] = camel(it.name) }
+                    found.turn?.let { flat["turn"] = camel(it.name) }
+                    found.server?.let { flat["server"] = camel(it.name) }
+                    flat["serverStatus"] = found.serverStatus.toInt()
+                    flat["serverRoundTripMs"] = found.serverRoundTripMs.toInt()
+                    found.echo?.let { flat["echo"] = camel(it.name) }
+                    found.echoVerdict?.let { flat["echoVerdict"] = camel(it.name) }
+                    flat["lossPercent"] = found.lossPercent
+                    flat["jitterMs"] = found.jitterMs
+                    found.roundTripMs?.let { flat["roundTripMs"] = it.toInt() }
+                    flat["rFactor"] = found.rFactor.toInt()
+                    flat["mos"] = found.mos
+                    found.local?.let { flat["local"] = it }
+                    found.mapped?.let { flat["mapped"] = it }
                 }
                 tokenRequiredOf(event) != null -> {
                     val token = tokenRequiredOf(event)!!

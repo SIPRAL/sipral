@@ -113,6 +113,11 @@ over with `account.SetAccessToken(token)`; `Register()` again registers at
 once, and a token the server called `InvalidToken` raises the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+Before a call, `stack.NetworkTest(account, echoCall)` asks the account's
+server and, given a call placed to an echo service, rates the audio that
+comes back; `SipralEventKind.NetworkTest` (`SipralEventArgs.NetworkTest`)
+carries every part and the verdict (`docs/25-network-test.md`).
+
 A `TransferRequested` can be taken with a call the application placed itself,
 `stack.AcceptTransferPlaced(args, call)`: the far end hears that call's
 progress. A transfer the far end refuses ends `WaitForTransferAsync` with

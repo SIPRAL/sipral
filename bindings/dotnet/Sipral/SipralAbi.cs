@@ -1692,6 +1692,13 @@ public enum SipralEventKind : uint
     /// again at once with the new token. `account` is the account.
     /// </summary>
     TokenRequired = 59,
+    /// <summary>
+    /// A network test `sipral_stack_network_test` started has every
+    /// answer it is going to get (ABI 1.2). `payload.network_test` holds
+    /// each part and the verdict; `account` is the account whose server
+    /// was probed and `call` the echo call, when the test had them.
+    /// </summary>
+    NetworkTest = 60,
 }
 
 /// <summary>
@@ -3682,6 +3689,103 @@ public enum SipralTokenError : uint
     /// Another code, as written in `error_code`.
     /// </summary>
     Other = 5,
+}
+
+/// <summary>
+/// What a network test, or one part of it, comes to. Names for
+/// `sipral_network_test_event_t::verdict` and `echo_verdict`.
+/// </summary>
+public enum SipralNetworkVerdict : uint
+{
+    /// <summary>
+    /// Nothing was tested.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// Calls should work and sound right.
+    /// </summary>
+    Good = 1,
+    /// <summary>
+    /// Calls should work, and may not everywhere or may not sound their
+    /// best.
+    /// </summary>
+    Acceptable = 2,
+    /// <summary>
+    /// Calls are likely to fail or to sound bad.
+    /// </summary>
+    Poor = 3,
+}
+
+/// <summary>
+/// Whether a part of a network test was tried, and how it went. Names
+/// for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+/// </summary>
+public enum SipralNetworkProbe : uint
+{
+    /// <summary>
+    /// Not part of this test.
+    /// </summary>
+    NotTested = 0,
+    /// <summary>
+    /// The server answered as hoped; for the echo, audio came back and
+    /// was measured.
+    /// </summary>
+    Succeeded = 1,
+    /// <summary>
+    /// It did not.
+    /// </summary>
+    Failed = 2,
+}
+
+/// <summary>
+/// What a STUN answer says about the NAT in front of this end. Names for
+/// `sipral_network_test_event_t::nat`. Approximate: one answer shows
+/// whether the address and the port were translated, and nothing about
+/// how the NAT filters what arrives (RFC 4787).
+/// </summary>
+public enum SipralNatKind : uint
+{
+    /// <summary>
+    /// No answer to read.
+    /// </summary>
+    Unknown = 0,
+    /// <summary>
+    /// No translation: the server saw the socket's own address.
+    /// </summary>
+    Open = 1,
+    /// <summary>
+    /// The address was translated and the port kept.
+    /// </summary>
+    PortPreserved = 2,
+    /// <summary>
+    /// The port was changed too.
+    /// </summary>
+    PortChanged = 3,
+}
+
+/// <summary>
+/// What the account's server did with the test's `OPTIONS`. Names for
+/// `sipral_network_test_event_t::server`.
+/// </summary>
+public enum SipralServerReach : uint
+{
+    /// <summary>
+    /// Not part of this test.
+    /// </summary>
+    NotTested = 0,
+    /// <summary>
+    /// It answered: `server_status` with what, `server_round_trip_ms`
+    /// after how long. Any final answer is a server that is there.
+    /// </summary>
+    Answered = 1,
+    /// <summary>
+    /// No answer before the request, or the test, timed out.
+    /// </summary>
+    TimedOut = 2,
+    /// <summary>
+    /// The transport refused the request or failed under it.
+    /// </summary>
+    TransportFailed = 3,
 }
 
 /// <summary>
@@ -7901,6 +8005,114 @@ public struct SipralTokenEvent
 }
 
 /// <summary>
+/// What a SipralEventKind.NetworkTest
+/// carries: every part of one test, and the verdict (ABI 1.2). The
+/// event's `account` is the account probed and its `call` the echo call,
+/// when there were any. The two addresses are `host:port`, not
+/// NUL-terminated, and the library's: valid for as long as the callback
+/// runs.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralNetworkTestEvent
+{
+    /// <summary>
+    /// The number sipral_stack_network_test gave the test.
+    /// </summary>
+    public uint Test;
+    /// <summary>
+    /// A SipralNetworkVerdict: the worst of the parts tested.
+    /// </summary>
+    public uint Verdict;
+    /// <summary>
+    /// A SipralNetworkProbe: whether a STUN server answered.
+    /// </summary>
+    public uint Stun;
+    /// <summary>
+    /// A SipralNatKind, from that answer.
+    /// </summary>
+    public uint Nat;
+    /// <summary>
+    /// A SipralNetworkProbe: whether the TURN server allocated a
+    /// relay for the probe socket.
+    /// </summary>
+    public uint Turn;
+    /// <summary>
+    /// A `SipralTransport`: what the TURN server was reached over, or
+    /// zero when it was not tested.
+    /// </summary>
+    public uint TurnProtocol;
+    /// <summary>
+    /// A SipralServerReach.
+    /// </summary>
+    public uint Server;
+    /// <summary>
+    /// The status the server answered with, or zero.
+    /// </summary>
+    public uint ServerStatus;
+    /// <summary>
+    /// From sending the `OPTIONS` to its answer, in milliseconds.
+    /// </summary>
+    public uint ServerRoundTripMs;
+    /// <summary>
+    /// A SipralNetworkProbe: whether audio came back on the echo call
+    /// and was measured. Failed for a call whose media never started, or
+    /// that brought nothing back.
+    /// </summary>
+    public uint Echo;
+    /// <summary>
+    /// A SipralNetworkVerdict for the echo alone.
+    /// </summary>
+    public uint EchoVerdict;
+    /// <summary>
+    /// Packets lost or too late to play, as a percentage of those due.
+    /// </summary>
+    public float LossPercent;
+    /// <summary>
+    /// Interarrival jitter (RFC 3550 §6.4.1), in milliseconds.
+    /// </summary>
+    public float JitterMs;
+    /// <summary>
+    /// Nonzero when RTCP brought a round trip back in time.
+    /// </summary>
+    public uint HasRoundTrip;
+    /// <summary>
+    /// That round trip, in milliseconds.
+    /// </summary>
+    public uint RoundTripMs;
+    /// <summary>
+    /// The one-way delay the rating assumed: half the round trip and the
+    /// jitter buffer's delay, in milliseconds.
+    /// </summary>
+    public uint OneWayDelayMs;
+    /// <summary>
+    /// G.107's transmission rating R, 0 to 100, for concealed G.711.
+    /// </summary>
+    public uint RFactor;
+    /// <summary>
+    /// The conversational mean opinion score estimated from it, 1.0 to
+    /// 4.5.
+    /// </summary>
+    public float Mos;
+    /// <summary>
+    /// The socket the STUN answer was about: the probe socket, or the
+    /// signalling socket.
+    /// </summary>
+    public IntPtr Local;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint LocalLen;
+    /// <summary>
+    /// Where the STUN server saw it. Empty without an answer.
+    /// </summary>
+    public IntPtr Mapped;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint MappedLen;
+}
+
+/// <summary>
 /// The arm of an event that its kind names.
 ///
 /// The whole union is zeroed before that one arm is written, so every
@@ -8050,6 +8262,11 @@ public struct SipralEventPayload
     /// </summary>
     [FieldOffset(0)]
     public SipralTokenEvent Token;
+    /// <summary>
+    /// For SipralEventKind.NetworkTest.
+    /// </summary>
+    [FieldOffset(0)]
+    public SipralNetworkTestEvent NetworkTest;
 }
 
 /// <summary>
@@ -9408,6 +9625,60 @@ public struct SipralPinnedCertificate
 }
 
 /// <summary>
+/// What sipral_stack_network_test tests. Zero in any member but
+/// `size` leaves that part out or takes its default.
+///
+/// Set `size` to `sizeof(sipral_network_test_config_t)` before the call.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct SipralNetworkTestConfig
+{
+    /// <summary>
+    /// `sizeof` this struct, as the caller's header declares it.
+    /// </summary>
+    public nuint Size;
+    /// <summary>
+    /// The account whose server to probe, on the account's own
+    /// transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+    /// </summary>
+    public ulong Account;
+    /// <summary>
+    /// A UDP socket the application bound for the test, `host:port`,
+    /// asked about as `sipral_stack_nat_map` asks about a media socket;
+    /// null to ask about the signalling socket only, and to test no
+    /// relay. Not NUL-terminated.
+    /// </summary>
+    public IntPtr ProbeSocket;
+    /// <summary>
+    /// How many bytes of it.
+    /// </summary>
+    public nuint ProbeSocketLen;
+    /// <summary>
+    /// A call the application placed to an echo service, measured once
+    /// its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+    /// </summary>
+    public ulong EchoCall;
+    /// <summary>
+    /// How long the echo is measured. 8000 by default.
+    /// </summary>
+    public uint EchoMs;
+    /// <summary>
+    /// How long the whole test may take. 30000 by default; a part that
+    /// has not answered by then counts as failed.
+    /// </summary>
+    public uint TimeoutMs;
+
+    /// <summary>A zeroed one with its size filled in, which is
+    /// what every struct here has to be handed over as.</summary>
+    public static SipralNetworkTestConfig Sized()
+    {
+        var value = default(SipralNetworkTestConfig);
+        value.Size = (nuint)Marshal.SizeOf<SipralNetworkTestConfig>();
+        return value;
+    }
+}
+
+/// <summary>
 /// A list of SipralHeader as the array the library reads, for the length of
 /// one call. Every piece of text in every element is copied into one
 /// buffer, the records point into it, and both are pinned until Dispose,
@@ -9623,6 +9894,9 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_account_set_access_token(ulong stack, ulong account, sbyte[] token, nuint tokenLen);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern SipralStatus sipral_stack_network_test(ulong stack, in SipralNetworkTestConfig config, ulong nowMs, out uint test);
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern SipralStatus sipral_call_place(ulong stack, ulong account, in SipralCallConfig config, out ulong call, ulong nowMs);
@@ -10656,6 +10930,7 @@ public static partial class Sipral
         ("sipral_locate_event_t", Marshal.SizeOf<SipralLocateEvent>(), 48, 32, 32),
         ("sipral_challenge_event_t", Marshal.SizeOf<SipralChallengeEvent>(), 40, 20, 20),
         ("sipral_token_event_t", Marshal.SizeOf<SipralTokenEvent>(), 88, 48, 48),
+        ("sipral_network_test_event_t", Marshal.SizeOf<SipralNetworkTestEvent>(), 104, 88, 88),
         ("sipral_event_payload_t", Marshal.SizeOf<SipralEventPayload>(), 328, 208, 216),
         ("sipral_event_t", Marshal.SizeOf<SipralEvent>(), 384, 248, 264),
         ("sipral_suspending_t", Marshal.SizeOf<SipralSuspending>(), 32, 16, 16),
@@ -10680,6 +10955,7 @@ public static partial class Sipral
         ("sipral_local_conference_info_t", Marshal.SizeOf<SipralLocalConferenceInfo>(), 56, 48, 48),
         ("sipral_local_conference_member_t", Marshal.SizeOf<SipralLocalConferenceMember>(), 40, 36, 40),
         ("sipral_pinned_certificate_t", Marshal.SizeOf<SipralPinnedCertificate>(), 40, 36, 40),
+        ("sipral_network_test_config_t", Marshal.SizeOf<SipralNetworkTestConfig>(), 48, 36, 40),
     };
 
     /// <summary>The calling thread's last error, or an empty string
@@ -11486,6 +11762,32 @@ public static partial class Sipral
         var tokenSigned = new sbyte[tokenBytes.Length];
         Buffer.BlockCopy(tokenBytes, 0, tokenSigned, 0, tokenBytes.Length);
         Check(NativeMethods.sipral_account_set_access_token(stack, account, tokenSigned, (nuint)tokenSigned.Length));
+    }
+
+    /// <summary>
+    /// Test the network before a call: STUN, TURN, the account's server and,
+    /// with an echo call, the audio path, as `config` says (ABI 1.2). The
+    /// answer arrives from a later `sipral_stack_poll` as one
+    /// `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+    /// has answered or `timeout_ms` has passed. Tests may run side by side.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+    /// no STUN server, and for an account whose server has not been located
+    /// yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+    /// an address or is a signalling socket of the stack's own; a handle
+    /// that names no account or call of this stack is refused as handles are.
+    /// Nothing is started when anything is refused.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_network_test_config_t` whose `size`
+    /// member says how long it is, with `probe_socket` readable for
+    /// `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+    /// </summary>
+    public static uint StackNetworkTest(ulong stack, in SipralNetworkTestConfig config, ulong nowMs)
+    {
+        Check(NativeMethods.sipral_stack_network_test(stack, in config, nowMs, out var test));
+        return test;
     }
 
     /// <summary>

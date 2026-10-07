@@ -59,7 +59,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
         if (jni_event_callback_class == NULL) {
             return JNI_ERR;
         }
-        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J[B[B[J[B[B[J[B[B[B[B[B[J)V");
+        jni_event_callback_deliver = (*env)->GetStaticMethodID(env, jni_event_callback_class, "deliver", "(JJJJJJ[B[J[B[B[B[B[B[B[B[B[B[B[B[B[J[B[J[B[J[J[J[B[J[J[J[B[J[B[B[B[J[B[B[B[J[B[B[B[B[J[B[B[J[B[B[J[J[B[B[J[B[B[B[B[J[J[J[B[J[B[B[J[B[J[J[B[B[J[B[B[J[B[B[B[B[B[J[B[B[J)V");
         if (jni_event_callback_deliver == NULL) {
             return JNI_ERR;
         }
@@ -250,6 +250,9 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     jbyteArray payloadTokenAuthzServer = NULL;
     jbyteArray payloadTokenErrorCode = NULL;
     jlongArray payloadTokenNumbers = NULL;
+    jbyteArray payloadNetworkTestLocal = NULL;
+    jbyteArray payloadNetworkTestMapped = NULL;
+    jlongArray payloadNetworkTestNumbers = NULL;
 
     if (jni_vm == NULL || event == NULL) {
         return;
@@ -1109,8 +1112,60 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
             (*env)->SetLongArrayRegion(env, payloadTokenNumbers, 0, 2, slots);
         }
     }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_NETWORK_TEST) && JNI_REACHES(event, sipral_event_t, payload.network_test.local_len) && event->payload.network_test.local != NULL) {
+        payloadNetworkTestLocal = (*env)->NewByteArray(env, (jsize)event->payload.network_test.local_len);
+        if (payloadNetworkTestLocal == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadNetworkTestLocal, 0, (jsize)event->payload.network_test.local_len, (const jbyte *)event->payload.network_test.local);
+        }
+    }
+    if (built && (event->kind == SIPRAL_EVENT_KIND_NETWORK_TEST) && JNI_REACHES(event, sipral_event_t, payload.network_test.mapped_len) && event->payload.network_test.mapped != NULL) {
+        payloadNetworkTestMapped = (*env)->NewByteArray(env, (jsize)event->payload.network_test.mapped_len);
+        if (payloadNetworkTestMapped == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetByteArrayRegion(env, payloadNetworkTestMapped, 0, (jsize)event->payload.network_test.mapped_len, (const jbyte *)event->payload.network_test.mapped);
+        }
+    }
     if (built) {
-        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName, payloadLocateTargets, payloadLocateNumbers, payloadChallengeServer, payloadChallengeRealms, payloadChallengeNumbers, payloadTokenServer, payloadTokenRealm, payloadTokenScope, payloadTokenAuthzServer, payloadTokenErrorCode, payloadTokenNumbers);
+        jlong slots[18] = { 0 };
+        slots[0] = JNI_REACHES(event, sipral_event_t, payload.network_test.test) ? (jlong)event->payload.network_test.test : 0;
+        slots[1] = JNI_REACHES(event, sipral_event_t, payload.network_test.verdict) ? (jlong)event->payload.network_test.verdict : 0;
+        slots[2] = JNI_REACHES(event, sipral_event_t, payload.network_test.stun) ? (jlong)event->payload.network_test.stun : 0;
+        slots[3] = JNI_REACHES(event, sipral_event_t, payload.network_test.nat) ? (jlong)event->payload.network_test.nat : 0;
+        slots[4] = JNI_REACHES(event, sipral_event_t, payload.network_test.turn) ? (jlong)event->payload.network_test.turn : 0;
+        slots[5] = JNI_REACHES(event, sipral_event_t, payload.network_test.turn_protocol) ? (jlong)event->payload.network_test.turn_protocol : 0;
+        slots[6] = JNI_REACHES(event, sipral_event_t, payload.network_test.server) ? (jlong)event->payload.network_test.server : 0;
+        slots[7] = JNI_REACHES(event, sipral_event_t, payload.network_test.server_status) ? (jlong)event->payload.network_test.server_status : 0;
+        slots[8] = JNI_REACHES(event, sipral_event_t, payload.network_test.server_round_trip_ms) ? (jlong)event->payload.network_test.server_round_trip_ms : 0;
+        slots[9] = JNI_REACHES(event, sipral_event_t, payload.network_test.echo) ? (jlong)event->payload.network_test.echo : 0;
+        slots[10] = JNI_REACHES(event, sipral_event_t, payload.network_test.echo_verdict) ? (jlong)event->payload.network_test.echo_verdict : 0;
+        if (JNI_REACHES(event, sipral_event_t, payload.network_test.loss_percent)) {
+            double wide = (double)event->payload.network_test.loss_percent;
+            memcpy(&slots[11], &wide, sizeof wide);
+        }
+        if (JNI_REACHES(event, sipral_event_t, payload.network_test.jitter_ms)) {
+            double wide = (double)event->payload.network_test.jitter_ms;
+            memcpy(&slots[12], &wide, sizeof wide);
+        }
+        slots[13] = JNI_REACHES(event, sipral_event_t, payload.network_test.has_round_trip) ? (jlong)event->payload.network_test.has_round_trip : 0;
+        slots[14] = JNI_REACHES(event, sipral_event_t, payload.network_test.round_trip_ms) ? (jlong)event->payload.network_test.round_trip_ms : 0;
+        slots[15] = JNI_REACHES(event, sipral_event_t, payload.network_test.one_way_delay_ms) ? (jlong)event->payload.network_test.one_way_delay_ms : 0;
+        slots[16] = JNI_REACHES(event, sipral_event_t, payload.network_test.r_factor) ? (jlong)event->payload.network_test.r_factor : 0;
+        if (JNI_REACHES(event, sipral_event_t, payload.network_test.mos)) {
+            double wide = (double)event->payload.network_test.mos;
+            memcpy(&slots[17], &wide, sizeof wide);
+        }
+        payloadNetworkTestNumbers = (*env)->NewLongArray(env, 18);
+        if (payloadNetworkTestNumbers == NULL) {
+            built = 0;
+        } else {
+            (*env)->SetLongArrayRegion(env, payloadNetworkTestNumbers, 0, 18, slots);
+        }
+    }
+    if (built) {
+        (*env)->CallStaticVoidMethod(env, jni_event_callback_class, jni_event_callback_deliver, (jlong)(intptr_t)user_data, (jlong)event->size, JNI_REACHES(event, sipral_event_t, stack) ? (jlong)event->stack : 0, JNI_REACHES(event, sipral_event_t, kind) ? (jlong)event->kind : 0, JNI_REACHES(event, sipral_event_t, account) ? (jlong)event->account : 0, JNI_REACHES(event, sipral_event_t, call) ? (jlong)event->call : 0, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget, payloadTransferNumbers, payloadMediaReason, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost, payloadResolveNumbers, payloadMessageContentType, payloadMessageBody, payloadMessageMessageAccount, payloadMessageNumbers, payloadNatLocal, payloadNatMapped, payloadNatPrevious, payloadNatNumbers, payloadRelayLocal, payloadRelayRelayed, payloadRelayMapped, payloadRelayReason, payloadRelayNumbers, payloadReferralTarget, payloadReferralReferredBy, payloadReferralNumbers, payloadTurnStreamLocal, payloadTurnStreamServer, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer, payloadStunServerPrevious, payloadStunServerNumbers, payloadVerificationCertificateUrl, payloadVerificationOrig, payloadVerificationOrigid, payloadVerificationDetail, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText, payloadTextNumbers, payloadPresenceEntity, payloadPresenceNote, payloadPresenceNumbers, payloadTransportFailedDetail, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName, payloadLocateTargets, payloadLocateNumbers, payloadChallengeServer, payloadChallengeRealms, payloadChallengeNumbers, payloadTokenServer, payloadTokenRealm, payloadTokenScope, payloadTokenAuthzServer, payloadTokenErrorCode, payloadTokenNumbers, payloadNetworkTestLocal, payloadNetworkTestMapped, payloadNetworkTestNumbers);
     }
     /* deliver hands what a listener throws to the thread's own handler, so
      * what is pending here is the JVM's -- an array it could not make --
@@ -1349,6 +1404,15 @@ jni_event_callback(const sipral_event_t *event, void *user_data)
     }
     if (payloadTokenNumbers != NULL) {
         (*env)->DeleteLocalRef(env, payloadTokenNumbers);
+    }
+    if (payloadNetworkTestLocal != NULL) {
+        (*env)->DeleteLocalRef(env, payloadNetworkTestLocal);
+    }
+    if (payloadNetworkTestMapped != NULL) {
+        (*env)->DeleteLocalRef(env, payloadNetworkTestMapped);
+    }
+    if (payloadNetworkTestNumbers != NULL) {
+        (*env)->DeleteLocalRef(env, payloadNetworkTestNumbers);
     }
     if (attached) {
         (*jni_vm)->DetachCurrentThread(jni_vm);
@@ -2616,6 +2680,34 @@ Java_org_sipral_SipralNative_sipral_1account_1set_1access_1token(JNIEnv *env, jo
     sipral_status_t status = sipral_account_set_access_token((sipral_handle_t)stack, (sipral_handle_t)account, (const char *)token_data, (size_t)token_size);
     if (token) {
         (*env)->ReleaseByteArrayElements(env, token, token_data, JNI_ABORT);
+    }
+    return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sipral_SipralNative_sipral_1stack_1network_1test(JNIEnv *env, jobject self, jlong stack, jlong configAccount, jbyteArray configProbeSocket, jlong configEchoCall, jlong configEchoMs, jlong configTimeoutMs, jlong nowMs, jlongArray test)
+{
+    (void)env;
+    (void)self;
+    sipral_network_test_config_t config_value;
+    memset(&config_value, 0, sizeof config_value);
+    config_value.size = sizeof config_value;
+    config_value.account = (sipral_handle_t)configAccount;
+    jbyte *configProbeSocket_data = configProbeSocket ? (*env)->GetByteArrayElements(env, configProbeSocket, NULL) : NULL;
+    jsize configProbeSocket_size = configProbeSocket ? (*env)->GetArrayLength(env, configProbeSocket) : 0;
+    config_value.probe_socket = (const char *)configProbeSocket_data;
+    config_value.probe_socket_len = (size_t)configProbeSocket_size;
+    config_value.echo_call = (sipral_handle_t)configEchoCall;
+    config_value.echo_ms = (uint32_t)configEchoMs;
+    config_value.timeout_ms = (uint32_t)configTimeoutMs;
+    uint32_t test_value = 0;
+    sipral_status_t status = sipral_stack_network_test((sipral_handle_t)stack, &config_value, (uint64_t)nowMs, &test_value);
+    if (configProbeSocket) {
+        (*env)->ReleaseByteArrayElements(env, configProbeSocket, configProbeSocket_data, JNI_ABORT);
+    }
+    {
+        jlong slot = (jlong)test_value;
+        (*env)->SetLongArrayRegion(env, test, 0, 1, &slot);
     }
     return (jint)status;
 }

@@ -571,6 +571,42 @@ final class SipralStack {
     _poll();
   }
 
+  /// Test the network before a call without placing one of its own
+  /// (`sipral_stack_network_test`), and return the test's number. What it
+  /// found arrives on [events] as `SipralEventKind.networkTest`
+  /// ([SipralStackEvent.networkTest]). [account] has its server asked with
+  /// an `OPTIONS` on its own transport. [echoCall] is a call this stack
+  /// placed to an echo service: its audio is measured for [echoMs] (8000 by
+  /// default) once its media starts, and the test hangs it up. A part that
+  /// has not answered within [timeoutMs] (30000 by default) counts as
+  /// failed.
+  int networkTest({
+    SipralAccount? account,
+    SipralCall? echoCall,
+    int echoMs = 0,
+    int timeoutMs = 0,
+  }) {
+    _ensureOpen();
+    final test = using((arena) {
+      final config = arena<SipralNetworkTestConfig>();
+      config.ref
+        ..size = ffi.sizeOf<SipralNetworkTestConfig>()
+        ..account = account?.handle ?? 0
+        ..echoCall = echoCall?.handle ?? 0
+        ..echoMs = echoMs
+        ..timeoutMs = timeoutMs;
+      final out = arena<ffi.Uint32>();
+      _checkNow(
+        _sipral,
+        'sipral_stack_network_test',
+        () => _sipral.stackNetworkTest(_handle, config, nowMs(), out),
+      );
+      return out.value;
+    });
+    _poll();
+    return test;
+  }
+
   /// Turn the diagnostic trace on or off while the stack runs
   /// (`sipral_stack_diagnostic_trace`): whether the trace level writes every
   /// SIP message whole, with its peer, from now on -- credentials and keys

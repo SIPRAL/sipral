@@ -550,6 +550,7 @@ typedef struct sipral_local_conference_event sipral_local_conference_event_t;
 typedef struct sipral_locate_event sipral_locate_event_t;
 typedef struct sipral_challenge_event sipral_challenge_event_t;
 typedef struct sipral_token_event sipral_token_event_t;
+typedef struct sipral_network_test_event sipral_network_test_event_t;
 typedef union sipral_event_payload sipral_event_payload_t;
 typedef struct sipral_event sipral_event_t;
 typedef struct sipral_suspending sipral_suspending_t;
@@ -574,6 +575,7 @@ typedef struct sipral_local_conference_config sipral_local_conference_config_t;
 typedef struct sipral_local_conference_info sipral_local_conference_info_t;
 typedef struct sipral_local_conference_member sipral_local_conference_member_t;
 typedef struct sipral_pinned_certificate sipral_pinned_certificate_t;
+typedef struct sipral_network_test_config sipral_network_test_config_t;
 
 /**
  * The result of a call across the C ABI.
@@ -2257,6 +2259,13 @@ enum {
      * again at once with the new token. `account` is the account.
      */
     SIPRAL_EVENT_KIND_TOKEN_REQUIRED = 59,
+    /**
+     * A network test `sipral_stack_network_test` started has every
+     * answer it is going to get (ABI 1.2). `payload.network_test` holds
+     * each part and the verdict; `account` is the account whose server
+     * was probed and `call` the echo call, when the test had them.
+     */
+    SIPRAL_EVENT_KIND_NETWORK_TEST = 60,
 };
 
 /**
@@ -4247,6 +4256,103 @@ enum {
      * Another code, as written in `error_code`.
      */
     SIPRAL_TOKEN_ERROR_OTHER = 5,
+};
+
+/**
+ * What a network test, or one part of it, comes to. Names for
+ * `sipral_network_test_event_t::verdict` and `echo_verdict`.
+ */
+typedef uint32_t sipral_network_verdict_t;
+enum {
+    /**
+     * Nothing was tested.
+     */
+    SIPRAL_NETWORK_VERDICT_UNKNOWN = 0,
+    /**
+     * Calls should work and sound right.
+     */
+    SIPRAL_NETWORK_VERDICT_GOOD = 1,
+    /**
+     * Calls should work, and may not everywhere or may not sound their
+     * best.
+     */
+    SIPRAL_NETWORK_VERDICT_ACCEPTABLE = 2,
+    /**
+     * Calls are likely to fail or to sound bad.
+     */
+    SIPRAL_NETWORK_VERDICT_POOR = 3,
+};
+
+/**
+ * Whether a part of a network test was tried, and how it went. Names
+ * for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+ */
+typedef uint32_t sipral_network_probe_t;
+enum {
+    /**
+     * Not part of this test.
+     */
+    SIPRAL_NETWORK_PROBE_NOT_TESTED = 0,
+    /**
+     * The server answered as hoped; for the echo, audio came back and
+     * was measured.
+     */
+    SIPRAL_NETWORK_PROBE_SUCCEEDED = 1,
+    /**
+     * It did not.
+     */
+    SIPRAL_NETWORK_PROBE_FAILED = 2,
+};
+
+/**
+ * What a STUN answer says about the NAT in front of this end. Names for
+ * `sipral_network_test_event_t::nat`. Approximate: one answer shows
+ * whether the address and the port were translated, and nothing about
+ * how the NAT filters what arrives (RFC 4787).
+ */
+typedef uint32_t sipral_nat_kind_t;
+enum {
+    /**
+     * No answer to read.
+     */
+    SIPRAL_NAT_KIND_UNKNOWN = 0,
+    /**
+     * No translation: the server saw the socket's own address.
+     */
+    SIPRAL_NAT_KIND_OPEN = 1,
+    /**
+     * The address was translated and the port kept.
+     */
+    SIPRAL_NAT_KIND_PORT_PRESERVED = 2,
+    /**
+     * The port was changed too.
+     */
+    SIPRAL_NAT_KIND_PORT_CHANGED = 3,
+};
+
+/**
+ * What the account's server did with the test's `OPTIONS`. Names for
+ * `sipral_network_test_event_t::server`.
+ */
+typedef uint32_t sipral_server_reach_t;
+enum {
+    /**
+     * Not part of this test.
+     */
+    SIPRAL_SERVER_REACH_NOT_TESTED = 0,
+    /**
+     * It answered: `server_status` with what, `server_round_trip_ms`
+     * after how long. Any final answer is a server that is there.
+     */
+    SIPRAL_SERVER_REACH_ANSWERED = 1,
+    /**
+     * No answer before the request, or the test, timed out.
+     */
+    SIPRAL_SERVER_REACH_TIMED_OUT = 2,
+    /**
+     * The transport refused the request or failed under it.
+     */
+    SIPRAL_SERVER_REACH_TRANSPORT_FAILED = 3,
 };
 
 /**
@@ -8205,6 +8311,112 @@ struct sipral_token_event {
 };
 
 /**
+ * What a SIPRAL_EVENT_KIND_NETWORK_TEST
+ * carries: every part of one test, and the verdict (ABI 1.2). The
+ * event's `account` is the account probed and its `call` the echo call,
+ * when there were any. The two addresses are `host:port`, not
+ * NUL-terminated, and the library's: valid for as long as the callback
+ * runs.
+ */
+struct sipral_network_test_event {
+    /**
+     * The number sipral_stack_network_test gave the test.
+     */
+    uint32_t test;
+    /**
+     * A sipral_network_verdict_t: the worst of the parts tested.
+     */
+    sipral_network_verdict_t verdict;
+    /**
+     * A sipral_network_probe_t: whether a STUN server answered.
+     */
+    sipral_network_probe_t stun;
+    /**
+     * A sipral_nat_kind_t, from that answer.
+     */
+    sipral_nat_kind_t nat;
+    /**
+     * A sipral_network_probe_t: whether the TURN server allocated a
+     * relay for the probe socket.
+     */
+    sipral_network_probe_t turn;
+    /**
+     * A `sipral_transport_t`: what the TURN server was reached over, or
+     * zero when it was not tested.
+     */
+    sipral_transport_t turn_protocol;
+    /**
+     * A sipral_server_reach_t.
+     */
+    sipral_server_reach_t server;
+    /**
+     * The status the server answered with, or zero.
+     */
+    uint32_t server_status;
+    /**
+     * From sending the `OPTIONS` to its answer, in milliseconds.
+     */
+    uint32_t server_round_trip_ms;
+    /**
+     * A sipral_network_probe_t: whether audio came back on the echo call
+     * and was measured. Failed for a call whose media never started, or
+     * that brought nothing back.
+     */
+    sipral_network_probe_t echo;
+    /**
+     * A sipral_network_verdict_t for the echo alone.
+     */
+    sipral_network_verdict_t echo_verdict;
+    /**
+     * Packets lost or too late to play, as a percentage of those due.
+     */
+    float loss_percent;
+    /**
+     * Interarrival jitter (RFC 3550 §6.4.1), in milliseconds.
+     */
+    float jitter_ms;
+    /**
+     * Nonzero when RTCP brought a round trip back in time.
+     */
+    uint32_t has_round_trip;
+    /**
+     * That round trip, in milliseconds.
+     */
+    uint32_t round_trip_ms;
+    /**
+     * The one-way delay the rating assumed: half the round trip and the
+     * jitter buffer's delay, in milliseconds.
+     */
+    uint32_t one_way_delay_ms;
+    /**
+     * G.107's transmission rating R, 0 to 100, for concealed G.711.
+     */
+    uint32_t r_factor;
+    /**
+     * The conversational mean opinion score estimated from it, 1.0 to
+     * 4.5.
+     */
+    float mos;
+    /**
+     * The socket the STUN answer was about: the probe socket, or the
+     * signalling socket.
+     */
+    const char *local;
+    /**
+     * How many bytes of it.
+     */
+    size_t local_len;
+    /**
+     * Where the STUN server saw it. Empty without an answer.
+     */
+    const char *mapped;
+    /**
+     * How many bytes of it.
+     */
+    size_t mapped_len;
+};
+
+/**
  * The arm of an event that its kind names.
  *
  * The whole union is zeroed before that one arm is written, so every
@@ -8326,6 +8538,10 @@ union sipral_event_payload {
      * For SIPRAL_EVENT_KIND_TOKEN_REQUIRED.
      */
     sipral_token_event_t token;
+    /**
+     * For SIPRAL_EVENT_KIND_NETWORK_TEST.
+     */
+    sipral_network_test_event_t network_test;
 };
 
 /**
@@ -9431,6 +9647,49 @@ struct sipral_pinned_certificate {
 };
 
 /**
+ * What sipral_stack_network_test tests. Zero in any member but
+ * `size` leaves that part out or takes its default.
+ *
+ * Set `size` to `sizeof(sipral_network_test_config_t)` before the call.
+ */
+struct sipral_network_test_config {
+    /**
+     * `sizeof` this struct, as the caller's header declares it.
+     */
+    size_t size;
+    /**
+     * The account whose server to probe, on the account's own
+     * transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+     */
+    sipral_handle_t account;
+    /**
+     * A UDP socket the application bound for the test, `host:port`,
+     * asked about as `sipral_stack_nat_map` asks about a media socket;
+     * null to ask about the signalling socket only, and to test no
+     * relay. Not NUL-terminated.
+     */
+    const char *probe_socket;
+    /**
+     * How many bytes of it.
+     */
+    size_t probe_socket_len;
+    /**
+     * A call the application placed to an echo service, measured once
+     * its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+     */
+    sipral_handle_t echo_call;
+    /**
+     * How long the echo is measured. 8000 by default.
+     */
+    uint32_t echo_ms;
+    /**
+     * How long the whole test may take. 30000 by default; a part that
+     * has not answered by then counts as failed.
+     */
+    uint32_t timeout_ms;
+};
+
+/**
  * Copy the calling thread's last error message into `buffer`.
  *
  * The message is UTF-8 and is written with a trailing NUL, which is not
@@ -10087,6 +10346,28 @@ sipral_status_t sipral_account_registration_state(sipral_handle_t stack, sipral_
  * length of zero.
  */
 sipral_status_t sipral_account_set_access_token(sipral_handle_t stack, sipral_handle_t account, const char *token, size_t token_len);
+
+/**
+ * Test the network before a call: STUN, TURN, the account's server and,
+ * with an echo call, the audio path, as `config` says (ABI 1.2). The
+ * answer arrives from a later `sipral_stack_poll` as one
+ * `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+ * has answered or `timeout_ms` has passed. Tests may run side by side.
+ *
+ * `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+ * no STUN server, and for an account whose server has not been located
+ * yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+ * an address or is a signalling socket of the stack's own; a handle
+ * that names no account or call of this stack is refused as handles are.
+ * Nothing is started when anything is refused.
+ *
+ * Safety
+ *
+ * `config` must point at a `sipral_network_test_config_t` whose `size`
+ * member says how long it is, with `probe_socket` readable for
+ * `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+ */
+sipral_status_t sipral_stack_network_test(sipral_handle_t stack, const sipral_network_test_config_t *config, uint64_t now_ms, uint32_t *out_test);
 
 /**
  * Place a call, and write its handle to `out_call`.
@@ -13498,6 +13779,7 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_locate_event_t": (48, 32, 32),
     "sipral_challenge_event_t": (40, 20, 20),
     "sipral_token_event_t": (88, 48, 48),
+    "sipral_network_test_event_t": (104, 88, 88),
     "sipral_event_payload_t": (328, 208, 216),
     "sipral_event_t": (384, 248, 264),
     "sipral_suspending_t": (32, 16, 16),
@@ -13522,4 +13804,5 @@ RECORD_LAYOUTS: dict[str, tuple[int, int, int]] = {
     "sipral_local_conference_info_t": (56, 48, 48),
     "sipral_local_conference_member_t": (40, 36, 40),
     "sipral_pinned_certificate_t": (40, 36, 40),
+    "sipral_network_test_config_t": (48, 36, 40),
 }

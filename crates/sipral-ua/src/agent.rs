@@ -151,6 +151,8 @@ pub struct UserAgent {
     pub(crate) messages: HashMap<MessageHandle, SentMessage>,
     /// The MESSAGE transaction each one has in flight.
     pub(crate) by_message: HashMap<AnyTransactionId, MessageHandle>,
+    /// The `OPTIONS` probes of an account's server not yet reported.
+    pub(crate) probes: crate::probe::Probes,
     /// The event state this agent keeps at a compositor (RFC 3903).
     pub(crate) publications: crate::publishing::Publications,
     /// What this layer sends inside a dialog by itself and RFC 3261 §18.1.1
@@ -299,6 +301,7 @@ impl UserAgent {
             by_subscribe: HashMap::new(),
             messages: HashMap::new(),
             by_message: HashMap::new(),
+            probes: crate::probe::Probes::default(),
             publications: crate::publishing::Publications::default(),
             parked: Vec::new(),
             stream_deadline: None,
@@ -1088,6 +1091,7 @@ impl UserAgent {
         self.settle_offer_challenges();
         self.settle_subscription_challenges(now);
         self.settle_message_challenges();
+        self.settle_probe_challenges();
         self.settle_publication_challenges(now);
         self.settle_announcements(now);
         self.settle_unanswered_changes(now);
@@ -1133,6 +1137,9 @@ impl UserAgent {
         // a request to a located server that found nobody there goes to the
         // next address the name gave, and its owner never hears of the first
         let event = self.on_unreached_event(event, now)?;
+        // a probe is claimed by its transaction, before anything that would
+        // take its challenge for one to answer
+        let event = self.on_probe_event(event, now)?;
         let event = self.on_registration_event(event, now)?;
         let event = self.on_call_event(event, now)?;
         let event = self.on_reliable_event(event, now)?;

@@ -108,6 +108,11 @@ registers at once, and a token the server called `INVALID_TOKEN` raises the
 event again (`docs/08-ffi.md`, "What ABI 1.2 added"). The JVM jar's
 `SipralJava.tokenRequiredOf` and `SipralJava.setAccessToken` are the same.
 
+Before a call, `client.networkTest(account, echoCall)` asks the account's
+server and, given a call placed to an echo service, rates the audio that
+comes back; `networkTestOf(event)` reads `SIPRAL_EVENT_KIND_NETWORK_TEST`,
+every part and the verdict (`docs/25-network-test.md`).
+
 Without `registrar` the account never registers: registering throws, and
 the registrar address is only the outbound proxy. Left out, `bindHost` and
 `mediaHost` are the address of the route toward the registrar.

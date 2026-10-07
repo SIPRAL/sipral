@@ -855,6 +855,32 @@ public sealed partial class SipralStack : IDisposable
         _nat = listed.Length == 0 ? SipralNat.Off : SipralNat.Stun;
     }
 
+    /// <summary><c>sipral_stack_network_test</c>: test the network before a
+    /// call without placing one of its own, and return the test's number.
+    /// What it found arrives as <see cref="SipralEventKind.NetworkTest"/>
+    /// (<see cref="SipralEventArgs.NetworkTest"/>). <paramref name="account"/>
+    /// has its server asked with an <c>OPTIONS</c> on its own transport; on a
+    /// stack with a STUN server the answer the signalling socket was last
+    /// given stands for the STUN part. <paramref name="echoCall"/> is a call
+    /// this stack placed to an echo service: its audio is measured for
+    /// <paramref name="echoMs"/> (8000 by default) once its media starts,
+    /// and the test hangs it up. A part that has not answered within
+    /// <paramref name="timeoutMs"/> (30000 by default) counts as
+    /// failed.</summary>
+    public uint NetworkTest(Account? account = null, Call? echoCall = null, uint echoMs = 0, uint timeoutMs = 0)
+    {
+        var config = SipralNetworkTestConfig.Sized();
+        config.Account = account?.Handle ?? 0;
+        config.EchoCall = echoCall?.Handle ?? 0;
+        config.EchoMs = echoMs;
+        config.TimeoutMs = timeoutMs;
+        uint test = 0;
+        SipralErrors.Call(
+            () => NativeMethods.sipral_stack_network_test(Handle, config, NowMs, out test),
+            "sipral_stack_network_test");
+        return test;
+    }
+
     /// <summary><c>sipral_stack_stir</c>: verify the callers of the calls
     /// this stack's accounts receive against <paramref name="anchors"/> (PEM
     /// or DER certificates, the STI-PA's roots in a SHAKEN deployment) from

@@ -6,6 +6,7 @@ import type {
   CallEndedEvent,
   ChallengeDeclinedEvent,
   IncomingCallEvent,
+  NetworkTestEvent,
   RegistrationChangedEvent,
   TokenRequiredEvent,
 } from '../index';
@@ -353,6 +354,50 @@ describe('accounts', () => {
     expect(handed).toEqual([
       [account.id, 'eyJ0.eyJ1.c2ln'],
       [account.id, ''],
+    ]);
+  });
+
+  it('starts a network test and reports what it found', async () => {
+    const {client, native} = await opened();
+    const account = await client.addAccount({aor: 'sip:alice@example.com', registrarAddress: '203.0.113.5:5060'});
+    const found: NetworkTestEvent[] = [];
+    client.on('networkTest', (event) => found.push(event));
+    expect(await client.networkTest({account, timeoutMs: 5000})).toBe(4);
+    expect(native.calls.filter((call) => call.method === 'networkTest').map((call) => call.args)).toEqual([
+      [account.id, '', 0, 5000],
+    ]);
+    native.emit({
+      kind: 'networkTest',
+      test: 4,
+      verdict: 'acceptable',
+      stun: 'succeeded',
+      nat: 'portChanged',
+      turn: 'failed',
+      server: 'answered',
+      serverStatus: 200,
+      serverRoundTripMs: 37,
+      mapped: '203.0.113.7:41002',
+    });
+    expect(found).toEqual([
+      {
+        test: 4,
+        verdict: 'acceptable',
+        stun: 'succeeded',
+        nat: 'portChanged',
+        turn: 'failed',
+        server: 'answered',
+        serverStatus: 200,
+        serverRoundTripMs: 37,
+        echo: 'notTested',
+        echoVerdict: 'unknown',
+        lossPercent: 0,
+        jitterMs: 0,
+        roundTripMs: null,
+        rFactor: 0,
+        mos: 0,
+        local: '',
+        mapped: '203.0.113.7:41002',
+      },
     ]);
   });
 

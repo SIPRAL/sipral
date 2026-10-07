@@ -93,6 +93,10 @@ __all__ = [
     "PublishFailure",
     "ChallengeRefusal",
     "HeldAudio",
+    "NetworkVerdict",
+    "NetworkProbe",
+    "NatKind",
+    "ServerReach",
 ]
 
 
@@ -434,6 +438,23 @@ ChallengeRefusal = _enum("ChallengeRefusal", "SIPRAL_CHALLENGE_REFUSAL_")
 #: access token it was given, ``fields["error"]`` on
 #: `SIPRAL_EVENT_KIND_TOKEN_REQUIRED` (RFC 6750 section 3.1).
 TokenError = _enum("TokenError", "SIPRAL_TOKEN_ERROR_")
+
+#: A `sipral_network_verdict_t`: what a network test came to,
+#: ``fields["verdict"]`` and ``fields["echo_verdict"]`` on
+#: `SIPRAL_EVENT_KIND_NETWORK_TEST`.
+NetworkVerdict = _enum("NetworkVerdict", "SIPRAL_NETWORK_VERDICT_")
+
+#: A `sipral_network_probe_t`: whether one part of a network test was tried
+#: and how it went.
+NetworkProbe = _enum("NetworkProbe", "SIPRAL_NETWORK_PROBE_")
+
+#: A `sipral_nat_kind_t`: what a STUN answer says about the NAT in front of
+#: this end.
+NatKind = _enum("NatKind", "SIPRAL_NAT_KIND_")
+
+#: A `sipral_server_reach_t`: what the account's server did with a network
+#: test's ``OPTIONS``.
+ServerReach = _enum("ServerReach", "SIPRAL_SERVER_REACH_")
 
 #: A `sipral_held_audio_t`: what a party this end holds is sent,
 #: ``Stack(held_audio=...)``.

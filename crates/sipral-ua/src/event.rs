@@ -696,6 +696,16 @@ pub enum UaEvent {
         /// The response, whole, when there was one.
         response: Option<OwnedMessage>,
     },
+    /// A probe of an account's server ([`UserAgent::probe_server`](crate::UserAgent::probe_server))
+    /// was answered, or never will be.
+    ServerProbed {
+        /// Which probe.
+        probe: crate::ProbeHandle,
+        /// Whose server.
+        account: AccountId,
+        /// What came of it.
+        outcome: crate::ProbeOutcome,
+    },
     /// A message-summary NOTIFY reported the state of a mailbox (RFC 3842
     /// §3.9).
     ///

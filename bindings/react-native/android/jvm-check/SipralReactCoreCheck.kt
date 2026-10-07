@@ -28,6 +28,10 @@ import org.sipral.SipralChallengeRefusal
 import org.sipral.SipralCodec
 import org.sipral.SipralEvent
 import org.sipral.SipralEventKind
+import org.sipral.SipralNatKind
+import org.sipral.SipralNetworkProbe
+import org.sipral.SipralNetworkVerdict
+import org.sipral.SipralServerReach
 import org.sipral.SipralToggle
 import org.sipral.SipralTokenError
 import org.sipral.idiomatic.SipralAudioMode
@@ -509,7 +513,46 @@ private fun theRealmsAndTheHeldAudioReachTheLibrary(): String {
     assertEquals("https://as.example.com", token["tokenAuthzServer"])
     assertEquals("sip register", token["tokenScope"])
     assertEquals("example.com", token["tokenRealm"])
-    return "the realms and the held audio reached the library, and a declined challenge and a token asked for were flattened"
+    val tested = SipralReactCore.flatten(
+        SipralEvent(
+            size = 0,
+            stack = 0,
+            kind = SipralEventKind.NETWORK_TEST.value.toLong(),
+            account = 7,
+            call = 0,
+            message = null,
+            payloadNetworkTestMapped = "203.0.113.7:41002",
+            payloadNetworkTestNumbers = longArrayOf(
+                4,
+                SipralNetworkVerdict.ACCEPTABLE.value.toLong(),
+                SipralNetworkProbe.SUCCEEDED.value.toLong(),
+                SipralNatKind.PORT_CHANGED.value.toLong(),
+                SipralNetworkProbe.NOT_TESTED.value.toLong(),
+                0,
+                SipralServerReach.ANSWERED.value.toLong(),
+                200,
+                37,
+                SipralNetworkProbe.NOT_TESTED.value.toLong(),
+                SipralNetworkVerdict.UNKNOWN.value.toLong(),
+                0.0.toRawBits(),
+                0.0.toRawBits(),
+                0,
+                0,
+                0,
+                0,
+                0.0.toRawBits(),
+            ),
+        ),
+    )
+    assertEquals("networkTest", tested["kind"])
+    assertEquals(4, tested["test"])
+    assertEquals("acceptable", tested["verdict"])
+    assertEquals("succeeded", tested["stun"])
+    assertEquals("portChanged", tested["nat"])
+    assertEquals("answered", tested["server"])
+    assertEquals(200, tested["serverStatus"])
+    assertEquals("203.0.113.7:41002", tested["mapped"])
+    return "the realms and the held audio reached the library, and a declined challenge, a token asked for and a network test were flattened"
 }
 
 private fun aSettleAfterShutdownIsRejectedNotThrown(): String {

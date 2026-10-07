@@ -180,6 +180,7 @@ mod local_conference_tests;
 mod log;
 #[cfg(feature = "stun")]
 mod nat;
+pub mod network_test;
 mod payloads;
 // the published INVITE sizes, measured on the shipped build's catalogue:
 // Opus in it, ICE offered

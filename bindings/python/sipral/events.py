@@ -577,6 +577,30 @@ def _decode_payload(kind: int, payload) -> dict[str, object]:
             "protocol": int(resolve.protocol),
         }
 
+    if kind == lib.SIPRAL_EVENT_KIND_NETWORK_TEST:
+        tested = payload.network_test
+        return {
+            "test": int(tested.test),
+            "verdict": int(tested.verdict),
+            "stun": int(tested.stun),
+            "nat": int(tested.nat),
+            "turn": int(tested.turn),
+            "turn_protocol": int(tested.turn_protocol),
+            "server": int(tested.server),
+            "server_status": int(tested.server_status),
+            "server_round_trip_ms": int(tested.server_round_trip_ms),
+            "echo": int(tested.echo),
+            "echo_verdict": int(tested.echo_verdict),
+            "loss_percent": float(tested.loss_percent),
+            "jitter_ms": float(tested.jitter_ms),
+            "round_trip_ms": int(tested.round_trip_ms) if tested.has_round_trip else None,
+            "one_way_delay_ms": int(tested.one_way_delay_ms),
+            "r_factor": int(tested.r_factor),
+            "mos": float(tested.mos),
+            "local": _text(tested.local, tested.local_len) or None,
+            "mapped": _text(tested.mapped, tested.mapped_len) or None,
+        }
+
     if kind == lib.SIPRAL_EVENT_KIND_TOKEN_REQUIRED:
         token = payload.token
         return {

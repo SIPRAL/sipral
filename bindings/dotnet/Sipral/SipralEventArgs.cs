@@ -104,6 +104,9 @@ public sealed class SipralEventArgs : EventArgs
     /// <summary>Set for <see cref="SipralEventKind.TokenRequired"/>.</summary>
     public SipralTokenEventInfo? Token { get; private init; }
 
+    /// <summary>Set for <see cref="SipralEventKind.NetworkTest"/>.</summary>
+    public SipralNetworkTestEventInfo? NetworkTest { get; private init; }
+
     private SipralEventArgs(
         SipralEventKind kind, string kindName, ulong stack, ulong account, ulong call, byte[]? message,
         SipralRegistrationEventInfo? registration, SipralCallEventInfo? callInfo,
@@ -347,7 +350,18 @@ public sealed class SipralEventArgs : EventArgs
         SipralLocateEventInfo? locate = null;
         SipralChallengeEventInfo? challenge = null;
         SipralTokenEventInfo? token = null;
-        if (kind == SipralEventKind.TokenRequired)
+        SipralNetworkTestEventInfo? networkTest = null;
+        if (kind == SipralEventKind.NetworkTest)
+        {
+            var n = evt.Payload.NetworkTest;
+            networkTest = new SipralNetworkTestEventInfo(
+                n.Test, (SipralNetworkVerdict)n.Verdict, (SipralNetworkProbe)n.Stun, (SipralNatKind)n.Nat,
+                (SipralNetworkProbe)n.Turn, (SipralServerReach)n.Server, n.ServerStatus, n.ServerRoundTripMs,
+                (SipralNetworkProbe)n.Echo, (SipralNetworkVerdict)n.EchoVerdict, n.LossPercent, n.JitterMs,
+                n.HasRoundTrip != 0 ? n.RoundTripMs : null, n.RFactor, n.Mos,
+                ReadUtf8(n.Local, n.LocalLen), ReadUtf8(n.Mapped, n.MappedLen));
+        }
+        else if (kind == SipralEventKind.TokenRequired)
         {
             var t = evt.Payload.Token;
             static string? NonEmpty(string? text) => string.IsNullOrEmpty(text) ? null : text;
@@ -418,6 +432,7 @@ public sealed class SipralEventArgs : EventArgs
             Locate = locate,
             Challenge = challenge,
             Token = token,
+            NetworkTest = networkTest,
         };
     }
 

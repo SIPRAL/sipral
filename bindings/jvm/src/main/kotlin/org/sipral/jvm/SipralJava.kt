@@ -34,6 +34,7 @@ import org.sipral.idiomatic.SipralAudioMode
 import org.sipral.idiomatic.SipralCall
 import org.sipral.idiomatic.SipralClient
 import org.sipral.idiomatic.SipralDeclinedChallenge
+import org.sipral.idiomatic.SipralNetworkTest
 import org.sipral.idiomatic.SipralTokenRequired
 import org.sipral.idiomatic.awaitNext
 
@@ -150,6 +151,26 @@ object SipralJava {
     @JvmStatic
     fun tokenRequiredOf(event: SipralEvent): SipralTokenRequired? =
         org.sipral.idiomatic.tokenRequiredOf(event)
+
+    /** What a `NETWORK_TEST` [event] found -- every part of a network test
+     * and its verdict -- or null for any other event
+     * ([org.sipral.idiomatic.networkTestOf]). */
+    @JvmStatic
+    fun networkTestOf(event: SipralEvent): SipralNetworkTest? =
+        org.sipral.idiomatic.networkTestOf(event)
+
+    /** [SipralClient.networkTest]: test the network before a call --
+     * [account]'s server, and [echoCall] measured and hung up -- and return
+     * the test's number. */
+    @JvmStatic
+    @JvmOverloads
+    fun networkTest(
+        client: SipralClient,
+        account: SipralAccount? = null,
+        echoCall: SipralCall? = null,
+        echoMs: Long = 0,
+        timeoutMs: Long = 0,
+    ): Long = client.networkTest(account, echoCall, echoMs, timeoutMs)
 
     /** [SipralAccount.setAccessToken]: the access token [account]'s server
      * asked for, or null to take it away. */

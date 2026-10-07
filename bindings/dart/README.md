@@ -54,6 +54,11 @@ over with `account.setAccessToken(token)`; `register()` again registers at
 once, and a token the server called `SipralTokenError.invalidToken` raises
 the event again (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+Before a call, `stack.networkTest(account: account, echoCall: call)` asks
+the account's server and, given a call placed to an echo service, rates the
+audio that comes back; `SipralStackEvent.networkTest` carries every part and
+the verdict (`docs/25-network-test.md`).
+
 Everything runs on the isolate that opened the stack: the sockets are
 `RawDatagramSocket`s, the poll and each call's frame clock are timers, and
 the event callback is a `NativeCallable.isolateLocal`, which the library calls

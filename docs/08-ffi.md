@@ -3661,9 +3661,9 @@ stacks, all in application mode, answer with `wrongState`.
 
 ## What ABI 1.2 added
 
-Grown as 1.1 was: one entry point, one event kind with its union arm, one
-enumeration, and nothing else in the header moved. The union keeps its size,
-since the new arm is smaller than the largest. A binding printed at 1.1 loads
+Grown as 1.1 was: entry points, event kinds with their union arms and
+enumerations added, and nothing else in the header moved. The union keeps its
+size, since every new arm is smaller than the largest. A binding printed at 1.1 loads
 against a 1.2 library and works as it did; one printed at 1.2 is refused by
 a 1.1 library, with both versions named.
 
@@ -3717,6 +3717,57 @@ of the event's fields and `Account.set_access_token`, Dart
 `SipralStackEvent.tokenAuthzServer` and its siblings and
 `SipralAccount.setAccessToken`, React Native the `tokenRequired` event on the
 client and the account and `account.setAccessToken(token)` (TypeScript,
+Android and iOS halves).
+
+**A network test before a call.** `docs/25-network-test.md` is the whole
+of it; what the header carries:
+
+- `sipral_stack_network_test(stack, config, now_ms, out_test)` with a
+  `sipral_network_test_config_t`: `account` (its server asked with an
+  `OPTIONS` on its own transport, timed, and not answered with credentials if
+  it challenges), `probe_socket` (a UDP socket the application bound,
+  `host:port`, asked about exactly as `sipral_stack_nat_map` asks about a
+  media socket — STUN, and a relay when the stack has a `turn_server` — and
+  given back when the test ends), `echo_call` (a call placed to an echo
+  service: its received stream measured for `echo_ms`, 8000 by default, once
+  its media starts, then hung up), `timeout_ms` (30000 by default). Each is
+  left out at zero. `*out_test` is the test's number. A `probe_socket` on a
+  stack without `SIPRAL_NAT_STUN`, and an account whose server is not located
+  yet, are `SIPRAL_STATUS_WRONG_STATE`.
+- `SIPRAL_EVENT_KIND_NETWORK_TEST` (60, with `sipral_event_payload_t::network_test`,
+  a `sipral_network_test_event_t`), once every part has answered or the
+  timeout passed: `test`; `verdict` (`sipral_network_verdict_t`: `UNKNOWN`
+  when nothing was tested, `GOOD`, `ACCEPTABLE`, `POOR`), the worst of the
+  parts; `stun`, `turn` and `echo` (`sipral_network_probe_t`: `NOT_TESTED`,
+  `SUCCEEDED`, `FAILED`); `nat` (`sipral_nat_kind_t`: `UNKNOWN`, `OPEN`,
+  `PORT_PRESERVED`, `PORT_CHANGED`) with `local` and `mapped`;
+  `turn_protocol`; `server` (`sipral_server_reach_t`: `NOT_TESTED`,
+  `ANSWERED`, `TIMED_OUT`, `TRANSPORT_FAILED`) with `server_status` and
+  `server_round_trip_ms`; and for the echo `echo_verdict`, `loss_percent`,
+  `jitter_ms`, `has_round_trip` and `round_trip_ms`, `one_way_delay_ms`, and
+  `r_factor` and `mos` from the G.107 E-model, rated for concealed G.711.
+  `account` and `call` are the account probed and the echo call.
+
+| Part | Good | Acceptable | Poor |
+|---|---|---|---|
+| Account's server | answered | — | timed out, or the transport failed |
+| STUN | answered | no answer | — |
+| TURN | relay allocated | refused or no answer | — |
+| Echo: packet loss | under 1 % | under 3 % | 3 % or more, or no audio came back |
+| Echo: jitter | 20 ms or less | 50 ms or less | over 50 ms |
+| Echo: round trip | 300 ms or less | 600 ms or less | over 600 ms |
+| Echo: MOS (CQ) | 4.0 or more | 3.6 or more | under 3.6 |
+
+The facade carries the same as `UserAgent::probe_server` with
+`UaEvent::ServerProbed`, and the rating as `sipral::network_test`
+(`Findings`, `EchoMeasurement`, `Verdict`). In the layers: Python
+`Stack.network_test` (which binds and closes the probe socket itself) and
+`EventKind.NETWORK_TEST`; Swift `SipralStack.networkTest` and
+`SipralEvent.networkTestData`; .NET `SipralStack.NetworkTest` and
+`SipralEventArgs.NetworkTest`; Kotlin and the JVM jar
+`SipralClient.networkTest` and `networkTestOf`; Dart
+`SipralStack.networkTest` and `SipralStackEvent.networkTest`; React Native
+`client.networkTest` and the client's `networkTest` event (TypeScript,
 Android and iOS halves).
 
 **What a bridge between two calls needs.** Three gaps a bridge from a PBX to

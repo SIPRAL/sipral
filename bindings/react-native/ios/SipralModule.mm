@@ -261,6 +261,16 @@ static void put(NSMutableDictionary *into, NSString *key, id _Nullable value)
   [_bridge setDiagnosticTrace:on resolve:resolve reject:reject];
 }
 
+- (void)networkTest:(NSString *)account
+           echoCall:(NSString *)echoCall
+             echoMs:(double)echoMs
+          timeoutMs:(double)timeoutMs
+            resolve:(RCTPromiseResolveBlock)resolve
+             reject:(RCTPromiseRejectBlock)reject
+{
+  [_bridge networkTest:account echoCall:echoCall echoMs:echoMs timeoutMs:timeoutMs resolve:resolve reject:reject];
+}
+
 - (void)setCallGain:(NSString *)call
           direction:(NSString *)direction
                gain:(double)gain

@@ -79,6 +79,48 @@ public struct SipralEvent: Sendable {
     public internal(set) var challengeData: ChallengeEventData? = nil
     /// `payload.token`, for `SipralEventKind.tokenRequired` only.
     public internal(set) var tokenData: TokenEventData? = nil
+    /// `payload.network_test`, for `SipralEventKind.networkTest` only.
+    public internal(set) var networkTestData: NetworkTestEventData? = nil
+}
+
+/// What `SipralEventKind.networkTest` carries (`sipral_network_test_event_t`):
+/// every part of one test `SipralStack.networkTest(account:echoCall:echoMs:timeoutMs:)`
+/// started, and the verdict, the worst of the parts that were tested.
+public struct NetworkTestEventData: Sendable {
+    /// The number the test was given.
+    public let test: UInt32
+    /// Good, acceptable or poor; unknown when nothing was tested.
+    public let verdict: SipralNetworkVerdict?
+    /// Whether a STUN server answered.
+    public let stun: SipralNetworkProbe?
+    /// What its answer says about the NAT.
+    public let nat: SipralNatKind?
+    /// Whether the TURN server allocated a relay.
+    public let turn: SipralNetworkProbe?
+    /// What the account's server did with the `OPTIONS`.
+    public let server: SipralServerReach?
+    /// The status it answered with, or zero.
+    public let serverStatus: UInt32
+    /// From the `OPTIONS` to its answer, in milliseconds.
+    public let serverRoundTripMs: UInt32
+    /// Whether audio came back on the echo call.
+    public let echo: SipralNetworkProbe?
+    /// The echo's own verdict.
+    public let echoVerdict: SipralNetworkVerdict?
+    /// Lost or late, as a percentage.
+    public let lossPercent: Float
+    /// Interarrival jitter, in milliseconds.
+    public let jitterMs: Float
+    /// The round trip RTCP measured, when it did.
+    public let roundTripMs: UInt32?
+    /// G.107's R, for concealed G.711.
+    public let rFactor: UInt32
+    /// The conversational MOS estimated from it.
+    public let mos: Float
+    /// The socket the STUN answer was about.
+    public let local: String?
+    /// Where the STUN server saw it.
+    public let mapped: String?
 }
 
 /// What `SipralEventKind.tokenRequired` carries (`sipral_token_event_t`): an
@@ -869,6 +911,28 @@ enum SipralEventDecoder {
                 refusal: SipralChallengeRefusal(rawValue: told.refusal),
                 server: textC(told.server, told.server_len),
                 realms: realms.split(separator: "\n").map(String.init)
+            )
+        }
+        if kindRaw == SipralEventKind.networkTest.rawValue {
+            let told = raw.payload.network_test
+            event.networkTestData = NetworkTestEventData(
+                test: told.test,
+                verdict: SipralNetworkVerdict(rawValue: told.verdict),
+                stun: SipralNetworkProbe(rawValue: told.stun),
+                nat: SipralNatKind(rawValue: told.nat),
+                turn: SipralNetworkProbe(rawValue: told.turn),
+                server: SipralServerReach(rawValue: told.server),
+                serverStatus: told.server_status,
+                serverRoundTripMs: told.server_round_trip_ms,
+                echo: SipralNetworkProbe(rawValue: told.echo),
+                echoVerdict: SipralNetworkVerdict(rawValue: told.echo_verdict),
+                lossPercent: told.loss_percent,
+                jitterMs: told.jitter_ms,
+                roundTripMs: told.has_round_trip != 0 ? told.round_trip_ms : nil,
+                rFactor: told.r_factor,
+                mos: told.mos,
+                local: textC(told.local, told.local_len),
+                mapped: textC(told.mapped, told.mapped_len)
             )
         }
         if kindRaw == SipralEventKind.tokenRequired.rawValue {

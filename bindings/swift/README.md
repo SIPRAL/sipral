@@ -192,6 +192,11 @@ over with `try account.setAccessToken(token)`; `register()` again registers at
 once, and a token the server called `.invalidToken` raises the event again
 (`docs/08-ffi.md`, "What ABI 1.2 added").
 
+Before a call, `stack.networkTest(account:echoCall:)` asks the account's
+server and, given a call placed to an echo service, rates the audio that
+comes back; `SipralEventKind.networkTest` (`SipralEvent.networkTestData`)
+carries every part and the verdict (`docs/25-network-test.md`).
+
 An application that runs its own audio -- a voice agent, a recorder -- makes
 the stack in application mode, and pumps each call's frames:
 

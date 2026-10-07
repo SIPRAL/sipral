@@ -103,6 +103,63 @@ public class EventDecodingTests
         }
     }
 
+    /// <summary>A network test's event carries every part and the
+    /// verdict.</summary>
+    [Fact]
+    public void ANetworkTestCarriesItsPartsAndItsVerdict()
+    {
+        string[] texts = { "192.0.2.10:40000", "203.0.113.7:41002" };
+        var pointers = new IntPtr[texts.Length];
+        try
+        {
+            for (var i = 0; i < texts.Length; i++)
+            {
+                var bytes = Encoding.UTF8.GetBytes(texts[i]);
+                pointers[i] = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, pointers[i], bytes.Length);
+            }
+            var evt = Raw(SipralEventKind.NetworkTest);
+            evt.Payload.NetworkTest.Test = 4;
+            evt.Payload.NetworkTest.Verdict = (uint)SipralNetworkVerdict.Acceptable;
+            evt.Payload.NetworkTest.Stun = (uint)SipralNetworkProbe.Succeeded;
+            evt.Payload.NetworkTest.Nat = (uint)SipralNatKind.PortChanged;
+            evt.Payload.NetworkTest.Turn = (uint)SipralNetworkProbe.Failed;
+            evt.Payload.NetworkTest.Server = (uint)SipralServerReach.Answered;
+            evt.Payload.NetworkTest.ServerStatus = 200;
+            evt.Payload.NetworkTest.ServerRoundTripMs = 37;
+            evt.Payload.NetworkTest.HasRoundTrip = 1;
+            evt.Payload.NetworkTest.RoundTripMs = 80;
+            evt.Payload.NetworkTest.Mos = 4.2f;
+            evt.Payload.NetworkTest.Local = pointers[0];
+            evt.Payload.NetworkTest.LocalLen = (nuint)texts[0].Length;
+            evt.Payload.NetworkTest.Mapped = pointers[1];
+            evt.Payload.NetworkTest.MappedLen = (nuint)texts[1].Length;
+            var decoded = Decode(evt).NetworkTest!;
+            Assert.Equal(4u, decoded.Test);
+            Assert.Equal(SipralNetworkVerdict.Acceptable, decoded.Verdict);
+            Assert.Equal(SipralNetworkProbe.Succeeded, decoded.Stun);
+            Assert.Equal(SipralNatKind.PortChanged, decoded.Nat);
+            Assert.Equal(SipralNetworkProbe.Failed, decoded.Turn);
+            Assert.Equal(SipralServerReach.Answered, decoded.Server);
+            Assert.Equal(200u, decoded.ServerStatus);
+            Assert.Equal(37u, decoded.ServerRoundTripMs);
+            Assert.Equal(80u, decoded.RoundTripMs);
+            Assert.Equal(4.2f, decoded.Mos);
+            Assert.Equal("192.0.2.10:40000", decoded.Local);
+            Assert.Equal("203.0.113.7:41002", decoded.Mapped);
+        }
+        finally
+        {
+            foreach (var pointer in pointers)
+            {
+                if (pointer != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(pointer);
+                }
+            }
+        }
+    }
+
     /// <summary>An account's server asking for an OAuth access token says
     /// where one comes from, for what scope, and why the last was
     /// refused.</summary>

@@ -48,7 +48,8 @@
     X(sipral_progress_config) X(sipral_consent_tone)                          \
     X(sipral_recording_options) X(sipral_transport_failure)                   \
     X(sipral_local_conference_config) X(sipral_local_conference_info)         \
-    X(sipral_local_conference_member) X(sipral_pinned_certificate)
+    X(sipral_local_conference_member) X(sipral_pinned_certificate)            \
+    X(sipral_network_test_config)
 
 static int failures;
 
@@ -1213,6 +1214,17 @@ static sipral_status_t pinned_certificate_at(struct fixture *fixture, size_t dec
                                             0, &pinned);
 }
 
+/* A network test with every part left out: nothing to ask, so it only
+ * comes back as an event with nothing tested; the length is what is being
+ * tried. */
+static sipral_status_t network_test_config_at(struct fixture *fixture, size_t declared)
+{
+    sipral_network_test_config_t config = { 0 };
+    config.size = declared;
+    uint32_t test = 0;
+    return sipral_stack_network_test(fixture->stack, &config, 0, &test);
+}
+
 static const struct {
     const char *name;
     sipral_status_t (*at)(struct fixture *fixture, size_t declared);
@@ -1252,6 +1264,7 @@ static const struct {
     { "sipral_local_conference_info_t", local_conference_info_at },
     { "sipral_local_conference_member_t", local_conference_member_at },
     { "sipral_pinned_certificate_t", pinned_certificate_at },
+    { "sipral_network_test_config_t", network_test_config_at },
 };
 
 #define HANDOVERS (sizeof handovers / sizeof handovers[0])

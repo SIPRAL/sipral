@@ -1764,6 +1764,13 @@ enum class SipralEventKind(val value: Int) {
      * again at once with the new token. `account` is the account.
      */
     TOKEN_REQUIRED(59),
+    /**
+     * A network test `sipral_stack_network_test` started has every
+     * answer it is going to get (ABI 1.2). `payload.network_test` holds
+     * each part and the verdict; `account` is the account whose server
+     * was probed and `call` the echo call, when the test had them.
+     */
+    NETWORK_TEST(60),
     ;
 
     companion object {
@@ -4010,6 +4017,119 @@ enum class SipralTokenError(val value: Int) {
 
     companion object {
         fun of(value: Int): SipralTokenError? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a network test, or one part of it, comes to. Names for
+ * `sipral_network_test_event_t::verdict` and `echo_verdict`.
+ */
+enum class SipralNetworkVerdict(val value: Int) {
+    /**
+     * Nothing was tested.
+     */
+    UNKNOWN(0),
+    /**
+     * Calls should work and sound right.
+     */
+    GOOD(1),
+    /**
+     * Calls should work, and may not everywhere or may not sound their
+     * best.
+     */
+    ACCEPTABLE(2),
+    /**
+     * Calls are likely to fail or to sound bad.
+     */
+    POOR(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNetworkVerdict? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * Whether a part of a network test was tried, and how it went. Names
+ * for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+ */
+enum class SipralNetworkProbe(val value: Int) {
+    /**
+     * Not part of this test.
+     */
+    NOT_TESTED(0),
+    /**
+     * The server answered as hoped; for the echo, audio came back and
+     * was measured.
+     */
+    SUCCEEDED(1),
+    /**
+     * It did not.
+     */
+    FAILED(2),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNetworkProbe? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What a STUN answer says about the NAT in front of this end. Names for
+ * `sipral_network_test_event_t::nat`. Approximate: one answer shows
+ * whether the address and the port were translated, and nothing about
+ * how the NAT filters what arrives (RFC 4787).
+ */
+enum class SipralNatKind(val value: Int) {
+    /**
+     * No answer to read.
+     */
+    UNKNOWN(0),
+    /**
+     * No translation: the server saw the socket's own address.
+     */
+    OPEN(1),
+    /**
+     * The address was translated and the port kept.
+     */
+    PORT_PRESERVED(2),
+    /**
+     * The port was changed too.
+     */
+    PORT_CHANGED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralNatKind? = entries.firstOrNull { it.value == value }
+    }
+}
+
+/**
+ * What the account's server did with the test's `OPTIONS`. Names for
+ * `sipral_network_test_event_t::server`.
+ */
+enum class SipralServerReach(val value: Int) {
+    /**
+     * Not part of this test.
+     */
+    NOT_TESTED(0),
+    /**
+     * It answered: `server_status` with what, `server_round_trip_ms`
+     * after how long. Any final answer is a server that is there.
+     */
+    ANSWERED(1),
+    /**
+     * No answer before the request, or the test, timed out.
+     */
+    TIMED_OUT(2),
+    /**
+     * The transport refused the request or failed under it.
+     */
+    TRANSPORT_FAILED(3),
+    ;
+
+    companion object {
+        fun of(value: Int): SipralServerReach? = entries.firstOrNull { it.value == value }
     }
 }
 
@@ -7278,6 +7398,45 @@ class SipralLocalConferenceConfig(
 )
 
 /**
+ * What sipral_stack_network_test tests. Zero in any member but
+ * `size` leaves that part out or takes its default.
+ *
+ * Set `size` to `sizeof(sipral_network_test_config_t)` before the call.
+ *
+ * Built here and copied into the C struct by the JNI shim, which sets the
+ * size member itself: a field left at its default is the zero the struct
+ * would have held.
+ */
+class SipralNetworkTestConfig(
+    /**
+     * The account whose server to probe, on the account's own
+     * transport, or `SIPRAL_HANDLE_NONE` to leave it out.
+     */
+    val account: Long = 0,
+    /**
+     * A UDP socket the application bound for the test, `host:port`,
+     * asked about as `sipral_stack_nat_map` asks about a media socket;
+     * null to ask about the signalling socket only, and to test no
+     * relay. Not NUL-terminated.
+     */
+    val probeSocket: String? = null,
+    /**
+     * A call the application placed to an echo service, measured once
+     * its media starts and hung up by the test, or `SIPRAL_HANDLE_NONE`.
+     */
+    val echoCall: Long = 0,
+    /**
+     * How long the echo is measured. 8000 by default.
+     */
+    val echoMs: Long = 0,
+    /**
+     * How long the whole test may take. 30000 by default; a part that
+     * has not answered by then counts as failed.
+     */
+    val timeoutMs: Long = 0,
+)
+
+/**
  * Something the library has to tell the application.
  *
  * The pointer handed to the callback is the library's, and it is valid for
@@ -8497,6 +8656,104 @@ data class SipralTokenEvent(
 )
 
 /**
+ * What a SipralEventKind.NETWORK_TEST
+ * carries: every part of one test, and the verdict (ABI 1.2). The
+ * event's `account` is the account probed and its `call` the echo call,
+ * when there were any. The two addresses are `host:port`, not
+ * NUL-terminated, and the library's: valid for as long as the callback
+ * runs.
+ */
+data class SipralNetworkTestEvent(
+    /**
+     * The number sipral_stack_network_test gave the test.
+     */
+    val test: Long,
+    /**
+     * A SipralNetworkVerdict: the worst of the parts tested.
+     */
+    val verdict: Long,
+    /**
+     * A SipralNetworkProbe: whether a STUN server answered.
+     */
+    val stun: Long,
+    /**
+     * A SipralNatKind, from that answer.
+     */
+    val nat: Long,
+    /**
+     * A SipralNetworkProbe: whether the TURN server allocated a
+     * relay for the probe socket.
+     */
+    val turn: Long,
+    /**
+     * A `SipralTransport`: what the TURN server was reached over, or
+     * zero when it was not tested.
+     */
+    val turnProtocol: Long,
+    /**
+     * A SipralServerReach.
+     */
+    val server: Long,
+    /**
+     * The status the server answered with, or zero.
+     */
+    val serverStatus: Long,
+    /**
+     * From sending the `OPTIONS` to its answer, in milliseconds.
+     */
+    val serverRoundTripMs: Long,
+    /**
+     * A SipralNetworkProbe: whether audio came back on the echo call
+     * and was measured. Failed for a call whose media never started, or
+     * that brought nothing back.
+     */
+    val echo: Long,
+    /**
+     * A SipralNetworkVerdict for the echo alone.
+     */
+    val echoVerdict: Long,
+    /**
+     * Packets lost or too late to play, as a percentage of those due.
+     */
+    val lossPercent: Double,
+    /**
+     * Interarrival jitter (RFC 3550 §6.4.1), in milliseconds.
+     */
+    val jitterMs: Double,
+    /**
+     * Nonzero when RTCP brought a round trip back in time.
+     */
+    val hasRoundTrip: Long,
+    /**
+     * That round trip, in milliseconds.
+     */
+    val roundTripMs: Long,
+    /**
+     * The one-way delay the rating assumed: half the round trip and the
+     * jitter buffer's delay, in milliseconds.
+     */
+    val oneWayDelayMs: Long,
+    /**
+     * G.107's transmission rating R, 0 to 100, for concealed G.711.
+     */
+    val rFactor: Long,
+    /**
+     * The conversational mean opinion score estimated from it, 1.0 to
+     * 4.5.
+     */
+    val mos: Double,
+    /**
+     * The socket the STUN answer was about: the probe socket, or the
+     * signalling socket.
+     */
+    val local: String?,
+    /**
+     * Where the STUN server saw it. Empty without an answer.
+     */
+    val mapped: String?,
+)
+
+/**
  * One of every arm [`SipralEventPayload`] declares, read back whole:
  * [`SipralEvent.payload`] builds one from every event, and which member of
  * it means something is named by [`SipralEvent.kind`] alone.
@@ -8614,6 +8871,10 @@ class SipralEventPayload(
      * For SipralEventKind.TOKEN_REQUIRED.
      */
     val token: SipralTokenEvent,
+    /**
+     * For SipralEventKind.NETWORK_TEST.
+     */
+    val networkTest: SipralNetworkTestEvent,
 )
 
 class SipralEvent(
@@ -9007,6 +9268,19 @@ class SipralEvent(
      * For SipralEventKind.TOKEN_REQUIRED.
      */
     private val payloadTokenNumbers: LongArray? = null,
+    /**
+     * The socket the STUN answer was about: the probe socket, or the
+     * signalling socket.
+     */
+    private val payloadNetworkTestLocal: String? = null,
+    /**
+     * Where the STUN server saw it. Empty without an answer.
+     */
+    private val payloadNetworkTestMapped: String? = null,
+    /**
+     * For SipralEventKind.NETWORK_TEST.
+     */
+    private val payloadNetworkTestNumbers: LongArray? = null,
 ) {
     /** One of every arm [`SipralEventPayload`] declares; see its own documentation. */
     val payload: SipralEventPayload
@@ -9037,6 +9311,7 @@ class SipralEvent(
             SipralLocateEvent((payloadLocateNumbers?.get(0) ?: 0L), (payloadLocateNumbers?.get(1) ?: 0L), payloadLocateName, payloadLocateTargets, (payloadLocateNumbers?.get(2) ?: 0L)),
             SipralChallengeEvent((payloadChallengeNumbers?.get(0) ?: 0L), payloadChallengeServer, payloadChallengeRealms),
             SipralTokenEvent((payloadTokenNumbers?.get(0) ?: 0L), (payloadTokenNumbers?.get(1) ?: 0L), payloadTokenServer, payloadTokenRealm, payloadTokenScope, payloadTokenAuthzServer, payloadTokenErrorCode),
+            SipralNetworkTestEvent((payloadNetworkTestNumbers?.get(0) ?: 0L), (payloadNetworkTestNumbers?.get(1) ?: 0L), (payloadNetworkTestNumbers?.get(2) ?: 0L), (payloadNetworkTestNumbers?.get(3) ?: 0L), (payloadNetworkTestNumbers?.get(4) ?: 0L), (payloadNetworkTestNumbers?.get(5) ?: 0L), (payloadNetworkTestNumbers?.get(6) ?: 0L), (payloadNetworkTestNumbers?.get(7) ?: 0L), (payloadNetworkTestNumbers?.get(8) ?: 0L), (payloadNetworkTestNumbers?.get(9) ?: 0L), (payloadNetworkTestNumbers?.get(10) ?: 0L), Double.fromBits(payloadNetworkTestNumbers?.get(11) ?: 0L), Double.fromBits(payloadNetworkTestNumbers?.get(12) ?: 0L), (payloadNetworkTestNumbers?.get(13) ?: 0L), (payloadNetworkTestNumbers?.get(14) ?: 0L), (payloadNetworkTestNumbers?.get(15) ?: 0L), (payloadNetworkTestNumbers?.get(16) ?: 0L), Double.fromBits(payloadNetworkTestNumbers?.get(17) ?: 0L), payloadNetworkTestLocal, payloadNetworkTestMapped),
         )
 }
 
@@ -9108,10 +9383,10 @@ internal object SipralEventListeners {
 
     /** Called by the JNI shim, once per event, on the thread that polls. */
     @JvmStatic
-    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?, payloadTokenServer: ByteArray?, payloadTokenRealm: ByteArray?, payloadTokenScope: ByteArray?, payloadTokenAuthzServer: ByteArray?, payloadTokenErrorCode: ByteArray?, payloadTokenNumbers: LongArray?) {
+    fun deliver(key: Long, size: Long, stack: Long, kind: Long, account: Long, call: Long, message: ByteArray?, payloadRegistrationNumbers: LongArray?, payloadCallLocalSdp: ByteArray?, payloadCallRemoteSdp: ByteArray?, payloadCallFromUri: ByteArray?, payloadCallFromDisplay: ByteArray?, payloadCallToUri: ByteArray?, payloadCallCallId: ByteArray?, payloadCallCauseText: ByteArray?, payloadCallAssertedUri: ByteArray?, payloadCallAssertedDisplay: ByteArray?, payloadCallDivertedFrom: ByteArray?, payloadCallDiversionReason: ByteArray?, payloadCallAlertInfo: ByteArray?, payloadCallNumbers: LongArray?, payloadTransferTarget: ByteArray?, payloadTransferNumbers: LongArray?, payloadMediaReason: ByteArray?, payloadMediaStatistics: LongArray?, payloadMediaNumbers: LongArray?, payloadRecoveryNumbers: LongArray?, payloadTransportWantedDestination: ByteArray?, payloadTransportWantedNumbers: LongArray?, payloadSubscriptionNumbers: LongArray?, payloadAnnounceNumbers: LongArray?, payloadResolveHost: ByteArray?, payloadResolveNumbers: LongArray?, payloadMessageContentType: ByteArray?, payloadMessageBody: ByteArray?, payloadMessageMessageAccount: ByteArray?, payloadMessageNumbers: LongArray?, payloadNatLocal: ByteArray?, payloadNatMapped: ByteArray?, payloadNatPrevious: ByteArray?, payloadNatNumbers: LongArray?, payloadRelayLocal: ByteArray?, payloadRelayRelayed: ByteArray?, payloadRelayMapped: ByteArray?, payloadRelayReason: ByteArray?, payloadRelayNumbers: LongArray?, payloadReferralTarget: ByteArray?, payloadReferralReferredBy: ByteArray?, payloadReferralNumbers: LongArray?, payloadTurnStreamLocal: ByteArray?, payloadTurnStreamServer: ByteArray?, payloadTurnStreamNumbers: LongArray?, payloadAudioNumbers: LongArray?, payloadStunServerServer: ByteArray?, payloadStunServerPrevious: ByteArray?, payloadStunServerNumbers: LongArray?, payloadVerificationCertificateUrl: ByteArray?, payloadVerificationOrig: ByteArray?, payloadVerificationOrigid: ByteArray?, payloadVerificationDetail: ByteArray?, payloadVerificationNumbers: LongArray?, payloadProgressNumbers: LongArray?, payloadConferenceNumbers: LongArray?, payloadTextText: ByteArray?, payloadTextNumbers: LongArray?, payloadPresenceEntity: ByteArray?, payloadPresenceNote: ByteArray?, payloadPresenceNumbers: LongArray?, payloadTransportFailedDetail: ByteArray?, payloadTransportFailedNumbers: LongArray?, payloadLocalConferenceNumbers: LongArray?, payloadLocateName: ByteArray?, payloadLocateTargets: ByteArray?, payloadLocateNumbers: LongArray?, payloadChallengeServer: ByteArray?, payloadChallengeRealms: ByteArray?, payloadChallengeNumbers: LongArray?, payloadTokenServer: ByteArray?, payloadTokenRealm: ByteArray?, payloadTokenScope: ByteArray?, payloadTokenAuthzServer: ByteArray?, payloadTokenErrorCode: ByteArray?, payloadTokenNumbers: LongArray?, payloadNetworkTestLocal: ByteArray?, payloadNetworkTestMapped: ByteArray?, payloadNetworkTestNumbers: LongArray?) {
         val listener = synchronized(this) { listening[key] } ?: return
         try {
-            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers, payloadTokenServer?.let { String(it, Charsets.UTF_8) }, payloadTokenRealm?.let { String(it, Charsets.UTF_8) }, payloadTokenScope?.let { String(it, Charsets.UTF_8) }, payloadTokenAuthzServer?.let { String(it, Charsets.UTF_8) }, payloadTokenErrorCode?.let { String(it, Charsets.UTF_8) }, payloadTokenNumbers))
+            listener.onEvent(SipralEvent(size, stack, kind, account, call, message, payloadRegistrationNumbers, payloadCallLocalSdp, payloadCallRemoteSdp, payloadCallFromUri, payloadCallFromDisplay, payloadCallToUri, payloadCallCallId, payloadCallCauseText, payloadCallAssertedUri, payloadCallAssertedDisplay, payloadCallDivertedFrom, payloadCallDiversionReason, payloadCallAlertInfo, payloadCallNumbers, payloadTransferTarget?.let { String(it, Charsets.UTF_8) }, payloadTransferNumbers, payloadMediaReason?.let { String(it, Charsets.UTF_8) }, payloadMediaStatistics, payloadMediaNumbers, payloadRecoveryNumbers, payloadTransportWantedDestination?.let { String(it, Charsets.UTF_8) }, payloadTransportWantedNumbers, payloadSubscriptionNumbers, payloadAnnounceNumbers, payloadResolveHost?.let { String(it, Charsets.UTF_8) }, payloadResolveNumbers, payloadMessageContentType?.let { String(it, Charsets.UTF_8) }, payloadMessageBody, payloadMessageMessageAccount?.let { String(it, Charsets.UTF_8) }, payloadMessageNumbers, payloadNatLocal?.let { String(it, Charsets.UTF_8) }, payloadNatMapped?.let { String(it, Charsets.UTF_8) }, payloadNatPrevious?.let { String(it, Charsets.UTF_8) }, payloadNatNumbers, payloadRelayLocal?.let { String(it, Charsets.UTF_8) }, payloadRelayRelayed?.let { String(it, Charsets.UTF_8) }, payloadRelayMapped?.let { String(it, Charsets.UTF_8) }, payloadRelayReason?.let { String(it, Charsets.UTF_8) }, payloadRelayNumbers, payloadReferralTarget?.let { String(it, Charsets.UTF_8) }, payloadReferralReferredBy?.let { String(it, Charsets.UTF_8) }, payloadReferralNumbers, payloadTurnStreamLocal?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamServer?.let { String(it, Charsets.UTF_8) }, payloadTurnStreamNumbers, payloadAudioNumbers, payloadStunServerServer?.let { String(it, Charsets.UTF_8) }, payloadStunServerPrevious?.let { String(it, Charsets.UTF_8) }, payloadStunServerNumbers, payloadVerificationCertificateUrl?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrig?.let { String(it, Charsets.UTF_8) }, payloadVerificationOrigid?.let { String(it, Charsets.UTF_8) }, payloadVerificationDetail?.let { String(it, Charsets.UTF_8) }, payloadVerificationNumbers, payloadProgressNumbers, payloadConferenceNumbers, payloadTextText?.let { String(it, Charsets.UTF_8) }, payloadTextNumbers, payloadPresenceEntity?.let { String(it, Charsets.UTF_8) }, payloadPresenceNote?.let { String(it, Charsets.UTF_8) }, payloadPresenceNumbers, payloadTransportFailedDetail?.let { String(it, Charsets.UTF_8) }, payloadTransportFailedNumbers, payloadLocalConferenceNumbers, payloadLocateName?.let { String(it, Charsets.UTF_8) }, payloadLocateTargets?.let { String(it, Charsets.UTF_8) }, payloadLocateNumbers, payloadChallengeServer?.let { String(it, Charsets.UTF_8) }, payloadChallengeRealms?.let { String(it, Charsets.UTF_8) }, payloadChallengeNumbers, payloadTokenServer?.let { String(it, Charsets.UTF_8) }, payloadTokenRealm?.let { String(it, Charsets.UTF_8) }, payloadTokenScope?.let { String(it, Charsets.UTF_8) }, payloadTokenAuthzServer?.let { String(it, Charsets.UTF_8) }, payloadTokenErrorCode?.let { String(it, Charsets.UTF_8) }, payloadTokenNumbers, payloadNetworkTestLocal?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestMapped?.let { String(it, Charsets.UTF_8) }, payloadNetworkTestNumbers))
         } catch (failure: Throwable) {
             val thread = Thread.currentThread()
             thread.uncaughtExceptionHandler.uncaughtException(thread, failure)
@@ -9711,6 +9986,7 @@ internal object SipralNative {
     external fun sipral_account_unregister(stack: Long, account: Long, nowMs: Long): Int
     external fun sipral_account_registration_state(stack: Long, account: Long, state: LongArray): Int
     external fun sipral_account_set_access_token(stack: Long, account: Long, token: ByteArray): Int
+    external fun sipral_stack_network_test(stack: Long, configAccount: Long, configProbeSocket: ByteArray?, configEchoCall: Long, configEchoMs: Long, configTimeoutMs: Long, nowMs: Long, test: LongArray): Int
     external fun sipral_call_place(stack: Long, account: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, call: LongArray, nowMs: Long): Int
     external fun sipral_call_ring(stack: Long, call: Long, sdp: ByteArray, nowMs: Long): Int
     external fun sipral_call_ring_media(stack: Long, call: Long, configTarget: ByteArray?, configSdp: ByteArray?, configDestination: ByteArray?, configKeepAllForks: Long, configMediaAddress: ByteArray?, configHeadersBytes: ByteArray?, configHeadersLengths: LongArray?, configSrtp: Long, configTransport: Long, configCodecs: ByteArray?, configIce: Long, configTextAddress: ByteArray?, configFeedback: Long, configFocus: Long, nowMs: Long): Int
@@ -10392,6 +10668,7 @@ object Sipral {
         "sipral_locate_event_t" to intArrayOf(48, 32, 32),
         "sipral_challenge_event_t" to intArrayOf(40, 20, 20),
         "sipral_token_event_t" to intArrayOf(88, 48, 48),
+        "sipral_network_test_event_t" to intArrayOf(104, 88, 88),
         "sipral_event_payload_t" to intArrayOf(328, 208, 216),
         "sipral_event_t" to intArrayOf(384, 248, 264),
         "sipral_suspending_t" to intArrayOf(32, 16, 16),
@@ -10416,6 +10693,7 @@ object Sipral {
         "sipral_local_conference_info_t" to intArrayOf(56, 48, 48),
         "sipral_local_conference_member_t" to intArrayOf(40, 36, 40),
         "sipral_pinned_certificate_t" to intArrayOf(40, 36, 40),
+        "sipral_network_test_config_t" to intArrayOf(48, 36, 40),
     )
 
     /**
@@ -11241,6 +11519,33 @@ object Sipral {
     fun accountSetAccessToken(stack: Long, account: Long, token: String) {
         val tokenBytes = token.toByteArray(Charsets.UTF_8)
         check(SipralNative.sipral_account_set_access_token(stack, account, tokenBytes))
+    }
+
+    /**
+     * Test the network before a call: STUN, TURN, the account's server and,
+     * with an echo call, the audio path, as `config` says (ABI 1.2). The
+     * answer arrives from a later `sipral_stack_poll` as one
+     * `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+     * has answered or `timeout_ms` has passed. Tests may run side by side.
+     *
+     * `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+     * no STUN server, and for an account whose server has not been located
+     * yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+     * an address or is a signalling socket of the stack's own; a handle
+     * that names no account or call of this stack is refused as handles are.
+     * Nothing is started when anything is refused.
+     *
+     * Safety
+     *
+     * `config` must point at a `sipral_network_test_config_t` whose `size`
+     * member says how long it is, with `probe_socket` readable for
+     * `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+     */
+    fun stackNetworkTest(stack: Long, config: SipralNetworkTestConfig, nowMs: Long): Long {
+        val configProbeSocket = config.probeSocket?.toByteArray(Charsets.UTF_8)
+        val testSlot = LongArray(1)
+        check(SipralNative.sipral_stack_network_test(stack, config.account, configProbeSocket, config.echoCall, config.echoMs, config.timeoutMs, nowMs, testSlot))
+        return testSlot[0]
     }
 
     /**

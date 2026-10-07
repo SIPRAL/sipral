@@ -53,6 +53,7 @@ import org.sipral.SipralLink
 import org.sipral.SipralLogLevel
 import org.sipral.SipralLogListener
 import org.sipral.SipralNat
+import org.sipral.SipralNetworkTestConfig
 import org.sipral.SipralRecovery
 import org.sipral.SipralSrtp
 import org.sipral.SipralStackConfig
@@ -975,6 +976,36 @@ class SipralClient private constructor(
     fun setStunServers(servers: List<String>) {
         retryBusy { Sipral.stackStunServers(handle, servers.joinToString(","), nowMs()) }
         stunServer = servers.firstOrNull()
+    }
+
+    /**
+     * `sipral_stack_network_test`: test the network before a call without
+     * placing one of its own, and return the test's number. What it found
+     * arrives as `SIPRAL_EVENT_KIND_NETWORK_TEST` ([networkTestOf]).
+     * [account] has its server asked with an `OPTIONS` on its own transport;
+     * on a client with a STUN server the answer the signalling socket was
+     * last given stands for the STUN part. [echoCall] is a call this client
+     * placed to an echo service: its audio is measured for [echoMs] (8000 by
+     * default) once its media starts, and the test hangs it up. A part that
+     * has not answered within [timeoutMs] (30000 by default) counts as
+     * failed.
+     */
+    fun networkTest(
+        account: SipralAccount? = null,
+        echoCall: SipralCall? = null,
+        echoMs: Long = 0,
+        timeoutMs: Long = 0,
+    ): Long = retryBusy {
+        Sipral.stackNetworkTest(
+            handle,
+            SipralNetworkTestConfig(
+                account = account?.handle ?: 0,
+                echoCall = echoCall?.handle ?: 0,
+                echoMs = echoMs,
+                timeoutMs = timeoutMs,
+            ),
+            nowMs(),
+        )
     }
 
     /**

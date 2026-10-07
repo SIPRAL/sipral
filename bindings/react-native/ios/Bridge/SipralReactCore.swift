@@ -396,6 +396,20 @@ public final class SipralReactCore: @unchecked Sendable {
         try guarded { try open().setDiagnosticTrace(on) }
     }
 
+    /// A network test before a call: the account's server, and the echo
+    /// call measured and hung up, either "" to leave it out. Returns the
+    /// test's number, which its `networkTest` event carries.
+    public func networkTest(_ account: String, echoCall: String, echoMs: Int, timeoutMs: Int) throws -> Int {
+        try guarded {
+            let stack = try open()
+            let line = account.isEmpty ? nil : try accountOf(account)
+            let echo = echoCall.isEmpty ? nil : try callOf(echoCall)
+            return Int(try stack.networkTest(
+                account: line, echoCall: echo, echoMs: UInt32(clamping: echoMs), timeoutMs: UInt32(clamping: timeoutMs)
+            ))
+        }
+    }
+
     /// One call's own gain in one direction, "input" or "output".
     public func setCallGain(_ call: String, _ direction: String, _ gain: Double) throws {
         try guarded { try devices().setGain(gain, for: try Self.direction(direction), of: try callOf(call)) }
@@ -621,6 +635,24 @@ public final class SipralReactCore: @unchecked Sendable {
             transfer.target.map { flat["target"] = $0 }
         } else if event.kind == .digitReceived || event.kind == .inBandDigit, let digit = event.mediaData?.digit {
             flat["digit"] = String(digit)
+        } else if let found = event.networkTestData {
+            flat["test"] = Int(found.test)
+            found.verdict.map { flat["verdict"] = String(describing: $0) }
+            found.stun.map { flat["stun"] = String(describing: $0) }
+            found.nat.map { flat["nat"] = String(describing: $0) }
+            found.turn.map { flat["turn"] = String(describing: $0) }
+            found.server.map { flat["server"] = String(describing: $0) }
+            flat["serverStatus"] = Int(found.serverStatus)
+            flat["serverRoundTripMs"] = Int(found.serverRoundTripMs)
+            found.echo.map { flat["echo"] = String(describing: $0) }
+            found.echoVerdict.map { flat["echoVerdict"] = String(describing: $0) }
+            flat["lossPercent"] = Double(found.lossPercent)
+            flat["jitterMs"] = Double(found.jitterMs)
+            found.roundTripMs.map { flat["roundTripMs"] = Int($0) }
+            flat["rFactor"] = Int(found.rFactor)
+            flat["mos"] = Double(found.mos)
+            found.local.map { flat["local"] = $0 }
+            found.mapped.map { flat["mapped"] = $0 }
         } else if let token = event.tokenData {
             token.error.map { flat["tokenError"] = String(describing: $0) }
             token.errorCode.map { flat["tokenErrorCode"] = $0 }

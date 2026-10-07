@@ -1254,6 +1254,11 @@ public enum SipralEventKind: UInt32, Sendable {
     /// with the 401 or 407 — and `sipral_account_register` registers
     /// again at once with the new token. `account` is the account.
     case tokenRequired = 59
+    /// A network test `sipral_stack_network_test` started has every
+    /// answer it is going to get (ABI 1.2). `payload.network_test` holds
+    /// each part and the verdict; `account` is the account whose server
+    /// was probed and `call` the echo call, when the test had them.
+    case networkTest = 60
 }
 
 /// Where a registration is. Names for `sipral_registration_event_t::state`.
@@ -2423,6 +2428,61 @@ public enum SipralTokenError: UInt32, Sendable {
     case other = 5
 }
 
+/// What a network test, or one part of it, comes to. Names for
+/// `sipral_network_test_event_t::verdict` and `echo_verdict`.
+public enum SipralNetworkVerdict: UInt32, Sendable {
+    /// Nothing was tested.
+    case unknown = 0
+    /// Calls should work and sound right.
+    case good = 1
+    /// Calls should work, and may not everywhere or may not sound their
+    /// best.
+    case acceptable = 2
+    /// Calls are likely to fail or to sound bad.
+    case poor = 3
+}
+
+/// Whether a part of a network test was tried, and how it went. Names
+/// for `sipral_network_test_event_t::stun`, `turn` and `echo`.
+public enum SipralNetworkProbe: UInt32, Sendable {
+    /// Not part of this test.
+    case notTested = 0
+    /// The server answered as hoped; for the echo, audio came back and
+    /// was measured.
+    case succeeded = 1
+    /// It did not.
+    case failed = 2
+}
+
+/// What a STUN answer says about the NAT in front of this end. Names for
+/// `sipral_network_test_event_t::nat`. Approximate: one answer shows
+/// whether the address and the port were translated, and nothing about
+/// how the NAT filters what arrives (RFC 4787).
+public enum SipralNatKind: UInt32, Sendable {
+    /// No answer to read.
+    case unknown = 0
+    /// No translation: the server saw the socket's own address.
+    case open = 1
+    /// The address was translated and the port kept.
+    case portPreserved = 2
+    /// The port was changed too.
+    case portChanged = 3
+}
+
+/// What the account's server did with the test's `OPTIONS`. Names for
+/// `sipral_network_test_event_t::server`.
+public enum SipralServerReach: UInt32, Sendable {
+    /// Not part of this test.
+    case notTested = 0
+    /// It answered: `server_status` with what, `server_round_trip_ms`
+    /// after how long. Any final answer is a server that is there.
+    case answered = 1
+    /// No answer before the request, or the test, timed out.
+    case timedOut = 2
+    /// The transport refused the request or failed under it.
+    case transportFailed = 3
+}
+
 /// What a party this end holds is sent:
 /// `sipral_stack_config_t::held_audio`.
 public enum SipralHeldAudio: UInt32, Sendable {
@@ -2858,6 +2918,16 @@ public extension sipral_local_conference_member_t {
 }
 
 public extension sipral_pinned_certificate_t {
+    /// A zeroed one with its size filled in, which is what every
+    /// struct here has to be handed over as.
+    static func sized() -> Self {
+        var value = Self()
+        value.size = MemoryLayout<Self>.size
+        return value
+    }
+}
+
+public extension sipral_network_test_config_t {
     /// A zeroed one with its size filled in, which is what every
     /// struct here has to be handed over as.
     static func sized() -> Self {
@@ -3426,6 +3496,7 @@ public enum Sipral {
         ("sipral_locate_event_t", MemoryLayout<sipral_locate_event_t>.size, 48, 32, 32),
         ("sipral_challenge_event_t", MemoryLayout<sipral_challenge_event_t>.size, 40, 20, 20),
         ("sipral_token_event_t", MemoryLayout<sipral_token_event_t>.size, 88, 48, 48),
+        ("sipral_network_test_event_t", MemoryLayout<sipral_network_test_event_t>.size, 104, 88, 88),
         ("sipral_event_payload_t", MemoryLayout<sipral_event_payload_t>.size, 328, 208, 216),
         ("sipral_event_t", MemoryLayout<sipral_event_t>.size, 384, 248, 264),
         ("sipral_suspending_t", MemoryLayout<sipral_suspending_t>.size, 32, 16, 16),
@@ -3450,6 +3521,7 @@ public enum Sipral {
         ("sipral_local_conference_info_t", MemoryLayout<sipral_local_conference_info_t>.size, 56, 48, 48),
         ("sipral_local_conference_member_t", MemoryLayout<sipral_local_conference_member_t>.size, 40, 36, 40),
         ("sipral_pinned_certificate_t", MemoryLayout<sipral_pinned_certificate_t>.size, 40, 36, 40),
+        ("sipral_network_test_config_t", MemoryLayout<sipral_network_test_config_t>.size, 48, 36, 40),
     ]
 
     /// The short name of a status code, as a static NUL-terminated string, or
@@ -4222,6 +4294,33 @@ public enum Sipral {
                 }
             }
         try check(status)
+    }
+
+    /// Test the network before a call: STUN, TURN, the account's server and,
+    /// with an echo call, the audio path, as `config` says (ABI 1.2). The
+    /// answer arrives from a later `sipral_stack_poll` as one
+    /// `SIPRAL_EVENT_KIND_NETWORK_TEST` carrying `*out_test`, once every part
+    /// has answered or `timeout_ms` has passed. Tests may run side by side.
+    ///
+    /// `SIPRAL_STATUS_WRONG_STATE` for a `probe_socket` on a stack that asks
+    /// no STUN server, and for an account whose server has not been located
+    /// yet; `SIPRAL_STATUS_INVALID_ARGUMENT` for a `probe_socket` that is not
+    /// an address or is a signalling socket of the stack's own; a handle
+    /// that names no account or call of this stack is refused as handles are.
+    /// Nothing is started when anything is refused.
+    ///
+    /// Safety
+    ///
+    /// `config` must point at a `sipral_network_test_config_t` whose `size`
+    /// member says how long it is, with `probe_socket` readable for
+    /// `probe_socket_len` bytes; `out_test` must point at one `uint32_t`.
+    public static func stackNetworkTest(stack: SipralHandle, config: sipral_network_test_config_t, nowMs: UInt64) throws -> UInt32 {
+        try ensureAbi()
+        var config = config
+        var test = UInt32()
+        let status = sipral_stack_network_test(stack, &config, nowMs, &test)
+        try check(status)
+        return test
     }
 
     /// Place a call, and write its handle to `out_call`.

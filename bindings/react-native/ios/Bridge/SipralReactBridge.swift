@@ -125,6 +125,15 @@ public final class SipralReactBridge: NSObject {
         settle(resolve, reject) { try self.core.setDiagnosticTrace(on) }
     }
 
+    @objc public func networkTest(
+        _ account: String, echoCall: String, echoMs: Double, timeoutMs: Double,
+        resolve: @escaping Resolve, reject: @escaping Reject
+    ) {
+        settle(resolve, reject) {
+            try self.core.networkTest(account, echoCall: echoCall, echoMs: Int(echoMs), timeoutMs: Int(timeoutMs))
+        }
+    }
+
     @objc public func setCallGain(
         _ call: String, direction: String, gain: Double, resolve: @escaping Resolve, reject: @escaping Reject
     ) {

@@ -77,6 +77,7 @@ final class SipralStackEvent {
     this.tokenRealm,
     this.tokenScope,
     this.tokenAuthzServer,
+    this.networkTest,
   });
 
   factory SipralStackEvent._read(SipralEvent event) {
@@ -96,6 +97,8 @@ final class SipralStackEvent {
             : null;
     final token =
         kind == SipralEventKind.tokenRequired ? event.payload.token : null;
+    final tested =
+        kind == SipralEventKind.networkTest ? event.payload.networkTest : null;
     final record =
         kind == SipralEventKind.mediaStatistics
             ? event.payload.media.statistics
@@ -154,6 +157,29 @@ final class SipralStackEvent {
           token == null
               ? null
               : _nonEmpty(text(token.authzServer, token.authzServerLen)),
+      networkTest:
+          tested == null
+              ? null
+              : SipralNetworkTestResult._(
+                test: tested.test,
+                verdict: tested.verdict,
+                stun: tested.stun,
+                nat: tested.nat,
+                turn: tested.turn,
+                server: tested.server,
+                serverStatus: tested.serverStatus,
+                serverRoundTripMs: tested.serverRoundTripMs,
+                echo: tested.echo,
+                echoVerdict: tested.echoVerdict,
+                lossPercent: tested.lossPercent,
+                jitterMs: tested.jitterMs,
+                roundTripMs:
+                    tested.hasRoundTrip != 0 ? tested.roundTripMs : null,
+                rFactor: tested.rFactor,
+                mos: tested.mos,
+                local: _nonEmpty(text(tested.local, tested.localLen)),
+                mapped: _nonEmpty(text(tested.mapped, tested.mappedLen)),
+              ),
       statistics:
           record == ffi.nullptr ? null : SipralMediaStatistics._(record.ref),
     );
@@ -216,6 +242,9 @@ final class SipralStackEvent {
   /// [SipralAccount.setAccessToken].
   final String? tokenAuthzServer;
 
+  /// What a network test found, for `SipralEventKind.networkTest`.
+  final SipralNetworkTestResult? networkTest;
+
   /// The account's `SipralRegistrationState` value, for
   /// `SipralEventKind.registrationChanged`.
   final int? registrationState;
@@ -270,6 +299,85 @@ final class SipralStackEvent {
   @override
   String toString() =>
       'SipralStackEvent(kind: $kind, account: $account, call: $call)';
+}
+
+/// What `SipralEventKind.networkTest` carries: every part of one test
+/// [SipralStack.networkTest] started, and the verdict, the worst of the
+/// parts tested. The enumerations are their ABI values: [verdict] and
+/// [echoVerdict] a `SipralNetworkVerdict`, [stun], [turn] and [echo] a
+/// `SipralNetworkProbe`, [nat] a `SipralNatKind`, [server] a
+/// `SipralServerReach`.
+final class SipralNetworkTestResult {
+  SipralNetworkTestResult._({
+    required this.test,
+    required this.verdict,
+    required this.stun,
+    required this.nat,
+    required this.turn,
+    required this.server,
+    required this.serverStatus,
+    required this.serverRoundTripMs,
+    required this.echo,
+    required this.echoVerdict,
+    required this.lossPercent,
+    required this.jitterMs,
+    required this.roundTripMs,
+    required this.rFactor,
+    required this.mos,
+    required this.local,
+    required this.mapped,
+  });
+
+  /// The number [SipralStack.networkTest] returned.
+  final int test;
+
+  /// Good, acceptable or poor; unknown when nothing was tested.
+  final int verdict;
+
+  /// Whether a STUN server answered.
+  final int stun;
+
+  /// What its answer says about the NAT.
+  final int nat;
+
+  /// Whether the TURN server allocated a relay.
+  final int turn;
+
+  /// What the account's server did with the `OPTIONS`.
+  final int server;
+
+  /// The status it answered with, or zero.
+  final int serverStatus;
+
+  /// From the `OPTIONS` to its answer, in milliseconds.
+  final int serverRoundTripMs;
+
+  /// Whether audio came back on the echo call.
+  final int echo;
+
+  /// The echo's own verdict.
+  final int echoVerdict;
+
+  /// Lost or late, as a percentage.
+  final double lossPercent;
+
+  /// Interarrival jitter, in milliseconds.
+  final double jitterMs;
+
+  /// The round trip RTCP measured, or null when it brought none back.
+  final int? roundTripMs;
+
+  /// G.107's R, for concealed G.711.
+  final int rFactor;
+
+  /// The conversational MOS estimated from it.
+  final double mos;
+
+  /// The socket the STUN answer was about.
+  final String? local;
+
+  /// Where the STUN server saw it.
+  final String? mapped;
 }
 
 /// [text], or null when it is empty.

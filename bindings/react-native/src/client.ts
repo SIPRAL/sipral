@@ -33,6 +33,10 @@ import type {
   Settings,
   Signalling,
   TokenError,
+  NatKind,
+  NetworkProbe,
+  NetworkVerdict,
+  ServerReach,
 } from './types';
 
 export interface RegistrationChangedEvent {
@@ -91,6 +95,41 @@ export interface TokenRequiredEvent {
   scope: string;
   /** The authorization server, an https URI, '' for none named. */
   authzServer: string;
+}
+
+/**
+ * What a network test found: every part of one test
+ * `client.networkTest` started, and the verdict, the worst of the parts
+ * tested.
+ */
+export interface NetworkTestEvent {
+  /** The number `client.networkTest` resolved with. */
+  test: number;
+  verdict: NetworkVerdict;
+  stun: NetworkProbe;
+  nat: NatKind;
+  turn: NetworkProbe;
+  server: ServerReach;
+  /** The status the account's server answered with, 0 for none. */
+  serverStatus: number;
+  /** From the OPTIONS to its answer, in milliseconds. */
+  serverRoundTripMs: number;
+  echo: NetworkProbe;
+  echoVerdict: NetworkVerdict;
+  /** Lost or late on the echo call, as a percentage. */
+  lossPercent: number;
+  /** Interarrival jitter on the echo call, in milliseconds. */
+  jitterMs: number;
+  /** The round trip RTCP measured on the echo call, null when it brought none back. */
+  roundTripMs: number | null;
+  /** G.107's R for the echo call, for concealed G.711. */
+  rFactor: number;
+  /** The conversational MOS estimated from it. */
+  mos: number;
+  /** The socket the STUN answer was about, '' for none. */
+  local: string;
+  /** Where the STUN server saw it, '' for no answer. */
+  mapped: string;
 }
 
 export interface IncomingCallEvent {
@@ -156,6 +195,7 @@ export interface ClientEvents {
   locateFailed: LocateFailedEvent;
   challengeDeclined: ChallengeDeclinedEvent;
   tokenRequired: TokenRequiredEvent;
+  networkTest: NetworkTestEvent;
   /** Every event, typed or not, as the native half handed it over. */
   event: NativeEvent;
 }
@@ -774,6 +814,30 @@ export class SipralClient {
    * on -- credentials and keys taken out either way -- or pseudonymised, as
    * by default. For a diagnosis.
    */
+  /**
+   * Test the network before a call without placing one of its own, and
+   * resolve with the test's number; what it found arrives as
+   * 'networkTest'. `account` has its server asked with an OPTIONS on its
+   * own transport. `echoCall` is a call placed to an echo service: its
+   * audio is measured for `echoMs` (8000 by default) once its media
+   * starts, and the test hangs it up. A part that has not answered within
+   * `timeoutMs` (30000 by default) counts as failed.
+   */
+  networkTest(
+    options: {account?: SipralAccount; echoCall?: SipralCall; echoMs?: number; timeoutMs?: number} = {},
+  ): Promise<number> {
+    return this.run(
+      () => undefined,
+      (native) =>
+        native.networkTest(
+          options.account?.id ?? '',
+          options.echoCall?.id ?? '',
+          options.echoMs ?? 0,
+          options.timeoutMs ?? 0,
+        ),
+    );
+  }
+
   setDiagnosticTrace(on: boolean): Promise<void> {
     return this.run(() => undefined, (native) => native.setDiagnosticTrace(on));
   }
@@ -911,6 +975,28 @@ export class SipralClient {
       };
       account.challengeDeclined(payload);
       this.emitter.emit('challengeDeclined', payload);
+      return;
+    }
+    if (event.kind === 'networkTest') {
+      this.emitter.emit('networkTest', {
+        test: event.test ?? 0,
+        verdict: (event.verdict as NetworkVerdict | undefined) ?? 'unknown',
+        stun: (event.stun as NetworkProbe | undefined) ?? 'notTested',
+        nat: (event.nat as NatKind | undefined) ?? 'unknown',
+        turn: (event.turn as NetworkProbe | undefined) ?? 'notTested',
+        server: (event.server as ServerReach | undefined) ?? 'notTested',
+        serverStatus: event.serverStatus ?? 0,
+        serverRoundTripMs: event.serverRoundTripMs ?? 0,
+        echo: (event.echo as NetworkProbe | undefined) ?? 'notTested',
+        echoVerdict: (event.echoVerdict as NetworkVerdict | undefined) ?? 'unknown',
+        lossPercent: event.lossPercent ?? 0,
+        jitterMs: event.jitterMs ?? 0,
+        roundTripMs: event.roundTripMs ?? null,
+        rFactor: event.rFactor ?? 0,
+        mos: event.mos ?? 0,
+        local: event.local ?? '',
+        mapped: event.mapped ?? '',
+      });
       return;
     }
     if (event.kind === 'tokenRequired') {

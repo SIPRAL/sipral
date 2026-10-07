@@ -736,6 +736,30 @@ _Static_assert(offsetof(sipral_token_event_t, authz_server_len) == SIPRAL_LAYOUT
 _Static_assert(offsetof(sipral_token_event_t, error_code) == SIPRAL_LAYOUT(72, 40, 40), "sipral_token_event_t::error_code");
 _Static_assert(offsetof(sipral_token_event_t, error_code_len) == SIPRAL_LAYOUT(80, 44, 44), "sipral_token_event_t::error_code_len");
 
+_Static_assert(sizeof(sipral_network_test_event_t) == SIPRAL_LAYOUT(104, 88, 88), "sipral_network_test_event_t");
+_Static_assert(offsetof(sipral_network_test_event_t, test) == SIPRAL_LAYOUT(0, 0, 0), "sipral_network_test_event_t::test");
+_Static_assert(offsetof(sipral_network_test_event_t, verdict) == SIPRAL_LAYOUT(4, 4, 4), "sipral_network_test_event_t::verdict");
+_Static_assert(offsetof(sipral_network_test_event_t, stun) == SIPRAL_LAYOUT(8, 8, 8), "sipral_network_test_event_t::stun");
+_Static_assert(offsetof(sipral_network_test_event_t, nat) == SIPRAL_LAYOUT(12, 12, 12), "sipral_network_test_event_t::nat");
+_Static_assert(offsetof(sipral_network_test_event_t, turn) == SIPRAL_LAYOUT(16, 16, 16), "sipral_network_test_event_t::turn");
+_Static_assert(offsetof(sipral_network_test_event_t, turn_protocol) == SIPRAL_LAYOUT(20, 20, 20), "sipral_network_test_event_t::turn_protocol");
+_Static_assert(offsetof(sipral_network_test_event_t, server) == SIPRAL_LAYOUT(24, 24, 24), "sipral_network_test_event_t::server");
+_Static_assert(offsetof(sipral_network_test_event_t, server_status) == SIPRAL_LAYOUT(28, 28, 28), "sipral_network_test_event_t::server_status");
+_Static_assert(offsetof(sipral_network_test_event_t, server_round_trip_ms) == SIPRAL_LAYOUT(32, 32, 32), "sipral_network_test_event_t::server_round_trip_ms");
+_Static_assert(offsetof(sipral_network_test_event_t, echo) == SIPRAL_LAYOUT(36, 36, 36), "sipral_network_test_event_t::echo");
+_Static_assert(offsetof(sipral_network_test_event_t, echo_verdict) == SIPRAL_LAYOUT(40, 40, 40), "sipral_network_test_event_t::echo_verdict");
+_Static_assert(offsetof(sipral_network_test_event_t, loss_percent) == SIPRAL_LAYOUT(44, 44, 44), "sipral_network_test_event_t::loss_percent");
+_Static_assert(offsetof(sipral_network_test_event_t, jitter_ms) == SIPRAL_LAYOUT(48, 48, 48), "sipral_network_test_event_t::jitter_ms");
+_Static_assert(offsetof(sipral_network_test_event_t, has_round_trip) == SIPRAL_LAYOUT(52, 52, 52), "sipral_network_test_event_t::has_round_trip");
+_Static_assert(offsetof(sipral_network_test_event_t, round_trip_ms) == SIPRAL_LAYOUT(56, 56, 56), "sipral_network_test_event_t::round_trip_ms");
+_Static_assert(offsetof(sipral_network_test_event_t, one_way_delay_ms) == SIPRAL_LAYOUT(60, 60, 60), "sipral_network_test_event_t::one_way_delay_ms");
+_Static_assert(offsetof(sipral_network_test_event_t, r_factor) == SIPRAL_LAYOUT(64, 64, 64), "sipral_network_test_event_t::r_factor");
+_Static_assert(offsetof(sipral_network_test_event_t, mos) == SIPRAL_LAYOUT(68, 68, 68), "sipral_network_test_event_t::mos");
+_Static_assert(offsetof(sipral_network_test_event_t, local) == SIPRAL_LAYOUT(72, 72, 72), "sipral_network_test_event_t::local");
+_Static_assert(offsetof(sipral_network_test_event_t, local_len) == SIPRAL_LAYOUT(80, 76, 76), "sipral_network_test_event_t::local_len");
+_Static_assert(offsetof(sipral_network_test_event_t, mapped) == SIPRAL_LAYOUT(88, 80, 80), "sipral_network_test_event_t::mapped");
+_Static_assert(offsetof(sipral_network_test_event_t, mapped_len) == SIPRAL_LAYOUT(96, 84, 84), "sipral_network_test_event_t::mapped_len");
+
 _Static_assert(sizeof(sipral_event_payload_t) == SIPRAL_LAYOUT(328, 208, 216), "sipral_event_payload_t");
 _Static_assert(offsetof(sipral_event_payload_t, registration) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::registration");
 _Static_assert(offsetof(sipral_event_payload_t, call) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::call");
@@ -763,6 +787,7 @@ _Static_assert(offsetof(sipral_event_payload_t, local_conference) == SIPRAL_LAYO
 _Static_assert(offsetof(sipral_event_payload_t, locate) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::locate");
 _Static_assert(offsetof(sipral_event_payload_t, challenge) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::challenge");
 _Static_assert(offsetof(sipral_event_payload_t, token) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::token");
+_Static_assert(offsetof(sipral_event_payload_t, network_test) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_payload_t::network_test");
 
 _Static_assert(sizeof(sipral_event_t) == SIPRAL_LAYOUT(384, 248, 264), "sipral_event_t");
 _Static_assert(offsetof(sipral_event_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_event_t::size");
@@ -1004,4 +1029,14 @@ _Static_assert(offsetof(sipral_pinned_certificate_t, expired) == SIPRAL_LAYOUT(2
 _Static_assert(offsetof(sipral_pinned_certificate_t, not_yet_valid) == SIPRAL_LAYOUT(32, 28, 32), "sipral_pinned_certificate_t::not_yet_valid");
 _Static_assert(offsetof(sipral_pinned_certificate_t, reserved) == SIPRAL_LAYOUT(36, 32, 36), "sipral_pinned_certificate_t::reserved");
 _Static_assert(offsetof(sipral_pinned_certificate_t, reserved) + sizeof(((sipral_pinned_certificate_t *)0)->reserved) == SIPRAL_LAYOUT(40, 36, 40), "sipral_pinned_certificate_t is pinned through reserved");
+
+_Static_assert(sizeof(sipral_network_test_config_t) == SIPRAL_LAYOUT(48, 36, 40), "sipral_network_test_config_t");
+_Static_assert(offsetof(sipral_network_test_config_t, size) == SIPRAL_LAYOUT(0, 0, 0), "sipral_network_test_config_t::size");
+_Static_assert(offsetof(sipral_network_test_config_t, account) == SIPRAL_LAYOUT(8, 4, 8), "sipral_network_test_config_t::account");
+_Static_assert(offsetof(sipral_network_test_config_t, probe_socket) == SIPRAL_LAYOUT(16, 12, 16), "sipral_network_test_config_t::probe_socket");
+_Static_assert(offsetof(sipral_network_test_config_t, probe_socket_len) == SIPRAL_LAYOUT(24, 16, 20), "sipral_network_test_config_t::probe_socket_len");
+_Static_assert(offsetof(sipral_network_test_config_t, echo_call) == SIPRAL_LAYOUT(32, 20, 24), "sipral_network_test_config_t::echo_call");
+_Static_assert(offsetof(sipral_network_test_config_t, echo_ms) == SIPRAL_LAYOUT(40, 28, 32), "sipral_network_test_config_t::echo_ms");
+_Static_assert(offsetof(sipral_network_test_config_t, timeout_ms) == SIPRAL_LAYOUT(44, 32, 36), "sipral_network_test_config_t::timeout_ms");
+_Static_assert(offsetof(sipral_network_test_config_t, timeout_ms) + sizeof(((sipral_network_test_config_t *)0)->timeout_ms) == SIPRAL_LAYOUT(48, 36, 40), "sipral_network_test_config_t is pinned through timeout_ms");
 

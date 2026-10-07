@@ -44,6 +44,7 @@ tree object survived both unchanged, so the code history is untouched.
 | [22-tls.md](22-tls.md) | TLS per platform: who checks the certificate, what RFC 5922 adds, the default trust anchors, a private CA, pinning one authority or a PBX's own certificate, and the failures an application sees |
 | [23-compared-with-pjsip.md](23-compared-with-pjsip.md) | the same scenarios run for Sipral's headless agent and for pjsua against one Asterisk: registration, call set-up, memory, CPU, bad links, a moved address, the INVITE with ICE |
 | [24-voice-agents.md](24-voice-agents.md) | connecting Sipral to AI voice-agent services: the SIP bridge, Pipecat and headless PCM paths, and for each service its address, transports, codecs, admission and audio format |
+| [25-network-test.md](25-network-test.md) | the network test before a call: STUN, TURN, the account's server and an echo call, rated, and the thresholds of its verdict |
 
 ## Conventions
 
