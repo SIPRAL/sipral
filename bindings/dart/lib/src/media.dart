@@ -6,14 +6,12 @@
 
 part of 'idiomatic.dart';
 
-/// One `sipral_media_packet_t` with room of its own, filled by the library
-/// again and again.
+/// One reusable `sipral_media_packet_t` with its own buffers.
 final class _MediaPacket {
   final ffi.Pointer<SipralMediaPacket> packet = calloc<SipralMediaPacket>();
   final ffi.Pointer<ffi.Uint8> _data = calloc<ffi.Uint8>(_packetBytes);
   final ffi.Pointer<ffi.Uint8> _to = calloc<ffi.Uint8>(_addressBytes);
 
-  /// Hand the room over again, empty.
   void prepare() {
     packet.ref
       ..size = ffi.sizeOf<SipralMediaPacket>()
@@ -25,10 +23,8 @@ final class _MediaPacket {
       ..destinationLen = 0;
   }
 
-  /// The datagram the library wrote, copied.
   Uint8List payload() => Uint8List.fromList(_data.asTypedList(packet.ref.len));
 
-  /// Where it goes, `host:port`.
   String destination() => _decode(_to, packet.ref.destinationLen);
 
   void free() {
@@ -78,10 +74,8 @@ final class SipralMediaStatistics {
 
 /// A call's media, from `SipralEventKind.mediaStarted` on: [SipralCall.media].
 ///
-/// Every frame, on a schedule rather than a sleep after each: the far end's
-/// audio is played out into [frames], one frame of this end's is captured
-/// from what [sendAudio] queued, or silence, and what RTCP and DTMF owe goes
-/// out.
+/// Each frame tick plays the far end's audio into [frames] and sends one
+/// frame of what [sendAudio] queued, or silence.
 final class SipralMedia {
   SipralMedia._(this.call, this._socket) {
     final sipral = call.stack._sipral;
@@ -154,15 +148,13 @@ final class SipralMedia {
     _toSend.addAll(pcm);
   }
 
-  /// `sipral_media_set_app_rate`: the rate [frames] hands out and
-  /// [sendAudio] takes, whatever rate the codec runs at -- 8000, 16000,
-  /// 24000 or 48000, or 0 for the codec's own, which is where every call
-  /// starts. The library converts both ways with its own resampler, and the
-  /// frame keeps the call's duration, so [sampleRate] and [frameSamples] say
-  /// the new rate and its length from here on. Audio queued with [sendAudio]
-  /// and not yet sent was at the old rate, and is dropped. Any other rate
-  /// throws [SipralException] with `SipralStatus.invalidArgument`, and
-  /// device mode with `SipralStatus.wrongState`.
+  /// `sipral_media_set_app_rate`: the PCM rate of [frames] and [sendAudio],
+  /// independent of the codec: 8000, 16000, 24000 or 48000, or 0 for the
+  /// codec's own (the default). The library resamples; [sampleRate] and
+  /// [frameSamples] follow the new rate. Audio queued and not yet sent is
+  /// dropped. Any other rate throws [SipralException] with
+  /// `SipralStatus.invalidArgument`, device mode with
+  /// `SipralStatus.wrongState`.
   void setAppRate(int hz) {
     final sipral = call.stack._sipral;
     _check(
@@ -185,10 +177,8 @@ final class SipralMedia {
     _toSend.clear();
   }
 
-  /// What the media has done so far. Once the call has ended the stream is
-  /// gone and the library answers `SipralStatus.wrongState`; from the moment
-  /// the end-of-call record has arrived this answers with that record
-  /// ([SipralCall.finalStatistics]) instead.
+  /// The media statistics so far. After the call ends this returns
+  /// [SipralCall.finalStatistics] once it has arrived.
   SipralMediaStatistics statistics() => using((arena) {
     final stats = arena<SipralStreamStats>();
     stats.ref.size = ffi.sizeOf<SipralStreamStats>();
@@ -232,9 +222,7 @@ final class SipralMedia {
     _due += frameMs;
     var wait = _due - call.stack.nowMs();
     if (wait < 0) {
-      // a clock that loses what it overslept sends fewer frames a second
-      // than the far end expects; one that has fallen a whole frame behind
-      // starts again from now rather than bursting to catch up
+      // a whole frame behind: restart from now rather than burst to catch up
       _due = call.stack.nowMs();
       wait = 0;
     }

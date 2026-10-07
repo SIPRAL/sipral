@@ -24,29 +24,23 @@ final class SipralAccount {
   /// requests go over, `tcp` or `tls`, or null for the stack's UDP socket.
   final int? streamProtocol;
 
-  /// The certificate pin it was added with, which a TLS connection of its
-  /// own is held to.
   final String? _tlsPin;
 
-  /// Where the account's requests go, `host:port`: the address it was added
-  /// with, or -- for one added with a [serverUri] -- the address it was last
-  /// located at, empty until then.
+  /// Where the account's requests go, `host:port`. For an account added with
+  /// a [serverUri], the address it was last located at, empty until then.
   String registrarAddress;
 
-  /// The server named by a URI RFC 3263 locates, or null.
+  /// The server URI located by RFC 3263, or null.
   final String? serverUri;
 
-  /// Whether its `Contact` is the one this layer derives, and the
-  /// `host:port` it names when this layer chose it.
   final bool _derivesContact;
   String? _advertised;
 
-  /// `sipral_account_check_certificate`: the verdict of this account's
-  /// `tlsPin` on [certificate], the DER bytes of the leaf a TLS server
-  /// presented, from inside the application's own certificate check. The
-  /// certificate's dates when it is the pinned one -- accept the handshake
-  /// whoever signed it, an expired one included; null when the account pins
-  /// nothing and the platform's own checks decide; a [SipralException] with
+  /// `sipral_account_check_certificate`: checks the DER leaf [certificate] a
+  /// TLS server presented against this account's `tlsPin`. Returns the
+  /// certificate's dates when it is the pinned one (accept the handshake,
+  /// even if expired); null when the account pins nothing and the platform
+  /// decides. Throws a [SipralException] with
   /// `SipralStatus.certificateRefused` when it pins another.
   SipralPinnedCertificateInfo? checkCertificate(
     List<int> certificate, {
@@ -109,15 +103,13 @@ final class SipralAccount {
     return out.value;
   });
 
-  /// `sipral_account_set_access_token`: the OAuth 2.0 access token the
-  /// account's server asked for (RFC 8898), in place of any it had; null
-  /// takes it away. The answer to `SipralEventKind.tokenRequired`
-  /// ([SipralStackEvent.tokenAuthzServer], [SipralStackEvent.tokenScope]),
-  /// and the way a renewed token goes in: from the next request on, the
-  /// server's `Bearer` challenge is answered with it. A registration that
-  /// failed for want of one starts again with [register]. Throws a
-  /// [SipralException] with `invalidArgument` for a token that is not RFC
-  /// 6750's `b64token`, with nothing changed.
+  /// `sipral_account_set_access_token`: sets the OAuth 2.0 access token
+  /// (RFC 8898), replacing any previous one; null removes it. This answers
+  /// `SipralEventKind.tokenRequired` and is how a renewed token goes in; the
+  /// next `Bearer` challenge is answered with it. A registration that failed
+  /// for want of a token restarts with [register]. Throws a [SipralException]
+  /// with `invalidArgument`, changing nothing, for a token that is not an
+  /// RFC 6750 `b64token`.
   void setAccessToken(String? token) {
     stack._ensureOpen();
     using((arena) {
@@ -168,13 +160,11 @@ final class SipralAccount {
     });
   }
 
-  /// Remove the binding, and stop refreshing it.
+  /// Remove the binding (REGISTER with Expires: 0) and stop refreshing it.
   ///
-  /// Gives the binding up: a REGISTER with Expires: 0. The registration state
-  /// reads unregistered as soon as this returns, before the registrar answers;
-  /// the answer is the registration-changed event that follows. Wait for that
-  /// event before closing the stack, which otherwise cannot answer a challenge
-  /// to the un-REGISTER.
+  /// The state reads unregistered at once; the registrar's answer comes as a
+  /// later registration-changed event. Wait for it before closing the stack,
+  /// or a challenge to the un-REGISTER goes unanswered.
   void unregister() {
     stack._ensureOpen();
     _checkNow(

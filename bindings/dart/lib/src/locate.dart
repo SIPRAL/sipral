@@ -5,10 +5,10 @@
 
 part of 'idiomatic.dart';
 
-/// What a resolver said to one lookup: a `SipralDnsAnswer` value, and with
-/// `records` the records of the kind asked for, each its time-to-live in
-/// seconds and then its data as a zone file writes it -- `300 192.0.2.40`,
-/// `300 10 60 5060 sip1.example.com` (`sipral_account_looked_up`).
+/// A resolver's answer to one lookup: a `SipralDnsAnswer` value and, with
+/// `records`, each record as its time-to-live in seconds followed by its data
+/// in zone-file form: `300 192.0.2.40`, `300 10 60 5060 sip1.example.com`
+/// (`sipral_account_looked_up`).
 final class SipralLookup {
   const SipralLookup(this.answer, [this.records = const []]);
 
@@ -21,7 +21,7 @@ final class SipralLookup {
   /// A `SipralDnsAnswer` value.
   final int answer;
 
-  /// The records, as the class documentation says.
+  /// The records.
   final List<String> records;
 }
 
@@ -32,19 +32,17 @@ typedef SipralResolver = Future<SipralLookup> Function(String name, int record);
 
 /// The resolver a [SipralStack] uses when it is given none.
 ///
-/// `dart:io` asks the platform for addresses only, so A and AAAA are what
-/// [InternetAddress.lookup] finds -- the hosts file included -- with a
-/// time-to-live of [addressTtl] seconds, the platform not saying what the
-/// zone's was; and every SRV or NAPTR query is answered `nothing`, which RFC
-/// 3263's procedure takes as a domain that publishes none, going on to the
-/// host's own addresses. An application whose server publishes SRV records
-/// passes a resolver that reads them.
+/// `dart:io` only resolves addresses, so A and AAAA come from
+/// [InternetAddress.lookup] (hosts file included) with a time-to-live of
+/// [addressTtl] seconds. SRV and NAPTR are answered `nothing`, which RFC 3263
+/// treats as a domain that publishes none. An application whose server
+/// publishes SRV records passes its own resolver.
 abstract final class SipralDns {
-  /// The time-to-live given an address the platform found, in seconds: how
-  /// soon a moved server is looked up again.
+  /// Seconds an address found by the platform is kept before it is looked up
+  /// again.
   static const int addressTtl = 60;
 
-  /// The platform's resolver, as the class documentation describes.
+  /// The platform's resolver.
   static Future<SipralLookup> platform(String name, int record) async {
     final type = switch (record) {
       SipralDnsRecordType.a => InternetAddressType.IPv4,
@@ -104,11 +102,9 @@ String advertisedAddress(String bound, String peer, {Sipral? library}) {
   });
 }
 
-/// The address of this machine's route toward [peer] (`host:port`), the one
-/// a socket bound on every interface is reached at from there; `127.0.0.1`
-/// when there is no peer, it is a name rather than an address, or no route
-/// reaches it -- the address that works for a peer on this machine and that
-/// the library refuses to advertise to any other.
+/// The host of this machine's route toward [peer] (`host:port`). Returns
+/// `127.0.0.1` when there is no peer, it is a name rather than an address,
+/// or no route reaches it.
 String routeHost(String? peer, {Sipral? library}) {
   if (peer == null || _parseAddress(peer) == null) {
     return '127.0.0.1';

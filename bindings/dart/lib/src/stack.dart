@@ -21,54 +21,36 @@ final class SipralStack {
   );
 
   /// Bind a socket on [bindHost]:[bindPort] (0 for any port) and create a
-  /// stack on it, in application mode: this layer carries each call's PCM.
-  /// [userAgent] names the stack in `User-Agent` and `Server`. [library] is
-  /// the library to use, [Sipral.open]'s by default.
+  /// stack on it in application mode: this layer carries each call's PCM.
+  /// [userAgent] goes in `User-Agent` and `Server`.
   ///
-  /// [bindHost] left out listens on every interface, and the stack
-  /// advertises the address of the operating system's route toward the
-  /// server of its first account (`sipral_advertised_address`): the address
-  /// a PBX on the network reaches this machine at, and `127.0.0.1` for one on
-  /// this machine. Each account is reached at the route toward its own
-  /// server, and a call's media socket, when `mediaHost` is left out, at the
-  /// route toward the far end or the account's server. A loopback address is
-  /// never advertised to a peer elsewhere: the library refuses that with
+  /// Without [bindHost] the socket listens on every interface and each
+  /// account is advertised at the route toward its own server
+  /// (`sipral_advertised_address`). A loopback address is never advertised
+  /// to a remote peer: the library refuses with
   /// `SipralStatus.unreachableAddress`.
   ///
-  /// [srtp] is a `SipralSrtp` value -- `SipralSrtp.bestEffort` offers SDES on
-  /// plain `RTP/AVP`, the call encrypted when the answer takes a key and
-  /// plain when it takes none -- and [srtpSuites] the SRTP suites every call
-  /// offers and accepts, most preferred first, by their RFC 4568 and RFC 7714
-  /// names. [pathMtu] is the MTU of the path toward the server when the
-  /// deployment knows it (0 for unknown, else 576 or more).
-  /// [datagramWithoutStreamBytes] is a deliberate deviation from RFC 3261
-  /// §18.1.1 for a server that takes SIP over UDP alone: this layer opens no
-  /// stream, and a request up to this many bytes goes over UDP anyway (0 for
-  /// never, at most 65 507), [diagnosticsJson] saying so as
-  /// `transport.kept.datagram`. [pseudonymSalt] (16 bytes or more, kept by
-  /// the installation) keys the pseudonyms the log writes, so that two runs
-  /// compare line by line; it is a secret, like a key. [diagnosticTrace]
-  /// writes whole SIP messages at the trace level, credentials and keys
-  /// taken out; [setDiagnosticTrace] turns it on and off later. [resolver]
-  /// answers `SipralEventKind.lookupWanted` for the accounts added with a
-  /// `serverUri`; [SipralDns.platform] by default. [tlsServerName] is the
-  /// name a TLS connection of an account's own is checked against (the
-  /// server's host by default), for an account added with
-  /// `streamProtocol: SipralTransport.tls` and no `tlsPin`. [heldAudio] is a
-  /// `SipralHeldAudio` value: what a party this end holds is sent while the
-  /// hold lasts -- silence by default, since the frames sent may be a
-  /// microphone's; `SipralHeldAudio.application` sends the frames the
-  /// application sends (hold music, an announcement, a voice agent's own
-  /// speech).
+  /// [srtp] is a `SipralSrtp` value; `bestEffort` offers SDES on plain
+  /// `RTP/AVP` and encrypts only if the answer takes a key. [srtpSuites] are
+  /// RFC 4568 / RFC 7714 suite names, most preferred first. [pathMtu] is 0
+  /// for unknown, else 576 or more. [datagramWithoutStreamBytes] deliberately
+  /// deviates from RFC 3261 §18.1.1 for UDP-only servers: requests up to this
+  /// size stay on UDP (0 for never, at most 65 507), logged as
+  /// `transport.kept.datagram` in [diagnosticsJson]. [pseudonymSalt] (16+
+  /// bytes) keys the log pseudonyms so runs compare line by line; treat it as
+  /// a secret. [diagnosticTrace] writes whole SIP messages at trace level,
+  /// credentials removed. [resolver] answers `SipralEventKind.lookupWanted`
+  /// ([SipralDns.platform] by default). [tlsServerName] is checked on an
+  /// account's own TLS connection when it has no `tlsPin`. [heldAudio] is a
+  /// `SipralHeldAudio` value: silence by default while holding, since the
+  /// frames may be a microphone's; `application` sends what the application
+  /// sends (hold music, a voice agent).
   ///
-  /// [maxDialogs] is the most calls the stack holds at once, either way (0
-  /// for 128): past it an incoming call is answered 503 with `Retry-After:
-  /// 2` before it rings, and [placeCall] throws a [SipralException] with
-  /// `SipralStatus.limitReached`. [maxServerTransactions] is the most
-  /// requests from other ends it works on at once (0 for 256); a server
-  /// raising [maxDialogs] raises it beside, to three a call and 256 more,
-  /// since an answered INVITE and a BYE each hold one for 32 seconds over
-  /// UDP (`docs/08-ffi.md`, "Limits, and what went out twice").
+  /// [maxDialogs] caps concurrent calls (0 for 128): past it an incoming
+  /// call gets 503 with `Retry-After: 2` and [placeCall] throws
+  /// `SipralStatus.limitReached`. [maxServerTransactions] (0 for 256) should
+  /// be raised alongside, to three per call plus 256, since an answered
+  /// INVITE and a BYE each hold one for 32 seconds over UDP (`docs/08-ffi.md`).
   static Future<SipralStack> open({
     String? bindHost,
     int bindPort = 0,
@@ -136,28 +118,21 @@ final class SipralStack {
   final Sipral _sipral;
   final RawDatagramSocket _socket;
 
-  /// Where the signalling socket is reached, `host:port`: what every `Via`
-  /// this stack writes carries, and where another stack reaches it. A stack
-  /// opened with no `bindHost` listens on every interface, and this is the
-  /// route toward its first account's server.
+  /// Where the signalling socket is reached, `host:port`, as every `Via`
+  /// carries it. Without `bindHost`, the route toward the first account's
+  /// server.
   String get bindAddress => _bindAddress;
   String _bindAddress;
 
-  /// Whether this stack picks the address peers reach it at -- it was opened
-  /// with no `bindHost` -- and whether it has picked it yet.
+  /// Opened without `bindHost`, so the stack picks its own address.
   final bool _routes;
   bool _routeChosen = false;
 
-  /// Answers `SipralEventKind.lookupWanted`.
   final SipralResolver _resolver;
 
-  /// The name a TLS connection of an account's own is checked against;
-  /// null for the server's host.
   final String? _tlsServerName;
 
-  /// The connections opened for accounts on a connection of their own, by
-  /// the transport number each is bound at, the server each goes to, and
-  /// the servers one is being opened to.
+  /// Per-account stream connections, keyed by transport number.
   final Map<int, Socket> _streams = {};
   final Map<int, String> _streamDestinations = {};
   final Set<String> _streamsOpening = {};
@@ -190,18 +165,13 @@ final class SipralStack {
   /// own are also on [SipralCall.events].
   Stream<SipralStackEvent> get events => _events.stream;
 
-  /// Called with each event as the library hands it over, before its copy
-  /// reaches [events]: the whole `sipral_event_t`, so every payload arm the
-  /// ABI declares is readable through `package:sipral/sipral_abi.dart`'s
-  /// [SipralEvent] (`event.payload.subscription`, `event.payload.message`,
-  /// and the rest), not only what [SipralStackEvent] copies out. It runs on
-  /// this isolate, inside the poll, and the struct and every pointer in it
-  /// are the library's only until it returns: copy out what is kept, and
-  /// call nothing on this stack from inside it.
+  /// Called with the raw `sipral_event_t` before its copy reaches [events],
+  /// for payload arms [SipralStackEvent] does not copy out. It runs inside
+  /// the poll, and the struct and its pointers are valid only until it
+  /// returns: copy what you keep, and call nothing on this stack from it.
   void Function(SipralEvent event)? onRawEvent;
 
-  /// Milliseconds since the stack was created: what every `now_ms` the
-  /// library takes is measured in.
+  /// Milliseconds since the stack was created, the clock of every `now_ms`.
   int nowMs() => _clock.elapsedMilliseconds;
 
   void _create(
@@ -280,46 +250,32 @@ final class SipralStack {
   }
 
   /// Add an account whose requests go to [registrarAddress], `host:port`.
-  /// With [registrar] it can register there ([SipralAccount.register]), as
-  /// [authUser] with [authPassword] when challenged; without one it never
-  /// registers, and [registrarAddress] is only its outbound proxy.
-  /// [contact] is where the account is reached; by default the user part of
-  /// [aor] at the route toward its server, or at this stack's [bindAddress].
+  /// With [registrar] it can register ([SipralAccount.register]) as
+  /// [authUser]/[authPassword]; without one [registrarAddress] is only its
+  /// outbound proxy. [contact] defaults to the user part of [aor] at the
+  /// route toward its server, or at [bindAddress].
   ///
-  /// [serverUri] names the server by a URI whose host RFC 3263 locates --
-  /// `sip:pbx.example.com`, `sips:example.com:5061` -- in place of
-  /// [registrarAddress]: exactly one of the two is given. The lookups are
-  /// the stack's resolver's; `SipralEventKind.located` says where the server
-  /// was found and `SipralEventKind.locateFailed` why not. [serverNaptr] asks
-  /// the domain for NAPTR records before SRV (RFC 3263 §4.1). [keepaliveMs]
-  /// keeps the account's flow to its server open at that interval -- a
-  /// double CRLF -- 1 000 to 120 000, 0 for never. [tlsPin] is the SHA-256
-  /// fingerprint of the one TLS certificate the account trusts, in any form
-  /// [sipralPinDigest] reads and an [ArgumentError] for any other, for an
-  /// application that runs the account's TLS itself:
-  /// [SipralAccount.checkCertificate] is its verdict.
+  /// [serverUri] (`sip:pbx.example.com`, `sips:example.com:5061`) is located
+  /// by RFC 3263 instead of [registrarAddress]; give exactly one.
+  /// `SipralEventKind.located` / `locateFailed` report the outcome.
+  /// [serverNaptr] asks for NAPTR before SRV (RFC 3263 §4.1). [keepaliveMs]
+  /// sends a double CRLF at that interval, 1 000 to 120 000, 0 for never.
+  /// [tlsPin] is the SHA-256 fingerprint of the one certificate the account
+  /// trusts, in any form [sipralPinDigest] reads (else [ArgumentError]).
   ///
-  /// [streamProtocol] (`SipralTransport.tcp` or `SipralTransport.tls`) puts
-  /// the account on a connection of its own to its server, beside accounts
-  /// on this stack's UDP socket to other servers: the stack asks for it
-  /// (`SipralEventKind.transportWanted`, nothing outgrown), this layer opens
-  /// it to the account's server and binds it, and the REGISTER and every
-  /// call of the account go over it. A TLS one with a [tlsPin] trusts the
-  /// pinned certificate alone, by the library's own verdict
-  /// ([SipralAccount.checkCertificate]); without one, the platform's
-  /// authorities under the stack's `tlsServerName` or the server's host. One
-  /// that closes is opened again. Until it is open a call the account
-  /// places throws with `SipralStatus.transportDown`. Anything else is an
-  /// [ArgumentError].
+  /// [streamProtocol] (`SipralTransport.tcp` or `tls`) puts the account on
+  /// its own connection to its server; the stack asks for it with
+  /// `SipralEventKind.transportWanted` and this layer opens it, reopening it
+  /// when it closes. With a [tlsPin] only the pinned certificate is trusted;
+  /// otherwise the platform's authorities under `tlsServerName` or the
+  /// server's host. Until it is open, placing a call throws
+  /// `SipralStatus.transportDown`. Any other value is an [ArgumentError].
   ///
-  /// [realms] are the realms the password answers (RFC 3261 §22.1). Left
-  /// empty, the account answers the realm its server first challenges it
-  /// with and every realm its REGISTERs are challenged with, and no other;
-  /// an SBC or outbound proxy at the server's address that challenges calls
-  /// under a realm of its own needs both named. A challenge the password is
-  /// not for is not answered, and `SipralEventKind.challengeDeclined` says
-  /// who asked and why ([SipralStackEvent.challengeRefusal],
-  /// [SipralStackEvent.challengeServer], [SipralStackEvent.challengeRealms]).
+  /// [realms] are the realms the password answers (RFC 3261 §22.1). Empty
+  /// means the realm of the first challenge plus every realm REGISTER is
+  /// challenged with; an SBC challenging calls under its own realm needs both
+  /// named. A challenge for any other realm is not answered and raises
+  /// `SipralEventKind.challengeDeclined`.
   SipralAccount addAccount(
     String aor, {
     String? registrarAddress,
@@ -435,10 +391,8 @@ final class SipralStack {
     return account;
   }
 
-  /// The `host:port` an account whose server is [peer] is reached at, on a
-  /// stack that picks its own address: the route toward the server, on this
-  /// stack's port. The first server named also becomes the address the
-  /// stack's `Via` carries.
+  /// The route toward [peer] on this stack's port. The first one chosen
+  /// also becomes the stack's `Via` address.
   String _advertiseToward(String peer) {
     final port = bindAddress.substring(bindAddress.lastIndexOf(':') + 1);
     final address = '${routeHost(peer, library: _sipral)}:$port';
@@ -469,10 +423,6 @@ final class SipralStack {
     return address;
   }
 
-  /// Where a call's media socket is bound: [mediaHost] when one was given,
-  /// else the route toward where the media will come from --
-  /// [destination], the account's server, or the address this stack is
-  /// reached at.
   String _mediaHost(
     String? mediaHost,
     SipralAccount? account,
@@ -489,10 +439,8 @@ final class SipralStack {
     return bindAddress.substring(0, bindAddress.lastIndexOf(':'));
   }
 
-  /// Ask the resolver what `SipralEventKind.lookupWanted` asked, after the
-  /// poll that raised it, and hand the answer back
-  /// (`sipral_account_looked_up`); a resolver that threw is an answer that
-  /// failed, since the procedure waits for every one.
+  /// A resolver that threw still answers `failed`: the locate procedure
+  /// waits for every lookup.
   Future<void> _lookUp(int account, String name, int record) async {
     SipralLookup answer;
     try {
@@ -527,8 +475,6 @@ final class SipralStack {
     _poll();
   }
 
-  /// An account located at [target]: pointed at it, and -- on a stack that
-  /// picks its own address -- reached at the route toward it.
   void _located(int handle, String target) {
     final account = _accounts[handle];
     if (account == null || _closed) {
@@ -571,15 +517,11 @@ final class SipralStack {
     _poll();
   }
 
-  /// Test the network before a call without placing one of its own
-  /// (`sipral_stack_network_test`), and return the test's number. What it
-  /// found arrives on [events] as `SipralEventKind.networkTest`
-  /// ([SipralStackEvent.networkTest]). [account] has its server asked with
-  /// an `OPTIONS` on its own transport. [echoCall] is a call this stack
-  /// placed to an echo service: its audio is measured for [echoMs] (8000 by
-  /// default) once its media starts, and the test hangs it up. A part that
-  /// has not answered within [timeoutMs] (30000 by default) counts as
-  /// failed.
+  /// Start a network test (`sipral_stack_network_test`) and return its
+  /// number; the result arrives as `SipralEventKind.networkTest`. [account]'s
+  /// server gets an `OPTIONS`. [echoCall], a call to an echo service, is
+  /// measured for [echoMs] (8000 by default) and then hung up by the test.
+  /// Parts silent after [timeoutMs] (30000 by default) count as failed.
   int networkTest({
     SipralAccount? account,
     SipralCall? echoCall,
@@ -607,10 +549,8 @@ final class SipralStack {
     return test;
   }
 
-  /// Turn the diagnostic trace on or off while the stack runs
-  /// (`sipral_stack_diagnostic_trace`): whether the trace level writes every
-  /// SIP message whole, with its peer, from now on -- credentials and keys
-  /// taken out either way -- or pseudonymised, as by default.
+  /// Switch the trace between whole SIP messages and pseudonymised ones
+  /// (`sipral_stack_diagnostic_trace`); credentials are removed either way.
   void setDiagnosticTrace(bool on) {
     _ensureOpen();
     _check(
@@ -620,12 +560,8 @@ final class SipralStack {
     );
   }
 
-  /// Turn the platform's own echo cancellation on or off while the stack
-  /// runs (`sipral_audio_set_system_echo_cancellation`, ABI 1.1): the devices
-  /// the library opens are reopened at once with or without it. This layer
-  /// runs every call's audio in the application, where the library opens no
-  /// device, so the library refuses it with `SipralStatus.wrongState`, as it
-  /// does every `sipral_audio_*` call on such a stack.
+  /// `sipral_audio_set_system_echo_cancellation`. This layer opens no audio
+  /// device, so the library always refuses it with `SipralStatus.wrongState`.
   void setSystemEchoCancellation(bool on) {
     _ensureOpen();
     _check(
@@ -635,9 +571,7 @@ final class SipralStack {
     );
   }
 
-  /// What the stack runs with, every default filled in
-  /// (`sipral_stack_settings`), with the SRTP suites its calls offer in
-  /// order (`sipral_stack_srtp_suite_order`).
+  /// The settings in effect, defaults filled in (`sipral_stack_settings`).
   SipralSettings settings() {
     _ensureOpen();
     return using((arena) {
@@ -660,11 +594,8 @@ final class SipralStack {
     });
   }
 
-  /// The diagnostic record of every call the stack keeps, as JSON
-  /// (`sipral_stack_diagnostics_json`): each decision the stack made and why
-  /// -- `transport.kept.datagram` among them for a request that went over
-  /// UDP past RFC 3261 §18.1.1's line because `datagramWithoutStreamBytes`
-  /// let it.
+  /// Each decision the stack made and why, as JSON
+  /// (`sipral_stack_diagnostics_json`).
   String diagnosticsJson() {
     _ensureOpen();
     var capacity = 4096;
@@ -697,8 +628,6 @@ final class SipralStack {
     false => SipralToggle.off,
   };
 
-  /// `scheme:user@host:port` for [aor] at [at], or `scheme:host:port` for an
-  /// address of record with no user part, [parameters] after it.
   String _defaultContact(String aor, String at, [String parameters = '']) {
     final colon = aor.indexOf(':');
     final scheme = colon < 0 ? 'sip' : aor.substring(0, colon);
@@ -709,8 +638,7 @@ final class SipralStack {
         : '$scheme:${rest.substring(0, user)}@$at$parameters';
   }
 
-  /// The transport an account on a connection of its own names in its
-  /// `Contact` (RFC 3261 §19.1.1); nothing for one on the UDP socket.
+  /// The `Contact` transport parameter (RFC 3261 §19.1.1).
   static String _contactParameters(int? streamProtocol) =>
       switch (streamProtocol) {
         SipralTransport.tcp => ';transport=tcp',
@@ -718,11 +646,8 @@ final class SipralStack {
         _ => '',
       };
 
-  /// Open the connection an account on a connection of its own asked for
-  /// (`SipralEventKind.transportWanted` with nothing outgrown) to
-  /// [destination], over [protocol], and bind it; a connection that cannot
-  /// be made is told to the stack, which asks again with the account's next
-  /// REGISTER.
+  /// Answers `SipralEventKind.transportWanted`. A failed connection is
+  /// reported; the stack asks again with the account's next REGISTER.
   Future<void> _openStream(String destination, int protocol) async {
     if (_closed ||
         _streamsOpening.contains(destination) ||
@@ -757,12 +682,9 @@ final class SipralStack {
         final secured = await SecureSocket.secure(
           plain,
           host: _tlsServerName ?? address.$1.address,
-          // a pin is the whole verdict: no authority is trusted beside it.
-          // The handshake is let through here and the verdict read below,
-          // on the leaf: what this callback is handed is whichever
-          // certificate of the chain failed, the top one, and a server
-          // that sends the pinned certificate above a leaf of its own
-          // would pass on it
+          // with a pin, no authority is trusted. The pin is checked below on
+          // the leaf: this callback sees the failing chain certificate, so a
+          // server sending the pinned one above its own leaf would pass here
           context: pinned ? SecurityContext(withTrustedRoots: false) : null,
           onBadCertificate: pinned ? (_) => true : null,
         );
@@ -820,8 +742,6 @@ final class SipralStack {
     _poll();
   }
 
-  /// Whether [certificate] is the one [account] pins, by the library's own
-  /// verdict.
   static bool _pinned(SipralAccount account, X509Certificate certificate) {
     try {
       return account.checkCertificate(certificate.der) != null;
@@ -830,7 +750,6 @@ final class SipralStack {
     }
   }
 
-  /// `sipral_stack_transport_failed_with` for a connection that was not made.
   void _sayNoStream(int id, String destination, bool tls, Object refused) {
     final error = switch (refused) {
       SocketException(osError: OSError(errorCode: 61 || 111)) =>
@@ -863,8 +782,6 @@ final class SipralStack {
     });
   }
 
-  /// What a connection of an account's own carried, to
-  /// `sipral_stack_receive_stream`, every byte and in order.
   void _streamReceived(int id, Uint8List bytes) {
     if (_closed) {
       return;
@@ -890,8 +807,7 @@ final class SipralStack {
     _poll();
   }
 
-  /// A connection of an account's own closed or failed: told to the stack
-  /// (`sipral_stack_stream_closed`), which asks for another.
+  /// The stack asks for a new connection after `sipral_stack_stream_closed`.
   void _loseStream(int id) {
     final socket = _streams.remove(id);
     _streamDestinations.remove(id);
@@ -903,16 +819,12 @@ final class SipralStack {
     _poll();
   }
 
-  /// Place a call from [account] to [target], its media socket bound on
-  /// [mediaHost] -- by default the route toward [destination] or the
-  /// account's server: the socket is open, and its address offered, before
-  /// the INVITE goes out. [destination] sends the INVITE somewhere other than
-  /// the account's registrar address. [codecs] -- `'PCMA,PCMU'` -- is what
-  /// this call offers and in what order, in place of the stack's
-  /// (`sipral_call_config_t::codecs`). [followRedirects] sends the call on
-  /// to the targets a 3xx names (RFC 3261 §8.1.3.4); left off, a 3xx ends
-  /// the call with its status, and the `Contact` it named is the
-  /// application's to act on.
+  /// Place a call from [account] to [target]. The media socket is bound on
+  /// [mediaHost] (by default the route toward [destination] or the account's
+  /// server) before the INVITE goes out. [destination] overrides the
+  /// registrar address as next hop. [codecs] (`'PCMA,PCMU'`) replaces the
+  /// stack's offer and order. [followRedirects] follows a 3xx's targets (RFC
+  /// 3261 §8.1.3.4); otherwise a 3xx ends the call with its status.
   Future<SipralCall> placeCall(
     SipralAccount account,
     String target, {
@@ -972,11 +884,9 @@ final class SipralStack {
   }
 
   /// Answer the `SipralEventKind.incomingCall` [incoming], with a media
-  /// socket bound on [mediaHost] -- by default the route toward the server
-  /// of the account the call came to. [codecs] -- `'PCMA,PCMU'` -- is what
-  /// this call takes, in place of the stack's, answered through
-  /// `sipral_call_answer_with`; an answer keeps the offer's order (RFC 3264
-  /// §6.1), so it chooses which codecs rather than which comes first.
+  /// socket bound on [mediaHost] (by default the route toward the account's
+  /// server). [codecs] (`'PCMA,PCMU'`) chooses which codecs the call takes,
+  /// not their order: an answer keeps the offer's order (RFC 3264 §6.1).
   Future<SipralCall> answerCall(
     SipralStackEvent incoming, {
     String? mediaHost,
@@ -1055,9 +965,8 @@ final class SipralStack {
     _poll();
   }
 
-  /// Hang up every call still up, give the goodbyes a moment to go out,
-  /// then destroy the stack and close every socket. Calling it again does
-  /// nothing.
+  /// Hang up live calls, wait briefly for the BYEs to go out, then destroy
+  /// the stack and close every socket. Idempotent.
   Future<void> close() async {
     if (_closed) {
       return;
@@ -1186,8 +1095,7 @@ final class SipralStack {
     }
   }
 
-  /// What a call that ended still owes its far end -- its RTCP BYE -- sent
-  /// from the call's own socket while that is still open.
+  /// An ended call's RTCP BYE, sent from its own socket while still open.
   void _drainFarewells() {
     while (!_closed) {
       _farewell.prepare();
@@ -1225,9 +1133,8 @@ final class SipralStack {
             wanted.destination == ffi.nullptr
                 ? null
                 : _decode(wanted.destination.cast(), wanted.destinationLen);
-        // an account on a connection of its own asks with nothing
-        // outgrown; a request that outgrew a datagram is left to the
-        // stack's own wait, as this layer opens no stream for one
+        // only per-account connections; this layer opens no stream for a
+        // request that outgrew a datagram
         if (destination != null &&
             wanted.requestBytes == 0 &&
             wanted.limitBytes == 0) {

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Sipral-Commercial
 // Copyright (c) 2026 Sytek
 //
-// One event, copied out of the `sipral_event_t` the callback was handed,
-// which is the library's only for the length of the callback.
+// One event, copied out of the `sipral_event_t`, which is valid only during
+// the callback.
 
 part of 'idiomatic.dart';
 
 /// The kinds whose payload is the call arm (`EVENT_KIND_ARMS` in
-/// crates/sipral-ffi/src/event.rs): what [SipralStackEvent.callState] and
-/// [SipralStackEvent.statusCode] are read from.
+/// crates/sipral-ffi/src/event.rs).
 const Set<int> _callArm = {
   SipralEventKind.started,
   SipralEventKind.incomingCall,
@@ -23,20 +22,17 @@ const Set<int> _callArm = {
   SipralEventKind.dtmfSent,
 };
 
-/// The kinds whose payload is the locate arm.
 const Set<int> _locateArm = {
   SipralEventKind.lookupWanted,
   SipralEventKind.located,
   SipralEventKind.locateFailed,
 };
 
-/// The kinds whose payload is the subscription arm.
 const Set<int> _subscriptionArm = {
   SipralEventKind.subscriptionChanged,
   SipralEventKind.notified,
 };
 
-/// The kinds whose payload is the transfer arm.
 const Set<int> _transferArm = {
   SipralEventKind.transferRequested,
   SipralEventKind.transferProgress,
@@ -45,8 +41,7 @@ const Set<int> _transferArm = {
 
 /// Something a stack reports, with the part of its payload this layer reads.
 ///
-/// Every union arm the event did not write is left unread: its bytes are
-/// another arm's, and mean nothing as this one.
+/// Only the union arm the event wrote is read; the others hold garbage.
 final class SipralStackEvent {
   SipralStackEvent._(
     this.kind,
@@ -236,10 +231,9 @@ final class SipralStackEvent {
   /// The scope a token has to carry, for `SipralEventKind.tokenRequired`.
   final String? tokenScope;
 
-  /// The authorization server a token comes from, an `https` URI, for
-  /// `SipralEventKind.tokenRequired`: check it against the ones the
-  /// application trusts, then hand the token to
-  /// [SipralAccount.setAccessToken].
+  /// The authorization server (`https` URI), for
+  /// `SipralEventKind.tokenRequired`. Check it against the trusted ones before
+  /// passing a token to [SipralAccount.setAccessToken].
   final String? tokenAuthzServer;
 
   /// What a network test found, for `SipralEventKind.networkTest`.
@@ -291,9 +285,8 @@ final class SipralStackEvent {
   /// zero before it said anything.
   final int? transferStatusCode;
 
-  /// What the call's media cost in the end, for
-  /// `SipralEventKind.mediaStatistics`: the record the library hands over
-  /// once the stream is gone, copied while the callback still owns it.
+  /// The call's final media statistics, for
+  /// `SipralEventKind.mediaStatistics`, copied during the callback.
   final SipralMediaStatistics? statistics;
 
   @override
@@ -301,9 +294,8 @@ final class SipralStackEvent {
       'SipralStackEvent(kind: $kind, account: $account, call: $call)';
 }
 
-/// What `SipralEventKind.networkTest` carries: every part of one test
-/// [SipralStack.networkTest] started, and the verdict, the worst of the
-/// parts tested. The enumerations are their ABI values: [verdict] and
+/// The result of one [SipralStack.networkTest]; [verdict] is the worst of the
+/// parts tested. Enumerations are ABI values: [verdict] and
 /// [echoVerdict] a `SipralNetworkVerdict`, [stun], [turn] and [echo] a
 /// `SipralNetworkProbe`, [nat] a `SipralNatKind`, [server] a
 /// `SipralServerReach`.
@@ -380,5 +372,4 @@ final class SipralNetworkTestResult {
   final String? mapped;
 }
 
-/// [text], or null when it is empty.
 String? _nonEmpty(String? text) => text == null || text.isEmpty ? null : text;

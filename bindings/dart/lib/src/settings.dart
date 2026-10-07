@@ -5,11 +5,9 @@
 
 part of 'idiomatic.dart';
 
-/// What a stack runs with, every default filled in
-/// ([SipralStack.settings]): what a settings screen or a support report
-/// shows, rather than what was passed. Every toggle is read as a `bool`;
-/// [rtpPorts] is null for no range, [mediaStallMs] and
-/// [registrarKeepaliveMs] zero with that watchdog or keep-alive off.
+/// The settings a stack runs with, defaults filled in
+/// ([SipralStack.settings]). [rtpPorts] is null for no range;
+/// [mediaStallMs] and [registrarKeepaliveMs] are zero when off.
 final class SipralSettings {
   SipralSettings._(SipralStackSettings raw, this.srtpSuites)
     : transport = raw.transport,
@@ -67,20 +65,17 @@ final class SipralSettings {
   final int pathMtu;
   final int datagramWithoutStreamBytes;
 
-  /// The SRTP suites the stack's calls offer and accept unless their account
-  /// names its own, in the order they are offered, as `SipralSrtpSuite`
-  /// values (ABI 0.35).
+  /// The default SRTP suites in offer order, as `SipralSrtpSuite` values; an
+  /// account may name its own.
   final List<int> srtpSuites;
 
-  /// Whether a `pseudonymSalt` was given; the salt itself is never read back
-  /// (ABI 0.35).
+  /// Whether a `pseudonymSalt` was given; the salt itself is never read back.
   final bool pseudonymSalted;
 
-  /// Whether the trace writes whole messages now (ABI 0.35).
+  /// Whether the trace writes whole messages.
   final bool diagnosticTrace;
 
-  /// Whether the platform's echo cancellation is asked for, the default
-  /// filled in (ABI 0.35). This layer runs every call's audio in the
-  /// application, where the library opens no device.
+  /// Whether the platform's echo cancellation is asked for. This layer opens
+  /// no audio device, so the application applies it.
   final bool systemEchoCancellation;
 }

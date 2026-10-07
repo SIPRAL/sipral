@@ -41,11 +41,9 @@ final class SipralCall {
   /// Whether `SipralEventKind.callEnded` has been delivered.
   bool get ended => _ended.isCompleted;
 
-  /// What the call's media cost in the end: the record
-  /// `SipralEventKind.mediaStatistics` carries, kept from the moment it
-  /// arrives -- right after `SipralEventKind.callEnded` -- and null before
-  /// that or for a call whose media never started. [SipralMedia.statistics]
-  /// answers with it too once the stream is gone.
+  /// The final media statistics from `SipralEventKind.mediaStatistics`, which
+  /// arrives right after `SipralEventKind.callEnded`. Null before that or when
+  /// media never started.
   SipralMediaStatistics? get finalStatistics => _finalStatistics;
   SipralMediaStatistics? _finalStatistics;
 
@@ -161,7 +159,6 @@ final class SipralCall {
     }
   }
 
-  /// One packet out of the call's socket, where it says to go.
   void _sendPacket(_MediaPacket packet) {
     if (_closed) {
       return;
