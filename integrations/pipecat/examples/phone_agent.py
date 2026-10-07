@@ -6,7 +6,7 @@
 caller through Deepgram (speech to text), OpenAI (the model) and OpenAI
 (text to speech), one Pipecat pipeline per call.
 
-    pip install sipral-pipecat "pipecat-ai[deepgram,openai,silero]"
+    pip install ./integrations/pipecat "pipecat-ai[deepgram,openai,silero]"
 
     SIPRAL_AOR=sip:agent@example.invalid \\
     SIPRAL_REGISTRAR=sip:example.invalid \\

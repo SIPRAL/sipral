@@ -28,8 +28,10 @@ and Pipecat the speech recognition, the model and the speech.
 
 ## Install
 
+Until 1.2 reaches PyPI, from a checkout of this repository:
+
 ```sh
-pip install sipral-pipecat "pipecat-ai[deepgram,openai,silero]"
+pip install ./integrations/pipecat "pipecat-ai[deepgram,openai,silero]"
 ```
 
 Python 3.11 or later, as Pipecat needs. The `sipral` wheel carries the native

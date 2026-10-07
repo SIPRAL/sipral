@@ -87,8 +87,10 @@ in the core.
 
 ## Install
 
+Until 1.2 reaches PyPI, install it from a checkout of this repository:
+
 ```sh
-pip install sipral-agents
+pip install ./integrations/agents
 ```
 
 Python 3.11 or later. The `sipral` wheel carries the native library; a

@@ -5,7 +5,7 @@
 """A phone agent: answers every call to one SIP account and joins it to
 OpenAI Realtime or Gemini Live, one session per call.
 
-    pip install sipral-agents
+    pip install ./integrations/agents
 
     SIPRAL_AOR=sip:agent@example.invalid \\
     SIPRAL_REGISTRAR=sip:example.invalid \\

@@ -68,7 +68,7 @@ What the bridge uses from the stack:
   application's that accepts the call; Sipral sees only the SIP side.
 
 **2. Pipecat.** Pipecat is an open-source Python framework that runs a
-pipeline of speech, language and speech-to-speech services. A Sipral
+pipeline of speech, language and speech-to-speech services. Sipral has a
 transport for Pipecat, the package `sipral-pipecat` (`integrations/pipecat/`,
 and `07-headless.md`, "Pipecat"); with it
 a call answered by Sipral becomes a Pipecat pipeline's input and output, and
