@@ -203,14 +203,17 @@ internal object IdentityReader {
         return (0 until count).map { index ->
             var buffer = ByteArray(256)
             val needed = LongArray(1)
-            var status = SipralNative.sipral_call_identity_text(
-                client.handle, call, index, which.value.toLong(), buffer, needed,
-            )
+            val read = { into: ByteArray ->
+                retryBusy {
+                    SipralNative.sipral_call_identity_text(
+                        client.handle, call, index, which.value.toLong(), into, needed,
+                    ).also(::throwIfPassing)
+                }
+            }
+            var status = read(buffer)
             if (status == SipralStatus.BUFFER_TOO_SMALL.value) {
                 buffer = ByteArray(needed[0].toInt())
-                status = SipralNative.sipral_call_identity_text(
-                    client.handle, call, index, which.value.toLong(), buffer, needed,
-                )
+                status = read(buffer)
             }
             if (status != SipralStatus.OK.value) {
                 throw SipralException(SipralStatus.of(status), Sipral.lastErrorMessage())
